@@ -239,6 +239,23 @@ describe("buildReviewPrompt", () => {
     );
   });
 
+  it("limits the review to the turn's own files, never concurrent work in the range", () => {
+    for (const reviewMode of ["auto", "devkit", "self"] as const) {
+      for (const committedSince of ["0123abcd", null]) {
+        const text = buildReviewPrompt({
+          decision: { commit: true, merge: false },
+          reviewMode,
+          scope: baseScope,
+          committedSince,
+        });
+        expect(text).toMatch(
+          /1\. Review[^\n]*Review ONLY your own work from this turn: the files in the list above[^\n]*do not review them, report findings on them, or fix them/u,
+        );
+        expect(text.indexOf("```text auto-review-scope")).toBeLessThan(text.indexOf("1. Review"));
+      }
+    }
+  });
+
   it("never renders a committed range from something that is not a commit sha", () => {
     for (const committedSince of ["main; echo pwned", "HEAD~1", null]) {
       const text = buildReviewPrompt({
