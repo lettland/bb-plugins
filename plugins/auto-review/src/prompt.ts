@@ -93,7 +93,7 @@ function reviewTarget(committedSince: string | null): { devkit: string; self: st
  * review; this one covers only the turn's own work.
  */
 const OWN_WORK_ONLY =
-  "Review ONLY your own work from this turn: the files in the list above, and within them only the changes you made. That diff can also contain edits or commits the user or another thread made in this checkout meanwhile — they are not yours, so do not review them, report findings on them, or fix them.";
+  "Review ONLY your own work from this turn: the files attributed to your turn above (including any a note says were left off the list), and within them only the changes you made. That diff can also contain edits or commits the user or another thread made in this checkout meanwhile — they are not yours, so do not review them, report findings on them, or fix them.";
 
 function reviewStep(mode: ReviewMode, committedSince: string | null): string {
   const target = reviewTarget(committedSince);

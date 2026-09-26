@@ -249,7 +249,7 @@ describe("buildReviewPrompt", () => {
           committedSince,
         });
         expect(text).toMatch(
-          /1\. Review[^\n]*Review ONLY your own work from this turn: the files in the list above[^\n]*do not review them, report findings on them, or fix them/u,
+          /1\. Review[^\n]*Review ONLY your own work from this turn: the files attributed to your turn above \(including any a note says were left off the list\)[^\n]*do not review them, report findings on them, or fix them/u,
         );
         expect(text.indexOf("```text auto-review-scope")).toBeLessThan(text.indexOf("1. Review"));
       }
