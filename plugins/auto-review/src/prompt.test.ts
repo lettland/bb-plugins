@@ -256,6 +256,18 @@ describe("buildReviewPrompt", () => {
     }
   });
 
+  it("keeps odd-named own files in the review even though they are not listed", () => {
+    const text = buildReviewPrompt({
+      decision: { commit: true, merge: false },
+      reviewMode: "auto",
+      scope: renderScope(["src/a.ts", "two words.md"]),
+    });
+    expect(text).not.toContain("two words");
+    expect(text).toContain("Note: 1 more file(s) you edited");
+    expect(text).toContain("review and stage them from your own edit record");
+    expect(text).toMatch(/1\. Review[^\n]*including any a note says were left off the list/u);
+  });
+
   it("never renders a committed range from something that is not a commit sha", () => {
     for (const committedSince of ["main; echo pwned", "HEAD~1", null]) {
       const text = buildReviewPrompt({

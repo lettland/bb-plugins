@@ -191,7 +191,7 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
   const scopeNote: string[] = [];
   if (scope.oddCount > 0) {
     scopeNote.push(
-      `${scope.oddCount} more file(s) you edited have names outside the safe character set and are omitted from this list; stage them from your own edit record if you touched them.`,
+      `${scope.oddCount} more file(s) you edited have names outside the safe character set and are omitted from this list; review and stage them from your own edit record if you touched them.`,
     );
   }
   if (scope.overflowCount > 0) {
