@@ -30,7 +30,7 @@ describe("decide branch policy", () => {
     expect(
       decide({
         base: "master",
-        currentBranch: "feature",
+        currentBranch: "fix/oh-1/feature",
         isDedicatedWorktree: false,
         mergeEligibleMainlines: ELIGIBLE,
       }),
@@ -75,6 +75,39 @@ describe("decide branch policy", () => {
       decide({
         base: "master",
         currentBranch: "master",
+        isDedicatedWorktree: true,
+        mergeEligibleMainlines: ELIGIBLE,
+      }),
+    ).toEqual({ commit: true, merge: false });
+  });
+
+  it("never merges a top-level branch (develop) into an eligible mainline", () => {
+    expect(
+      decide({
+        base: "master",
+        currentBranch: "develop",
+        isDedicatedWorktree: false,
+        mergeEligibleMainlines: ELIGIBLE,
+      }),
+    ).toEqual({ commit: true, merge: false });
+  });
+
+  it("never merges a top-level branch, even in a worktree", () => {
+    expect(
+      decide({
+        base: "master",
+        currentBranch: "develop",
+        isDedicatedWorktree: true,
+        mergeEligibleMainlines: ELIGIBLE,
+      }),
+    ).toEqual({ commit: true, merge: false });
+  });
+
+  it("never merges a detached HEAD", () => {
+    expect(
+      decide({
+        base: "master",
+        currentBranch: null,
         isDedicatedWorktree: true,
         mergeEligibleMainlines: ELIGIBLE,
       }),

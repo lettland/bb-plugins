@@ -20,7 +20,8 @@ It ships enabled (opt-out).
   Commits replayed by a rebase with the same patches as the turn started with do not
   count as new work; changed replayed patches still count.
 - Chooses commit and merge from a branch policy keyed on the mainline name. A feature
-  branch merges into an eligible mainline; a non-eligible (protected) mainline such as
+  branch (name contains a `/`, e.g. `fix/x`, `bb/<slug>`) merges into an eligible mainline;
+  a top-level branch such as `develop` is never merged; a non-eligible (protected) mainline such as
   `main` is never a merge target, and the primary checkout is never committed to there.
 - Runs one review at a time per provider across all projects, since those reviews share
   the provider's usage limits. A turn ending behind another review is deferred, not

@@ -22,7 +22,8 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   output, not the turn's work. A sibling's shell edit, or a human's edit, made in the same
   checkout during the turn cannot be told apart and is claimed.
 - Chooses commit / merge from a branch policy keyed on the mainline name: a feature
-  branch merges into a personal mainline (e.g. `master`) whether the thread runs in a
+  branch (name contains a `/`; a top-level branch such as `develop` is never merged)
+  merges into a personal mainline (e.g. `master`) whether the thread runs in a
   dedicated worktree or the primary checkout; a non-personal mainline (e.g. `main`) is
   never a merge target.
 - Runs one review at a time per provider, across all projects, since reviews on one

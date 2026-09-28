@@ -91,8 +91,9 @@ Per-project overrides and per-thread skip are stored by the plugin, not in setti
 | Worktree, on the mainline | review + fixes + commit | review + fixes + commit |
 | Primary checkout, feature branch | review + fixes + commit + local merge | review + fixes, no commit |
 | Primary checkout, on the mainline | review + fixes + commit | review + fixes, no commit |
+| Either, on a top-level branch (e.g. `develop`) | review + fixes + commit, no merge | worktree: review + fixes + commit; primary: review + fixes, no commit |
 
-A feature branch merges into an eligible mainline (e.g. `master`) whether it runs in a dedicated worktree or the primary checkout. When the root mainline is non-eligible (protected, e.g. `main`), auto-review never commits in the primary checkout — on any branch checked out there — so protected-mainline work stays in a dedicated worktree. Merge is local only — auto-review never pushes.
+A feature branch is one whose name contains a `/` (`fix/oh-1/x`, `OH-2/y`, bb's own `bb/<slug>` worktree branches). A top-level branch — no `/`, such as `develop`, `dev`, `sandbox` — is never merged into the mainline, in a worktree or not. A feature branch merges into an eligible mainline (e.g. `master`) whether it runs in a dedicated worktree or the primary checkout. When the root mainline is non-eligible (protected, e.g. `main`), auto-review never commits in the primary checkout — on any branch checked out there — so protected-mainline work stays in a dedicated worktree. Merge is local only — auto-review never pushes.
 
 ## One review per provider
 
