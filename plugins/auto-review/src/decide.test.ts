@@ -103,6 +103,17 @@ describe("decide branch policy", () => {
     ).toEqual({ commit: true, merge: false });
   });
 
+  it("never merges a mainline into itself, even when its name contains a slash", () => {
+    expect(
+      decide({
+        base: "team/master",
+        currentBranch: "team/master",
+        isDedicatedWorktree: false,
+        mergeEligibleMainlines: ["team/master"],
+      }),
+    ).toEqual({ commit: true, merge: false });
+  });
+
   it("never merges a detached HEAD", () => {
     expect(
       decide({
