@@ -24,7 +24,6 @@ import {
   type WorkStateCategory
 } from './contract.js';
 
-type PluginDatabase = ReturnType<BbPluginApi['storage']['database']>;
 type SqlParameter = string | number | null;
 
 interface WorkItemRow {

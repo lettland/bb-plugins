@@ -6,7 +6,6 @@ import {
   lstat,
   mkdir,
   readFile,
-  readdir,
   realpath,
   rename,
   rm,
@@ -261,6 +260,7 @@ async function resolveDockerSocket(dockerPath, options) {
       return host.slice("unix://".length);
     }
   } catch {
+    // No Docker context host available: return null below.
   }
   return null;
 }
@@ -636,6 +636,7 @@ async function commandDoctor(options) {
         try {
           resolved = await realpath(source);
         } catch {
+          // Keep the unresolved source path.
         }
         note(
           resolved === (await realpath(policy.worktreeRoot).catch(() => policy.worktreeRoot)) || source === policy.worktreeRoot

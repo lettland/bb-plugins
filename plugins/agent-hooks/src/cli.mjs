@@ -4,9 +4,8 @@
 // hooks are not actually firing leaves the machine unguarded. `status --probe` is
 // the evidence for that, and it checks behaviour, not just file presence.
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import {
   PROVIDERS,
   INSTALL_DIR,

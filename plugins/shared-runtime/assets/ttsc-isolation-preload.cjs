@@ -26,6 +26,7 @@ function resolveWritableCopyRoots() {
         roots.push(absolute);
       }
     } catch {
+      // Missing or unreadable candidate: skip it.
     }
   }
   return roots;

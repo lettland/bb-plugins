@@ -43,6 +43,7 @@ async function resolvedRoots(options) {
         roots.push({ ...configuredRoot, path: resolved });
       }
     } catch {
+      // Unresolvable configured root: skip it.
     }
   }
   return roots;
@@ -71,6 +72,7 @@ async function findSkillRoot(target, allowedRoot) {
         return current;
       }
     } catch {
+      // No usable marker at this level: keep walking up.
     }
     if (current === allowedRoot.path) break;
     current = path.dirname(current);

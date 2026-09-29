@@ -19,7 +19,6 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,7 +26,6 @@ import {
   MANIFEST_FILE_NAME,
   PRIMARY_ROOT_PLACEHOLDER,
   expandDependencies,
-  readManifest,
   substitutePlaceholders,
 } from "./manifest.mjs";
 import { RUNTIME_ROOT_NAME, defaultRuntimeRoot } from "./registry.mjs";
@@ -794,9 +792,10 @@ async function readProcessIdentity(pid) {
       return `proc:${bootId.trim()}:${statFields[19]}`;
     }
   } catch {
+    // /proc is unavailable or unreadable: fall back to ps.
   }
   return new Promise((resolve) => {
-    const child = spawn("/bin/ps", ["-o", "lstart=", "-p", `${pid}`], {
+    const child = spawn("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
       env: { ...process.env, LC_ALL: "C" },
       stdio: ["ignore", "pipe", "ignore"],
     });
@@ -1072,6 +1071,7 @@ async function inspectOwnerClaim(ownerPath) {
     try {
       owner = parseLockOwner(serialized);
     } catch {
+      // Unparseable owner file: leave owner null so callers treat the claim as stale.
     }
     return {
       identity: { device: identity.dev, inode: identity.ino },
@@ -1521,7 +1521,6 @@ async function acquireStateGate(lockPath, signal, options = {}) {
     }
 
     let keepClaim = false;
-    let legacyOwner = null;
     try {
       const currentClaim = await inspectOwnerClaim(claimPath);
       if (!sameClaimIdentity(currentClaim, claim)) {
@@ -1532,7 +1531,6 @@ async function acquireStateGate(lockPath, signal, options = {}) {
         ["owner.json"],
         signal,
       );
-      legacyOwner = legacyState.owner;
       if (legacyState.replace) {
         const verifiedClaim = await inspectOwnerClaim(claimPath);
         if (sameClaimIdentity(verifiedClaim, claim)) {
@@ -2472,7 +2470,9 @@ export async function executeGit(policy, workspace, input, options = {}) {
       const cleanupScratch =
         containers.length > 0
           ? await resetContainerScratch(policy, workspace, containers, run, options.signal)
-          : async () => {};
+          : async () => {
+              // No container scratch was reset, so there is nothing to clean up.
+            };
       try {
         await prepareCommitOutputs(policy, workspace, run, options.signal);
       } finally {

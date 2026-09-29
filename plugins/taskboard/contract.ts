@@ -3,8 +3,6 @@ import { z } from 'zod';
 import {
   bbProjectIdSchema,
   jiraBaseUrlSchema,
-  projectCredentialsInteractionPayloadSchema,
-  projectCredentialsInteractionResponseSchema,
   secretMutationSchema
 } from './credential-contract.js';
 import { projectBoardSettingsSchema } from './board-settings.js';

@@ -122,7 +122,7 @@ export async function writeState(
 ): Promise<void> {
   await bb.sdk.threads.updatePluginMetadata({
     threadId,
-    set: set as unknown as MetadataSet,
+    set: set as MetadataSet,
     ...(remove === undefined ? {} : { remove }),
   });
 }
