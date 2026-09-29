@@ -688,6 +688,41 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
+  it("fires one review across several queued user turns and extra idles", async () => {
+    const host = createHost({
+      sendDelivery: "queued",
+      queuedRows: [userRow({ id: "u1" }), userRow({ id: "u2" })],
+    });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    host.setQueuedRows([userRow({ id: "u2" })]);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+
+    host.setQueuedRows([]);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(host.metadata.phase).toBe("pending-dispatch");
+
+    // The thread goes idle again while the review is still queued.
+    host.setQueuedRows([{ id: "qm-1" }]);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+
+    host.setQueuedRows([]);
+    await host.harness.behavior.emitThreadEvent("message.dispatched", {
+      entry: queueEntry(),
+    });
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.metadata.phase).toBe("idle");
+    expect(host.sends).toHaveLength(1);
+    await host.harness.dispose();
+  });
+
   it("folds the review when the user's turn already started before idle was handled", async () => {
     const host = createHost();
     await plugin(host.bb);
