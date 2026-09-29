@@ -89,7 +89,12 @@ async function aislopScanAvailable(bb: BbPluginApi): Promise<boolean> {
     return plugins.some(
       (entry) => entry.enabled && entry.status === "running" && entry.cliCommand?.name === "aislop",
     );
-  } catch {
+  } catch (error) {
+    bb.log.warn(
+      `auto-review: could not list plugins, leaving the aislop scan out of this review: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
     return false;
   }
 }

@@ -550,6 +550,8 @@ describe("auto-review plugin", () => {
       expect(idle.errors).toEqual([]);
       expect(host.sends).toHaveLength(1);
       expect(promptText(host).includes("bb aislop scan")).toBe(expected);
+      const warned = host.harness.logEntries.some((entry) => entry.message.includes("could not list plugins"));
+      expect(warned).toBe(plugins === "throws");
       await host.harness.dispose();
     }
   });
