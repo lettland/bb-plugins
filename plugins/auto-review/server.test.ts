@@ -58,6 +58,8 @@ interface HostOptions {
   headSha?: string;
   initialCommits?: TreeCommit[];
   newestFirstCommits?: boolean;
+  /** What `plugins.list` reports; "throws" makes the lookup fail. Default: no plugins. */
+  plugins?: Array<{ enabled: boolean; status: string; cliCommand: { name: string } | null }> | "throws";
 }
 
 interface InterruptEvent {
@@ -163,6 +165,14 @@ function createHost(options: HostOptions = {}) {
   let interrupts: InterruptEvent[] = [];
 
   const sdk: CreateFakePluginHostOptions["sdk"] = {
+    plugins: {
+      list: async () => {
+        if (options.plugins === "throws") {
+          throw new Error("plugin list unavailable");
+        }
+        return { plugins: options.plugins ?? [] };
+      },
+    },
     threads: {
       getPluginMetadata: async (args: { threadId: string }) => ({
         ...bucket(args.threadId),
@@ -520,6 +530,28 @@ describe("auto-review plugin", () => {
     expect(host.sends).toHaveLength(1);
     expect(host.metadata.phase).toBe("idle");
     await host.harness.dispose();
+  });
+
+  it("asks for the aislop scan only while a running plugin serves `bb aislop`", async () => {
+    const aislop = { enabled: true, status: "running", cliCommand: { name: "aislop" } };
+    const cases: Array<[HostOptions["plugins"], boolean]> = [
+      [[aislop], true],
+      [[{ ...aislop, enabled: false, status: "disabled" }], false],
+      [[{ ...aislop, status: "error" }], false],
+      [[{ enabled: true, status: "running", cliCommand: { name: "auto-review" } }], false],
+      [[], false],
+      ["throws", false],
+    ];
+    for (const [plugins, expected] of cases) {
+      const host = createHost({ plugins });
+      await plugin(host.bb);
+      await emitActive(host);
+      const idle = await emitIdle(host);
+      expect(idle.errors).toEqual([]);
+      expect(host.sends).toHaveLength(1);
+      expect(promptText(host).includes("bb aislop scan")).toBe(expected);
+      await host.harness.dispose();
+    }
   });
 
   it("never asks the timeline for more segments than it serves", async () => {

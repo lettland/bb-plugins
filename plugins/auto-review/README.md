@@ -76,7 +76,9 @@ Install [aislop](../aislop) alongside it and every code review also runs `bb ais
 on the branch's changes. Its findings are advisory: the review fixes the real ones in
 the turn's own changed lines, and it leaves false positives and anything against the
 project's own rules (CLAUDE.md / AGENTS.md, lint config, local conventions) unfixed,
-listing each with a reason. Without the plugin, the step is skipped.
+listing each with a reason. auto-review checks the plugin list before each review and
+asks for the scan only while a running plugin serves `bb aislop`; with aislop missing
+or disabled the step is left out, and each plugin works on its own.
 
 ## Development
 

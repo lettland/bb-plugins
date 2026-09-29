@@ -42,6 +42,8 @@ export interface BuildPromptInput {
    * Anything not shaped like a commit sha is ignored.
    */
   committedSince?: string | null;
+  /** Whether the aislop plugin's `bb aislop scan` is available to run. */
+  aislopScan?: boolean;
 }
 
 const SECRET_PATTERNS = [
@@ -96,22 +98,24 @@ const OWN_WORK_ONLY =
   "Review ONLY your own work from this turn: the files attributed to your turn above (including any a note says were left off the list), and within them only the changes you made. That diff can also contain edits or commits the user or another thread made in this checkout meanwhile — they are not yours, so do not review them, report findings on them, or fix them.";
 
 /**
- * The aislop plugin's scan, when it is installed. Its findings are heuristics,
- * so they are triaged against the project's own rules rather than all fixed.
+ * The aislop plugin's scan, asked for only while that plugin is running. Its
+ * findings are heuristics, so they are triaged against the project's own rules
+ * rather than all fixed.
  */
 const AISLOP_SCAN =
-  "Then run `bb aislop scan`, which scans what this branch changed against its root branch; if bb reports the command unknown, the aislop plugin is not installed, so skip this. A non-zero exit code from the scan only means it found issues, not that the step failed. Treat its findings as advice, not orders: act only on findings in the files listed above and on lines you changed this turn, and fix one only when it is a real problem and the fix does not go against this project's own rules (CLAUDE.md / AGENTS.md, lint and formatter config, or the conventions the surrounding code follows). Leave false positives and rule conflicts as they are, and list each finding you skipped with a one-line reason in your final reply.";
+  " Then run `bb aislop scan`, which scans what this branch changed against its root branch; if bb reports the command unknown or its plugin disabled, the aislop plugin went away meanwhile, so skip this. A non-zero exit code from the scan only means it found issues, not that the step failed. Treat its findings as advice, not orders: act only on findings in the files listed above and on lines you changed this turn, and fix one only when it is a real problem and the fix does not go against this project's own rules (CLAUDE.md / AGENTS.md, lint and formatter config, or the conventions the surrounding code follows). Leave false positives and rule conflicts as they are, and list each finding you skipped with a one-line reason in your final reply.";
 
-function reviewStep(mode: ReviewMode, committedSince: string | null): string {
+function reviewStep(mode: ReviewMode, committedSince: string | null, aislopScan: boolean): string {
   const target = reviewTarget(committedSince);
+  const scan = aislopScan ? AISLOP_SCAN : "";
   switch (mode) {
     case "devkit":
-      return `Review the changes with devkit's calibrated review: ${target.devkit}. ${OWN_WORK_ONLY} ${AISLOP_SCAN} If the devkit_load_skill tool is not available, STOP and report that the devkit review workflow is missing; do not fall back to a self-review.`;
+      return `Review the changes with devkit's calibrated review: ${target.devkit}. ${OWN_WORK_ONLY}${scan} If the devkit_load_skill tool is not available, STOP and report that the devkit review workflow is missing; do not fall back to a self-review.`;
     case "self":
-      return `Review the changes with a focused self-review of ${target.self}. ${OWN_WORK_ONLY} ${AISLOP_SCAN}`;
+      return `Review the changes with a focused self-review of ${target.self}. ${OWN_WORK_ONLY}${scan}`;
     case "auto":
     default:
-      return `Review the changes: if the devkit_load_skill tool is available, ${target.devkit}; otherwise do a focused self-review of ${target.self}. ${OWN_WORK_ONLY} ${AISLOP_SCAN}`;
+      return `Review the changes: if the devkit_load_skill tool is available, ${target.devkit}; otherwise do a focused self-review of ${target.self}. ${OWN_WORK_ONLY}${scan}`;
   }
 }
 
@@ -215,7 +219,7 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
     lines.push(`Note: ${note}`);
   }
   lines.push("");
-  lines.push(`1. ${reviewStep(reviewMode, committedSince)}`);
+  lines.push(`1. ${reviewStep(reviewMode, committedSince, input.aislopScan ?? false)}`);
   lines.push("2. Apply the fixes the review reports. Re-run the review if it asks you to.");
   lines.push(
     "3. Stage ONLY the files you yourself edited this turn — those in the list above — using an explicit pathspec (`git add -- <path> …`). Never use `git add -A`, `git add -a`, or `git add .`. Do not stage, revert, checkout, stash, or clean any other modified or untracked file — it was already there and is not yours to touch. Before staging each file, confirm its current contents are the changes you made this turn; if a file also contains edits you did not make (a concurrent human or sibling edit), skip it and report it rather than committing someone else's work.",

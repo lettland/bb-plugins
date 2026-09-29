@@ -222,9 +222,13 @@ describe("buildReviewPrompt", () => {
 
   it("runs the aislop scan in every mode as advice triaged against the project's rules", () => {
     for (const reviewMode of ["auto", "devkit", "self"] as const) {
-      const text = buildReviewPrompt({ decision: { commit: true, merge: false }, reviewMode, scope: baseScope });
+      const build = (aislopScan?: boolean) =>
+        buildReviewPrompt({ decision: { commit: true, merge: false }, reviewMode, scope: baseScope, aislopScan });
+      expect(build()).not.toContain("aislop");
+      expect(build(false)).not.toContain("aislop");
+      const text = build(true);
       expect(text).toMatch(
-        /1\. [^\n]*Then run `bb aislop scan`[^\n]*command unknown[^\n]*skip this[^\n]*non-zero exit code[^\n]*only means it found issues[^\n]*advice, not orders[^\n]*project's own rules[^\n]*one-line reason/u,
+        /1\. [^\n]*Then run `bb aislop scan`[^\n]*command unknown or its plugin disabled[^\n]*skip this[^\n]*non-zero exit code[^\n]*only means it found issues[^\n]*advice, not orders[^\n]*project's own rules[^\n]*one-line reason/u,
       );
     }
   });

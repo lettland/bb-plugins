@@ -78,6 +78,22 @@ function withProviderLock<T>(providerId: string, run: () => Promise<T>): Promise
   return next;
 }
 
+/**
+ * Whether a running plugin serves `bb aislop`. The review only asks for the scan
+ * then, so a missing or disabled aislop plugin never shows up as a failed step;
+ * a failed lookup counts as absent and never blocks the review itself.
+ */
+async function aislopScanAvailable(bb: BbPluginApi): Promise<boolean> {
+  try {
+    const { plugins } = await bb.sdk.plugins.list();
+    return plugins.some(
+      (entry) => entry.enabled && entry.status === "running" && entry.cliCommand?.name === "aislop",
+    );
+  } catch {
+    return false;
+  }
+}
+
 export default async function plugin(bb: BbPluginApi) {
   const settings = defineAutoReviewSettings(bb);
   let globals: GlobalDefaults = globalDefaultsFrom(await settings.get());
@@ -396,6 +412,7 @@ export default async function plugin(bb: BbPluginApi) {
         scope: renderScope(scope),
         committedSince:
           turn.commits.length > 0 ? (state.turnStart?.tree?.headSha ?? null) : null,
+        aislopScan: await aislopScanAvailable(bb),
       });
       await writeState(
         bb,
