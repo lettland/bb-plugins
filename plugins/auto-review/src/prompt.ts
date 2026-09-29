@@ -100,13 +100,13 @@ const OWN_WORK_ONLY =
  * so they are triaged against the project's own rules rather than all fixed.
  */
 const AISLOP_SCAN =
-  "Then run `bb aislop scan`, which scans what this branch changed against its root branch; if bb reports the command unknown, the aislop plugin is not installed, so skip this. Treat its findings as advice, not orders: act only on findings in the files listed above and on lines you changed this turn, and fix one only when it is a real problem and the fix does not go against this project's own rules (CLAUDE.md / AGENTS.md, lint and formatter config, or the conventions the surrounding code follows). Leave false positives and rule conflicts as they are, and list each finding you skipped with a one-line reason in your final reply.";
+  "Then run `bb aislop scan`, which scans what this branch changed against its root branch; if bb reports the command unknown, the aislop plugin is not installed, so skip this. A non-zero exit code from the scan only means it found issues, not that the step failed. Treat its findings as advice, not orders: act only on findings in the files listed above and on lines you changed this turn, and fix one only when it is a real problem and the fix does not go against this project's own rules (CLAUDE.md / AGENTS.md, lint and formatter config, or the conventions the surrounding code follows). Leave false positives and rule conflicts as they are, and list each finding you skipped with a one-line reason in your final reply.";
 
 function reviewStep(mode: ReviewMode, committedSince: string | null): string {
   const target = reviewTarget(committedSince);
   switch (mode) {
     case "devkit":
-      return `Review the changes with devkit's calibrated review: ${target.devkit}. ${OWN_WORK_ONLY} If the devkit_load_skill tool is not available, STOP and report that the devkit review workflow is missing; do not fall back to a self-review. ${AISLOP_SCAN}`;
+      return `Review the changes with devkit's calibrated review: ${target.devkit}. ${OWN_WORK_ONLY} ${AISLOP_SCAN} If the devkit_load_skill tool is not available, STOP and report that the devkit review workflow is missing; do not fall back to a self-review.`;
     case "self":
       return `Review the changes with a focused self-review of ${target.self}. ${OWN_WORK_ONLY} ${AISLOP_SCAN}`;
     case "auto":

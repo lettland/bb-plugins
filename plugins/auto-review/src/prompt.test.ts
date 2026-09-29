@@ -224,7 +224,7 @@ describe("buildReviewPrompt", () => {
     for (const reviewMode of ["auto", "devkit", "self"] as const) {
       const text = buildReviewPrompt({ decision: { commit: true, merge: false }, reviewMode, scope: baseScope });
       expect(text).toMatch(
-        /1\. [^\n]*Then run `bb aislop scan`[^\n]*command unknown[^\n]*skip this[^\n]*advice, not orders[^\n]*project's own rules[^\n]*one-line reason/u,
+        /1\. [^\n]*Then run `bb aislop scan`[^\n]*command unknown[^\n]*skip this[^\n]*non-zero exit code[^\n]*only means it found issues[^\n]*advice, not orders[^\n]*project's own rules[^\n]*one-line reason/u,
       );
     }
   });
