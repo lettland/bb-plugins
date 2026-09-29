@@ -34,6 +34,10 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   one deferred turn per provider released per review end. In-flight reviews and parked
   turns are indexed in plugin storage, and parked turns are swept every 5 minutes, so a
   release whose event was missed still happens.
+- Yields to the user: a turn ending with a user message queued (or its turn already
+  started) is carried, not reviewed — its cursor is kept, and the review fires at the
+  first idle with nothing of the user's waiting, covering every turn since. Scheduled,
+  failed, agent and plugin rows do not count.
 - Injects one review-and-commit turn into the same thread, guarded by a per-thread
   latch (persisted in plugin metadata) so it never reviews its own review turn. When that
   turn commits, it judges from the thread's plan whether work remains and continues any

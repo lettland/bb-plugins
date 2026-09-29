@@ -13,6 +13,7 @@ export const FIRE_REASONS = [
   "empty-scope",
   "no-turn-start",
   "user-stopped",
+  "user-queued",
   "disabled",
   "skipped",
   "sibling-active",

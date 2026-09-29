@@ -93,6 +93,7 @@ describe("resetToIdlePatch", () => {
       "pendingEntryId",
       "dispatchedAt",
       "deferredSince",
+      "carryTurnStart",
     ]);
   });
 });

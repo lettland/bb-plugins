@@ -242,6 +242,44 @@ export default async function plugin(bb: BbPluginApi) {
     await recordFire(thread.projectId, thread.id, "stood-down", reason, extra);
   }
 
+  /**
+   * Whether the user's next turn is already lined up: a message they queued
+   * during this turn, or a turn already started because core drained the queue
+   * before this idle was handled. Scheduled and failed rows do not count.
+   */
+  async function userTurnQueued(threadId: string): Promise<boolean> {
+    const now = Date.now();
+    const [{ status }, rows] = await Promise.all([
+      bb.sdk.threads.get({ threadId }),
+      bb.sdk.threads.queuedMessages.list({ threadId }),
+    ]);
+    return (
+      isBusyStatus(status) ||
+      rows.some(
+        (row) =>
+          row.initiator === "user" &&
+          row.origin !== "plugin" &&
+          row.failureReason === null &&
+          (row.sendAt === null || row.sendAt <= now),
+      )
+    );
+  }
+
+  /**
+   * Fold this turn's review into the user's next turn instead of firing it
+   * alongside their message. The cursor is kept, so the review that fires once
+   * the thread goes idle with nothing of theirs waiting covers every turn since.
+   */
+  async function carryOver(thread: GateThreadLike, state: ThreadState): Promise<void> {
+    await writeState(bb, thread.id, { phase: "idle", carryTurnStart: true }, [
+      "deferredSince",
+    ]);
+    if (state.phase === "deferred") {
+      await removeDeferral(bb, thread.id);
+    }
+    await recordFire(thread.projectId, thread.id, "deferred", "user-queued");
+  }
+
   async function evaluate(thread: GateThreadLike): Promise<void> {
     const state = await readState(bb, thread.id);
     // Three drivers reach this: a thread's own idle, a sibling's idle releasing
@@ -252,6 +290,11 @@ export default async function plugin(bb: BbPluginApi) {
     // idempotent — it records no fire, because nothing was decided here.
     if (REVIEW_IN_FLIGHT_PHASES.includes(state.phase)) {
       return;
+    }
+    if (state.carryTurnStart === true) {
+      // The idle a carried review waited for; it is decided now, and carried
+      // again below if the user has queued yet another message.
+      await writeState(bb, thread.id, {}, ["carryTurnStart"]);
     }
     const project = await readProjectConfig(bb, thread.projectId);
     const config = effectiveConfig(globals, project, state.skip === true);
@@ -272,6 +315,10 @@ export default async function plugin(bb: BbPluginApi) {
     // half-done work behind their back is the last thing they asked for.
     if (await stoppedByUser(bb, thread.id, state.turnStart.sinceSeq)) {
       await standDown(thread, state, "user-stopped");
+      return;
+    }
+    if (await userTurnQueued(thread.id)) {
+      await carryOver(thread, state);
       return;
     }
     const environmentId = thread.environmentId;
@@ -626,10 +673,13 @@ export default async function plugin(bb: BbPluginApi) {
     }
     await withThreadLock(thread.id, async () => {
       const state = await readState(bb, thread.id);
-      if (state.phase === "deferred" && state.turnStart !== undefined) {
-        // A deferred turn is still owed a review. Keep its (earlier) cursor so
-        // the eventual review covers that turn's work as well as this one's,
-        // instead of starting the authorship window over and losing it.
+      if (
+        (state.phase === "deferred" || state.carryTurnStart === true) &&
+        state.turnStart !== undefined
+      ) {
+        // A deferred or carried turn is still owed a review. Keep its (earlier)
+        // cursor so the eventual review covers that turn's work as well as this
+        // one's, instead of starting the authorship window over and losing it.
         return;
       }
       const startedAt = Date.now();

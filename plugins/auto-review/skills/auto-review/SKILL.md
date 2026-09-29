@@ -144,6 +144,11 @@ review and commit then never run.
   never triggers a review, commit or merge. A turn of this thread that was parked
   (`deferred`) is dropped as well. A stop bb made on its own (daemon restart,
   provider-turn watchdog) does not count.
+- `user-queued` — the turn ended with a message of the user's already queued (or its turn
+  already started). Paired with outcome `deferred`: no review fires next to their message;
+  the turn-start cursor is carried into that next turn, and the review fires at the first
+  idle with nothing of the user's queued, covering every turn since. A scheduled or failed
+  row, or one an agent or plugin queued, does not count.
 - `disabled` — disabled globally or for this project.
 - `skipped` — this thread has a skip flag set.
 Outcomes are `fired`, `deferred` (parked, will still run) and `stood-down` (will not run).

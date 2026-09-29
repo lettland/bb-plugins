@@ -26,6 +26,9 @@ It ships enabled (opt-out).
 - Runs one review at a time per provider across all projects, since those reviews share
   the provider's usage limits. A turn ending behind another review is deferred, not
   dropped, and fires when the blocking review ends.
+- Never fires alongside a message you queued. If a user message is waiting when the turn
+  ends (or its turn has already started), the review is carried into that turn and fires
+  once the thread goes idle with nothing of yours queued, covering every turn since.
 - Commits only a complete, working change. The review turn gets the full list of files the
   turn authored, checks that nothing the staged change depends on is left out, and runs the
   project's typecheck/build and tests. If the work is unfinished, broken, or could only be

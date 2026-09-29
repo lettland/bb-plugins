@@ -25,6 +25,14 @@ interface EnvThread {
   originPluginId?: string | null;
 }
 
+interface QueuedRow {
+  id: string;
+  initiator?: string;
+  origin?: string | null;
+  failureReason?: string | null;
+  sendAt?: number | null;
+}
+
 interface HostOptions {
   sendDelivery?: "sent" | "queued";
   sendThrows?: boolean;
@@ -33,7 +41,7 @@ interface HostOptions {
   worktree?: boolean;
   /** Latch a same-provider review between the first check and the lock. */
   reviewLandsBeforeLock?: boolean;
-  queuedRows?: Array<{ id: string }>;
+  queuedRows?: QueuedRow[];
   envThreads?: EnvThread[];
   authoringThreads?: string[];
   getThrowsFor?: string[];
@@ -356,7 +364,7 @@ function createHost(options: HostOptions = {}) {
     interrupt: (event: InterruptEvent) => {
       interrupts = [...interrupts, event];
     },
-    setQueuedRows: (next: Array<{ id: string }>) => {
+    setQueuedRows: (next: QueuedRow[]) => {
       queuedRows = next;
     },
     /** The working tree as a shell command would leave it — no timeline row. */
@@ -608,6 +616,78 @@ describe("auto-review plugin", () => {
       outcome: "stood-down",
       reason: "user-stopped",
     });
+    await host.harness.dispose();
+  });
+
+  function userRow(extra: Partial<QueuedRow> = {}): QueuedRow {
+    return {
+      id: "user-msg",
+      initiator: "user",
+      origin: "app",
+      failureReason: null,
+      sendAt: null,
+      ...extra,
+    };
+  }
+
+  it("folds the review into the user's queued next turn", async () => {
+    const host = createHost({ queuedRows: [userRow()] });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(host.metadata.carryTurnStart).toBe(true);
+    expect(await lastFire(host)).toMatchObject({
+      outcome: "deferred",
+      reason: "user-queued",
+    });
+
+    // Core dispatches the user's message; that turn keeps the first cursor.
+    host.setQueuedRows([]);
+    host.setMaxSeq(200);
+    await emitActive(host);
+    expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 100 });
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(host.metadata.carryTurnStart).toBeUndefined();
+    expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
+    await host.harness.dispose();
+  });
+
+  it("folds the review when the user's turn already started before idle was handled", async () => {
+    const host = createHost();
+    await plugin(host.bb);
+    await emitActive(host);
+    host.setEnvThreads([{ id: THREAD_ID, status: "active" }]);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ reason: "user-queued" });
+    await host.harness.dispose();
+  });
+
+  it("folds a released deferral into the turn the thread is already running", async () => {
+    const host = createHost({ envThreads: [{ id: THREAD_ID, status: "active" }] });
+    await plugin(host.bb);
+    await park(host, THREAD_ID);
+    await emitIdle(host, "other");
+    expect(host.sends).toHaveLength(0);
+    expect(host.metadata.phase).toBe("idle");
+    expect(host.metadata.carryTurnStart).toBe(true);
+    expect(await host.bb.storage.kv.get(`deferral:${THREAD_ID}`)).toBeFalsy();
+    await host.harness.dispose();
+  });
+
+  it.each([
+    ["a scheduled message", { sendAt: Date.now() + 60 * 60 * 1_000 }],
+    ["a failed message", { failureReason: "boom" }],
+    ["a plugin's message", { origin: "plugin" }],
+    ["an agent's message", { initiator: "agent" }],
+  ])("still fires when the only queued row is %s", async (_label, extra) => {
+    const host = createHost({ queuedRows: [userRow(extra)] });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
     await host.harness.dispose();
   });
 
