@@ -72,6 +72,12 @@ bb plugin install npm:@lettland/bb-plugin-auto-review
 
 Install [devkit](../devkit) alongside it to get the calibrated review in `auto` mode.
 
+Install [aislop](../aislop) alongside it and every code review also runs `bb aislop scan`
+on the branch's changes. Its findings are advisory: the review fixes the real ones in
+the turn's own changed lines, and it leaves false positives and anything against the
+project's own rules (CLAUDE.md / AGENTS.md, lint config, local conventions) unfixed,
+listing each with a reason. Without the plugin, the step is skipped.
+
 ## Development
 
 ```sh

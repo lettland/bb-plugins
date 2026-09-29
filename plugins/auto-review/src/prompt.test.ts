@@ -220,6 +220,15 @@ describe("buildReviewPrompt", () => {
     expect(text).toMatch(/do not fall back to a self-review/);
   });
 
+  it("runs the aislop scan in every mode as advice triaged against the project's rules", () => {
+    for (const reviewMode of ["auto", "devkit", "self"] as const) {
+      const text = buildReviewPrompt({ decision: { commit: true, merge: false }, reviewMode, scope: baseScope });
+      expect(text).toMatch(
+        /1\. [^\n]*Then run `bb aislop scan`[^\n]*command unknown[^\n]*skip this[^\n]*advice, not orders[^\n]*project's own rules[^\n]*one-line reason/u,
+      );
+    }
+  });
+
   it("reviews the committed range when the turn already committed its work", () => {
     const build = (reviewMode: "auto" | "devkit" | "self") =>
       buildReviewPrompt({

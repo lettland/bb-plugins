@@ -81,6 +81,11 @@ All commands accept `--json`.
   tool is available, else self-review), `devkit` (require devkit's review), or `self`
   (always self-review). Applies to both plan and code review.
 
+Every code review also runs `bb aislop scan` when the aislop plugin is installed (skipped
+otherwise). Its findings are advice: only real problems in the turn's own changed lines
+are fixed; false positives and findings that go against the project's own rules are
+left alone and listed with a one-line reason.
+
 Per-project overrides and per-thread skip are stored by the plugin, not in settings.
 
 ## Branch policy
