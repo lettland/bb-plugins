@@ -4,6 +4,7 @@
   "name": "lettland-plugins",
   "plugins": [
     { "name": "agent-hooks", "source": "./plugins/agent-hooks" },
+    { "name": "aislop", "source": "./plugins/aislop" },
     { "name": "auto-review", "source": "./plugins/auto-review" },
     { "name": "devkit", "source": "./plugins/devkit" },
     { "name": "dir-skills", "source": "./plugins/dir-skills" },

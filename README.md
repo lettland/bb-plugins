@@ -12,6 +12,7 @@ The root [`.bb/plugins.json`](.bb/plugins.json) collection manifest indexes them
 | Plugin | ID | npm |
 |---|---|---|
 | [Agent hooks](plugins/agent-hooks) | `agent-hooks` | `@lettland/bb-plugin-agent-hooks` |
+| [aislop](plugins/aislop) | `aislop` | `@lettland/bb-plugin-aislop` |
 | [Auto review](plugins/auto-review) | `auto-review` | `@lettland/bb-plugin-auto-review` |
 | [devkit](plugins/devkit) | `devkit` | `@lettland/bb-plugin-devkit` |
 | [Directory skills](plugins/dir-skills) | `dir-skills` | `@lettland/bb-plugin-dir-skills` |

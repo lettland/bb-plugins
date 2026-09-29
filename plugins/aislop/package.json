@@ -1,0 +1,45 @@
+{
+  "name": "@lettland/bb-plugin-aislop",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Run the aislop quality scan from bb, scoped by default to what the current branch changed against its root.",
+  "engines": {
+    "bb": ">=0.0"
+  },
+  "bb": {
+    "name": "aislop",
+    "description": "Run the aislop quality scan from bb, scoped by default to what the current branch changed against its root.",
+    "branding": {
+      "icon": "ScanSearch"
+    },
+    "server": "./server.ts",
+    "host": "./host.ts",
+    "skills": [
+      "skills"
+    ]
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.config.ts --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.5.9",
+    "@types/node": "^22.20.4",
+    "@vitest/coverage-v8": "^4.1.11",
+    "better-sqlite3": "^13.0.3",
+    "cron-parser": "^5.5.0",
+    "hono": "^4.13.9",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}
