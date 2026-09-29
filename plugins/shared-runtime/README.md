@@ -148,6 +148,26 @@ Field notes:
   start with `bash` or `sh` followed by a repository-relative script that is read from the
   primary checkout, never from the worktree.
 
+### Node copy compatibility preload
+
+The isolation launcher rejects `chmod`, `utimes`, and xattr syscalls with `EPERM`, so Node's
+`fs.copyFile`/`fs.cp` fail under confinement because they chmod the destination. An operation
+that copies files into scratch from Node can load `${runtime}/node-copy-compat-preload.cjs`. For
+destinations under `TMPDIR`/`TMP`/`TEMP` or `BB_NODE_COPY_ROOTS` (a `path.delimiter`-separated
+list), it copies by read-and-write with the source mode and skips `chmod`. It does nothing unless
+enabled:
+
+```json
+"env": {
+  "NODE_OPTIONS": "--require=${runtime}/node-copy-compat-preload.cjs",
+  "BB_NODE_COPY_COMPAT_COMMANDS": "ttsc,ttsc.js"
+}
+```
+
+`BB_NODE_COPY_COMPAT_COMMANDS` patches only the Node processes whose script basename is in the
+comma-separated list. `NODE_OPTIONS` is inherited by every child process, so this keeps other
+tools untouched. `BB_NODE_COPY_COMPAT=1` patches every Node process.
+
 ## Registry reference (`~/.bb/shared-runtime/projects/<projectId>.json`)
 
 Written only by `bb-shared-runtime install` and `sync`, mode 0600 inside 0700 directories. The

@@ -1,5 +1,12 @@
 "use strict";
 
+// The isolation launcher's seccomp filter fails chmod, utimes, and xattr
+// syscalls with EPERM, which breaks Node's copyFile/cp (they chmod the
+// destination). Inside the writable copy roots this preload copies by
+// read + write-with-mode instead and skips chmod. It is inert unless
+// BB_NODE_COPY_COMPAT=1 (every Node process) or BB_NODE_COPY_COMPAT_COMMANDS
+// (comma-separated command basenames, e.g. "ttsc,ttsc.js") enables it.
+
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -8,9 +15,13 @@ const originalCopyFileSync = fs.copyFileSync;
 const originalCpSync = fs.cpSync;
 const originalPromisesCopyFile = fs.promises.copyFile.bind(fs.promises);
 const writableCopyRoots = resolveWritableCopyRoots();
-const isTtscProcess = process.argv
+const compatCommands = (process.env.BB_NODE_COPY_COMPAT_COMMANDS ?? "")
+  .split(",")
+  .map((name) => name.trim())
+  .filter((name) => name.length > 0);
+const isCompatCommand = process.argv
   .slice(1)
-  .some((value) => /^(?:ttsc|ttsc\.js)$/.test(path.basename(value)));
+  .some((value) => compatCommands.includes(path.basename(value)));
 
 function resolveWritableCopyRoots() {
   const roots = [];
@@ -90,7 +101,7 @@ function copyTreeIntoScratch(source, destination, options = {}) {
   copyFileIntoScratch(source, destination, options.mode ?? 0);
 }
 
-if (isTtscProcess || process.env.BB_TTSC_COPY_COMPAT_FORCE === "1") {
+if (isCompatCommand || process.env.BB_NODE_COPY_COMPAT === "1") {
   fs.copyFileSync = copyFileIntoScratch;
   fs.cpSync = copyTreeIntoScratch;
   fs.promises.copyFile = copyFileIntoScratchAsync;

@@ -819,9 +819,13 @@ test("ttsc checks load the scratch-confined Node copy compatibility", () => {
     assert.ok(invocation, `${operation} must include a check invocation`);
     assert.ok(
       invocation.args.includes(
-        "NODE_OPTIONS=--require=/platform-primary/.bb-runtime/assets/ttsc-isolation-preload.cjs",
+        "NODE_OPTIONS=--require=/platform-primary/.bb-runtime/assets/node-copy-compat-preload.cjs",
       ),
-      `${operation} must load the ttsc isolation compatibility preload`,
+      `${operation} must load the Node copy compatibility preload`,
+    );
+    assert.ok(
+      invocation.args.includes("BB_NODE_COPY_COMPAT_COMMANDS=ttsc,ttsc.js"),
+      `${operation} must enable copy compatibility for ttsc only`,
     );
     assert.ok(
       invocation.args.includes("GOPATH=/var/tmp/bb-runtime-go-mod-env_abc123"),
@@ -844,9 +848,9 @@ test("ttsc checks load the scratch-confined Node copy compatibility", () => {
   }
 });
 
-test("ttsc isolation preload copies source trees into scratch without chmod", async () => {
-  const scratch = await mkdtemp(path.join(tmpdir(), "ttsc-isolation-preload-"));
-  const preload = path.join(pluginRoot, "assets/ttsc-isolation-preload.cjs");
+test("Node copy compatibility preload copies source trees into scratch without chmod", async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), "node-copy-compat-preload-"));
+  const preload = path.join(pluginRoot, "assets/node-copy-compat-preload.cjs");
   const source = path.join(pluginRoot, "test");
   const destination = path.join(scratch, "copied-test");
   try {
@@ -865,7 +869,7 @@ test("ttsc isolation preload copies source trees into scratch without chmod", as
       {
         env: {
           ...process.env,
-          BB_TTSC_COPY_COMPAT_FORCE: "1",
+          BB_NODE_COPY_COMPAT: "1",
           TEMP: scratch,
           TMP: scratch,
           TMPDIR: scratch,
@@ -878,15 +882,46 @@ test("ttsc isolation preload copies source trees into scratch without chmod", as
   }
 });
 
-test("ttsc isolation preload leaves other Node tools unchanged", async () => {
-  const preload = path.join(pluginRoot, "assets/ttsc-isolation-preload.cjs");
-  const { stdout } = await execFileAsync(process.execPath, [
-    "--require",
-    preload,
-    "-e",
-    "process.stdout.write(require('node:fs').chmodSync.name)",
-  ]);
+test("Node copy compatibility preload is inert unless enabled", async () => {
+  const preload = path.join(pluginRoot, "assets/node-copy-compat-preload.cjs");
+  const env = { ...process.env };
+  delete env.BB_NODE_COPY_COMPAT;
+  delete env.BB_NODE_COPY_COMPAT_COMMANDS;
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [
+      "--require",
+      preload,
+      "-e",
+      "process.stdout.write(require('node:fs').chmodSync.name)",
+    ],
+    { env },
+  );
   assert.equal(stdout, "chmodSync");
+});
+
+test("Node copy compatibility preload patches only the listed commands", async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), "node-copy-compat-commands-"));
+  const preload = path.join(pluginRoot, "assets/node-copy-compat-preload.cjs");
+  const script = path.join(scratch, "fake-tool.js");
+  await writeFile(
+    script,
+    "process.stdout.write(require('node:fs').chmodSync.name)\n",
+  );
+  const env = { ...process.env };
+  delete env.BB_NODE_COPY_COMPAT;
+  const run = async (commands) =>
+    (
+      await execFileAsync(process.execPath, ["--require", preload, script], {
+        env: { ...env, BB_NODE_COPY_COMPAT_COMMANDS: commands },
+      })
+    ).stdout;
+  try {
+    assert.equal(await run("other-tool, fake-tool.js"), "chmodWithinIsolation");
+    assert.equal(await run("ttsc,ttsc.js"), "chmodSync");
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
 });
 
 test("Svelte tests confine Node copy compatibility to the selected worktree", () => {
@@ -908,12 +943,12 @@ test("Svelte tests confine Node copy compatibility to the selected worktree", ()
       `${operation} must limit compatibility copies to the selected Svelte worktree`,
     );
     assert.ok(
-      invocation.args.includes("BB_TTSC_COPY_COMPAT_FORCE=1"),
+      invocation.args.includes("BB_NODE_COPY_COMPAT=1"),
       `${operation} must explicitly enable compatibility for its artifact copier`,
     );
     assert.ok(
       invocation.args.includes(
-        "NODE_OPTIONS=--require=/platform-primary/.bb-runtime/assets/ttsc-isolation-preload.cjs",
+        "NODE_OPTIONS=--require=/platform-primary/.bb-runtime/assets/node-copy-compat-preload.cjs",
       ),
       `${operation} must load the Node copy compatibility preload`,
     );

@@ -112,8 +112,9 @@
       "container": "sveltekit",
       "argv": ["pnpm", "-r", "--stream", "--workspace-concurrency=1", "check"],
       "env": {
+        "BB_NODE_COPY_COMPAT_COMMANDS": "ttsc,ttsc.js",
         "GOPATH": "${scratch.go-mod}",
-        "NODE_OPTIONS": "--require=${runtime}/ttsc-isolation-preload.cjs",
+        "NODE_OPTIONS": "--require=${runtime}/node-copy-compat-preload.cjs",
         "TEMP": "${scratch.ttsc-cache}",
         "TMP": "${scratch.ttsc-cache}",
         "TMPDIR": "${scratch.ttsc-cache}",
@@ -128,9 +129,9 @@
       "container": "sveltekit",
       "argv": ["pnpm", "-r", "--workspace-concurrency=1", "test"],
       "env": {
+        "BB_NODE_COPY_COMPAT": "1",
         "BB_NODE_COPY_ROOTS": "${cwd}",
-        "BB_TTSC_COPY_COMPAT_FORCE": "1",
-        "NODE_OPTIONS": "--require=${runtime}/ttsc-isolation-preload.cjs"
+        "NODE_OPTIONS": "--require=${runtime}/node-copy-compat-preload.cjs"
       }
     },
     "svelte_format_check": {
