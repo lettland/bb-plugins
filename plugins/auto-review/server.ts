@@ -292,8 +292,9 @@ export default async function plugin(bb: BbPluginApi) {
    * the thread goes idle with nothing of theirs waiting covers every turn since.
    */
   async function carryOver(thread: GateThreadLike, state: ThreadState): Promise<void> {
-    await writeState(bb, thread.id, { phase: "idle", carryTurnStart: true }, [
+    await writeState(bb, thread.id, { phase: "idle" }, [
       "deferredSince",
+      "turnDecided",
     ]);
     if (state.phase === "deferred") {
       await removeDeferral(bb, thread.id);
@@ -312,11 +313,9 @@ export default async function plugin(bb: BbPluginApi) {
     if (REVIEW_IN_FLIGHT_PHASES.includes(state.phase)) {
       return;
     }
-    if (state.carryTurnStart === true) {
-      // The idle a carried review waited for; it is decided now, and carried
-      // again below if the user has queued yet another message.
-      await writeState(bb, thread.id, {}, ["carryTurnStart"]);
-    }
+    // This idle decides the turn; `carryOver` below reopens it when the review
+    // is folded into the user's queued next turn.
+    await writeState(bb, thread.id, { turnDecided: true });
     const project = await readProjectConfig(bb, thread.projectId);
     const config = effectiveConfig(globals, project, state.skip === true);
 
@@ -696,12 +695,14 @@ export default async function plugin(bb: BbPluginApi) {
     await withThreadLock(thread.id, async () => {
       const state = await readState(bb, thread.id);
       if (
-        (state.phase === "deferred" || state.carryTurnStart === true) &&
+        (state.phase === "deferred" || state.turnDecided !== true) &&
         state.turnStart !== undefined
       ) {
-        // A deferred or carried turn is still owed a review. Keep its (earlier)
-        // cursor so the eventual review covers that turn's work as well as this
-        // one's, instead of starting the authorship window over and losing it.
+        // A deferred turn, or one no idle has decided yet (its review was
+        // folded into this turn, or its idle is still to be handled), is owed
+        // a review. Keep its (earlier) cursor so the eventual review covers
+        // that turn's work as well as this one's, instead of starting the
+        // authorship window over and losing it.
         return;
       }
       const startedAt = Date.now();
@@ -715,9 +716,12 @@ export default async function plugin(bb: BbPluginApi) {
           ? Promise.resolve(undefined)
           : captureTree(bb, thread.environmentId),
       ]);
-      await writeState(bb, thread.id, {
-        turnStart: { sinceSeq, startedAt, ...(tree === undefined ? {} : { tree }) },
-      });
+      await writeState(
+        bb,
+        thread.id,
+        { turnStart: { sinceSeq, startedAt, ...(tree === undefined ? {} : { tree }) } },
+        ["turnDecided"],
+      );
     });
   });
 

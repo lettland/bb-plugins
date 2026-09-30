@@ -670,7 +670,7 @@ describe("auto-review plugin", () => {
     await emitActive(host);
     await emitIdle(host);
     expect(host.sends).toHaveLength(0);
-    expect(host.metadata.carryTurnStart).toBe(true);
+    expect(host.metadata.turnDecided).toBeUndefined();
     expect(await lastFire(host)).toMatchObject({
       outcome: "deferred",
       reason: "user-queued",
@@ -683,7 +683,7 @@ describe("auto-review plugin", () => {
     expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 100 });
     await emitIdle(host);
     expect(host.sends).toHaveLength(1);
-    expect(host.metadata.carryTurnStart).toBeUndefined();
+    expect(host.metadata.turnDecided).toBe(true);
     expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
     await host.harness.dispose();
   });
@@ -723,14 +723,39 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
-  it("folds the review when the user's turn already started before idle was handled", async () => {
+  it("keeps the finished turn's cursor when the next turn's start is handled before its idle", async () => {
     const host = createHost();
     await plugin(host.bb);
     await emitActive(host);
+    // Core drained the user's message: the next turn is running, and its
+    // thread.active reaches the plugin before the finished turn's idle.
+    host.setMaxSeq(200);
     host.setEnvThreads([{ id: THREAD_ID, status: "active" }]);
+    await emitActive(host);
+    expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 100 });
     await emitIdle(host);
     expect(host.sends).toHaveLength(0);
     expect(await lastFire(host)).toMatchObject({ reason: "user-queued" });
+
+    host.setEnvThreads([{ id: THREAD_ID, status: "idle" }]);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({
+      outcome: "fired",
+      scopePaths: ["src/a.ts"],
+    });
+    await host.harness.dispose();
+  });
+
+  it("starts a fresh cursor once the previous turn's idle decided it", async () => {
+    const host = createHost({ authoredRows: [] });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    host.setMaxSeq(200);
+    await emitActive(host);
+    expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 200 });
+    expect(host.metadata.turnDecided).toBeUndefined();
     await host.harness.dispose();
   });
 
@@ -741,7 +766,7 @@ describe("auto-review plugin", () => {
     await emitIdle(host, "other");
     expect(host.sends).toHaveLength(0);
     expect(host.metadata.phase).toBe("idle");
-    expect(host.metadata.carryTurnStart).toBe(true);
+    expect(host.metadata.turnDecided).toBeUndefined();
     expect(await host.bb.storage.kv.get(`deferral:${THREAD_ID}`)).toBeFalsy();
     await host.harness.dispose();
   });

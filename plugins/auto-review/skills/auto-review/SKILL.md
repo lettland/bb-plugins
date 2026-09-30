@@ -154,6 +154,8 @@ review and commit then never run.
   the turn-start cursor is carried into that next turn, and the review fires at the first
   idle with nothing of the user's queued, covering every turn since. A scheduled or failed
   row, or one an agent or plugin queued, does not count.
+  A turn's cursor is only replaced once an idle has decided that turn, so this holds even
+  when the next turn's start reaches the plugin before the finished turn's idle.
 - `disabled` — disabled globally or for this project.
 - `skipped` — this thread has a skip flag set.
 Outcomes are `fired`, `deferred` (parked, will still run) and `stood-down` (will not run).

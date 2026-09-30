@@ -53,10 +53,12 @@ export const threadStateSchema = z.object({
   dispatchedAt: z.number().optional(),
   deferredSince: z.number().optional(),
   /**
-   * Set when a turn ended with the user's next message already queued: its
-   * review is folded into that next turn, whose start keeps this cursor.
+   * Set once an idle has decided the turn `turnStart` opened. Until then the
+   * next `thread.active` keeps the cursor instead of starting a new window, so
+   * a turn whose idle is handled after the next turn's start — or whose review
+   * was folded into the user's queued next turn — is still covered.
    */
-  carryTurnStart: z.literal(true).optional(),
+  turnDecided: z.literal(true).optional(),
   skip: z.literal(true).optional(),
   /**
    * Set when a plan's first presentation was held back for review; the next
@@ -132,7 +134,7 @@ export const LATCH_KEYS: readonly string[] = [
   "pendingEntryId",
   "dispatchedAt",
   "deferredSince",
-  "carryTurnStart",
+  "turnDecided",
 ];
 
 /** Plan-gate keys, cleared together whenever the gate disarms. */
