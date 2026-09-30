@@ -39,6 +39,7 @@ import { planApprovalOf, planGateAction, type PlanApproval } from "./src/plan.js
 import {
   buildPlanReviewPrompt,
   buildReviewPrompt,
+  PLAN_FIRST_INSTRUCTIONS,
   renderScope,
 } from "./src/prompt.js";
 import { addReview, readReviews, removeReview } from "./src/reviews.js";
@@ -105,6 +106,21 @@ export default async function plugin(bb: BbPluginApi) {
   settings.onChange((next) => {
     globals = globalDefaultsFrom(next);
   });
+
+  // Only threads the plan gate can serve get the plan-first instruction: a
+  // child or plugin-spawned thread would stop for an approval nobody reviews
+  // or may be watching. The callback must be synchronous, so it follows the
+  // global switch only: a project or thread that turned auto-review off still
+  // gets it, and its plan then goes to the user unreviewed.
+  bb.agents.configure((context) => ({
+    tools: [],
+    skills: ["auto-review"],
+    ...(globals.enabled &&
+    context.thread.parentThreadId === null &&
+    context.origin.pluginId === null
+      ? { instructions: PLAN_FIRST_INSTRUCTIONS }
+      : {}),
+  }));
 
   async function recordFire(
     projectId: string,

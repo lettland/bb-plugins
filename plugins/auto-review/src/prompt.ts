@@ -179,6 +179,18 @@ export function buildPlanReviewPrompt(input: BuildPlanPromptInput): string {
   return lines.join("\n");
 }
 
+/**
+ * Thread instructions that make plan review reachable outside plan mode. The
+ * gate only sees a plan presented for approval, and an agent in a normal
+ * permission mode goes straight from its own design to edits, so it is told to
+ * present the plan first.
+ */
+export const PLAN_FIRST_INSTRUCTIONS = [
+  "auto-review reviews plans, but only a plan you present for approval. Before substantial implementation — a new module, a change across several files, or a design choice the user has not seen — present a plan first, even when the thread is not in plan mode. Settling the design yourself is not approval: never announce a design and start editing.",
+  "To present it: enter plan mode (Claude Code: EnterPlanMode), write the plan, then present it (ExitPlanMode). Do not call ExitPlanMode outside plan mode — there it approves itself without asking the user. If your provider cannot enter plan mode on its own, end your turn with the plan and wait for the user's approval.",
+  `Skip this for small, contained fixes, for work under a plan the user already approved in this thread, for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan.`,
+].join("\n\n");
+
 export function buildReviewPrompt(input: BuildPromptInput): string {
   const { decision, reviewMode, scope } = input;
   const since = input.committedSince ?? null;

@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   createFakePluginHost,
+  makePluginAgentConfigurationContext,
   makeQueueEntry,
   makeThreadResponse,
   type CreateFakePluginHostOptions,
 } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server.js";
+import { PLAN_FIRST_INSTRUCTIONS } from "./src/prompt.js";
 import { STALE_WINDOW_MS } from "./src/state.js";
 
 const THREAD_ID = "thread-1";
@@ -354,7 +356,7 @@ function createHost(options: HostOptions = {}) {
   function metadataOf(threadId: string) {
     return bucket(threadId);
   }
-  const fake = createFakePluginHost({ pluginId: PLUGIN_ID, sdk });
+  const fake = createFakePluginHost({ pluginId: PLUGIN_ID, sdk, agentSkillIds: ["auto-review"] });
   hostRef = fake as unknown as { bb: { storage: { kv: KvLike } } };
   return {
     ...fake,
@@ -1659,6 +1661,36 @@ describe("auto-review plugin", () => {
     expect(host.sends).toHaveLength(1);
     expect(promptText(host)).toContain("focused self-review of the diff");
     expect(promptText(host)).not.toContain("devkit_load_skill");
+    await host.harness.dispose();
+  });
+
+  it("asks top-level user threads to present a plan outside plan mode while auto-review is on", async () => {
+    const host = createHost();
+    await plugin(host.bb);
+    const resolve = (parentThreadId: string | null, pluginId: string | null) =>
+      host.harness.resolveAgentConfiguration(
+        makePluginAgentConfigurationContext({
+          thread: { id: THREAD_ID, parentThreadId },
+          origin: { kind: pluginId === null ? null : "fork", pluginId },
+        }),
+      );
+
+    expect(await resolve(null, null)).toEqual({
+      tools: [],
+      skills: ["auto-review"],
+      instructions: PLAN_FIRST_INSTRUCTIONS,
+    });
+    // The plan gate never serves these, so they keep the skill but get no instruction.
+    for (const [parentThreadId, pluginId] of [["parent-1", null], [null, "side-chat"]] as const) {
+      expect(await resolve(parentThreadId, pluginId)).toEqual({
+        tools: [],
+        skills: ["auto-review"],
+        instructions: null,
+      });
+    }
+
+    await host.harness.setSettings({ enabled: false });
+    expect((await resolve(null, null)).instructions).toBeNull();
     await host.harness.dispose();
   });
 

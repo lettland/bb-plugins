@@ -6,7 +6,8 @@ changes, applies fixes, commits only the paths that turn touched, and on a perso
 mainline (e.g. `master`) merges the feature branch into it locally. It never pushes.
 
 It also reviews plans: the first presentation of a plan for approval is held back,
-reviewed, and revised before the user sees it.
+reviewed, and revised before the user sees it. A thread instruction has agents present a
+plan before substantial work even outside plan mode, so the review has a plan to catch.
 
 It ships enabled (opt-out).
 

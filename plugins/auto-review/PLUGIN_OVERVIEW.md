@@ -44,7 +44,10 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   genuinely-unfinished planned work instead of halting mid-plan (never inventing work).
 - Reviews plans too: fires on `interaction.pending` for a plan approval, holds the
   first presentation back (queues a review-plan turn, then denies the approval), and
-  releases the revised plan to the user on its re-presentation.
+  releases the revised plan to the user on its re-presentation. Via
+  `bb.agents.configure` instructions it tells agents in top-level, user-started threads
+  to present a plan before substantial work even outside plan mode, since the gate only
+  sees a presented plan.
 - Ships enabled (opt-out). Turn it off globally or per project, or skip a single
   thread, with `bb auto-review`.
 

@@ -4,6 +4,7 @@ import {
   buildPlanReviewPrompt,
   buildReviewPrompt,
   MAX_SCOPE_ENTRIES,
+  PLAN_FIRST_INSTRUCTIONS,
   renderScope,
 } from "./prompt.js";
 
@@ -346,5 +347,30 @@ describe("buildPlanReviewPrompt", () => {
     const self = buildPlanReviewPrompt({ reviewMode: "self", planFilePath: "/p.md" });
     expect(self).toMatch(/focused self-review of the plan/);
     expect(self).not.toContain("devkit_load_skill");
+  });
+});
+
+describe("PLAN_FIRST_INSTRUCTIONS", () => {
+  it("asks for a presented plan before substantial work, even outside plan mode", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/even when the thread is not in plan mode/);
+    expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/never announce a design and start editing/);
+  });
+
+  it("enters plan mode before presenting, since ExitPlanMode outside it approves itself", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS.indexOf("EnterPlanMode")).toBeLessThan(
+      PLAN_FIRST_INSTRUCTIONS.indexOf("ExitPlanMode"),
+    );
+    expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/Do not call ExitPlanMode outside plan mode/);
+    expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/cannot enter plan mode on its own, end your turn with the plan/);
+  });
+
+  it("exempts small fixes, approved plans, and auto-review's own turns", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/small, contained fixes/);
+    expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/already approved in this thread/);
+    expect(PLAN_FIRST_INSTRUCTIONS).toContain(`${AUTO_REVIEW_MARKER} turns`);
+  });
+
+  it("fits the host's 4096-character instruction limit", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS.length).toBeLessThanOrEqual(4096);
   });
 });

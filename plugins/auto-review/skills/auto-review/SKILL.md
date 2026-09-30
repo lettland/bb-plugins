@@ -46,6 +46,19 @@ minutes, auto-review withdraws it and releases the plan (reason `plan-hold-expir
 stuck review can never turn into a permanent deny. Once
 the plan is approved and implemented, the normal post-turn code review runs on turn end.
 
+The gate only sees a plan that is presented for approval, and an agent outside plan mode
+would otherwise go straight from its own design to edits. So while auto-review is enabled
+globally it adds a thread instruction: before substantial work (a new module, a
+multi-file change, a design the user has not seen) the agent enters plan mode and presents
+a plan, even when the thread is not in plan mode. If the provider cannot enter plan mode on
+its own, the agent ends its turn with the plan instead. Small fixes, work under an
+already-approved plan, and auto-review's own turns are exempt. Child threads and threads a
+plugin spawned (side chats, automations) never get it: the gate does not review their
+plans, and nobody may be there to approve one. The instruction follows the
+global switch only, so a project or thread with auto-review off still gets it, and its
+plan then goes to the user unreviewed. A running session keeps the instructions it started
+with, so the change applies from the next session start.
+
 A plan carrying the `<!-- devkit:commit-plan -->` sentinel on a line of its own (devkit's
 commit workflow) is bookkeeping, not code, and passes through unreviewed. `skip` and
 `disable` turn plan review off along with code review; `reset` also clears a gate left
