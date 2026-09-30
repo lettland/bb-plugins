@@ -315,7 +315,9 @@ export default async function plugin(bb: BbPluginApi) {
     }
     // This idle decides the turn; `carryOver` below reopens it when the review
     // is folded into the user's queued next turn.
-    await writeState(bb, thread.id, { turnDecided: true });
+    if (state.turnDecided !== true) {
+      await writeState(bb, thread.id, { turnDecided: true });
+    }
     const project = await readProjectConfig(bb, thread.projectId);
     const config = effectiveConfig(globals, project, state.skip === true);
 
