@@ -1,6 +1,6 @@
 {
   "name": "@lettland/bb-plugin-shared-runtime",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "One shared, write-confined container runtime per repository for every BB managed worktree, declared by a committed .bb-runtime.json manifest.",
   "license": "MIT",
   "type": "module",

@@ -1,6 +1,6 @@
 {
   "name": "@lettland/bb-plugin-aislop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Run the aislop quality scan from bb, scoped by default to what the current branch changed against its root.",
   "engines": {
