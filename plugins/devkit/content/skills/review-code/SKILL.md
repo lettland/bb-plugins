@@ -99,9 +99,11 @@ that lens through to the next, independently per lens.
   isn't the very end of the string (a trailing file extension breaks it). Write each lens's
   brief at `<run dir>/<lens>.md` with
   your file tool, not the shell, and never into the checkout; delete it once no further spawn
-  attempt will read it (the first try succeeded, or a retry — permission or otherwise — has also
-  failed). The tree guard below keeps its config snapshot in the run dir too; `rm -r` the whole
-  dir once the review ends. Not a heredoc: the Project context block inlines repo text
+  attempt will read it — after a successful spawn, or once the permission-mode retry (if any)
+  has also failed. The tree guard below keeps its config snapshot in the run dir too; at the end
+  of the review, `rm -f <run dir>/*` then `rmdir <run dir>` — never a recursive remove. Not a
+  heredoc: the
+  Project context block inlines repo text
   (CLAUDE.md/AGENTS.md) that could contain a line reading exactly the delimiter, closing it
   early and running what follows as shell:
   ```sh
@@ -126,8 +128,9 @@ that lens through to the next, independently per lens.
   this run (never commit), and fall the lens through to the next tier regardless — the other
   lenses keep running. Once stopped: archive it. On a normal finish instead: `bb thread output
   <id>`, then archive — archived threads stay openable, so their transcripts keep the reviewed
-  diff, including any secret values in it; delete one after reviewing a diff with a leaked
-  secret.
+  diff, including any secret values in it; run `bb thread delete --yes <id>` on one after
+  reviewing a diff with a leaked secret (`--yes` skips a confirmation prompt an unattended agent
+  would otherwise hang on).
 
   **Tree guard** — bb threads have no enforced read-only mode and share the parent's checkout.
   Enumerating config files one by one can't be complete (a system config, an `include.path` /
@@ -141,13 +144,18 @@ that lens through to the next, independently per lens.
     covers system, global, local, worktree, and include-pulled config in one pass.
   - **a2. Hooks**: hash every hook directory git might run — `$(git rev-parse
     --path-format=absolute --git-common-dir)/hooks`, plus every `core.hooksPath` value found in
-    the a1 snapshot (expand `~`; a relative value resolves against the toplevel) — deduped, each
-    with `find -L <dir> -type f -exec shasum {} +`, skipping an absent directory.
-  - **a3. Ignore sources**: hash `core.excludesFile` from a1 (default
-    `${XDG_CONFIG_HOME:-$HOME/.config}/git/ignore`) and `info/exclude` with plain `shasum`, and
-    list every `.gitignore` in the tree: `find . -name .gitignore -not -path
-    '*/node_modules/*' -not -path './.git/*' -exec shasum {} +` (a new self-ignoring one would
-    hide a planted file from (e)). Skip whichever is absent.
+    the a1 snapshot (`--list` lowercases keys, so match `core.hookspath` case-insensitively, or
+    the real global hooks dir is silently skipped; expand `~`; a relative value resolves against
+    the toplevel) — deduped, each with `find -L <dir> -type f -exec shasum {} +`, skipping an
+    absent directory.
+  - **a3. Ignore sources**: hash `core.excludesFile` from a1 (same case-insensitive match and `~`
+    expansion as a2; default `${XDG_CONFIG_HOME:-$HOME/.config}/git/ignore`),
+    `$(git rev-parse --path-format=absolute --git-path info/exclude)` (not the bare
+    `info/exclude` — `.git` is a file, not a directory, in a linked worktree, so a relative guess
+    silently finds nothing there), both with plain `shasum`, and list every `.gitignore` in the
+    tree: `find . -name .gitignore -not -path '*/node_modules/*' -not -path './.git/*' -exec
+    shasum {} +` (a new self-ignoring one would hide a planted file from (e)). Skip whichever is
+    absent.
   - **b. Refs**: `git rev-parse HEAD` and `git symbolic-ref -q HEAD` (catches a detached HEAD or
     one pointed at another branch on the same commit), `git for-each-ref refs/heads refs/tags
     refs/stash`, plus `git stash list`. Remote refs are excluded on purpose — a sibling's `git

@@ -229,6 +229,11 @@ describe("review-code content", () => {
     expect(normalized).toContain("xargs -0 --no-run-if-empty shasum");
   });
 
+  it("matches hookspath/excludesfile case-insensitively and resolves info/exclude absolutely", () => {
+    expect(normalized).toContain("case-insensitively");
+    expect(normalized).toContain("--git-path info/exclude");
+  });
+
   it("uses mktemp -d for the run dir, with no broken BSD mktemp -u template anywhere in §3", () => {
     const section3Start = content.indexOf("## 3.");
     const section4Start = content.indexOf("## 4.");
@@ -238,6 +243,20 @@ describe("review-code content", () => {
     expect(normalized).toContain("mktemp -d");
     expect(section3).not.toMatch(/X{3,}\.\w/);
     expect(normalized).toContain("delete it once no further spawn attempt will read it");
+  });
+
+  it("cleans up the run dir without rm -r", () => {
+    const section3Start = content.indexOf("## 3.");
+    const section4Start = content.indexOf("## 4.");
+    expect(section3Start).toBeGreaterThan(-1);
+    expect(section4Start).toBeGreaterThan(-1);
+    const section3 = content.slice(section3Start, section4Start);
+    expect(normalized).toContain("rmdir");
+    expect(section3).not.toContain("rm -r");
+  });
+
+  it("names bb thread delete --yes in SKILL.md", () => {
+    expect(normalized).toContain("bb thread delete --yes");
   });
 
   it("always requests auto permission mode, never falls back to accept-edits, and passes --permission-mode", () => {
