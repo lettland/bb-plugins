@@ -93,12 +93,16 @@ that lens through to the next, independently per lens.
   backstop. Never map `full` to `accept-edits`: on Claude Code that stalls at the first shell
   approval, which drops the lens straight to subagents.
 
-  **Brief file**: `$TMPDIR` may be unset (Linux, remote environments) — get a path with
-  `mktemp -u "${TMPDIR:-/tmp}/review-<lens>-XXXXXX.md"` (`-u` prints a unique name without
-  creating the file, so your file tool can write it fresh). Write it with your file tool, not
-  the shell, and never write it into the checkout. Delete it only after the spawn succeeds, or
-  after the retry above has also failed. Not a heredoc: the Project context block inlines repo
-  text (CLAUDE.md/AGENTS.md) that could contain a line reading exactly the delimiter, closing it
+  **Brief file**: create one run dir per review, `mktemp -d "${TMPDIR:-/tmp}/review-XXXXXX"` —
+  `$TMPDIR` may be unset (Linux, remote environments), and `-d` makes a real directory instead
+  of the literal template BSD/macOS `mktemp -u` prints whenever its run of placeholder letters
+  isn't the very end of the string (a trailing file extension breaks it). Write each lens's
+  brief at `<run dir>/<lens>.md` with
+  your file tool, not the shell, and never into the checkout; delete it once no further spawn
+  attempt will read it (the first try succeeded, or a retry — permission or otherwise — has also
+  failed). The tree guard below keeps its config snapshot in the run dir too; `rm -r` the whole
+  dir once the review ends. Not a heredoc: the Project context block inlines repo text
+  (CLAUDE.md/AGENTS.md) that could contain a line reading exactly the delimiter, closing it
   early and running what follows as shell:
   ```sh
   bb thread spawn --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" \
@@ -126,22 +130,24 @@ that lens through to the next, independently per lens.
   secret.
 
   **Tree guard** — bb threads have no enforced read-only mode and share the parent's checkout.
-  Run every command below from `git rev-parse --show-toplevel`; (c)–(e) and the compare run as
-  `git -c core.fsmonitor=false --no-pager …`, with `--no-ext-diff --no-textconv` wherever a
-  command diffs. Before spawning, record (and copy every file in (a) into the run's own temp
-  dir, for the recovery note below):
-  - **a. Metadata**, hashed with plain `shasum` (no git, so no filter or fsmonitor fires).
-    Record each absolute path and re-hash that same path at compare time, never re-resolved:
-    `$(git rev-parse --git-path config)`, `info/exclude`, `config.worktree`; every hook
-    directory git could actually run, deduped — `$(git rev-parse --git-path hooks)`,
-    `$(git rev-parse --git-common-dir)/hooks`, and `core.hooksPath` from `git config --local`
-    and `--worktree` when set (a global `core.hooksPath` delegate forwards to the repo's own
-    hooks dir, so hashing only the resolved `--git-path hooks` misses a planted repo-local
-    hook) — hash each with `find -L <dir> -type f -exec shasum {} +`; user-level config,
-    `~/.gitconfig` and `${XDG_CONFIG_HOME:-$HOME/.config}/git/config`; and every `.gitignore` in
-    the tree, without git — `find . -name .gitignore -not -path '*/node_modules/*' -not -path
-    './.git/*' -exec shasum {} +` (a new self-ignoring one would hide a planted file from (e)).
-    Skip whichever of the above is absent.
+  Enumerating config files one by one can't be complete (a system config, an `include.path` /
+  `includeIf` target, `GIT_CONFIG_GLOBAL`, a file absent at baseline that appears mid-run — each
+  closure pass found another one), so (a) is one whole-config snapshot instead. Run every
+  command below from `git rev-parse --show-toplevel`; (c)–(e) and the compare's git commands run
+  as `git -c core.fsmonitor=false --no-pager …`, with `--no-ext-diff --no-textconv` wherever a
+  command diffs. Before spawning, record:
+  - **a1. Config**: save `git config --list --show-origin --show-scope` to the run dir — it only
+    reads config (no index, no fsmonitor, no filters), so it's safe before anything else, and it
+    covers system, global, local, worktree, and include-pulled config in one pass.
+  - **a2. Hooks**: hash every hook directory git might run — `$(git rev-parse
+    --path-format=absolute --git-common-dir)/hooks`, plus every `core.hooksPath` value found in
+    the a1 snapshot (expand `~`; a relative value resolves against the toplevel) — deduped, each
+    with `find -L <dir> -type f -exec shasum {} +`, skipping an absent directory.
+  - **a3. Ignore sources**: hash `core.excludesFile` from a1 (default
+    `${XDG_CONFIG_HOME:-$HOME/.config}/git/ignore`) and `info/exclude` with plain `shasum`, and
+    list every `.gitignore` in the tree: `find . -name .gitignore -not -path
+    '*/node_modules/*' -not -path './.git/*' -exec shasum {} +` (a new self-ignoring one would
+    hide a planted file from (e)). Skip whichever is absent.
   - **b. Refs**: `git rev-parse HEAD` and `git symbolic-ref -q HEAD` (catches a detached HEAD or
     one pointed at another branch on the same commit), `git for-each-ref refs/heads refs/tags
     refs/stash`, plus `git stash list`. Remote refs are excluded on purpose — a sibling's `git
@@ -149,26 +155,31 @@ that lens through to the next, independently per lens.
   - **c. Index**: `git ls-files -s -v` — catches staged-only changes and skip-worktree/assume-
     unchanged flips.
   - **d. Tracked worktree content**: `git stash create` — writes no ref. Empty output means a
-    clean tree; record (b)'s HEAD SHA instead of the word `HEAD`, so a HEAD move doesn't make
-    the before/after diff come out empty.
+    clean tree; record (b)'s HEAD SHA instead of the word `HEAD`. Compare (d) only through
+    content — `git diff --name-only --no-ext-diff --no-textconv <before> <after>`, empty means
+    unchanged — never by SHA equality: `git stash create` stamps a fresh commit timestamp each
+    call, so its SHA differs run to run even over an identical tree.
   - **e. Untracked content**: `git ls-files -o --exclude-standard -z | xargs -0
     --no-run-if-empty shasum`.
 
   Compare once every reviewer has finished, been stopped, or been reported stuck, and before any
   other git command — including §4/§5's own `git diff`:
-  1. Re-hash (a) first, at the same recorded paths. Anything moved: stop and report
-     immediately, and run no further git command — a planted `core.fsmonitor` or filter would
-     otherwise execute. To tell a planted file from routine churn (a sibling's `git push -u`
-     legitimately rewrites `.git/config`), `diff` the live file against the copy saved at
-     baseline; if it's benign, take a fresh baseline and re-run.
+  1. Re-run a1 and the a2/a3 `find`s fresh, and re-hash — re-resolving is safe here, since none
+     of it reads the index. Any difference from baseline — a new `.gitignore`, a new hook
+     directory, a changed or new config value — counts as moved: stop, and run no further git
+     command, since a planted `core.fsmonitor` or filter would otherwise execute. `diff` the
+     saved a1 against the fresh one to name what changed; a benign cause (a sibling's `git push
+     -u` rewriting `.git/config`) means accepting that one change, never taking a new baseline —
+     continue to steps 2–3 against the original (b)–(e) baseline.
   2. Refs or the stash moved: stop and report.
-  3. The index listing changed, tracked paths changed (`git diff --name-only --no-ext-diff
-     --no-textconv <before> <after>` against (d)'s baseline), or the untracked listing changed:
-     name the paths, and never stage or commit them.
+  3. The index listing changed, (d) changed by its content diff, or the untracked listing
+     changed: name the paths, and never stage or commit them.
 
-  Not covered: ignored files, `info/attributes`, network exfiltration. Other activity in the
-  environment during the run — the user, a sibling thread — shows up as the same mismatch;
-  report it rather than blaming a lens.
+  Not covered: ignored files, `info/attributes`, git behavior driven by environment variables
+  (`GIT_CONFIG_*`, `GIT_DIR`), and network exfiltration — this is a best-effort tamper check
+  against a prompt-only read-only reviewer, not a sandbox. Other activity in the environment
+  during the run — the user, a sibling thread — shows up as the same mismatch; report it rather
+  than blaming a lens.
 
 - **Your provider's own subagents** — a read-only kind if it has one — when not running under
   bb, or for a lens whose bb-thread spawn failed or was given up on above.

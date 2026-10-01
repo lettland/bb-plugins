@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -213,7 +213,7 @@ describe("review-code content", () => {
     expect(section5).toContain("fresh baseline");
   });
 
-  it("hashes every hook directory git could run, plus user-level config and .gitignore files", () => {
+  it("hashes every hook directory git could run, plus the config snapshot and .gitignore files", () => {
     const section3Start = content.indexOf("## 3.");
     const section4Start = content.indexOf("## 4.");
     expect(section3Start).toBeGreaterThan(-1);
@@ -221,16 +221,23 @@ describe("review-code content", () => {
     const section3 = content.slice(section3Start, section4Start).replace(/\s+/g, " ");
     expect(section3).toContain("git rev-parse HEAD");
     expect(section3).toContain("git symbolic-ref -q HEAD");
+    expect(normalized).toContain("git config --list --show-origin --show-scope");
     expect(normalized).toContain("--git-common-dir");
     expect(normalized).toContain("core.hooksPath");
-    expect(normalized).toContain("~/.gitconfig");
+    expect(normalized).toContain("core.excludesFile");
     expect(normalized).toContain("find . -name .gitignore");
     expect(normalized).toContain("xargs -0 --no-run-if-empty shasum");
   });
 
-  it("uses mktemp -u for the brief file and deletes it only after a resolved spawn", () => {
-    expect(normalized).toContain("mktemp -u");
-    expect(normalized).toContain("Delete it only after the spawn succeeds");
+  it("uses mktemp -d for the run dir, with no broken BSD mktemp -u template anywhere in §3", () => {
+    const section3Start = content.indexOf("## 3.");
+    const section4Start = content.indexOf("## 4.");
+    expect(section3Start).toBeGreaterThan(-1);
+    expect(section4Start).toBeGreaterThan(-1);
+    const section3 = content.slice(section3Start, section4Start);
+    expect(normalized).toContain("mktemp -d");
+    expect(section3).not.toMatch(/X{3,}\.\w/);
+    expect(normalized).toContain("delete it once no further spawn attempt will read it");
   });
 
   it("always requests auto permission mode, never falls back to accept-edits, and passes --permission-mode", () => {
@@ -247,24 +254,62 @@ describe("review-code content", () => {
     expect(normalized).toContain("re-run directly in this thread, not back through the tiers");
   });
 
-  it("orders the tree guard's a/b/c baseline steps and compare steps 1 before 2", () => {
+  it("compares (d) by content never SHA, and never re-baselines on a benign config change", () => {
+    expect(normalized).toContain("record (b)'s HEAD SHA instead of the word `HEAD`");
+    expect(normalized).toContain("never by SHA equality");
+    expect(normalized).toContain("never taking a new baseline");
+  });
+
+  it("the closure review's brief explicitly overrides §2 item 2's stop-on-failed-calibration rule", () => {
+    expect(normalized).toContain("overrides §2 item 2");
+  });
+
+  it("slices the config/hooks/ignore (a) group and confirms hooks content precedes (b)", () => {
     const section3Start = content.indexOf("## 3.");
     const section4Start = content.indexOf("## 4.");
     expect(section3Start).toBeGreaterThan(-1);
     expect(section4Start).toBeGreaterThan(-1);
     const section3 = content.slice(section3Start, section4Start);
-    const aIdx = section3.indexOf("**a. Metadata**");
+    const aStart = section3.indexOf("**a1.");
+    const bStart = section3.indexOf("**b.");
+    expect(aStart).toBeGreaterThan(-1);
+    expect(bStart).toBeGreaterThan(-1);
+    const aGroup = section3.slice(aStart, bStart);
+    expect(aGroup).toContain("--git-common-dir");
+    expect(aGroup).toContain("core.hooksPath");
+  });
+
+  it("orders the tree guard's a1-e baseline steps and compare steps 1 before 2 before 3", () => {
+    const section3Start = content.indexOf("## 3.");
+    const section4Start = content.indexOf("## 4.");
+    expect(section3Start).toBeGreaterThan(-1);
+    expect(section4Start).toBeGreaterThan(-1);
+    const section3 = content.slice(section3Start, section4Start);
+    const a1Idx = section3.indexOf("**a1. Config**");
     const bIdx = section3.indexOf("**b. Refs**");
     const cIdx = section3.indexOf("**c. Index**");
-    expect(aIdx).toBeGreaterThan(-1);
-    expect(bIdx).toBeGreaterThan(-1);
-    expect(cIdx).toBeGreaterThan(-1);
-    expect(aIdx).toBeLessThan(bIdx);
+    const dIdx = section3.indexOf("**d. Tracked worktree content**");
+    const eIdx = section3.indexOf("**e. Untracked content**");
+    for (const idx of [a1Idx, bIdx, cIdx, dIdx, eIdx]) expect(idx).toBeGreaterThan(-1);
+    expect(a1Idx).toBeLessThan(bIdx);
     expect(bIdx).toBeLessThan(cIdx);
-    const step1Idx = section3.indexOf("1. Re-hash (a) first");
+    expect(cIdx).toBeLessThan(dIdx);
+    expect(dIdx).toBeLessThan(eIdx);
+    const step1Idx = section3.indexOf("1. Re-run a1");
     const step2Idx = section3.indexOf("2. Refs or the stash moved");
+    const step3Idx = section3.indexOf("3. The index listing changed");
     expect(step1Idx).toBeGreaterThan(-1);
     expect(step2Idx).toBeGreaterThan(-1);
+    expect(step3Idx).toBeGreaterThan(-1);
     expect(step1Idx).toBeLessThan(step2Idx);
+    expect(step2Idx).toBeLessThan(step3Idx);
+  });
+});
+
+describe("devkit README", () => {
+  it("tells agents to delete a leaked-secret reviewer thread with bb thread delete --yes", async () => {
+    const readmePath = path.join(import.meta.dirname, "..", "README.md");
+    const text = await readFile(readmePath, "utf8");
+    expect(text).toContain("bb thread delete --yes");
   });
 });
