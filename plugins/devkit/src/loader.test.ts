@@ -147,7 +147,11 @@ describe("review-code content", () => {
     const r = await loadSkill(contentRoot, "review-code");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    const section3 = r.content.slice(r.content.indexOf("## 3."), r.content.indexOf("## 4."));
+    const section3Start = r.content.indexOf("## 3.");
+    const section4Start = r.content.indexOf("## 4.");
+    expect(section3Start).toBeGreaterThan(-1);
+    expect(section4Start).toBeGreaterThan(-1);
+    const section3 = r.content.slice(section3Start, section4Start);
     const bbThreadsBullet = section3.indexOf("- **bb child threads**");
     const subagentsBullet = section3.indexOf("- **Your provider's own subagents**");
     expect(bbThreadsBullet).toBeGreaterThan(-1);
@@ -170,16 +174,22 @@ describe("review-code content", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.content).toContain("git stash create");
-    expect(r.content).toContain("git ls-files -o --exclude-standard -z | xargs -0 --no-run-if-empty");
+    expect(r.content).toContain("git ls-files -o --exclude-standard -z | xargs -0");
     expect(r.content).toContain("shasum");
-    expect(r.content).toContain("git diff --name-only --no-ext-diff --no-textconv");
+    expect(r.content.replace(/\s+/g, " ")).toContain("git diff --name-only --no-ext-diff --no-textconv");
+    expect(r.content).toContain("git ls-files -s -v");
+    expect(r.content).toContain("find -L");
   });
 
   it("does not use a heredoc anywhere in §3", async () => {
     const r = await loadSkill(contentRoot, "review-code");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    const section3 = r.content.slice(r.content.indexOf("## 3."), r.content.indexOf("## 4."));
+    const section3Start = r.content.indexOf("## 3.");
+    const section4Start = r.content.indexOf("## 4.");
+    expect(section3Start).toBeGreaterThan(-1);
+    expect(section4Start).toBeGreaterThan(-1);
+    const section3 = r.content.slice(section3Start, section4Start);
     expect(section3).not.toMatch(/<<-?\s*['"]?\w+['"]?/);
   });
 
@@ -187,25 +197,31 @@ describe("review-code content", () => {
     const r = await loadSkill(contentRoot, "review-code");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.content).toContain("--timeout 8m");
+    expect(r.content).toContain("--timeout 2m");
+    expect(r.content).not.toContain("--timeout 8m");
   });
 
-  it("passes --permission-mode, capping full at auto, and can stop and poll interactions", async () => {
+  it("retries the spawn at the parent's own permission mode, hashes metadata before any other git command, and disables fsmonitor", async () => {
     const r = await loadSkill(contentRoot, "review-code");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.content).toContain("--permission-mode <cappedMode>");
-    expect(r.content).toContain("`full` becomes `auto`");
+    const normalized = r.content.replace(/\s+/g, " ");
+    expect(normalized).toContain("retry once with the parent's own mode");
+    expect(normalized).toContain("before any other git command");
+    expect(r.content).toContain("core.fsmonitor=false");
     expect(r.content).toContain("bb thread stop");
     expect(r.content).toContain("bb thread interactions list");
   });
 
-  it("routes the closure review through a bb child thread", async () => {
+  it("closure review uses the §3 tiers with its own tree guard", async () => {
     const r = await loadSkill(contentRoot, "review-code");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    const section5 = r.content.slice(r.content.indexOf("## 5."));
+    const section5Start = r.content.indexOf("## 5.");
+    expect(section5Start).toBeGreaterThan(-1);
+    const section5 = r.content.slice(section5Start);
     expect(section5).toContain("closure review");
-    expect(section5).toContain("one bb child thread");
+    expect(section5).toContain("with its own tree guard");
+    expect(section5).toContain("fresh baseline");
   });
 });
