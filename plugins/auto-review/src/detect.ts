@@ -634,15 +634,21 @@ async function spawnedDescendants(
 ): Promise<ThreadListEntry[]> {
   const descendants: ThreadListEntry[] = [];
   const visited = new Set<string>([threadId]);
-  const queue = [threadId];
-  while (queue.length > 0) {
-    const parentId = queue.shift() as string;
+  const queue: string[] = [threadId];
+  for (let index = 0; index < queue.length; index += 1) {
+    const parentId = queue[index];
     const children = await bb.sdk.threads.list({
       parentThreadId: parentId,
       includeHidden: true,
     });
     for (const child of children) {
-      if (visited.has(child.id) || child.originPluginId !== null) {
+      if (
+        visited.has(child.id) ||
+        child.originPluginId !== null ||
+        // Defence if the list filter is ever ignored: a row that isn't
+        // actually this parent's child must not be walked as one.
+        child.parentThreadId !== parentId
+      ) {
         continue;
       }
       visited.add(child.id);
@@ -673,38 +679,6 @@ export async function runningChildIds(
         entry.status !== "error",
     )
     .map((entry) => entry.id);
-}
-
-/**
- * Whether the user manual-stopped one of this thread's spawned children at or
- * after the turn began. A user who stops a child to take over gets no review
- * of its half-done work — the same promise `stoppedByUser` makes for the
- * thread itself.
- */
-export async function childStoppedByUser(
-  bb: BbPluginApi,
-  threadId: string,
-  sinceStartedAt: number,
-): Promise<boolean> {
-  const descendants = await spawnedDescendants(bb, threadId);
-  for (const child of descendants) {
-    const events = await bb.sdk.threads.events.list({
-      threadId: child.id,
-      types: ["system/thread/interrupted"],
-      order: "desc",
-      limit: "10",
-    });
-    const stopped = events.some(
-      (event) =>
-        event.type === "system/thread/interrupted" &&
-        event.data.reason === "manual-stop" &&
-        event.createdAt >= sinceStartedAt,
-    );
-    if (stopped) {
-      return true;
-    }
-  }
-  return false;
 }
 
 function oldestCreatedAt(rows: readonly TimelineRow[]): number | null {

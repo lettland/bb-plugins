@@ -560,11 +560,12 @@ describe("auto-review cli: status", () => {
       });
       const text = await host.run(["status", THREAD_ID]);
       expect(text.stdout).toContain("phase: deferred\ndeferred for: 3 min — ");
-      expect(text.stdout).toContain("waiting for child threads to finish: child-1, child-2\n");
+      expect(text.stdout).toContain("held by child threads (as of parking): child-1, child-2\n");
       expect(text.stdout).toContain(
-        "It is reviewed when this thread next goes idle (bb wakes it when a child ends), or within 5 min of the last child ending.",
+        "It is reviewed when this thread next goes idle after bb wakes it for a child ending, " +
+          "or by the 5-minute sweep once all of them have ended (idle, errored, archived or deleted).",
       );
-      expect(text.stdout).toContain("Stop or archive a stuck child to release it.");
+      expect(text.stdout).toContain("Stop or archive a stuck child to release it — the turn is then reviewed.");
       expect(text.stdout).toContain(`To drop it instead: bb auto-review reset ${THREAD_ID}\n`);
       expect(text.stdout).not.toContain("waiting for another auto-review on the same provider");
 

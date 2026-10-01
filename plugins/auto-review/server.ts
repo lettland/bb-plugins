@@ -20,7 +20,6 @@ import {
 import {
   captureSinceSeq,
   captureTree,
-  childStoppedByUser,
   computeScope,
   dirtyOrAheadPaths,
   fetchWorkspace,
@@ -55,7 +54,6 @@ import {
   withThreadLock,
   writeState,
   type ThreadState,
-  type TurnStart,
 } from "./src/state.js";
 
 interface GateThreadLike extends GateThread {
@@ -101,25 +99,6 @@ async function aislopScanAvailable(bb: BbPluginApi): Promise<boolean> {
     );
     return false;
   }
-}
-
-/**
- * The user stopped this turn, or a child it spawned, to take over; reviewing
- * and committing half-done work behind their back is the last thing they
- * asked for.
- */
-async function userStoppedTurn(
-  bb: BbPluginApi,
-  threadId: string,
-  turnStart: TurnStart,
-): Promise<boolean> {
-  if (await stoppedByUser(bb, threadId, turnStart.sinceSeq)) {
-    return true;
-  }
-  return (
-    turnStart.startedAt !== undefined &&
-    (await childStoppedByUser(bb, threadId, turnStart.startedAt))
-  );
 }
 
 export default async function plugin(bb: BbPluginApi) {
@@ -379,7 +358,11 @@ export default async function plugin(bb: BbPluginApi) {
       await standDown(thread, state, "no-turn-start");
       return;
     }
-    if (await userStoppedTurn(bb, thread.id, state.turnStart)) {
+    // The user stopped this turn to take over; reviewing and committing
+    // half-done work behind their back is the last thing they asked for. A
+    // stopped child does not count: an agent stopping its own child records
+    // the same `manual-stop` reason as a user would.
+    if (await stoppedByUser(bb, thread.id, state.turnStart.sinceSeq)) {
       await standDown(thread, state, "user-stopped");
       return;
     }
@@ -403,8 +386,8 @@ export default async function plugin(bb: BbPluginApi) {
     }
 
     // A spawned child still running will wake this thread when it ends, and
-    // that wake-up turn's idle is what should review its work — reviewing now
-    // would review a tree snapshot the child is about to overwrite.
+    // that wake-up turn is where the supervisor acts on the child's result —
+    // so that turn's idle, not this one, is what should review its work.
     const runningChildren = await runningChildIds(bb, thread.id);
     if (runningChildren.length > 0) {
       await deferTurn(thread, state, environmentId, {
@@ -484,7 +467,7 @@ export default async function plugin(bb: BbPluginApi) {
         bb,
         thread.id,
         { phase: "awaiting-review", dispatchedAt: Date.now() },
-        ["pendingEntryId", "deferredSince"],
+        ["pendingEntryId", "deferredSince", "heldBy"],
       );
       await addReview(bb, { threadId: thread.id, providerId: thread.providerId });
       await removeDeferral(bb, thread.id);

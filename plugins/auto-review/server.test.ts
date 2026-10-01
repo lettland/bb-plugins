@@ -71,7 +71,6 @@ interface HostOptions {
 interface InterruptEvent {
   seq: number;
   reason: "manual-stop" | "host-daemon-restarted" | "provider-turn-idle";
-  createdAt?: number;
 }
 
 interface TreeFile {
@@ -134,29 +133,6 @@ function fakeMergeBase(
   };
 }
 
-/** `system/thread/interrupted` event rows a fake `events.list` would serve for one thread. */
-function interruptEventRows(
-  events: readonly InterruptEvent[],
-  args: { threadId: string; afterSeq?: string; order?: "asc" | "desc"; limit?: string },
-): unknown[] {
-  let filtered = events.filter((event) => event.seq > Number(args.afterSeq ?? -1));
-  if (args.order === "desc") {
-    filtered = [...filtered].reverse();
-  }
-  if (args.limit !== undefined) {
-    filtered = filtered.slice(0, Number(args.limit));
-  }
-  return filtered.map((event) => ({
-    id: `ev-${args.threadId}-${event.seq}`,
-    scope: { kind: "thread" },
-    threadId: args.threadId,
-    seq: event.seq,
-    createdAt: event.createdAt ?? 1_000,
-    type: "system/thread/interrupted",
-    data: { reason: event.reason },
-  }));
-}
-
 function createHost(options: HostOptions = {}) {
   const metadataByThread = new Map<string, Record<string, unknown>>();
   const bucket = (threadId: string): Record<string, unknown> => {
@@ -192,7 +168,7 @@ function createHost(options: HostOptions = {}) {
   ];
   let maxSeq = 100;
   let queuedRows = options.queuedRows ?? [];
-  let interruptsByThread: Record<string, InterruptEvent[]> = {};
+  let interrupts: InterruptEvent[] = [];
 
   const sdk: CreateFakePluginHostOptions["sdk"] = {
     plugins: {
@@ -265,15 +241,20 @@ function createHost(options: HostOptions = {}) {
         };
       },
       events: {
-        list: async (args: {
-          threadId: string;
-          afterSeq?: string;
-          types?: readonly string[];
-          order?: "asc" | "desc";
-          limit?: string;
-        }) =>
+        list: async (args: { threadId: string; afterSeq?: string; types?: readonly string[] }) =>
+          args.threadId === THREAD_ID &&
           args.types?.includes("system/thread/interrupted") === true
-            ? interruptEventRows(interruptsByThread[args.threadId] ?? [], args)
+            ? interrupts
+                .filter((event) => event.seq > Number(args.afterSeq ?? -1))
+                .map((event) => ({
+                  id: `ev-${event.seq}`,
+                  scope: { kind: "thread" },
+                  threadId: THREAD_ID,
+                  seq: event.seq,
+                  createdAt: 1_000,
+                  type: "system/thread/interrupted",
+                  data: { reason: event.reason },
+                }))
             : [],
       },
       list: async (args?: { parentThreadId?: string }) => {
@@ -402,12 +383,9 @@ function createHost(options: HostOptions = {}) {
     setMaxSeq: (next: number) => {
       maxSeq = next;
     },
-    /** Record a `system/thread/interrupted` event on a thread (default: the thread itself). */
-    interrupt: (event: InterruptEvent, threadId: string = THREAD_ID) => {
-      interruptsByThread = {
-        ...interruptsByThread,
-        [threadId]: [...(interruptsByThread[threadId] ?? []), event],
-      };
+    /** Record a `system/thread/interrupted` event on the thread. */
+    interrupt: (event: InterruptEvent) => {
+      interrupts = [...interrupts, event];
     },
     setQueuedRows: (next: QueuedRow[]) => {
       queuedRows = next;
@@ -1285,6 +1263,53 @@ describe("auto-review plugin", () => {
       outcome: "fired",
       scopePaths: ["child.ts"],
     });
+    expect(host.metadata.heldBy).toBeUndefined();
+    expect(await host.bb.storage.kv.list("deferral:")).toEqual([]);
+    await host.harness.dispose();
+  });
+
+  it("parks as sibling-active once a held child ends while another thread's review is in flight, then fires once that review ends", async () => {
+    const host = createHost({
+      authoredRows: [],
+      workingTreeFiles: [],
+      envThreads: [
+        { id: THREAD_ID, status: "idle" },
+        { id: "child-1", status: "active", parentThreadId: THREAD_ID },
+      ],
+    });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.metadata.phase).toBe("deferred");
+    expect(host.metadata.heldBy).toEqual(["child-1"]);
+
+    // The child finishes and wrote a file, but a sibling thread's review is
+    // already running on the same provider when bb wakes the parent.
+    await startReview(host, SIBLING_ID);
+    host.setEnvThreads([
+      { id: THREAD_ID, status: "idle" },
+      { id: "child-1", status: "idle", parentThreadId: THREAD_ID },
+    ]);
+    host.setWorkingTree([{ path: "child.ts", content: "c" }]);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(host.metadata.phase).toBe("deferred");
+    expect(host.metadata.heldBy).toBeUndefined();
+    expect(await lastFire(host)).toMatchObject({
+      outcome: "deferred",
+      reason: "sibling-active",
+    });
+
+    // The sibling's review ends; its idle releases the parked turn.
+    const released = await emitIdle(host, SIBLING_ID);
+    expect(released.errors).toEqual([]);
+    expect(host.sends).toHaveLength(1);
+    expect(host.sends[0]?.threadId).toBe(THREAD_ID);
+    expect(await lastFire(host)).toMatchObject({
+      outcome: "fired",
+      scopePaths: ["child.ts"],
+    });
     await host.harness.dispose();
   });
 
@@ -1347,34 +1372,6 @@ describe("auto-review plugin", () => {
     await host.harness.runSchedule("sweep-deferrals");
     expect(host.sends).toHaveLength(1);
     expect(host.sends[0]?.threadId).toBe(THREAD_ID);
-    await host.harness.dispose();
-  });
-
-  it("unparks a deferred turn when the user manually stops the child that was holding it", async () => {
-    const host = createHost({
-      envThreads: [
-        { id: THREAD_ID, status: "idle" },
-        { id: "child-1", status: "active", parentThreadId: THREAD_ID },
-      ],
-    });
-    await plugin(host.bb);
-    await emitActive(host);
-    await emitIdle(host);
-    expect(host.metadata.phase).toBe("deferred");
-    expect(host.metadata.heldBy).toEqual(["child-1"]);
-
-    // The user stops the child to take over; bb wakes the parent with a new turn.
-    host.interrupt({ seq: 1, reason: "manual-stop", createdAt: Date.now() }, "child-1");
-    host.setEnvThreads([
-      { id: THREAD_ID, status: "idle" },
-      { id: "child-1", status: "idle", parentThreadId: THREAD_ID },
-    ]);
-    await emitActive(host);
-    await emitIdle(host);
-    expect(host.sends).toHaveLength(0);
-    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "user-stopped" });
-    expect(host.metadata.phase).toBe("idle");
-    expect(await host.bb.storage.kv.list("deferral:")).toEqual([]);
     await host.harness.dispose();
   });
 

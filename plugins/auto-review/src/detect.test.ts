@@ -4,7 +4,6 @@ import {
   authoredPaths,
   authoredPathsFromRows,
   captureTree,
-  childStoppedByUser,
   computeScope,
   dirtyOrAheadPaths,
   fetchWorkspace,
@@ -1023,7 +1022,7 @@ describe("workspace capture edge cases", () => {
   });
 });
 
-describe("runningChildIds / childStoppedByUser", () => {
+describe("runningChildIds", () => {
   interface ChildEntry {
     id: string;
     parentThreadId: string | null;
@@ -1033,10 +1032,7 @@ describe("runningChildIds / childStoppedByUser", () => {
     status: string;
   }
 
-  function fakeBb(
-    entries: ChildEntry[],
-    events: Record<string, Array<{ seq: number; createdAt: number; reason: string }>> = {},
-  ) {
+  function fakeBb(entries: ChildEntry[]) {
     const listCalls: Array<string | undefined> = [];
     const bb = {
       sdk: {
@@ -1051,18 +1047,6 @@ describe("runningChildIds / childStoppedByUser", () => {
                 deletedAt: null,
                 ...entry,
               }));
-          },
-          events: {
-            list: async (args: { threadId: string }) =>
-              (events[args.threadId] ?? []).map((row) => ({
-                id: `ev-${args.threadId}-${row.seq}`,
-                scope: { kind: "thread" },
-                threadId: args.threadId,
-                seq: row.seq,
-                createdAt: row.createdAt,
-                type: "system/thread/interrupted",
-                data: { reason: row.reason },
-              })),
           },
         },
       },
@@ -1100,24 +1084,5 @@ describe("runningChildIds / childStoppedByUser", () => {
     expect(running.sort()).toEqual(["cA", "cB"]);
     // Each thread's children are listed exactly once despite the cycle.
     expect(listCalls.filter((id) => id === "self").length).toBe(1);
-  });
-
-  it("stands down for a manual-stop on a spawned child at or after the turn began", async () => {
-    const entries: ChildEntry[] = [{ id: "child", parentThreadId: "self", status: "idle" }];
-    const { bb } = fakeBb(entries, {
-      child: [{ seq: 1, createdAt: 2_000, reason: "manual-stop" }],
-    });
-    expect(await childStoppedByUser(bb, "self", 1_000)).toBe(true);
-    expect(await childStoppedByUser(bb, "self", 3_000)).toBe(false);
-  });
-
-  it("ignores a manual-stop on a plugin-originated helper", async () => {
-    const entries: ChildEntry[] = [
-      { id: "advisor", parentThreadId: "self", status: "idle", originPluginId: "advisor" },
-    ];
-    const { bb } = fakeBb(entries, {
-      advisor: [{ seq: 1, createdAt: 2_000, reason: "manual-stop" }],
-    });
-    expect(await childStoppedByUser(bb, "self", 1_000)).toBe(false);
   });
 });
