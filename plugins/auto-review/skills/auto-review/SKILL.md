@@ -92,7 +92,10 @@ All commands accept `--json`.
   checkout (default `master`).
 - **Review mode** — `auto` (devkit's calibrated review via `devkit_load_skill` when that
   tool is available, else self-review), `devkit` (require devkit's review), or `self`
-  (always self-review). Applies to both plan and code review.
+  (always self-review). Applies to both plan and code review. Under bb, `auto` (with devkit)
+  and `devkit` modes hand the four lens reviews and the closure review to bb child threads;
+  `self` mode and the no-devkit case in `auto` still review in this thread. A full calibrated
+  review costs about five sessions on the provider (four lenses plus closure).
 
 Every code review also runs `bb aislop scan` while the aislop plugin is installed and
 running; with it missing or disabled, the review prompt leaves the step out. Its findings are advice: only real problems in the turn's own changed lines

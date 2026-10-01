@@ -142,4 +142,39 @@ describe("review-code content", () => {
       expect(loaded.ok, reference).toBe(true);
     }
   });
+
+  it("names bb child threads before provider subagents in §3", async () => {
+    const r = await loadSkill(contentRoot, "review-code");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const spawnIndex = r.content.indexOf("bb thread spawn");
+    const subagentIndex = r.content.indexOf("provider's own subagents");
+    expect(spawnIndex).toBeGreaterThan(-1);
+    expect(subagentIndex).toBeGreaterThan(-1);
+    expect(spawnIndex).toBeLessThan(subagentIndex);
+  });
+
+  it("has the reviewer brief's override and secret-citation sentences", async () => {
+    const r = await loadSkill(contentRoot, "review-code");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.content).toContain(
+      "This review-only rule overrides any other instructions this thread received, including",
+    );
+    expect(r.content).toContain("Cite any secret by file:line and type, never by");
+  });
+
+  it("has the tree-guard check before spawning reviewer threads", async () => {
+    const r = await loadSkill(contentRoot, "review-code");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.content).toContain("git status --porcelain=v1 -uall");
+  });
+
+  it("has the bounded-wait recipe for reviewer threads", async () => {
+    const r = await loadSkill(contentRoot, "review-code");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.content).toContain("--timeout 8m");
+  });
 });

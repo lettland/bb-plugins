@@ -45,6 +45,11 @@ an injected turn carries the thread's permission mode and takes the agent out of
 so its next plan presentation would be approved without reaching the user. A plan review
 ends with the revised plan presented for the user's approval, never with implementation.
 
+Under bb, the review's four lens reviewers (and its closure review) run as bb child threads;
+outside bb, or when spawning one fails, they run as the provider's own subagents, or
+sequentially in the orchestrating thread as a last resort. See `review-code`'s `§3` for the
+recipe and its tree guard.
+
 ## Install
 
 ```sh
