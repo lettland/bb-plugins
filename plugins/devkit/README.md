@@ -48,7 +48,8 @@ ends with the revised plan presented for the user's approval, never with impleme
 Under bb, the review's four lens reviewers (and its closure review) run as bb child threads;
 outside bb, or when spawning one fails, they run as the provider's own subagents, or
 sequentially in the orchestrating thread as a last resort. See `review-code`'s `§3` for the
-recipe and its tree guard.
+recipe and its tree guard. A full review costs about five provider sessions (four lenses plus
+closure). Archived reviewer threads stay openable, so their transcripts keep the reviewed diff.
 
 ## Install
 

@@ -51,8 +51,9 @@ plugin, so agents can read it too.
 | Review mode | `auto` | `auto` uses devkit's calibrated review when `devkit_load_skill` is available, else self-review; `devkit` requires it; `self` always self-reviews |
 
 Under bb, `auto` (when devkit is available) and `devkit` modes hand the four lens reviews — and
-the closure review — to bb child threads; `self` mode and the no-devkit case in `auto` still
-review in the same thread. A full calibrated review costs about five sessions on the provider
+the closure review — to bb child threads when the thread can spawn children (otherwise provider
+subagents); `self` mode and the no-devkit case in `auto` still review in the same thread. A full
+calibrated review costs about five sessions on the provider
 (four lenses plus closure).
 
 Per-project overrides and per-thread skips are stored in the plugin's own storage.

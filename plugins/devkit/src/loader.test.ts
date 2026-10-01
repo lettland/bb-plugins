@@ -147,11 +147,12 @@ describe("review-code content", () => {
     const r = await loadSkill(contentRoot, "review-code");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    const spawnIndex = r.content.indexOf("bb thread spawn");
-    const subagentIndex = r.content.indexOf("provider's own subagents");
-    expect(spawnIndex).toBeGreaterThan(-1);
-    expect(subagentIndex).toBeGreaterThan(-1);
-    expect(spawnIndex).toBeLessThan(subagentIndex);
+    const section3 = r.content.slice(r.content.indexOf("## 3."), r.content.indexOf("## 4."));
+    const bbThreadsBullet = section3.indexOf("- **bb child threads**");
+    const subagentsBullet = section3.indexOf("- **Your provider's own subagents**");
+    expect(bbThreadsBullet).toBeGreaterThan(-1);
+    expect(subagentsBullet).toBeGreaterThan(-1);
+    expect(bbThreadsBullet).toBeLessThan(subagentsBullet);
   });
 
   it("has the reviewer brief's override and secret-citation sentences", async () => {
@@ -164,11 +165,19 @@ describe("review-code content", () => {
     expect(r.content).toContain("Cite any secret by file:line and type, never by");
   });
 
-  it("has the tree-guard check before spawning reviewer threads", async () => {
+  it("has the content-fingerprint tree guard, not status alone", async () => {
     const r = await loadSkill(contentRoot, "review-code");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.content).toContain("git status --porcelain=v1 -uall");
+    expect(r.content).toContain("git hash-object --stdin");
+  });
+
+  it("does not use a heredoc to pass the reviewer brief", async () => {
+    const r = await loadSkill(contentRoot, "review-code");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.content).not.toContain("<<'EOF'");
   });
 
   it("has the bounded-wait recipe for reviewer threads", async () => {
@@ -176,5 +185,14 @@ describe("review-code content", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.content).toContain("--timeout 8m");
+  });
+
+  it("routes the closure review through a bb child thread", async () => {
+    const r = await loadSkill(contentRoot, "review-code");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const section5 = r.content.slice(r.content.indexOf("## 5."));
+    expect(section5).toContain("closure review");
+    expect(section5).toContain("one bb child thread");
   });
 });
