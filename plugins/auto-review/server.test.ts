@@ -168,7 +168,7 @@ function createHost(options: HostOptions = {}) {
   ];
   let maxSeq = 100;
   let queuedRows = options.queuedRows ?? [];
-  let interrupts: InterruptEvent[] = [];
+  let interrupts: Record<string, InterruptEvent[]> = {};
 
   const sdk: CreateFakePluginHostOptions["sdk"] = {
     plugins: {
@@ -242,14 +242,13 @@ function createHost(options: HostOptions = {}) {
       },
       events: {
         list: async (args: { threadId: string; afterSeq?: string; types?: readonly string[] }) =>
-          args.threadId === THREAD_ID &&
           args.types?.includes("system/thread/interrupted") === true
-            ? interrupts
+            ? (interrupts[args.threadId] ?? [])
                 .filter((event) => event.seq > Number(args.afterSeq ?? -1))
                 .map((event) => ({
-                  id: `ev-${event.seq}`,
+                  id: `ev-${args.threadId}-${event.seq}`,
                   scope: { kind: "thread" },
-                  threadId: THREAD_ID,
+                  threadId: args.threadId,
                   seq: event.seq,
                   createdAt: 1_000,
                   type: "system/thread/interrupted",
@@ -383,9 +382,12 @@ function createHost(options: HostOptions = {}) {
     setMaxSeq: (next: number) => {
       maxSeq = next;
     },
-    /** Record a `system/thread/interrupted` event on the thread. */
-    interrupt: (event: InterruptEvent) => {
-      interrupts = [...interrupts, event];
+    /** Record a `system/thread/interrupted` event on a thread (default: the thread itself). */
+    interrupt: (event: InterruptEvent, threadId: string = THREAD_ID) => {
+      interrupts = {
+        ...interrupts,
+        [threadId]: [...(interrupts[threadId] ?? []), event],
+      };
     },
     setQueuedRows: (next: QueuedRow[]) => {
       queuedRows = next;
@@ -1310,6 +1312,38 @@ describe("auto-review plugin", () => {
       outcome: "fired",
       scopePaths: ["child.ts"],
     });
+    expect(host.metadata.heldBy).toBeUndefined();
+    await host.harness.dispose();
+  });
+
+  it("fires the wake-up turn even though a held child was manually stopped", async () => {
+    const host = createHost({
+      authoredRows: [],
+      workingTreeFiles: [],
+      envThreads: [
+        { id: THREAD_ID, status: "idle" },
+        { id: "child-1", status: "active", parentThreadId: THREAD_ID },
+      ],
+    });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.metadata.phase).toBe("deferred");
+    expect(host.metadata.heldBy).toEqual(["child-1"]);
+
+    // The child is manually stopped (e.g. a supervisor cleaning up a worker)
+    // and goes idle; that alone must not stand the parent's turn down.
+    host.interrupt({ seq: 1, reason: "manual-stop" }, "child-1");
+    host.setEnvThreads([
+      { id: THREAD_ID, status: "idle" },
+      { id: "child-1", status: "idle", parentThreadId: THREAD_ID },
+    ]);
+    host.setWorkingTree([{ path: "child.ts", content: "c" }]);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
+    expect(host.metadata.heldBy).toBeUndefined();
     await host.harness.dispose();
   });
 

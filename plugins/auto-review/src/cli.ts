@@ -75,11 +75,12 @@ function threadError(threadId: string, wantsJson: boolean): PluginCliResult {
 function deferredWaitText(threadId: string, heldBy: string[] | undefined): string {
   if (heldBy !== undefined) {
     return (
-      `held by child threads (as of parking): ${heldBy.join(", ")}\n` +
-      "  It is reviewed when this thread next goes idle after bb wakes it for a child " +
-      "ending, or by the 5-minute sweep once all of them have ended (idle, errored, " +
-      "archived or deleted).\n" +
-      "  Stop or archive a stuck child to release it — the turn is then reviewed.\n" +
+      `held by child threads (as of the last check): ${heldBy.join(", ")}\n` +
+      "  It is reviewed when this thread next goes idle after bb wakes it for the last " +
+      "of them ending, or by the 5-minute sweep once all of them have ended (idle, " +
+      "errored, archived or deleted).\n" +
+      "  Stop or archive a stuck child to release it — the turn is then re-checked for " +
+      "review.\n" +
       `  To drop it instead: bb auto-review reset ${threadId}\n`
     );
   }

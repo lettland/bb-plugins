@@ -156,9 +156,9 @@ longer running counts as a lost idle, not a review, so it never blocks.
 
 `bb auto-review status` shows a parked turn as phase `deferred`, with how long it has
 waited and what will release it — the blocking review, or the children still holding it
-(also `heldBy` in `--json`: the held child ids, `null` when parked behind a provider review
-instead). `bb auto-review reset <thread-id>` drops the turn instead — its review and commit
-then never run.
+(also `heldBy` in `--json`: the held child ids as of the last check, `null` when parked
+behind a provider review instead). `bb auto-review reset <thread-id>` drops the turn
+instead — its review and commit then never run.
 
 ## `reason` values in `status`
 
@@ -181,10 +181,14 @@ then never run.
 - `empty-scope` — the files it changed are no longer uncommitted, ahead, or in a commit the
   turn made (e.g. reverted).
 - `no-turn-start` — no turn-start cursor was recorded (a missed start event); stood down, fail-safe.
-- `user-stopped` — the user stopped the thread during the turn; stood down, so a manual stop
-  never triggers a review, commit or merge. A turn of this thread that was parked
-  (`deferred`) is dropped as well. A stop bb made on its own (daemon restart,
-  provider-turn watchdog) does not count.
+- `user-stopped` — the user stopped the thread itself during the turn; stood down, so a
+  manual stop never triggers a review, commit or merge. A turn of this thread that was
+  parked (`deferred`) is dropped as well. A stop bb made on its own (daemon restart,
+  provider-turn watchdog) does not count. Stopping a spawned child does not count either,
+  and does not stand the turn down — an agent's own `bb thread stop` on a child it is done
+  with records the same reason a user's manual stop would. To keep a turn from being
+  reviewed after taking over from a child, use `bb auto-review reset <thread-id>` or skip
+  the thread instead.
 - `user-queued` — the turn ended with a message of the user's already queued (or its turn
   already started). Paired with outcome `deferred`: no review fires next to their message;
   the turn-start cursor is carried into that next turn, and the review fires at the first

@@ -647,7 +647,12 @@ async function spawnedDescendants(
         child.originPluginId !== null ||
         // Defence if the list filter is ever ignored: a row that isn't
         // actually this parent's child must not be walked as one.
-        child.parentThreadId !== parentId
+        child.parentThreadId !== parentId ||
+        // bb archives cascade to children: an archived or deleted thread's
+        // own children are gone too, so there is nothing further to walk —
+        // keeping a long-lived supervisor's walk small.
+        child.archivedAt !== null ||
+        child.deletedAt !== null
       ) {
         continue;
       }

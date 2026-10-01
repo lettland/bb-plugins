@@ -1085,4 +1085,27 @@ describe("runningChildIds", () => {
     // Each thread's children are listed exactly once despite the cycle.
     expect(listCalls.filter((id) => id === "self").length).toBe(1);
   });
+
+  it("filters out rows the list fake returns regardless of parentThreadId", async () => {
+    const entries: ChildEntry[] = [
+      { id: "child-1", parentThreadId: "self", status: "active" },
+      { id: "unrelated-active", parentThreadId: null, status: "active" },
+      { id: "root-sibling", parentThreadId: "root-parent", status: "active" },
+    ];
+    const bb = {
+      sdk: {
+        threads: {
+          // Ignores the parentThreadId filter entirely, as a buggy list call might.
+          list: async () =>
+            entries.map((entry) => ({
+              originPluginId: null,
+              archivedAt: null,
+              deletedAt: null,
+              ...entry,
+            })),
+        },
+      },
+    } as never;
+    expect(await runningChildIds(bb, "self")).toEqual(["child-1"]);
+  });
 });
