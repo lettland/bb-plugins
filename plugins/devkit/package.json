@@ -1,6 +1,6 @@
 {
   "name": "@lettland/bb-plugin-devkit",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "type": "module",
   "description": "devkit's skill library, locator, and calibrated review — as a provider-neutral bb plugin.",
   "engines": {
