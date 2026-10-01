@@ -81,8 +81,9 @@ All commands accept `--json`.
 - `bb auto-review reset <thread-id>` — clear a wedged loop-guard latch (and skip) for a
   thread whose review never completed. Use this if `status` shows a non-`idle` phase that
   never clears. **On a `deferred` thread this is not an unstick — it cancels.** That phase
-  is a normal wait that resolves on its own (see *One review per provider*); resetting it throws
-  away that turn's pending review and commit.
+  is a normal wait that resolves on its own — behind another review on the same provider,
+  or behind a spawned child still running (see *One review per provider*); resetting it
+  throws away that turn's pending review and commit.
 
 ## Settings
 
@@ -122,31 +123,40 @@ A feature branch is one whose name contains a `/` (`fix/oh-1/x`, `OH-2/y`, bb's 
 
 ## One review per provider
 
-Other threads running — in the same checkout or anywhere else, including this thread's own
-advisor and subagents — never hold a review back, and never change what it does. Each review
-stages, commits and merges only the files its own turn authored (explicit pathspec), skips
-any file carrying edits it did not make, and the merge step itself refuses to run while the
-tree holds changes this turn did not make.
+A thread this turn itself spawned as a child (`bb thread spawn --parent-self`) holds the
+turn while it runs, directly or transitively (a grandchild counts too): bb wakes the parent
+with a new turn when the spawned child ends, and that wake-up turn's idle is what reviews
+its work, rather than reviewing a tree snapshot the child is about to overwrite. Every other
+thread running — in the same checkout or anywhere else, including this thread's own advisor
+and subagents it did not spawn as a child — never holds a review back, and never changes
+what it does. Each review stages, commits and merges only the files its own turn authored
+(explicit pathspec), skips any file carrying edits it did not make, and the merge step
+itself refuses to run while the tree holds changes this turn did not make.
 
-What auto-review limits is how many reviews run at once **per provider**, because reviews on
-one provider share that provider's usage limits: a Claude Code review here and a Claude Code
-review in another project compete, a Claude Code review and a Codex review do not. When a
-turn ends while another thread on the same provider — in any project — has its auto-review
-queued or running, auto-review **defers** that turn rather than skipping it: the turn-start
-cursor is kept, and the review fires — in full — as soon as the blocking review ends. If the
-thread takes another turn while deferred, the earlier cursor is carried forward, so one
-review covers both turns. A thread is never deferred behind itself.
+What auto-review also limits is how many reviews run at once **per provider**, because
+reviews on one provider share that provider's usage limits: a Claude Code review here and a
+Claude Code review in another project compete, a Claude Code review and a Codex review do
+not. When a turn ends while another thread on the same provider — in any project — has its
+auto-review queued or running, auto-review **defers** that turn rather than skipping it:
+the turn-start cursor is kept, and the review fires — in full — as soon as the blocking
+review ends. If the thread takes another turn while deferred, the earlier cursor is carried
+forward, so one review covers both turns. A thread is never deferred behind itself.
 
-Deferred turns are released one at a time per provider: when a review ends (its thread goes
-idle, fails, is archived or deleted, or its queued review is cancelled), one parked turn on
-that provider starts its review, and that review's end releases the next. If that event is
-missed, a background sweep every 5 minutes retries any parked turn whose provider no longer
-has a review in flight. A review latch older than 30 minutes on a thread that is no longer
-running counts as a lost idle, not a review, so it never blocks.
+Deferred turns held by a provider review are released one at a time per provider: when a
+review ends (its thread goes idle, fails, is archived or deleted, or its queued review is
+cancelled), one parked turn on that provider starts its review, and that review's end
+releases the next. A turn held by a running child is not released this way — only its own
+wake-up idle, or the sweep, re-evaluates it; otherwise an unrelated same-provider release
+could beat bb's wake-up and review the child's work too early. If a release event is
+missed, a background sweep every 5 minutes retries any parked turn that is no longer
+blocked — a provider review that has ended, or a child that has gone idle. A review latch
+older than 30 minutes on a thread that is no longer running counts as a lost idle, not a
+review, so it never blocks.
 
-`bb auto-review status` shows a parked turn as phase `deferred`, with how long it has waited
-and what will release it. `bb auto-review reset <thread-id>` drops the turn instead — its
-review and commit then never run.
+`bb auto-review status` shows a parked turn as phase `deferred`, with how long it has
+waited and what will release it — the blocking review, or the children still holding it.
+`bb auto-review reset <thread-id>` drops the turn instead — its review and commit then
+never run.
 
 ## `reason` values in `status`
 
@@ -154,6 +164,10 @@ review and commit then never run.
 - `sibling-active` — another thread on the same provider (in any project) has its
   auto-review running. Paired with outcome `deferred`, this turn is parked and will be
   reviewed as soon as that review ends. Not a skip — nothing is lost.
+- `children-active` — a thread this turn spawned as a child, directly or transitively, is
+  still running. Paired with outcome `deferred`, this turn is parked until bb wakes it with
+  the child's completion, or the 5-minute sweep if that wake-up is missed. Not a skip —
+  nothing is lost.
 - `no-authorship` — the turn changed no files: no tool edit, and nothing in the working
   tree (a new, rewritten or deleted path, or one in a commit the turn made — on a branch or
   straight onto the mainline) changed since the turn started. Edits made through shell commands count. Untracked
@@ -165,9 +179,10 @@ review and commit then never run.
 - `empty-scope` — the files it changed are no longer uncommitted, ahead, or in a commit the
   turn made (e.g. reverted).
 - `no-turn-start` — no turn-start cursor was recorded (a missed start event); stood down, fail-safe.
-- `user-stopped` — the user stopped the thread during the turn; stood down, so a manual stop
-  never triggers a review, commit or merge. A turn of this thread that was parked
-  (`deferred`) is dropped as well. A stop bb made on its own (daemon restart,
+- `user-stopped` — the user stopped the thread during the turn, or manually stopped a child
+  it spawned (directly or transitively) since the turn began; stood down either way, so a
+  manual stop never triggers a review, commit or merge. A turn of this thread that was
+  parked (`deferred`) is dropped as well. A stop bb made on its own (daemon restart,
   provider-turn watchdog) does not count.
 - `user-queued` — the turn ended with a message of the user's already queued (or its turn
   already started). Paired with outcome `deferred`: no review fires next to their message;

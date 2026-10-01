@@ -71,6 +71,31 @@ function threadError(threadId: string, wantsJson: boolean): PluginCliResult {
     : { exitCode: 1, stderr: `${message}\n` };
 }
 
+/** What releases a deferred turn, and how to drop it instead, for `status`. */
+function deferredWaitText(threadId: string, heldBy: string[] | undefined): string {
+  if (heldBy !== undefined) {
+    return (
+      `waiting for child threads to finish: ${heldBy.join(", ")}\n` +
+      "  It is reviewed when this thread next goes idle (bb wakes it when a child ends), " +
+      "or within 5 min of the last child ending.\n" +
+      "  Stop or archive a stuck child to release it.\n" +
+      `  To drop it instead: bb auto-review reset ${threadId}\n`
+    );
+  }
+  return (
+    "waiting for another auto-review on the same provider to finish.\n" +
+    "  It fires automatically as soon as that review ends.\n" +
+    `  To drop it instead: bb auto-review reset ${threadId}\n`
+  );
+}
+
+/** What a dropped deferred turn was waiting on, for `reset`'s report. */
+function droppedDeferralWaitText(heldBy: string[] | undefined): string {
+  return heldBy !== undefined
+    ? `waiting for child threads to finish (${heldBy.join(", ")}), not stuck`
+    : "waiting for another review on its provider to finish, not stuck";
+}
+
 async function resolveProjectId(
   bb: BbPluginApi,
   context: PluginCliContext,
@@ -238,7 +263,8 @@ export function registerAutoReviewCli(
                 exitCode: 0,
                 stdout:
                   `reset ${threadId} (dropped a deferred turn).\n` +
-                  "That turn was waiting for another review on its provider to finish, not stuck — its review and commit will now never run.\n",
+                  `That turn was ${droppedDeferralWaitText(prior.heldBy)} — ` +
+                  "its review and commit will now never run.\n",
               };
             }
             return {
@@ -284,6 +310,7 @@ export function registerAutoReviewCli(
           mergeEligibleMainlines: config.mergeEligibleMainlines,
           phase: state.phase,
           deferredSince: state.deferredSince ?? null,
+          heldBy: state.heldBy ?? null,
           lastFire,
         };
         if (wantsJson) {
@@ -299,9 +326,7 @@ export function registerAutoReviewCli(
         const deferredText =
           state.phase === "deferred" && state.deferredSince !== undefined
             ? `deferred for: ${Math.floor((Date.now() - state.deferredSince) / 60_000)} min — ` +
-              "waiting for another auto-review on the same provider to finish.\n" +
-              "  It fires automatically as soon as that review ends.\n" +
-              `  To drop it instead: bb auto-review reset ${threadId}\n`
+              deferredWaitText(threadId, state.heldBy)
             : "";
         return {
           exitCode: 0,

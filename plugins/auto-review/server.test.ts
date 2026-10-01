@@ -25,6 +25,10 @@ interface EnvThread {
   status: string;
   visibility?: string;
   originPluginId?: string | null;
+  parentThreadId?: string | null;
+  lifecycleOwnerThreadId?: string | null;
+  archivedAt?: number | null;
+  deletedAt?: number | null;
 }
 
 interface QueuedRow {
@@ -67,6 +71,7 @@ interface HostOptions {
 interface InterruptEvent {
   seq: number;
   reason: "manual-stop" | "host-daemon-restarted" | "provider-turn-idle";
+  createdAt?: number;
 }
 
 interface TreeFile {
@@ -129,6 +134,29 @@ function fakeMergeBase(
   };
 }
 
+/** `system/thread/interrupted` event rows a fake `events.list` would serve for one thread. */
+function interruptEventRows(
+  events: readonly InterruptEvent[],
+  args: { threadId: string; afterSeq?: string; order?: "asc" | "desc"; limit?: string },
+): unknown[] {
+  let filtered = events.filter((event) => event.seq > Number(args.afterSeq ?? -1));
+  if (args.order === "desc") {
+    filtered = [...filtered].reverse();
+  }
+  if (args.limit !== undefined) {
+    filtered = filtered.slice(0, Number(args.limit));
+  }
+  return filtered.map((event) => ({
+    id: `ev-${args.threadId}-${event.seq}`,
+    scope: { kind: "thread" },
+    threadId: args.threadId,
+    seq: event.seq,
+    createdAt: event.createdAt ?? 1_000,
+    type: "system/thread/interrupted",
+    data: { reason: event.reason },
+  }));
+}
+
 function createHost(options: HostOptions = {}) {
   const metadataByThread = new Map<string, Record<string, unknown>>();
   const bucket = (threadId: string): Record<string, unknown> => {
@@ -164,7 +192,7 @@ function createHost(options: HostOptions = {}) {
   ];
   let maxSeq = 100;
   let queuedRows = options.queuedRows ?? [];
-  let interrupts: InterruptEvent[] = [];
+  let interruptsByThread: Record<string, InterruptEvent[]> = {};
 
   const sdk: CreateFakePluginHostOptions["sdk"] = {
     plugins: {
@@ -203,6 +231,11 @@ function createHost(options: HostOptions = {}) {
             id: args.threadId,
             environmentId: ENV_ID,
             providerId: providerOf(args.threadId),
+            parentThreadId: listed?.parentThreadId ?? null,
+            lifecycleOwnerThreadId: listed?.lifecycleOwnerThreadId ?? null,
+            originPluginId: listed?.originPluginId ?? null,
+            archivedAt: listed?.archivedAt ?? null,
+            deletedAt: listed?.deletedAt ?? null,
             ...(options.hiddenThreads?.includes(args.threadId) === true
               ? { visibility: "hidden" as const }
               : {}),
@@ -232,36 +265,33 @@ function createHost(options: HostOptions = {}) {
         };
       },
       events: {
-        list: async (args: { threadId: string; afterSeq?: string; types?: readonly string[] }) =>
-          args.threadId === THREAD_ID &&
+        list: async (args: {
+          threadId: string;
+          afterSeq?: string;
+          types?: readonly string[];
+          order?: "asc" | "desc";
+          limit?: string;
+        }) =>
           args.types?.includes("system/thread/interrupted") === true
-            ? interrupts
-                .filter((event) => event.seq > Number(args.afterSeq ?? -1))
-                .map((event) => ({
-                  id: `ev-${event.seq}`,
-                  scope: { kind: "thread" },
-                  threadId: THREAD_ID,
-                  seq: event.seq,
-                  createdAt: 1_000,
-                  type: "system/thread/interrupted",
-                  data: { reason: event.reason },
-                }))
+            ? interruptEventRows(interruptsByThread[args.threadId] ?? [], args)
             : [],
       },
-      list: async () => {
-        return [
-          ...envThreads.map((entry) => ({
-            parentThreadId: null,
-            lifecycleOwnerThreadId: null,
-            deletedAt: null,
-            updatedAt: Date.now(),
-            originPluginId: null,
-            visibility: "visible",
-            environmentId: ENV_ID,
-            ...entry,
-            environmentIsWorktree: worktree,
-          })),
-        ];
+      list: async (args?: { parentThreadId?: string }) => {
+        const rows = envThreads.map((entry) => ({
+          parentThreadId: null,
+          lifecycleOwnerThreadId: null,
+          deletedAt: null,
+          archivedAt: null,
+          updatedAt: Date.now(),
+          originPluginId: null,
+          visibility: "visible",
+          environmentId: ENV_ID,
+          ...entry,
+          environmentIsWorktree: worktree,
+        }));
+        return args?.parentThreadId === undefined
+          ? rows
+          : rows.filter((row) => row.parentThreadId === args.parentThreadId);
       },
       send: async (args: { threadId: string; mode: string; input: unknown }) => {
         if (options.sendThrows === true) {
@@ -372,9 +402,12 @@ function createHost(options: HostOptions = {}) {
     setMaxSeq: (next: number) => {
       maxSeq = next;
     },
-    /** Record a `system/thread/interrupted` event on the thread. */
-    interrupt: (event: InterruptEvent) => {
-      interrupts = [...interrupts, event];
+    /** Record a `system/thread/interrupted` event on a thread (default: the thread itself). */
+    interrupt: (event: InterruptEvent, threadId: string = THREAD_ID) => {
+      interruptsByThread = {
+        ...interruptsByThread,
+        [threadId]: [...(interruptsByThread[threadId] ?? []), event],
+      };
     },
     setQueuedRows: (next: QueuedRow[]) => {
       queuedRows = next;
@@ -1100,6 +1133,264 @@ describe("auto-review plugin", () => {
       reason: "fired",
       merge: true,
     });
+    await host.harness.dispose();
+  });
+
+  it.each([
+    [
+      "an active",
+      [{ id: "child-1", status: "active", parentThreadId: THREAD_ID }],
+      ["child-1"],
+    ],
+    [
+      "a pending",
+      [{ id: "child-1", status: "pending", parentThreadId: THREAD_ID }],
+      ["child-1"],
+    ],
+    [
+      "a running grandchild under an idle",
+      [
+        { id: "child-1", status: "idle", parentThreadId: THREAD_ID },
+        { id: "grandchild-1", status: "active", parentThreadId: "child-1" },
+      ],
+      ["grandchild-1"],
+    ],
+  ] as Array<[string, EnvThread[], string[]]>)(
+    "holds the turn behind %s spawned child",
+    async (_label, extraThreads, expectedHeldBy) => {
+      const host = createHost({
+        envThreads: [{ id: THREAD_ID, status: "idle" }, ...extraThreads],
+      });
+      await plugin(host.bb);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(0);
+      expect(host.metadata.phase).toBe("deferred");
+      expect(host.metadata.heldBy).toEqual(expectedHeldBy);
+      expect(await lastFire(host)).toMatchObject({
+        outcome: "deferred",
+        reason: "children-active",
+      });
+      await host.harness.dispose();
+    },
+  );
+
+  it.each([
+    ["idle", { status: "idle" }],
+    ["erroring", { status: "error" }],
+    ["archived", { status: "active", archivedAt: 1 }],
+    ["deleted", { status: "active", deletedAt: 1 }],
+  ] as Array<[string, Partial<EnvThread>]>)(
+    "does not hold the turn for a %s child",
+    async (_label, extra) => {
+      const host = createHost({
+        envThreads: [
+          { id: THREAD_ID, status: "idle" },
+          { id: "child-1", parentThreadId: THREAD_ID, status: "active", ...extra },
+        ],
+      });
+      await plugin(host.bb);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      await host.harness.dispose();
+    },
+  );
+
+  it("does not hold the turn for a lifecycle-owned-only helper or a plugin-originated child", async () => {
+    const host = createHost({
+      envThreads: [
+        { id: THREAD_ID, status: "idle" },
+        { id: "owned", status: "active", lifecycleOwnerThreadId: THREAD_ID },
+        { id: "advisor", status: "active", parentThreadId: THREAD_ID, originPluginId: "advisor" },
+      ],
+    });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(host.metadata.phase).toBe("awaiting-review");
+    await host.harness.dispose();
+  });
+
+  it("does not review a child-held turn from the child's own idle, nor from releaseDeferred", async () => {
+    const host = createHost({
+      envThreads: [
+        { id: THREAD_ID, status: "idle" },
+        { id: "child-1", status: "active", parentThreadId: THREAD_ID },
+      ],
+    });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.metadata.phase).toBe("deferred");
+    expect(host.metadata.heldBy).toEqual(["child-1"]);
+
+    host.setEnvThreads([
+      { id: THREAD_ID, status: "idle" },
+      { id: "child-1", status: "idle", parentThreadId: THREAD_ID },
+    ]);
+    // The child's own idle event carries a parent, so it fails the thread
+    // gate outright — it cannot trigger a review of its own accord.
+    const childIdle = await host.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({
+        id: "child-1",
+        environmentId: ENV_ID,
+        providerId: "claude-code",
+        parentThreadId: THREAD_ID,
+      }),
+      lastAssistantText: null,
+    });
+    expect(childIdle.errors).toEqual([]);
+    expect(host.sends).toHaveLength(0);
+    expect(host.metadata.phase).toBe("deferred");
+
+    // Nor does an unrelated same-provider idle release it through
+    // releaseDeferred: a child-held entry waits for the sweep, not a release.
+    await emitIdle(host, "unrelated-thread");
+    expect(host.sends).toHaveLength(0);
+    expect(host.metadata.phase).toBe("deferred");
+    await host.harness.dispose();
+  });
+
+  it("fires the deferred review from the wake-up turn, scope including what the child wrote, keeping the cursor", async () => {
+    const host = createHost({
+      authoredRows: [],
+      workingTreeFiles: [],
+      envThreads: [
+        { id: THREAD_ID, status: "idle" },
+        { id: "child-1", status: "active", parentThreadId: THREAD_ID },
+      ],
+    });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.metadata.phase).toBe("deferred");
+    expect(host.metadata.heldBy).toEqual(["child-1"]);
+    const turnStartBefore = host.metadata.turnStart;
+
+    // The child finishes and wrote a file; bb wakes the parent with a new turn.
+    host.setEnvThreads([
+      { id: THREAD_ID, status: "idle" },
+      { id: "child-1", status: "idle", parentThreadId: THREAD_ID },
+    ]);
+    host.setWorkingTree([{ path: "child.ts", content: "c" }]);
+    await emitActive(host);
+    expect(host.metadata.turnStart).toEqual(turnStartBefore);
+
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({
+      outcome: "fired",
+      scopePaths: ["child.ts"],
+    });
+    await host.harness.dispose();
+  });
+
+  it("re-parks on the wake-up turn when a second child is still running, keeping the cursor and defer time", async () => {
+    const host = createHost({
+      envThreads: [
+        { id: THREAD_ID, status: "idle" },
+        { id: "child-1", status: "active", parentThreadId: THREAD_ID },
+        { id: "child-2", status: "active", parentThreadId: THREAD_ID },
+      ],
+    });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.metadata.phase).toBe("deferred");
+    expect([...(host.metadata.heldBy as string[])].sort()).toEqual(["child-1", "child-2"]);
+    const turnStartBefore = host.metadata.turnStart;
+    const deferredSinceBefore = host.metadata.deferredSince;
+
+    // child-1 finishes; bb wakes the parent while child-2 is still running.
+    host.setEnvThreads([
+      { id: THREAD_ID, status: "idle" },
+      { id: "child-1", status: "idle", parentThreadId: THREAD_ID },
+      { id: "child-2", status: "active", parentThreadId: THREAD_ID },
+    ]);
+    await emitActive(host);
+    expect(host.metadata.turnStart).toEqual(turnStartBefore);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(host.metadata.phase).toBe("deferred");
+    expect(host.metadata.heldBy).toEqual(["child-2"]);
+    expect(host.metadata.turnStart).toEqual(turnStartBefore);
+    expect(host.metadata.deferredSince).toBe(deferredSinceBefore);
+    await host.harness.dispose();
+  });
+
+  it("keeps a child-held turn deferred through a sweep while the child runs, then fires once it idles", async () => {
+    const host = createHost({
+      authoredRows: [],
+      workingTreeFiles: [],
+      envThreads: [
+        { id: THREAD_ID, status: "idle" },
+        { id: "child-1", status: "active", parentThreadId: THREAD_ID },
+      ],
+    });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.metadata.phase).toBe("deferred");
+
+    await host.harness.runSchedule("sweep-deferrals");
+    expect(host.sends).toHaveLength(0);
+    expect(host.metadata.phase).toBe("deferred");
+
+    host.setEnvThreads([
+      { id: THREAD_ID, status: "idle" },
+      { id: "child-1", status: "idle", parentThreadId: THREAD_ID },
+    ]);
+    host.setWorkingTree([{ path: "child.ts", content: "c" }]);
+    await host.harness.runSchedule("sweep-deferrals");
+    expect(host.sends).toHaveLength(1);
+    expect(host.sends[0]?.threadId).toBe(THREAD_ID);
+    await host.harness.dispose();
+  });
+
+  it("unparks a deferred turn when the user manually stops the child that was holding it", async () => {
+    const host = createHost({
+      envThreads: [
+        { id: THREAD_ID, status: "idle" },
+        { id: "child-1", status: "active", parentThreadId: THREAD_ID },
+      ],
+    });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.metadata.phase).toBe("deferred");
+    expect(host.metadata.heldBy).toEqual(["child-1"]);
+
+    // The user stops the child to take over; bb wakes the parent with a new turn.
+    host.interrupt({ seq: 1, reason: "manual-stop", createdAt: Date.now() }, "child-1");
+    host.setEnvThreads([
+      { id: THREAD_ID, status: "idle" },
+      { id: "child-1", status: "idle", parentThreadId: THREAD_ID },
+    ]);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "user-stopped" });
+    expect(host.metadata.phase).toBe("idle");
+    expect(await host.bb.storage.kv.list("deferral:")).toEqual([]);
+    await host.harness.dispose();
+  });
+
+  it("clears heldBy when a child-held deferred turn is carried into the user's next turn", async () => {
+    const host = createHost();
+    await plugin(host.bb);
+    await park(host, THREAD_ID);
+    Object.assign(host.metadataFor(THREAD_ID), { heldBy: ["child-1"] });
+    host.setQueuedRows([userRow()]);
+
+    await host.harness.runSchedule("sweep-deferrals");
+    expect(host.sends).toHaveLength(0);
+    expect(host.metadata.phase).toBe("idle");
+    expect(host.metadata).not.toHaveProperty("heldBy");
+    expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+    expect(await host.bb.storage.kv.list("deferral:")).toEqual([]);
     await host.harness.dispose();
   });
 

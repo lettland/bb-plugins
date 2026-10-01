@@ -4,12 +4,14 @@ import {
   authoredPaths,
   authoredPathsFromRows,
   captureTree,
+  childStoppedByUser,
   computeScope,
   dirtyOrAheadPaths,
   fetchWorkspace,
   fingerprintsMatch,
   isBranchCheckout,
   mainlineBase,
+  runningChildIds,
   siblingAuthoredPaths,
   snapshotTree,
   treeChangedPaths,
@@ -1018,5 +1020,104 @@ describe("workspace capture edge cases", () => {
       expect(paths.paths).toEqual(["shell.ts"]);
       expect(timelineCalls.map((call) => call.threadId)).toEqual(["self"]);
     });
+  });
+});
+
+describe("runningChildIds / childStoppedByUser", () => {
+  interface ChildEntry {
+    id: string;
+    parentThreadId: string | null;
+    originPluginId?: string | null;
+    archivedAt?: number | null;
+    deletedAt?: number | null;
+    status: string;
+  }
+
+  function fakeBb(
+    entries: ChildEntry[],
+    events: Record<string, Array<{ seq: number; createdAt: number; reason: string }>> = {},
+  ) {
+    const listCalls: Array<string | undefined> = [];
+    const bb = {
+      sdk: {
+        threads: {
+          list: async (args: { parentThreadId?: string }) => {
+            listCalls.push(args.parentThreadId);
+            return entries
+              .filter((entry) => entry.parentThreadId === args.parentThreadId)
+              .map((entry) => ({
+                originPluginId: null,
+                archivedAt: null,
+                deletedAt: null,
+                ...entry,
+              }));
+          },
+          events: {
+            list: async (args: { threadId: string }) =>
+              (events[args.threadId] ?? []).map((row) => ({
+                id: `ev-${args.threadId}-${row.seq}`,
+                scope: { kind: "thread" },
+                threadId: args.threadId,
+                seq: row.seq,
+                createdAt: row.createdAt,
+                type: "system/thread/interrupted",
+                data: { reason: row.reason },
+              })),
+          },
+        },
+      },
+    } as never;
+    return { bb, listCalls };
+  }
+
+  it("counts running children transitively, including a running grandchild under an idle child", async () => {
+    const entries: ChildEntry[] = [
+      { id: "active-child", parentThreadId: "self", status: "active" },
+      { id: "pending-child", parentThreadId: "self", status: "pending" },
+      { id: "idle-child", parentThreadId: "self", status: "idle" },
+      { id: "running-grandchild", parentThreadId: "idle-child", status: "active" },
+      { id: "error-child", parentThreadId: "self", status: "error" },
+      { id: "archived-child", parentThreadId: "self", status: "active", archivedAt: 1 },
+      { id: "deleted-child", parentThreadId: "self", status: "active", deletedAt: 1 },
+      { id: "advisor", parentThreadId: "self", status: "active", originPluginId: "advisor" },
+    ];
+    const { bb } = fakeBb(entries);
+    const running = await runningChildIds(bb, "self");
+    expect(running.sort()).toEqual(
+      ["active-child", "pending-child", "running-grandchild"].sort(),
+    );
+  });
+
+  it("does not loop forever on a cycle in the spawn graph", async () => {
+    const entries: ChildEntry[] = [
+      { id: "cA", parentThreadId: "self", status: "active" },
+      { id: "cB", parentThreadId: "cA", status: "active" },
+      // cB's own children "include" self again, simulating a cycle back to the root.
+      { id: "self", parentThreadId: "cB", status: "active" },
+    ];
+    const { bb, listCalls } = fakeBb(entries);
+    const running = await runningChildIds(bb, "self");
+    expect(running.sort()).toEqual(["cA", "cB"]);
+    // Each thread's children are listed exactly once despite the cycle.
+    expect(listCalls.filter((id) => id === "self").length).toBe(1);
+  });
+
+  it("stands down for a manual-stop on a spawned child at or after the turn began", async () => {
+    const entries: ChildEntry[] = [{ id: "child", parentThreadId: "self", status: "idle" }];
+    const { bb } = fakeBb(entries, {
+      child: [{ seq: 1, createdAt: 2_000, reason: "manual-stop" }],
+    });
+    expect(await childStoppedByUser(bb, "self", 1_000)).toBe(true);
+    expect(await childStoppedByUser(bb, "self", 3_000)).toBe(false);
+  });
+
+  it("ignores a manual-stop on a plugin-originated helper", async () => {
+    const entries: ChildEntry[] = [
+      { id: "advisor", parentThreadId: "self", status: "idle", originPluginId: "advisor" },
+    ];
+    const { bb } = fakeBb(entries, {
+      advisor: [{ seq: 1, createdAt: 2_000, reason: "manual-stop" }],
+    });
+    expect(await childStoppedByUser(bb, "self", 1_000)).toBe(false);
   });
 });

@@ -17,6 +17,7 @@ export const FIRE_REASONS = [
   "disabled",
   "skipped",
   "sibling-active",
+  "children-active",
   "send-failed",
   "not-a-branch",
   "status-unavailable",

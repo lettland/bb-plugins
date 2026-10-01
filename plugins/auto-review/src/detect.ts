@@ -621,6 +621,92 @@ function ownThreadIds(
   return own;
 }
 
+/**
+ * Threads spawned under this one, transitively, excluding plugin-originated
+ * helpers (the advisor and similar): those send no wake-up and must never
+ * hold a turn. Only `parentThreadId` links are walked — a thread merely
+ * `lifecycleOwnerThreadId`-owned gets no wake-up either. A visited set makes
+ * the walk cycle-safe.
+ */
+async function spawnedDescendants(
+  bb: BbPluginApi,
+  threadId: string,
+): Promise<ThreadListEntry[]> {
+  const descendants: ThreadListEntry[] = [];
+  const visited = new Set<string>([threadId]);
+  const queue = [threadId];
+  while (queue.length > 0) {
+    const parentId = queue.shift() as string;
+    const children = await bb.sdk.threads.list({
+      parentThreadId: parentId,
+      includeHidden: true,
+    });
+    for (const child of children) {
+      if (visited.has(child.id) || child.originPluginId !== null) {
+        continue;
+      }
+      visited.add(child.id);
+      queue.push(child.id);
+      descendants.push(child);
+    }
+  }
+  return descendants;
+}
+
+/**
+ * Spawned children (and grandchildren) still running. bb wakes this thread
+ * when one of them ends, so a turn that finds any of these should park
+ * instead of reviewing a tree snapshot the child is about to overwrite.
+ * `pending` counts: a child spawned just before the turn ends still holds it.
+ */
+export async function runningChildIds(
+  bb: BbPluginApi,
+  threadId: string,
+): Promise<string[]> {
+  const descendants = await spawnedDescendants(bb, threadId);
+  return descendants
+    .filter(
+      (entry) =>
+        entry.archivedAt === null &&
+        entry.deletedAt === null &&
+        entry.status !== "idle" &&
+        entry.status !== "error",
+    )
+    .map((entry) => entry.id);
+}
+
+/**
+ * Whether the user manual-stopped one of this thread's spawned children at or
+ * after the turn began. A user who stops a child to take over gets no review
+ * of its half-done work — the same promise `stoppedByUser` makes for the
+ * thread itself.
+ */
+export async function childStoppedByUser(
+  bb: BbPluginApi,
+  threadId: string,
+  sinceStartedAt: number,
+): Promise<boolean> {
+  const descendants = await spawnedDescendants(bb, threadId);
+  for (const child of descendants) {
+    const events = await bb.sdk.threads.events.list({
+      threadId: child.id,
+      types: ["system/thread/interrupted"],
+      order: "desc",
+      limit: "10",
+    });
+    const stopped = events.some(
+      (event) =>
+        event.type === "system/thread/interrupted" &&
+        event.data.reason === "manual-stop" &&
+        event.createdAt >= sinceStartedAt,
+    );
+    if (stopped) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function oldestCreatedAt(rows: readonly TimelineRow[]): number | null {
   let oldest: number | null = null;
   for (const row of rows) {

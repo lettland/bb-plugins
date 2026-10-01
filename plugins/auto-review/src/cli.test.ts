@@ -368,6 +368,23 @@ describe("auto-review cli: reset", () => {
     });
   });
 
+  it("drops a child-held deferred turn with wording naming the children", async () => {
+    await withHost({}, async (host) => {
+      Object.assign(host.metadataFor(THREAD_ID), {
+        phase: "deferred",
+        deferredSince: 5,
+        turnStart: { sinceSeq: 0 },
+        heldBy: ["child-1"],
+      });
+      const result = await host.run(["reset", THREAD_ID]);
+      expect(result.stdout).toContain(`reset ${THREAD_ID} (dropped a deferred turn).`);
+      expect(result.stdout).toContain(
+        "waiting for child threads to finish (child-1), not stuck",
+      );
+      expect(result.stdout).toContain("will now never run");
+    });
+  });
+
   it("flags the dropped deferral in JSON", async () => {
     await withHost({}, async (host) => {
       Object.assign(host.metadataFor(THREAD_ID), { phase: "deferred" });
@@ -472,6 +489,7 @@ describe("auto-review cli: status", () => {
           mergeEligibleMainlines: ["master", "main"],
           phase: "idle",
           deferredSince: null,
+          heldBy: null,
           lastFire: null,
         });
       },
@@ -529,6 +547,32 @@ describe("auto-review cli: status", () => {
       Object.assign(host.metadataFor(THREAD_ID), { phase: "deferred" });
       const text = await host.run(["status", THREAD_ID]);
       expect(text.stdout).toContain("phase: deferred\nlastFire: never\n");
+    });
+  });
+
+  it("explains a child-held deferred turn and names the children", async () => {
+    await withHost({}, async (host) => {
+      const deferredSince = Date.now() - 3 * 60_000;
+      Object.assign(host.metadataFor(THREAD_ID), {
+        phase: "deferred",
+        deferredSince,
+        heldBy: ["child-1", "child-2"],
+      });
+      const text = await host.run(["status", THREAD_ID]);
+      expect(text.stdout).toContain("phase: deferred\ndeferred for: 3 min — ");
+      expect(text.stdout).toContain("waiting for child threads to finish: child-1, child-2\n");
+      expect(text.stdout).toContain(
+        "It is reviewed when this thread next goes idle (bb wakes it when a child ends), or within 5 min of the last child ending.",
+      );
+      expect(text.stdout).toContain("Stop or archive a stuck child to release it.");
+      expect(text.stdout).toContain(`To drop it instead: bb auto-review reset ${THREAD_ID}\n`);
+      expect(text.stdout).not.toContain("waiting for another auto-review on the same provider");
+
+      const payload = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(payload.stdout)).toMatchObject({
+        phase: "deferred",
+        heldBy: ["child-1", "child-2"],
+      });
     });
   });
 

@@ -20,11 +20,13 @@ import {
 import {
   captureSinceSeq,
   captureTree,
+  childStoppedByUser,
   computeScope,
   dirtyOrAheadPaths,
   fetchWorkspace,
   isBranchCheckout,
   mainlineBase,
+  runningChildIds,
   stoppedByUser,
   turnChangedPaths,
 } from "./src/detect.js";
@@ -53,6 +55,7 @@ import {
   withThreadLock,
   writeState,
   type ThreadState,
+  type TurnStart,
 } from "./src/state.js";
 
 interface GateThreadLike extends GateThread {
@@ -98,6 +101,25 @@ async function aislopScanAvailable(bb: BbPluginApi): Promise<boolean> {
     );
     return false;
   }
+}
+
+/**
+ * The user stopped this turn, or a child it spawned, to take over; reviewing
+ * and committing half-done work behind their back is the last thing they
+ * asked for.
+ */
+async function userStoppedTurn(
+  bb: BbPluginApi,
+  threadId: string,
+  turnStart: TurnStart,
+): Promise<boolean> {
+  if (await stoppedByUser(bb, threadId, turnStart.sinceSeq)) {
+    return true;
+  }
+  return (
+    turnStart.startedAt !== undefined &&
+    (await childStoppedByUser(bb, threadId, turnStart.startedAt))
+  );
 }
 
 export default async function plugin(bb: BbPluginApi) {
@@ -150,6 +172,13 @@ export default async function plugin(bb: BbPluginApi) {
     return rows.some((row) => row.id === entryId);
   }
 
+  interface DeferTurnOptions {
+    reason: FireReason;
+    /** The running children holding the turn; absent waits on a provider review instead. */
+    heldBy?: string[];
+    extra?: Partial<Omit<LastFire, "at" | "outcome" | "reason">>;
+  }
+
   /**
    * Park this turn instead of dropping it. The turn-start cursor is left in
    * place, so when the blocking review ends this review still covers the work
@@ -160,8 +189,9 @@ export default async function plugin(bb: BbPluginApi) {
     thread: GateThreadLike,
     state: ThreadState,
     environmentId: string,
-    extra: Partial<Omit<LastFire, "at" | "outcome" | "reason">> = {},
+    options: DeferTurnOptions,
   ): Promise<void> {
+    const { reason, heldBy, extra = {} } = options;
     // Index first, state second. The sweep enumerates the index and prunes an
     // entry whose thread is not actually deferred, so an interruption between
     // these two writes leaves a harmless orphan the next sweep cleans up. The
@@ -173,17 +203,16 @@ export default async function plugin(bb: BbPluginApi) {
       environmentId,
       providerId: thread.providerId,
     });
-    await writeState(bb, thread.id, {
-      phase: "deferred",
+    const deferredPatch = {
+      phase: "deferred" as const,
       deferredSince: state.deferredSince ?? Date.now(),
-    });
-    await recordFire(
-      thread.projectId,
-      thread.id,
-      "deferred",
-      "sibling-active",
-      extra,
-    );
+    };
+    if (heldBy === undefined) {
+      await writeState(bb, thread.id, deferredPatch, ["heldBy"]);
+    } else {
+      await writeState(bb, thread.id, { ...deferredPatch, heldBy });
+    }
+    await recordFire(thread.projectId, thread.id, "deferred", reason, extra);
   }
 
   /**
@@ -311,6 +340,7 @@ export default async function plugin(bb: BbPluginApi) {
     await writeState(bb, thread.id, { phase: "idle" }, [
       "deferredSince",
       "turnDecided",
+      "heldBy",
     ]);
     if (state.phase === "deferred") {
       await removeDeferral(bb, thread.id);
@@ -349,9 +379,7 @@ export default async function plugin(bb: BbPluginApi) {
       await standDown(thread, state, "no-turn-start");
       return;
     }
-    // The user stopped this turn to take over; reviewing and committing
-    // half-done work behind their back is the last thing they asked for.
-    if (await stoppedByUser(bb, thread.id, state.turnStart.sinceSeq)) {
+    if (await userStoppedTurn(bb, thread.id, state.turnStart)) {
       await standDown(thread, state, "user-stopped");
       return;
     }
@@ -374,12 +402,25 @@ export default async function plugin(bb: BbPluginApi) {
       return;
     }
 
-    // Only another thread's review in flight parks this turn — two reviews
-    // staging, committing and merging in one working tree at once is the one
-    // thing to avoid. Threads that are merely running, including this thread's
-    // own advisor or subagents, never do.
+    // A spawned child still running will wake this thread when it ends, and
+    // that wake-up turn's idle is what should review its work — reviewing now
+    // would review a tree snapshot the child is about to overwrite.
+    const runningChildren = await runningChildIds(bb, thread.id);
+    if (runningChildren.length > 0) {
+      await deferTurn(thread, state, environmentId, {
+        reason: "children-active",
+        heldBy: runningChildren,
+      });
+      return;
+    }
+
+    // Past the children check, only another thread's review in flight parks
+    // this turn — two reviews staging, committing and merging in one working
+    // tree at once is the one thing to avoid. Threads that are merely
+    // running, including this thread's own advisor or non-child subagents,
+    // never do.
     if (await providerReviewInFlight(thread.providerId, thread.id)) {
-      await deferTurn(thread, state, environmentId);
+      await deferTurn(thread, state, environmentId, { reason: "sibling-active" });
       return;
     }
     const threadEntries = await bb.sdk.threads.list({
@@ -419,11 +460,14 @@ export default async function plugin(bb: BbPluginApi) {
     await withProviderLock(thread.providerId, async () => {
       if (await providerReviewInFlight(thread.providerId, thread.id)) {
         await deferTurn(thread, state, environmentId, {
-          commit: decision.commit,
-          merge: decision.merge,
-          base,
-          isWorktree,
-          scopePaths: scope,
+          reason: "sibling-active",
+          extra: {
+            commit: decision.commit,
+            merge: decision.merge,
+            base,
+            isWorktree,
+            scopePaths: scope,
+          },
         });
         return;
       }
@@ -501,8 +545,15 @@ export default async function plugin(bb: BbPluginApi) {
       if ((await deferralProviderId(entry)) !== providerId) {
         continue;
       }
-      if ((await readState(bb, entry.threadId)).phase !== "deferred") {
+      const state = await readState(bb, entry.threadId);
+      if (state.phase !== "deferred") {
         await removeDeferral(bb, entry.threadId);
+        continue;
+      }
+      // A child-held turn is not waiting on a provider review; releasing it
+      // here on an unrelated same-provider idle could beat bb's wake-up
+      // message. Only the sweep re-evaluates it.
+      if (state.heldBy !== undefined) {
         continue;
       }
       await resolveAndEvaluate(entry.threadId, async (why) => {

@@ -26,14 +26,19 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   merges into a personal mainline (e.g. `master`) whether the thread runs in a
   dedicated worktree or the primary checkout; a non-personal mainline (e.g. `main`) is
   never a merge target.
+- Holds the turn while a thread it spawned as a child (`bb thread spawn --parent-self`),
+  directly or transitively, is still running: bb wakes the parent with a new turn when the
+  child ends, and that wake-up turn's idle reviews its work instead of a tree snapshot the
+  child is about to overwrite. Released only by its own wake-up idle or the 5-minute sweep,
+  never by an unrelated same-provider release.
 - Runs one review at a time per provider, across all projects, since reviews on one
   provider share its usage limits: a turn ending while another thread on the same provider
-  has its review queued or running is deferred, not dropped — never because other threads
-  are merely active, never behind a different provider, never behind the thread itself.
-  The turn-start cursor is kept and the full review fires when the blocking review ends,
-  one deferred turn per provider released per review end. In-flight reviews and parked
-  turns are indexed in plugin storage, and parked turns are swept every 5 minutes, so a
-  release whose event was missed still happens.
+  has its review queued or running is deferred, not dropped — never because another thread
+  is merely active (other than a spawned child, above), never behind a different provider,
+  never behind the thread itself. The turn-start cursor is kept and the full review fires
+  when the blocking review ends, one deferred turn per provider released per review end.
+  In-flight reviews and parked turns are indexed in plugin storage, and parked turns are
+  swept every 5 minutes, so a release whose event was missed still happens.
 - Yields to the user: a turn ending with a user message queued (or its turn already
   started) is carried, not reviewed — its cursor is kept, and the review fires at the
   first idle with nothing of the user's waiting, covering every turn since. Scheduled,

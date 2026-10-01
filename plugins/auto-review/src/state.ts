@@ -52,6 +52,8 @@ export const threadStateSchema = z.object({
   pendingEntryId: z.string().optional(),
   dispatchedAt: z.number().optional(),
   deferredSince: z.number().optional(),
+  /** Spawned children holding this turn parked; absent means a provider review instead. */
+  heldBy: z.array(z.string()).optional(),
   /**
    * Set once an idle has decided the turn `turnStart` opened. Until then the
    * next `thread.active` keeps the cursor instead of starting a new window, so
@@ -135,6 +137,7 @@ export const LATCH_KEYS: readonly string[] = [
   "dispatchedAt",
   "deferredSince",
   "turnDecided",
+  "heldBy",
 ];
 
 /** Plan-gate keys, cleared together whenever the gate disarms. */

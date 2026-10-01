@@ -94,6 +94,7 @@ describe("resetToIdlePatch", () => {
       "dispatchedAt",
       "deferredSince",
       "turnDecided",
+      "heldBy",
     ]);
   });
 });
