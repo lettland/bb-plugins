@@ -223,14 +223,29 @@ describe("buildReviewPrompt", () => {
 
   it("runs the aislop scan in every mode as advice triaged against the project's rules", () => {
     for (const reviewMode of ["auto", "devkit", "self"] as const) {
-      const build = (aislopScan?: boolean) =>
-        buildReviewPrompt({ decision: { commit: true, merge: false }, reviewMode, scope: baseScope, aislopScan });
+      const build = (aislopScan?: boolean, committedSince?: string | null) =>
+        buildReviewPrompt({
+          decision: { commit: true, merge: false },
+          reviewMode,
+          scope: baseScope,
+          aislopScan,
+          committedSince,
+        });
       expect(build()).not.toContain("aislop");
       expect(build(false)).not.toContain("aislop");
       const text = build(true);
       expect(text).toMatch(
         /1\. [^\n]*Then run `bb aislop scan`[^\n]*command unknown or its plugin disabled[^\n]*skip this[^\n]*non-zero exit code[^\n]*only means it found issues[^\n]*advice, not orders[^\n]*project's own rules[^\n]*one-line reason/u,
       );
+      expect(text).toContain("`bb aislop scan`");
+      expect(text).not.toMatch(/bb aislop scan --base/);
+      expect(text).toMatch(/even when the current branch is the root branch itself/);
+
+      const textCommitted = build(true, "abc1234");
+      expect(textCommitted).toContain("`bb aislop scan --base abc1234`");
+      expect(textCommitted).not.toMatch(/`bb aislop scan`/);
+      expect(textCommitted).toContain("this turn's commits plus the uncommitted changes");
+      expect(textCommitted).toMatch(/even when the current branch is the root branch itself/);
     }
   });
 

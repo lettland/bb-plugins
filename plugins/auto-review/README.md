@@ -52,9 +52,9 @@ plugin, so agents can read it too.
 
 Under bb, `auto` (when devkit is available) and `devkit` modes hand the four lens reviews — and
 the closure review — to bb child threads when the thread can spawn children (otherwise provider
-subagents); `self` mode and the no-devkit case in `auto` still review in the same thread. A full
-calibrated review costs about five sessions on the provider
-(four lenses plus closure).
+subagents, or sequentially in the same thread); `self` mode and the no-devkit case in `auto`
+still review in the same thread. A full calibrated review costs about five sessions on the
+provider (four lenses plus closure).
 
 Per-project overrides and per-thread skips are stored in the plugin's own storage.
 
@@ -80,7 +80,9 @@ bb plugin install npm:@lettland/bb-plugin-auto-review
 Install [devkit](../devkit) alongside it to get the calibrated review in `auto` mode.
 
 Install [aislop](../aislop) alongside it and every code review also runs `bb aislop scan`
-on the branch's changes. Its findings are advisory: the review fixes the real ones in
+on the branch's changes — also on the root branch itself, where it covers unpushed
+commits and uncommitted work, and from the turn-start commit when the turn already
+committed. Its findings are advisory: the review fixes the real ones in
 the turn's own changed lines, and it leaves false positives and anything against the
 project's own rules (CLAUDE.md / AGENTS.md, lint config, local conventions) unfixed,
 listing each with a reason. auto-review checks the plugin list before each review and

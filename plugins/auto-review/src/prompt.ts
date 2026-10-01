@@ -100,14 +100,21 @@ const OWN_WORK_ONLY =
 /**
  * The aislop plugin's scan, asked for only while that plugin is running. Its
  * findings are heuristics, so they are triaged against the project's own rules
- * rather than all fixed.
+ * rather than all fixed. `--base` pins a committed turn to its start commit,
+ * which a root branch without a remote copy would otherwise miss.
  */
-const AISLOP_SCAN =
-  " Then run `bb aislop scan`, which scans what this branch changed against its root branch; if bb reports the command unknown or its plugin disabled, the aislop plugin went away meanwhile, so skip this. A non-zero exit code from the scan only means it found issues, not that the step failed. Treat its findings as advice, not orders: act only on findings in the files listed above and on lines you changed this turn, and fix one only when it is a real problem and the fix does not go against this project's own rules (CLAUDE.md / AGENTS.md, lint and formatter config, or the conventions the surrounding code follows). Leave false positives and rule conflicts as they are, and list each finding you skipped with a one-line reason in your final reply.";
+function aislopScanStep(committedSince: string | null): string {
+  const command = committedSince === null ? "bb aislop scan" : `bb aislop scan --base ${committedSince}`;
+  const description =
+    committedSince === null
+      ? "which scans what this branch changed against its root branch, committed or not"
+      : "which scans this turn's commits plus the uncommitted changes";
+  return ` Then run \`${command}\`, ${description}. Run it even when the current branch is the root branch itself — the scan still covers this turn's work there — so never skip it because the branch and its root are the same. If bb reports the command unknown or its plugin disabled, the aislop plugin went away meanwhile, so skip this. A non-zero exit code from the scan only means it found issues, not that the step failed. Treat its findings as advice, not orders: act only on findings in the files listed above and on lines you changed this turn, and fix one only when it is a real problem and the fix does not go against this project's own rules (CLAUDE.md / AGENTS.md, lint and formatter config, or the conventions the surrounding code follows). Leave false positives and rule conflicts as they are, and list each finding you skipped with a one-line reason in your final reply.`;
+}
 
 function reviewStep(mode: ReviewMode, committedSince: string | null, aislopScan: boolean): string {
   const target = reviewTarget(committedSince);
-  const scan = aislopScan ? AISLOP_SCAN : "";
+  const scan = aislopScan ? aislopScanStep(committedSince) : "";
   switch (mode) {
     case "devkit":
       return `Review the changes with devkit's calibrated review: ${target.devkit}. ${OWN_WORK_ONLY}${scan} If the devkit_load_skill tool is not available, STOP and report that the devkit review workflow is missing; do not fall back to a self-review.`;
