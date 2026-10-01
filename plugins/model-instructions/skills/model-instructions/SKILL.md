@@ -1,12 +1,12 @@
 ---
 name: model-instructions
-description: "Change the custom instructions bb adds to threads by provider, model, and top-level vs child thread (the model-instructions plugin's rules setting)."
+description: "Change the custom instructions bb adds to threads by provider, model, project, and top-level vs child thread (the model-instructions plugin's rules setting)."
 ---
 
 # Model instructions
 
 The `model-instructions` plugin adds instructions to a thread when its provider,
-model, and thread position match a rule. Rules live in one plugin setting,
+model, project, and thread position match a rule. Rules live in one plugin setting,
 `rules`, a JSON array. Every matching rule applies, in array order.
 
 ```json
@@ -24,6 +24,7 @@ model, and thread position match a rule. Rules live in one plugin setting,
 |---|---|---|
 | `provider` | no | Provider id glob (`claude-code`, `codex`). Omit to match every provider. |
 | `model` | no | Model id glob. `*` matches any run of characters; nothing else is special. End with `*` to also match suffixed ids such as `claude-opus-5-5[1m]`. Omit to match every model. |
+| `project` | no | bb project name glob (`bb-plugins`, `opshub-*`), case-sensitive, with `*` as the only special character. Renaming a project stops its rules matching. Omit to match every project. |
 | `threads` | no | `any` (default), `top-level` (no parent thread), or `child` (spawned with a parent thread). |
 | `instructions` | yes | A string, or an array of lines joined with newlines. |
 
@@ -38,7 +39,8 @@ bb plugin config model-instructions unset rules          # back to [] (no instru
 A value that is not valid JSON or does not match the shape above is rejected on
 write. Changes need no plugin reload; new threads get them, while a running
 thread may keep its old instructions until its provider session restarts.
-List model ids with `bb provider models <provider>`.
+List model ids with `bb provider models <provider>` and project names with
+`bb project list --include-personal`.
 
 ## Constraints
 

@@ -15,8 +15,13 @@ const SUPERVISOR = {
 const WORKER = { model: "claude-sonnet-*", threads: "child", instructions: "Implement the brief." };
 const EVERYONE = { instructions: "Be terse." };
 
-function target(model: string, parentThreadId: string | null = null, provider = "claude-code") {
-  return { provider, model, parentThreadId };
+function target(
+  model: string,
+  parentThreadId: string | null = null,
+  provider = "claude-code",
+  project = "bb-plugins",
+) {
+  return { provider, model, project, parentThreadId };
 }
 
 describe("resolveInstructions", () => {
@@ -44,6 +49,21 @@ describe("resolveInstructions", () => {
     expect(resolveInstructions(rules, target("claude-opus-5-5", null, "codex"))).toBe("Be terse.");
   });
 
+  it("filters by project name", () => {
+    const [rule] = parseRules(JSON.stringify([{ project: "bb-*", instructions: "x" }]));
+    expect(resolveInstructions([rule], target("claude-opus-5-5"))).toBe("x");
+    expect(resolveInstructions([rule], target("claude-opus-5-5", null, "claude-code", "opshub"))).toBeNull();
+  });
+
+  it("requires every filter to match alongside the project", () => {
+    const [rule] = parseRules(
+      JSON.stringify([{ project: "bb-*", model: "claude-sonnet-*", threads: "child", instructions: "x" }]),
+    );
+    expect(resolveInstructions([rule], target("claude-sonnet-5", "parent-1"))).toBe("x");
+    expect(resolveInstructions([rule], target("claude-sonnet-5"))).toBeNull();
+    expect(resolveInstructions([rule], target("claude-opus-5-5", "parent-1"))).toBeNull();
+  });
+
   it("treats glob metacharacters other than * literally", () => {
     const [rule] = parseRules(JSON.stringify([{ model: "gpt-5.1", instructions: "x" }]));
     expect(resolveInstructions([rule], target("gpt-5x1"))).toBeNull();
@@ -62,6 +82,7 @@ describe("parseRules", () => {
     ['[{"instructions": "  "}]', "instructions"],
     ['[{"instructions": "x", "threads": "root"}]', "threads"],
     ['[{"instructions": "x", "modle": "y"}]', "modle"],
+    ['[{"instructions": "x", "project": "  "}]', "project"],
   ])("rejects %s", (json, message) => {
     expect(() => parseRules(json)).toThrow(message);
   });
@@ -77,10 +98,16 @@ describe("plugin", () => {
     return createFakePluginHost({ pluginId: "model-instructions", agentSkillIds: ["model-instructions"], settings });
   }
 
-  function resolve(host: ReturnType<typeof createHost>, model: string, parentThreadId: string | null = null) {
+  function resolve(
+    host: ReturnType<typeof createHost>,
+    model: string,
+    parentThreadId: string | null = null,
+    project = "bb-plugins",
+  ) {
     return host.harness.resolveAgentConfiguration(
       makePluginAgentConfigurationContext({
         thread: { id: "thread-1", parentThreadId },
+        project: { name: project },
         provider: { id: "claude-code", model },
       }),
     );
@@ -112,6 +139,14 @@ describe("plugin", () => {
       "Plan and supervise.\nSpawn Sonnet workers to implement.",
     );
     expect((await resolve(host, "claude-sonnet-5-5", "parent-1")).instructions).toBe("Implement the brief.");
+    await host.harness.dispose();
+  });
+
+  it("passes the thread's project name to the rules", async () => {
+    const host = createHost({ rules: JSON.stringify([{ project: "opshub", instructions: "OpsHub only." }]) });
+    await plugin(host.bb);
+    expect((await resolve(host, "claude-opus-5-5", null, "opshub")).instructions).toBe("OpsHub only.");
+    expect((await resolve(host, "claude-opus-5-5")).instructions).toBeNull();
     await host.harness.dispose();
   });
 });

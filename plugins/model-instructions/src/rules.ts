@@ -6,6 +6,7 @@ const ruleSchema = z
   .object({
     provider: z.string().trim().min(1).optional(),
     model: z.string().trim().min(1).optional(),
+    project: z.string().trim().min(1).optional(),
     threads: z.enum(THREAD_SCOPES).default("any"),
     instructions: z
       .union([z.string(), z.array(z.string())])
@@ -21,6 +22,7 @@ export type Rule = z.infer<typeof ruleSchema>;
 interface Target {
   provider: string;
   model: string;
+  project: string;
   parentThreadId: string | null;
 }
 
@@ -61,6 +63,8 @@ function matches(rule: Rule, target: Target): boolean {
   if (rule.provider && !globToRegExp(rule.provider).test(target.provider))
     return false;
   if (rule.model && !globToRegExp(rule.model).test(target.model)) return false;
+  if (rule.project && !globToRegExp(rule.project).test(target.project))
+    return false;
   if (rule.threads === "top-level") return target.parentThreadId === null;
   if (rule.threads === "child") return target.parentThreadId !== null;
   return true;

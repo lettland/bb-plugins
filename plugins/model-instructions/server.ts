@@ -12,7 +12,7 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Rules",
       description:
-        'JSON array of rules. Each rule: { "provider"?: glob, "model"?: glob, "threads"?: "any" | "top-level" | "child", "instructions": string | string[] }. Every matching rule\'s instructions are added to the thread, in order.',
+        'JSON array of rules. Each rule: { "provider"?: glob, "model"?: glob, "project"?: glob, "threads"?: "any" | "top-level" | "child", "instructions": string | string[] }. Every matching rule\'s instructions are added to the thread, in order.',
       experimental_multiline: true,
       experimental_schema: rulesSettingSchema,
       default: "[]",
@@ -41,6 +41,7 @@ export default async function plugin(bb: BbPluginApi) {
     const instructions = resolveInstructions(rules, {
       provider: context.provider.id,
       model: context.provider.model,
+      project: context.project.name,
       parentThreadId: context.thread.parentThreadId,
     });
     return {

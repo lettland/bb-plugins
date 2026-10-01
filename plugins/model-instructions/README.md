@@ -1,9 +1,9 @@
 # bb-plugin-model-instructions
 
-Custom instructions per provider and model for bb. bb's built-in "Custom
-instructions" setting applies to every thread; this plugin adds instructions
-only to threads whose provider, model, and position (top-level or child thread)
-match a rule.
+Custom instructions per provider, model, and project for bb. bb's built-in
+"Custom instructions" setting applies to every thread; this plugin adds
+instructions only to threads whose provider, model, project, and position
+(top-level or child thread) match a rule.
 
 ## Rules
 
@@ -14,6 +14,7 @@ array order.
 |---|---|---|
 | `provider` | no | Provider id glob (`claude-code`, `codex`). Omit to match every provider. |
 | `model` | no | Model id glob. `*` matches any run of characters; nothing else is special. End with `*` to also match suffixed ids such as `claude-opus-5-5[1m]`. Omit to match every model. |
+| `project` | no | bb project name glob (`bb-plugins`, `opshub-*`), case-sensitive, with `*` as the only special character. Renaming a project stops its rules matching. Omit to match every project. |
 | `threads` | no | `any` (default), `top-level` (no parent thread), or `child` (spawned with a parent thread). |
 | `instructions` | yes | A string, or an array of lines joined with newlines. |
 
@@ -24,7 +25,7 @@ bb plugin config model-instructions set rules "$(cat rules.json)"
 ```
 
 An invalid value is rejected on write. `bb provider models <provider>` lists
-model ids.
+model ids; `bb project list --include-personal` lists project names.
 
 ## Example: Opus supervises, Sonnet implements
 

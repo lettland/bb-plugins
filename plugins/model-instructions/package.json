@@ -2,13 +2,13 @@
   "name": "@lettland/bb-plugin-model-instructions",
   "version": "0.1.1",
   "type": "module",
-  "description": "Add custom instructions to a thread by its provider, model, and whether it is a top-level or child thread.",
+  "description": "Add custom instructions to a thread by its provider, model, project, and whether it is a top-level or child thread.",
   "engines": {
     "bb": ">=0.44"
   },
   "bb": {
     "name": "Model instructions",
-    "description": "Custom instructions per provider and model, optionally only for top-level or only for child threads — e.g. Opus plans and supervises, Sonnet worker threads implement.",
+    "description": "Custom instructions per provider, model, and project, optionally only for top-level or only for child threads — e.g. Opus plans and supervises, Sonnet worker threads implement.",
     "branding": {
       "icon": "SlidersHorizontal"
     },
