@@ -25,8 +25,9 @@ It ships enabled (opt-out).
   a top-level branch such as `develop` is never merged; a non-eligible (protected) mainline such as
   `main` is never a merge target, and the primary checkout is never committed to there.
 - Holds the turn while any child it spawned, in any turn, is still running (directly or
-  transitively): bb wakes it with a new turn once the child ends, and that turn reviews
-  its work.
+  transitively): bb wakes it with a new turn each time one ends, but only the turn after
+  the last one ends reviews its work — an earlier wake-up with another child still running
+  just re-parks.
 - Runs one review at a time per provider across all projects, since those reviews share
   the provider's usage limits. A turn ending behind another review is deferred, not
   dropped, and fires when the blocking review ends.

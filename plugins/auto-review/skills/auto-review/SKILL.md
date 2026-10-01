@@ -124,15 +124,16 @@ A feature branch is one whose name contains a `/` (`fix/oh-1/x`, `OH-2/y`, bb's 
 ## One review per provider
 
 A thread this thread spawned as a child (`bb thread spawn --parent-self`), in any turn,
-holds the current turn while it runs, directly or transitively (a grandchild counts too;
-a long-running child spawned in an earlier turn holds a later one too): bb wakes this
-thread with a new turn when the spawned child ends, and that wake-up turn is where it acts
-on the child's result, so that turn's idle is what reviews its work. Every other thread
-running — in the same checkout or anywhere else, including this thread's own advisor and
-subagents it did not spawn as a child — never holds a review back, and never changes what
-it does. Each review stages, commits and merges only the files its own turn authored
-(explicit pathspec), skips any file carrying edits it did not make, and the merge step
-itself refuses to run while the tree holds changes this turn did not make.
+holds the current turn while it runs, directly or transitively (a grandchild counts too; a
+long-running child spawned in an earlier turn holds a later one too). bb wakes this thread
+with a new turn whenever one of them ends; if another is still running, that wake-up turn
+just re-parks, so only the wake-up after the **last** of them ends is where it acts on the
+child's result, and that turn's idle is what reviews its work. Every other thread running —
+in the same checkout or anywhere else, including this thread's own advisor and subagents it
+did not spawn as a child — never holds a review back, and never changes what it does. Each
+review stages, commits and merges only the files its own turn authored (explicit pathspec),
+skips any file carrying edits it did not make, and the merge step itself refuses to run
+while the tree holds changes this turn did not make.
 
 What auto-review also limits is how many reviews run at once **per provider**, because
 reviews on one provider share that provider's usage limits: a Claude Code review here and a
@@ -168,8 +169,8 @@ instead — its review and commit then never run.
   reviewed as soon as that review ends. Not a skip — nothing is lost.
 - `children-active` — a thread this thread spawned as a child, in any turn, directly or
   transitively, is still running. Paired with outcome `deferred`, this turn is parked until
-  bb wakes it with the child's completion, or the 5-minute sweep if that wake-up is missed.
-  Not a skip — nothing is lost.
+  bb wakes it once the last of them has ended, or the 5-minute sweep if that wake-up is
+  missed. Not a skip — nothing is lost.
 - `no-authorship` — the turn changed no files: no tool edit, and nothing in the working
   tree (a new, rewritten or deleted path, or one in a commit the turn made — on a branch or
   straight onto the mainline) changed since the turn started. Edits made through shell commands count. Untracked
@@ -186,9 +187,11 @@ instead — its review and commit then never run.
   parked (`deferred`) is dropped as well. A stop bb made on its own (daemon restart,
   provider-turn watchdog) does not count. Stopping a spawned child does not count either,
   and does not stand the turn down — an agent's own `bb thread stop` on a child it is done
-  with records the same reason a user's manual stop would. To keep a turn from being
-  reviewed after taking over from a child, use `bb auto-review reset <thread-id>` or skip
-  the thread instead.
+  with records the same reason a user's manual stop would. Taking over from a child this
+  way still lets its wake-up turn review the child's work, which a reviewer stepping in may
+  not want: to stop that review instead, run `bb auto-review skip <thread-id>` (or `reset`
+  while the turn is still `deferred`) **before** stopping the child — stopping it first lets
+  the wake-up turn's review fire regardless.
 - `user-queued` — the turn ended with a message of the user's already queued (or its turn
   already started). Paired with outcome `deferred`: no review fires next to their message;
   the turn-start cursor is carried into that next turn, and the review fires at the first

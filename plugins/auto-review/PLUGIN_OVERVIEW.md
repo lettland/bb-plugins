@@ -28,9 +28,10 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   never a merge target.
 - Holds the turn while any child the thread spawned (`bb thread spawn --parent-self`), in
   any turn, directly or transitively, is still running: bb wakes the parent with a new turn
-  when the child ends, and that wake-up turn's idle reviews its work instead of a tree
-  snapshot the child is about to overwrite. Released only by its own wake-up idle or the
-  5-minute sweep, never by an unrelated same-provider release.
+  each time one ends, but a wake-up with another child still running just re-parks. Only
+  the turn after the last one ends reviews its work, instead of a tree snapshot a running
+  child is about to overwrite. Released only by its own wake-up idle or the 5-minute sweep,
+  never by an unrelated same-provider release.
 - Runs one review at a time per provider, across all projects, since reviews on one
   provider share its usage limits: a turn ending while another thread on the same provider
   has its review queued or running is deferred, not dropped — never because another thread

@@ -1072,6 +1072,15 @@ describe("runningChildIds", () => {
     );
   });
 
+  it("descends through an archived child to find a running grandchild", async () => {
+    const entries: ChildEntry[] = [
+      { id: "archived-child", parentThreadId: "self", status: "active", archivedAt: 1 },
+      { id: "running-grandchild", parentThreadId: "archived-child", status: "active" },
+    ];
+    const { bb } = fakeBb(entries);
+    expect(await runningChildIds(bb, "self")).toEqual(["running-grandchild"]);
+  });
+
   it("does not loop forever on a cycle in the spawn graph", async () => {
     const entries: ChildEntry[] = [
       { id: "cA", parentThreadId: "self", status: "active" },

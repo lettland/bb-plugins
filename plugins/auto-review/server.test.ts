@@ -1332,8 +1332,10 @@ describe("auto-review plugin", () => {
     expect(host.metadata.heldBy).toEqual(["child-1"]);
 
     // The child is manually stopped (e.g. a supervisor cleaning up a worker)
-    // and goes idle; that alone must not stand the parent's turn down.
-    host.interrupt({ seq: 1, reason: "manual-stop" }, "child-1");
+    // and goes idle; that alone must not stand the parent's turn down. The
+    // seq is well above the parent's turn-start cursor (100), so a regression
+    // that checked children with the parent's own sinceSeq would still catch it.
+    host.interrupt({ seq: 150, reason: "manual-stop" }, "child-1");
     host.setEnvThreads([
       { id: THREAD_ID, status: "idle" },
       { id: "child-1", status: "idle", parentThreadId: THREAD_ID },
