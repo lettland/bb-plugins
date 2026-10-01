@@ -111,8 +111,9 @@ them is your provider's call.
 - **Your provider's own subagents** — a read-only kind if it has one — when not running under
   bb, or when a bb thread spawn fails.
 
-- **Otherwise, or when spawning fails** (an error, a refusal, plan mode or a sandbox blocking
-  it), run them one after another in this thread. For each reviewer in turn: load its
+- **Otherwise** — no bb threads and no provider subagents, or both fail to spawn (an error, a
+  refusal, plan mode or a sandbox blocking it) — run them one after another in this thread. For
+  each reviewer in turn: load its
   calibration and stack skills, read every hunk of its scope and the surrounding code a hunk
   depends on, then write out that reviewer's own Blockers / Concerns / Advisories / Verdict
   before starting the next. Do not merge the lenses into one pass.
