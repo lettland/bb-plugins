@@ -237,9 +237,9 @@ describe("buildReviewPrompt", () => {
       expect(text).toMatch(
         /1\. [^\n]*Then run `bb aislop scan`[^\n]*command unknown or its plugin disabled[^\n]*skip this[^\n]*non-zero exit code[^\n]*only means it found issues[^\n]*advice, not orders[^\n]*project's own rules[^\n]*one-line reason/u,
       );
-      expect(text).toContain("`bb aislop scan`");
       expect(text).not.toMatch(/bb aislop scan --base/);
       expect(text).toMatch(/even when the current branch is the root branch itself/);
+      expect(text).toMatch(/prints an error instead of a report[^\n]*did not run/);
 
       const textCommitted = build(true, "abc1234");
       expect(textCommitted).toContain("`bb aislop scan --base abc1234`");
@@ -304,11 +304,14 @@ describe("buildReviewPrompt", () => {
         reviewMode: "auto",
         scope: baseScope,
         committedSince,
+        aislopScan: true,
       });
       expect(text).toContain("scope `code` (the uncommitted changes)");
       expect(text).not.toContain("impl ");
       expect(text).not.toContain("Do not amend");
       expect(text).not.toContain("Scan this turn's commits");
+      expect(text).not.toContain("--base");
+      expect(text).toContain("`bb aislop scan`");
     }
   });
 

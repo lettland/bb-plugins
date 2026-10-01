@@ -101,7 +101,8 @@ const OWN_WORK_ONLY =
  * The aislop plugin's scan, asked for only while that plugin is running. Its
  * findings are heuristics, so they are triaged against the project's own rules
  * rather than all fixed. `--base` pins a committed turn to its start commit,
- * which a root branch without a remote copy would otherwise miss.
+ * which keeps the scan on the turn's own work and covers a root branch without
+ * a remote copy.
  */
 function aislopScanStep(committedSince: string | null): string {
   const command = committedSince === null ? "bb aislop scan" : `bb aislop scan --base ${committedSince}`;
@@ -109,7 +110,7 @@ function aislopScanStep(committedSince: string | null): string {
     committedSince === null
       ? "which scans what this branch changed against its root branch, committed or not"
       : "which scans this turn's commits plus the uncommitted changes";
-  return ` Then run \`${command}\`, ${description}. Run it even when the current branch is the root branch itself — the scan still covers this turn's work there — so never skip it because the branch and its root are the same. If bb reports the command unknown or its plugin disabled, the aislop plugin went away meanwhile, so skip this. A non-zero exit code from the scan only means it found issues, not that the step failed. Treat its findings as advice, not orders: act only on findings in the files listed above and on lines you changed this turn, and fix one only when it is a real problem and the fix does not go against this project's own rules (CLAUDE.md / AGENTS.md, lint and formatter config, or the conventions the surrounding code follows). Leave false positives and rule conflicts as they are, and list each finding you skipped with a one-line reason in your final reply.`;
+  return ` Then run \`${command}\`, ${description}. Run it even when the current branch is the root branch itself — the scan still covers this turn's work there — so never skip it because the branch and its root are the same. If bb reports the command unknown or its plugin disabled, the aislop plugin went away meanwhile, so skip this. A non-zero exit code from the scan only means it found issues, not that the step failed. But if it prints an error instead of a report (for example that no root branch was found), the scan did not run: say so in your final reply rather than treating it as findings. Treat its findings as advice, not orders: act only on findings in the files listed above and on lines you changed this turn, and fix one only when it is a real problem and the fix does not go against this project's own rules (CLAUDE.md / AGENTS.md, lint and formatter config, or the conventions the surrounding code follows). Leave false positives and rule conflicts as they are, and list each finding you skipped with a one-line reason in your final reply.`;
 }
 
 function reviewStep(mode: ReviewMode, committedSince: string | null, aislopScan: boolean): string {
