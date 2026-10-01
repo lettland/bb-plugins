@@ -50,8 +50,9 @@ outside bb, or when spawning one fails, they run as the provider's own subagents
 sequentially in the orchestrating thread as a last resort. See `review-code`'s `§3` for the
 recipe and its tree guard. A full review costs about five provider sessions (four lenses plus
 closure). Archived reviewer threads stay openable, so their transcripts keep the reviewed diff,
-including any secret values in it — delete those threads after reviewing a diff with a leaked
-secret.
+including any secret values in it — run `bb thread delete <id>` on one after reviewing a diff
+with a leaked secret, rather than waiting on its parent. They're spawned with
+`--lifecycle-owner-thread`, so they're deleted along with their parent anyway.
 
 ## Install
 
