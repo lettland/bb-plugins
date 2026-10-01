@@ -165,19 +165,22 @@ describe("review-code content", () => {
     expect(r.content).toContain("Cite any secret by file:line and type, never by");
   });
 
-  it("has the content-fingerprint tree guard, not status alone", async () => {
+  it("fingerprints tracked and untracked paths by name, not status alone", async () => {
     const r = await loadSkill(contentRoot, "review-code");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.content).toContain("git status --porcelain=v1 -uall");
-    expect(r.content).toContain("git hash-object --stdin");
+    expect(r.content).toContain("git stash create");
+    expect(r.content).toContain("git ls-files -o --exclude-standard -z | xargs -0 --no-run-if-empty");
+    expect(r.content).toContain("shasum");
+    expect(r.content).toContain("git diff --name-only --no-ext-diff --no-textconv");
   });
 
-  it("does not use a heredoc to pass the reviewer brief", async () => {
+  it("does not use a heredoc anywhere in §3", async () => {
     const r = await loadSkill(contentRoot, "review-code");
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.content).not.toContain("<<'EOF'");
+    const section3 = r.content.slice(r.content.indexOf("## 3."), r.content.indexOf("## 4."));
+    expect(section3).not.toMatch(/<<-?\s*['"]?\w+['"]?/);
   });
 
   it("has the bounded-wait recipe for reviewer threads", async () => {
@@ -185,6 +188,16 @@ describe("review-code content", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.content).toContain("--timeout 8m");
+  });
+
+  it("passes --permission-mode, capping full at auto, and can stop and poll interactions", async () => {
+    const r = await loadSkill(contentRoot, "review-code");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.content).toContain("--permission-mode <cappedMode>");
+    expect(r.content).toContain("`full` becomes `auto`");
+    expect(r.content).toContain("bb thread stop");
+    expect(r.content).toContain("bb thread interactions list");
   });
 
   it("routes the closure review through a bb child thread", async () => {
