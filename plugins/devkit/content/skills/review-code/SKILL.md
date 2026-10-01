@@ -94,18 +94,16 @@ that lens through to the next, independently per lens.
   approval, which drops the lens straight to subagents.
 
   **Brief file**: create one run dir per review, `mktemp -d "${TMPDIR:-/tmp}/review-XXXXXX"` —
-  `$TMPDIR` may be unset (Linux, remote environments), and `-d` makes a real directory instead
-  of the literal template BSD/macOS `mktemp -u` prints whenever its run of placeholder letters
-  isn't the very end of the string (a trailing file extension breaks it). Write each lens's
-  brief at `<run dir>/<lens>.md` with
-  your file tool, not the shell, and never into the checkout; delete it once no further spawn
-  attempt will read it — after a successful spawn, or once the permission-mode retry (if any)
-  has also failed. The tree guard below keeps its config snapshot in the run dir too; at the end
-  of the review, `rm -f <run dir>/*` then `rmdir <run dir>` — never a recursive remove. Not a
-  heredoc: the
-  Project context block inlines repo text
-  (CLAUDE.md/AGENTS.md) that could contain a line reading exactly the delimiter, closing it
-  early and running what follows as shell:
+  `$TMPDIR` may be unset (Linux, remote environments), and `-d` makes a real directory instead of
+  the literal template BSD/macOS `mktemp -u` prints whenever its run of placeholder letters isn't
+  the very end of the string (a trailing file extension breaks it). Write each lens's brief at
+  `<run dir>/<lens>.md` with your file tool, not the shell, and never into the checkout; delete it
+  once no further spawn attempt will read it — after a successful spawn, or once the
+  permission-mode retry (if any) has also failed. The tree guard below keeps its config snapshot
+  in the run dir too; at the end of the review, `rm -f <run dir>/*` then `rmdir <run dir>` — never
+  a recursive remove. Not a heredoc: the Project context block inlines repo text
+  (CLAUDE.md/AGENTS.md) that could contain a line reading exactly the delimiter, closing it early
+  and running what follows as shell:
   ```sh
   bb thread spawn --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" \
     --project <projectId> --environment "$BB_ENVIRONMENT_ID" --provider <providerId> \
