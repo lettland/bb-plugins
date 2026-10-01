@@ -125,7 +125,8 @@ A feature branch is one whose name contains a `/` (`fix/oh-1/x`, `OH-2/y`, bb's 
 
 A thread this thread spawned as a child (`bb thread spawn --parent-self`), in any turn,
 holds the current turn while it runs, directly or transitively (a grandchild counts too; a
-long-running child spawned in an earlier turn holds a later one too). bb wakes this thread
+long-running child spawned in an earlier turn holds a later one too; one under a deleted
+child is not seen, since bb never lists deleted threads). bb wakes this thread
 with a new turn whenever one of them ends; if another is still running, that wake-up turn
 just re-parks, so only the wake-up after the **last** of them ends is where it acts on the
 child's result, and that turn's idle is what reviews its work. Every other thread running —
@@ -189,9 +190,10 @@ instead — its review and commit then never run.
   and does not stand the turn down — an agent's own `bb thread stop` on a child it is done
   with records the same reason a user's manual stop would. Taking over from a child this
   way still lets its wake-up turn review the child's work, which a reviewer stepping in may
-  not want: to stop that review instead, run `bb auto-review skip <thread-id>` (or `reset`
-  while the turn is still `deferred`) **before** stopping the child — stopping it first lets
-  the wake-up turn's review fire regardless.
+  not want: to stop that review instead, run `bb auto-review skip <thread-id>` or
+  `bb auto-review reset <thread-id>`, best before stopping the child; either still works
+  until the wake-up turn ends, and only then is it too late. `skip` stays on for every
+  later turn of the thread until `bb auto-review unskip <thread-id>`.
 - `user-queued` — the turn ended with a message of the user's already queued (or its turn
   already started). Paired with outcome `deferred`: no review fires next to their message;
   the turn-start cursor is carried into that next turn, and the review fires at the first

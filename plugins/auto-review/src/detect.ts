@@ -626,7 +626,10 @@ function ownThreadIds(
  * helpers (the advisor and similar): those send no wake-up and must never
  * hold a turn. Only `parentThreadId` links are walked — a thread merely
  * `lifecycleOwnerThreadId`-owned gets no wake-up either. A visited set makes
- * the walk cycle-safe.
+ * the walk cycle-safe. Archived children are walked through, since archiving
+ * does not reliably take their children along; deleted ones never come back
+ * from `threads.list`, so a grandchild under a deleted child is not seen. One
+ * list call per descendant, archived ones included.
  */
 async function spawnedDescendants(
   bb: BbPluginApi,
