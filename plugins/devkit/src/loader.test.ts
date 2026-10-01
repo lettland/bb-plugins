@@ -123,3 +123,23 @@ describe("loadSkill", () => {
     if (r.ok) expect(r.truncated).toBe(false);
   });
 });
+
+describe("review-code content", () => {
+  const contentRoot = path.join(import.meta.dirname, "..", "content");
+
+  it("cites only references that load, including all four reviewer calibrations", async () => {
+    const r = await loadSkill(contentRoot, "review-code");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cited = new Set(
+      [...r.content.matchAll(/reference: "([a-z0-9-]+)"|`(reviewer-[a-z-]+)`/g)].map((m) => m[1] ?? m[2]),
+    );
+    for (const lens of ["reviewer-senior-dev", "reviewer-senior-qa", "reviewer-security", "reviewer-end-user"]) {
+      expect(cited).toContain(lens);
+    }
+    for (const reference of cited) {
+      const loaded = await loadSkill(contentRoot, undefined, reference);
+      expect(loaded.ok, reference).toBe(true);
+    }
+  });
+});
