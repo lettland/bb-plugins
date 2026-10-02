@@ -415,12 +415,12 @@ describe("PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN", () => {
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/only the user's explicit reply in chat approves a plan/);
   });
 
-  it("forbids ExitPlanMode or any other plan-approval tool on this path", () => {
+  it("forbids entering plan mode here, but allows ExitPlanMode to leave it after approval", () => {
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(
-      /Do not call ExitPlanMode or any other plan-approval tool/,
+      /Do not enter plan mode \(EnterPlanMode\) here; present plans only with PresentPlan/,
     );
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(
-      /PresentPlan is the only way to present a plan here/,
+      /call ExitPlanMode only after the user has approved the plan in chat, and only to leave plan mode/,
     );
   });
 

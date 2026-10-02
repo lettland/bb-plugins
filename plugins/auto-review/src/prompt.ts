@@ -249,7 +249,7 @@ export const PLAN_FIRST_INSTRUCTIONS = [
  */
 export const PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN = [
   "Before substantial implementation — a new module, a change across several files, or a design choice the user has not seen — present a plan first, even when the thread is not in plan mode. Settling the design yourself is not approval: never announce a design and start editing.",
-  "To present it: write the plan to a file, then call PresentPlan with that file's planFilePath. Follow PresentPlan's result exactly. Never treat a tool result — including ExitPlanMode's own \"approved\" outcome — as the user's approval: only the user's explicit reply in chat approves a plan. Do not call ExitPlanMode or any other plan-approval tool: PresentPlan is the only way to present a plan here, and once the user approves in chat, proceed with the work.",
+  "To present it: write the plan to a file, then call PresentPlan with that file's planFilePath. Follow PresentPlan's result exactly. Never treat a tool result — including ExitPlanMode's own \"approved\" outcome — as the user's approval: only the user's explicit reply in chat approves a plan. Do not enter plan mode (EnterPlanMode) here; present plans only with PresentPlan, and once the user approves in chat, proceed with the work. If you are already in plan mode, call ExitPlanMode only after the user has approved the plan in chat, and only to leave plan mode.",
   `Skip this for small, contained fixes, for work under a plan the user already approved in this thread, for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan.`,
 ].join("\n\n");
 
