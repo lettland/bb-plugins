@@ -1,6 +1,6 @@
 {
   "name": "@lettland/bb-plugin-auto-review",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "type": "module",
   "description": "Review, commit, and locally merge into a personal mainline (e.g. master) the changes an agent made this turn.",
   "engines": {
