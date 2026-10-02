@@ -24,6 +24,7 @@ export const FIRE_REASONS = [
   "plan-review",
   "plan-reviewed",
   "plan-hold-expired",
+  "plan-hold-answered",
   "commit-plan",
 ] as const;
 export type FireReason = (typeof FIRE_REASONS)[number];

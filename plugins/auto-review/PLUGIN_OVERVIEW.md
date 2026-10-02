@@ -50,10 +50,15 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   genuinely-unfinished planned work instead of halting mid-plan (never inventing work).
 - Reviews plans too: fires on `interaction.pending` for a plan approval, holds the
   first presentation back (queues a review-plan turn, then denies the approval), and
-  releases the revised plan to the user on its re-presentation. Via
-  `bb.agents.configure` instructions it tells agents in top-level, user-started threads
-  to present a plan before substantial work even outside plan mode, since the gate only
-  sees a presented plan.
+  releases the revised plan to the user on its re-presentation. If the agent reacts to
+  the bare deny by asking the user what to change, auto-review auto-answers that one
+  question itself (reason `plan-hold-answered`) so the user is never asked to explain a
+  rejection they never made. Via `bb.agents.configure` instructions it tells agents in
+  top-level, user-started threads to present a plan before substantial work even outside
+  plan mode, since the gate only sees a presented plan — the gated form (EnterPlanMode /
+  ExitPlanMode) only on Claude Code, the only provider whose plan approvals reach the
+  gate; every other provider gets a no-gate instruction to present the plan and wait for
+  the user's own approval instead.
 - Ships enabled (opt-out). Turn it off globally or per project, or skip a single
   thread, with `bb auto-review`.
 
@@ -61,6 +66,8 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
 
 - Settings: global `enabled`, default `mergeEligibleMainlines`, default `reviewMode`.
 - Per-project overrides and per-thread skip live in the plugin's own storage.
-- CLI: `bb auto-review status|show|enable|disable|skip|unskip|reset` (all `--json`).
+- CLI: `bb auto-review status|show|enable|disable|skip|unskip|reset` (all `--json`). `status`
+  reports `planGate`: whether this thread is a top-level, enabled, non-skipped `claude-code`
+  thread, so its plan review is owned here rather than by another gate (e.g. agent-hooks).
 
 See `skills/auto-review/SKILL.md` for details.

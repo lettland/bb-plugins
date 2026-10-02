@@ -5,6 +5,8 @@ import {
   buildReviewPrompt,
   MAX_SCOPE_ENTRIES,
   PLAN_FIRST_INSTRUCTIONS,
+  PLAN_FIRST_INSTRUCTIONS_NO_GATE,
+  PLAN_HOLD_ANSWER,
   renderScope,
 } from "./prompt.js";
 
@@ -390,5 +392,38 @@ describe("PLAN_FIRST_INSTRUCTIONS", () => {
 
   it("fits the host's 4096-character instruction limit", () => {
     expect(PLAN_FIRST_INSTRUCTIONS.length).toBeLessThanOrEqual(4096);
+  });
+});
+
+describe("PLAN_FIRST_INSTRUCTIONS_NO_GATE", () => {
+  it("asks for a presented plan before substantial work, even outside plan mode", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE).toMatch(/even when the thread is not in plan mode/);
+    expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE).toMatch(/never announce a design and start editing/);
+  });
+
+  it("waits for the user's own approval instead of a self-approving plan tool", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE).toMatch(/Do not use ExitPlanMode or another plan-approval tool/);
+    expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE).toMatch(/approves itself in this thread/);
+    expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE).toMatch(/is not the user's approval/);
+    expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE).toMatch(/plan review is not automatic in this thread/);
+  });
+
+  it("exempts small fixes, approved plans, and auto-review's own turns", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE).toMatch(/small, contained fixes/);
+    expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE).toMatch(/already approved in this thread/);
+    expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE).toContain(`${AUTO_REVIEW_MARKER} turns`);
+  });
+
+  it("fits the host's 4096-character instruction limit", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE.length).toBeLessThanOrEqual(4096);
+  });
+});
+
+describe("PLAN_HOLD_ANSWER", () => {
+  it("starts with the marker and says nobody has seen or rejected the plan", () => {
+    expect(PLAN_HOLD_ANSWER.startsWith(AUTO_REVIEW_MARKER)).toBe(true);
+    expect(PLAN_HOLD_ANSWER).toMatch(/did not reject this plan and has not seen it/);
+    expect(PLAN_HOLD_ANSWER).toMatch(/Do not ask the user what to change/);
+    expect(PLAN_HOLD_ANSWER).toMatch(/ask it again/);
   });
 });

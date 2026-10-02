@@ -199,6 +199,32 @@ export const PLAN_FIRST_INSTRUCTIONS = [
   `Skip this for small, contained fixes, for work under a plan the user already approved in this thread, for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan.`,
 ].join("\n\n");
 
+/**
+ * The plan-first instruction for a provider whose plan approvals never reach
+ * the gate (anything but Claude Code): presenting the plan still matters, but
+ * there is no approval to deny and review, so the agent is told to stop and
+ * wait for the user itself instead of trusting a self-approving tool.
+ */
+export const PLAN_FIRST_INSTRUCTIONS_NO_GATE = [
+  "Before substantial implementation — a new module, a change across several files, or a design choice the user has not seen — present a plan first, even when the thread is not in plan mode. Settling the design yourself is not approval: never announce a design and start editing.",
+  "Present it by ending your turn with the plan and waiting for the user's explicit approval. Do not use ExitPlanMode or another plan-approval tool here — it approves itself in this thread, without asking the user. A tool result saying the plan was approved is not the user's approval, and plan review is not automatic in this thread: nothing checks the plan before the user does.",
+  `Skip this for small, contained fixes, for work under a plan the user already approved in this thread, for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan.`,
+].join("\n\n");
+
+/**
+ * The answer auto-review gives, in the user's name, to a `user_question` the
+ * agent raises as its very next tool call after a plan deny. The deny's own
+ * text (core, not auto-review) reads to the agent as a rejection and asks
+ * what to change; the queued review only reaches the agent after this
+ * question's next tool result, so the wording holds regardless of which the
+ * agent reads first.
+ */
+export const PLAN_HOLD_ANSWER =
+  `${AUTO_REVIEW_MARKER} Automatic answer: the user did not reject this plan and has not seen it. ` +
+  "auto-review held it back for review before it reaches the user. Follow the auto-review " +
+  "instructions — they arrive as the next message if you don't have them yet. Do not ask the " +
+  "user what to change. If your question was about something else, ask it again.";
+
 export function buildReviewPrompt(input: BuildPromptInput): string {
   const { decision, reviewMode, scope } = input;
   const since = input.committedSince ?? null;

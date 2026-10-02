@@ -32,21 +32,32 @@ import {
 import {
   isBusyStatus,
   passesThreadGate,
+  PLAN_GATE_PROVIDER_ID,
   reviewInFlight,
   selfIsWorktree,
   type GateThread,
 } from "./src/gate.js";
-import { planApprovalOf, planGateAction, type PlanApproval } from "./src/plan.js";
+import {
+  isImmediateReactionToDeny,
+  planApprovalOf,
+  planGateAction,
+  userQuestionOf,
+  type PendingUserQuestion,
+  type PlanApproval,
+} from "./src/plan.js";
 import {
   buildPlanReviewPrompt,
   buildReviewPrompt,
   PLAN_FIRST_INSTRUCTIONS,
+  PLAN_FIRST_INSTRUCTIONS_NO_GATE,
+  PLAN_HOLD_ANSWER,
   renderScope,
 } from "./src/prompt.js";
 import { addReview, readReviews, removeReview } from "./src/reviews.js";
 import {
   isStale,
   PLAN_GATE_KEYS,
+  planDenyFresh,
   planHoldExpired,
   readState,
   REVIEW_IN_FLIGHT_PHASES,
@@ -59,7 +70,6 @@ import {
 interface GateThreadLike extends GateThread {
   id: string;
   projectId: string;
-  providerId: string;
 }
 
 const providerLocks = new Map<string, Promise<unknown>>();
@@ -108,20 +118,40 @@ export default async function plugin(bb: BbPluginApi) {
     globals = globalDefaultsFrom(next);
   });
 
-  // Only threads the plan gate can serve get the plan-first instruction: a
+  // Only threads the plan gate can serve get a plan-first instruction: a
   // child or plugin-spawned thread would stop for an approval nobody reviews
   // or may be watching. The callback must be synchronous, so it follows the
   // global switch only: a project or thread that turned auto-review off still
-  // gets it, and its plan then goes to the user unreviewed.
-  bb.agents.configure((context) => ({
-    tools: [],
-    skills: ["auto-review"],
-    ...(globals.enabled &&
-    context.thread.parentThreadId === null &&
-    context.origin.pluginId === null
-      ? { instructions: PLAN_FIRST_INSTRUCTIONS }
-      : {}),
-  }));
+  // gets one of these, and its plan then goes to the user unreviewed.
+  //
+  // Claude Code is the only provider whose plan approvals reach the gate: its
+  // ExitPlanMode routes to a real `interaction.pending` with
+  // `subject.kind: "plan"`, even in the `full` permission mode. The ACP
+  // bridge, by contrast, auto-approves every permission request in `full`
+  // mode (`handlePermissionRequest`), and in its other modes raises only a
+  // generic approval, never one with that subject kind — the SDK has no
+  // capability flag for this, so there is nothing to branch on but the
+  // provider id. On every other provider the gate never sees a plan, so a
+  // plan-approval tool (or none at all) just approves itself and the user
+  // never sees the plan either; those threads get the no-gate variant
+  // instead, which asks the agent to stop and wait for the user's own
+  // approval rather than trust a tool that approves itself.
+  bb.agents.configure((context) => {
+    const served =
+      globals.enabled &&
+      context.thread.parentThreadId === null &&
+      context.origin.pluginId === null;
+    const instructions = served
+      ? context.provider.id === PLAN_GATE_PROVIDER_ID
+        ? PLAN_FIRST_INSTRUCTIONS
+        : PLAN_FIRST_INSTRUCTIONS_NO_GATE
+      : null;
+    return {
+      tools: [],
+      skills: ["auto-review"],
+      ...(instructions === null ? {} : { instructions }),
+    };
+  });
 
   async function recordFire(
     projectId: string,
@@ -579,9 +609,14 @@ export default async function plugin(bb: BbPluginApi) {
   /**
    * Hold a plan's first presentation for review. The review turn is queued
    * BEFORE the approval is denied: a thread awaiting an interaction cannot take
-   * a prompt, so the turn waits on the approval and core steers it in the
-   * moment the deny settles — the agent reads the reason alongside the deny
-   * instead of guessing why its plan was "rejected".
+   * a prompt, so the turn waits on the approval and core steers it the moment
+   * the deny settles. But the deny's own text — core's, not auto-review's —
+   * reaches the agent first and reads as the user rejecting the plan; the
+   * steered review only reaches it after its next tool result (Claude Code
+   * hands a steered message to the model only then). In between, the agent
+   * may ask the user what to change — `denyPlan` leaves a short-lived
+   * `planDenied` cursor for exactly that, which the `interaction.pending`
+   * handler below uses to answer that one question itself.
    */
   async function gatePlan(
     thread: GateThreadLike,
@@ -704,19 +739,38 @@ export default async function plugin(bb: BbPluginApi) {
    * it would land after an approval and send the agent back to planning in the
    * middle of implementing — and disarm. A review that was delivered straight
    * into the turn (no queued row) cannot be withdrawn; that is only logged.
+   *
+   * The timeline cursor for `planDenied` is captured BEFORE the resolve call,
+   * not after: the agent can start its next tool call within the resolve's
+   * own round-trip, and a cursor taken afterward could already be past that
+   * tool call, making it invisible to the next-tool-call guard. Capturing the
+   * cursor never blocks the deny itself — if it fails, the deny still goes
+   * ahead, just without arming `planDenied` (logged, not fatal). `planDenied`
+   * is written only after the resolve has settled — never inside the same
+   * try as the deny itself, so a failing metadata write can never be mistaken
+   * for a failed deny.
    */
   async function denyPlan(
     thread: GateThreadLike,
     approval: PlanApproval,
     queuedMessageId: string | null,
   ): Promise<boolean> {
+    let sinceSeq: number | null = null;
+    try {
+      sinceSeq = await captureSinceSeq(bb, thread.id);
+    } catch (error) {
+      bb.log.warn(
+        `auto-review: could not capture a timeline cursor before denying the plan in ${thread.id}; a plan-hold question will not be auto-answered: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     try {
       await bb.sdk.threads.interactions.resolve({
         threadId: thread.id,
         interactionId: approval.interactionId,
         resolution: { decision: "deny" },
       });
-      return true;
     } catch (error) {
       bb.log.warn(
         `auto-review: could not hold the plan for review in ${thread.id}; leaving it for the user: ${
@@ -730,14 +784,86 @@ export default async function plugin(bb: BbPluginApi) {
       await recordFire(thread.projectId, thread.id, "stood-down", "send-failed");
       return false;
     }
+    if (sinceSeq !== null) {
+      await writeState(bb, thread.id, { planDenied: { at: Date.now(), sinceSeq } });
+    }
+    return true;
+  }
+
+  /**
+   * Answer, in the user's name, a `user_question` the agent raises as its
+   * very next tool call after a plan deny — the deny's own reason reaching it
+   * before the queued review does (see `gatePlan`). Absent, there is nothing
+   * to do. Present, it is one-shot: removed right away, before any of the
+   * checks below, so whether they pass or fail, a later question must not
+   * find it still armed.
+   */
+  async function answerPlanHoldQuestion(
+    thread: GateThreadLike,
+    question: PendingUserQuestion,
+  ): Promise<void> {
+    const state = await readState(bb, thread.id);
+    if (state.planDenied === undefined) {
+      return;
+    }
+    const { sinceSeq } = state.planDenied;
+    await writeState(bb, thread.id, {}, ["planDenied"]);
+    if (!planDenyFresh(state, Date.now())) {
+      return;
+    }
+    const project = await readProjectConfig(bb, thread.projectId);
+    const config = effectiveConfig(globals, project, state.skip === true);
+    if (!config.enabled || config.skipped) {
+      return;
+    }
+    const events = await bb.sdk.threads.events.list({
+      threadId: thread.id,
+      afterSeq: String(sinceSeq),
+      types: ["item/started"],
+    });
+    if (!isImmediateReactionToDeny(events)) {
+      // Real tool work happened since the deny, so this question is not
+      // necessarily about the held plan — leave it with the user.
+      return;
+    }
+    try {
+      await bb.sdk.threads.interactions.resolve({
+        threadId: thread.id,
+        interactionId: question.interactionId,
+        resolution: {
+          kind: "user_answer",
+          answers: Object.fromEntries(
+            question.questionIds.map((id) => [id, { selected: [], freeText: PLAN_HOLD_ANSWER }]),
+          ),
+        },
+      });
+    } catch (error) {
+      bb.log.warn(
+        `auto-review: could not auto-answer the plan-hold question in ${thread.id}; leaving it for the user: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return;
+    }
+    await recordFire(thread.projectId, thread.id, "fired", "plan-hold-answered");
+    bb.log.info(
+      `auto-review: auto-answered the plan-hold question ${question.interactionId} in thread ${thread.id}`,
+    );
   }
 
   bb.events.on("interaction.pending", async ({ thread, interaction }) => {
-    const approval = planApprovalOf(interaction);
-    if (approval === null || !passesThreadGate(thread)) {
+    if (!passesThreadGate(thread)) {
       return;
     }
-    await withThreadLock(thread.id, () => gatePlan(thread, approval));
+    const approval = planApprovalOf(interaction);
+    if (approval !== null) {
+      await withThreadLock(thread.id, () => gatePlan(thread, approval));
+      return;
+    }
+    const question = userQuestionOf(interaction);
+    if (question !== null) {
+      await withThreadLock(thread.id, () => answerPlanHoldQuestion(thread, question));
+    }
   });
 
   bb.events.on("thread.active", async ({ thread }) => {
@@ -781,7 +907,17 @@ export default async function plugin(bb: BbPluginApi) {
     if (!passesThreadGate(thread)) {
       return;
     }
-    await withThreadLock(thread.id, () => handleIdle(thread));
+    await withThreadLock(thread.id, async () => {
+      // The turn ended, so any `planDenied` cursor from a deny earlier in it
+      // is no longer "the next tool call" for anything — clear it, when
+      // present, before handleIdle's own early returns so a question in some
+      // later turn is never mistaken for a reaction to this one's deny.
+      const state = await readState(bb, thread.id);
+      if (state.planDenied !== undefined) {
+        await writeState(bb, thread.id, {}, ["planDenied"]);
+      }
+      await handleIdle(thread);
+    });
     // Outside the thread lock, and outside evaluate's provider lock, so
     // releasing another turn cannot deadlock against the work we just did.
     await releaseDeferred(thread.providerId);

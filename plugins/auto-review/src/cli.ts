@@ -12,6 +12,7 @@ import {
   type GlobalDefaults,
 } from "./config.js";
 import { removeDeferral } from "./deferrals.js";
+import { planGateServes } from "./gate.js";
 import {
   LATCH_KEYS,
   PLAN_GATE_KEYS,
@@ -292,16 +293,17 @@ export function registerAutoReviewCli(
               "A thread id is required: bb auto-review status [thread-id] (or run inside a thread).\n",
           };
         }
-        let projectId: string;
+        let thread: Awaited<ReturnType<typeof bb.sdk.threads.get>>;
         try {
-          const thread = await bb.sdk.threads.get({ threadId });
-          projectId = thread.projectId;
+          thread = await bb.sdk.threads.get({ threadId });
         } catch {
           return threadError(threadId, wantsJson);
         }
+        const projectId = thread.projectId;
         const state = await readState(bb, threadId);
         const project = await readProjectConfig(bb, projectId);
         const config = effectiveConfig(getGlobals(), project, state.skip === true);
+        const planGate = planGateServes(thread, config);
         const lastFire = await readLastFire(bb, projectId, threadId);
         const payload = {
           threadId,
@@ -310,6 +312,7 @@ export function registerAutoReviewCli(
           skipped: config.skipped,
           reviewMode: config.reviewMode,
           mergeEligibleMainlines: config.mergeEligibleMainlines,
+          planGate,
           phase: state.phase,
           deferredSince: state.deferredSince ?? null,
           heldBy: state.heldBy ?? null,
@@ -337,6 +340,7 @@ export function registerAutoReviewCli(
             `skipped: ${config.skipped}\n` +
             `reviewMode: ${config.reviewMode}\n` +
             `mergeEligibleMainlines: ${config.mergeEligibleMainlines.join(", ")}\n` +
+            `planGate: ${planGate}\n` +
             `phase: ${state.phase}\n` +
             deferredText +
             `lastFire: ${lastFireText}\n`,

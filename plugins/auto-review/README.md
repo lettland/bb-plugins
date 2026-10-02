@@ -6,8 +6,13 @@ changes, applies fixes, commits only the paths that turn touched, and on a perso
 mainline (e.g. `master`) merges the feature branch into it locally. It never pushes.
 
 It also reviews plans: the first presentation of a plan for approval is held back,
-reviewed, and revised before the user sees it. A thread instruction has agents present a
-plan before substantial work even outside plan mode, so the review has a plan to catch.
+reviewed, and revised before the user sees it. If the agent reacts to the hold by asking
+the user what to change, auto-review answers that one question itself (marked
+`[bb auto-review]`) so the queued review still reaches it instead of the user being asked
+to explain a rejection they never made. A thread instruction has Claude Code agents present
+a plan before substantial work, even outside plan mode, so the review has a plan to catch.
+Other providers' plan approvals never reach auto-review, so their agents are told to end the
+turn with the plan and wait for the user's explicit approval.
 
 It ships enabled (opt-out).
 
@@ -68,7 +73,7 @@ All commands accept `--json`.
 
 | Command | What it does |
 |---|---|
-| `bb auto-review status` | Effective state and last-fire outcome for the current thread |
+| `bb auto-review status` | Effective state (including `planGate`, whether this thread's plan review is served here) and last-fire outcome for the current thread |
 | `bb auto-review show` | Global defaults, project override and resolved settings for the current project |
 | `bb auto-review enable [--global \| --project <id>]` | Turn it on; bare `enable` is global |
 | `bb auto-review disable [--global \| --project <id>]` | Turn it off, same scoping |

@@ -10,6 +10,7 @@ export interface GateThread {
   originPluginId: string | null;
   visibility: string;
   environmentId: string | null;
+  providerId: string;
 }
 
 export function passesThreadGate(thread: GateThread): boolean {
@@ -26,6 +27,27 @@ export function passesThreadGate(thread: GateThread): boolean {
     return false;
   }
   return true;
+}
+
+/** The only provider whose plan approvals reach auto-review's gate (see server.ts). */
+export const PLAN_GATE_PROVIDER_ID = "claude-code";
+
+/**
+ * Whether auto-review's plan gate owns this thread's plan review. True only for a
+ * top-level, visible, environment-bound `claude-code` thread with auto-review on —
+ * every other thread (ACP, standalone, disabled/skipped, child) falls to whatever
+ * reviews plans outside auto-review instead (e.g. agent-hooks' own hook).
+ */
+export function planGateServes(
+  thread: GateThread,
+  config: { enabled: boolean; skipped: boolean },
+): boolean {
+  return (
+    config.enabled &&
+    !config.skipped &&
+    thread.providerId === PLAN_GATE_PROVIDER_ID &&
+    passesThreadGate(thread)
+  );
 }
 
 const BUSY_STATUSES = new Set(["active", "starting", "stopping"]);

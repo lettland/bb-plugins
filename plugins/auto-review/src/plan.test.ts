@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { isCommitPlan, planApprovalOf, planGateAction } from "./plan.js";
+import {
+  isCommitPlan,
+  isImmediateReactionToDeny,
+  planApprovalOf,
+  planGateAction,
+  userQuestionOf,
+} from "./plan.js";
 
 function approval(overrides: Record<string, unknown> = {}, subject: Record<string, unknown> = {}) {
   return {
@@ -44,6 +50,77 @@ describe("isCommitPlan", () => {
   it("ignores an in-prose mention or a near miss", () => {
     expect(isCommitPlan("see <!-- devkit:commit-plan --> above")).toBe(false);
     expect(isCommitPlan("<!-- devkit:commit-planner -->")).toBe(false);
+  });
+});
+
+function question(
+  overrides: Record<string, unknown> = {},
+  questions: Array<Record<string, unknown>> = [{ id: "q1", allowFreeText: true }],
+) {
+  return {
+    id: "uq-1",
+    status: "pending",
+    payload: { kind: "user_question", questions },
+    ...overrides,
+  } as never;
+}
+
+describe("userQuestionOf", () => {
+  it("extracts a pending question whose options all allow free text", () => {
+    const interaction = question({}, [
+      { id: "q1", allowFreeText: true },
+      { id: "q2", allowFreeText: true },
+    ]);
+    expect(userQuestionOf(interaction)).toEqual({
+      interactionId: "uq-1",
+      questionIds: ["q1", "q2"],
+    });
+  });
+
+  it("ignores settled, non-question, and partially free-text-less interactions", () => {
+    expect(userQuestionOf(question({ status: "resolved" }))).toBeNull();
+    expect(
+      userQuestionOf({ id: "x", status: "pending", payload: { kind: "approval" } } as never),
+    ).toBeNull();
+    expect(
+      userQuestionOf(
+        question({}, [
+          { id: "q1", allowFreeText: true },
+          { id: "q2", allowFreeText: false },
+        ]),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("isImmediateReactionToDeny", () => {
+  function itemStarted(item: Record<string, unknown>) {
+    return { type: "item/started", data: { item } } as never;
+  }
+
+  it("is true with no events, or only reasoning/agent talk and the question's own item", () => {
+    expect(isImmediateReactionToDeny([])).toBe(true);
+    expect(
+      isImmediateReactionToDeny([
+        itemStarted({ type: "reasoning" }),
+        itemStarted({ type: "agentMessage" }),
+        itemStarted({ type: "toolCall", tool: "AskUserQuestion" }),
+      ]),
+    ).toBe(true);
+  });
+
+  it("ignores non-item/started events", () => {
+    expect(isImmediateReactionToDeny([{ type: "system/thread/interrupted", data: {} } as never])).toBe(
+      true,
+    );
+  });
+
+  it("is false once a real tool call happened", () => {
+    expect(isImmediateReactionToDeny([itemStarted({ type: "commandExecution" })])).toBe(false);
+    expect(
+      isImmediateReactionToDeny([itemStarted({ type: "toolCall", tool: "Bash" })]),
+    ).toBe(false);
+    expect(isImmediateReactionToDeny([itemStarted({ type: "userMessage" })])).toBe(false);
   });
 });
 

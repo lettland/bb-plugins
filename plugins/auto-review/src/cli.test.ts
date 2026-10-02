@@ -15,9 +15,12 @@ const THREAD_ID = "thread-1";
 const OTHER_ID = "thread-2";
 const PROJECT_ID = "project-1";
 
+/** A thread's project id, or a richer set of `threads.get` field overrides. */
+type ThreadFixture = string | ({ projectId: string } & Record<string, unknown>);
+
 interface CliHostOptions {
-  /** Threads the fake host knows, mapped to their project. */
-  threads?: Record<string, string>;
+  /** Threads the fake host knows, mapped to their project (or full fixture). */
+  threads?: Record<string, ThreadFixture>;
   globals?: GlobalDefaults;
 }
 
@@ -43,9 +46,11 @@ function createCliHost(options: CliHostOptions = {}) {
     threads: {
       get: async (args: { threadId: string }) => {
         known(args.threadId);
+        const fixture = threads[args.threadId] as ThreadFixture;
+        const overrides = typeof fixture === "string" ? { projectId: fixture } : fixture;
         return {
           ...makeThreadResponse({ id: args.threadId }),
-          projectId: threads[args.threadId] as string,
+          ...overrides,
         };
       },
       getPluginMetadata: async (args: { threadId: string }) => ({
@@ -316,6 +321,7 @@ describe("auto-review cli: reset", () => {
         skip: true,
         planReviewArmedAt: 2,
         planReviewEntryId: "qm-2",
+        planDenied: { at: 3, sinceSeq: 4 },
         unrelated: "kept",
       });
       const result = await host.run(["reset", THREAD_ID]);
@@ -461,6 +467,7 @@ describe("auto-review cli: status", () => {
           "skipped: false\n" +
           "reviewMode: auto\n" +
           "mergeEligibleMainlines: master\n" +
+          "planGate: false\n" +
           "phase: idle\n" +
           "lastFire: never\n",
       );
@@ -487,6 +494,7 @@ describe("auto-review cli: status", () => {
           skipped: true,
           reviewMode: "self",
           mergeEligibleMainlines: ["master", "main"],
+          planGate: false,
           phase: "idle",
           deferredSince: null,
           heldBy: null,
@@ -590,6 +598,65 @@ describe("auto-review cli: status", () => {
         projectId: "project-2",
       });
     });
+  });
+});
+
+describe("auto-review cli: status — planGate", () => {
+  const claudeCodeThread: ThreadFixture = {
+    projectId: PROJECT_ID,
+    providerId: "claude-code",
+    environmentId: "env-1",
+  };
+
+  it("is true for a top-level, enabled claude-code thread", async () => {
+    await withHost({ threads: { [THREAD_ID]: claudeCodeThread } }, async (host) => {
+      const result = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(result.stdout)).toMatchObject({ planGate: true });
+    });
+  });
+
+  it("is false for a different provider (e.g. the ACP bridge)", async () => {
+    await withHost(
+      { threads: { [THREAD_ID]: { ...claudeCodeThread, providerId: "acp-claude-work" } } },
+      async (host) => {
+        const result = await host.run(["status", THREAD_ID, "--json"]);
+        expect(parse(result.stdout)).toMatchObject({ planGate: false });
+      },
+    );
+  });
+
+  it("is false for a skipped thread", async () => {
+    await withHost({ threads: { [THREAD_ID]: claudeCodeThread } }, async (host) => {
+      host.metadataFor(THREAD_ID).skip = true;
+      const result = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(result.stdout)).toMatchObject({ planGate: false });
+    });
+  });
+
+  it("is false when disabled for the project", async () => {
+    await withHost({ threads: { [THREAD_ID]: claudeCodeThread } }, async (host) => {
+      await host.kv.set(`project:${PROJECT_ID}`, { enabled: false });
+      const result = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(result.stdout)).toMatchObject({ planGate: false });
+    });
+  });
+
+  it("is false when disabled globally", async () => {
+    await withHost({ threads: { [THREAD_ID]: claudeCodeThread } }, async (host) => {
+      host.setGlobals({ enabled: false, mergeEligibleMainlines: ["master"], reviewMode: "auto" });
+      const result = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(result.stdout)).toMatchObject({ planGate: false });
+    });
+  });
+
+  it("is false for a child thread", async () => {
+    await withHost(
+      { threads: { [THREAD_ID]: { ...claudeCodeThread, parentThreadId: "thr_parent" } } },
+      async (host) => {
+        const result = await host.run(["status", THREAD_ID, "--json"]);
+        expect(parse(result.stdout)).toMatchObject({ planGate: false });
+      },
+    );
   });
 });
 

@@ -7,8 +7,13 @@ import {
   type CreateFakePluginHostOptions,
 } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server.js";
-import { PLAN_FIRST_INSTRUCTIONS } from "./src/prompt.js";
-import { STALE_WINDOW_MS } from "./src/state.js";
+import {
+  AUTO_REVIEW_MARKER,
+  PLAN_FIRST_INSTRUCTIONS,
+  PLAN_FIRST_INSTRUCTIONS_NO_GATE,
+  PLAN_HOLD_ANSWER,
+} from "./src/prompt.js";
+import { PLAN_DENY_ANSWER_WINDOW_MS, STALE_WINDOW_MS } from "./src/state.js";
 
 const THREAD_ID = "thread-1";
 const SIBLING_ID = "thread-2";
@@ -52,6 +57,10 @@ interface HostOptions {
   authoringThreads?: string[];
   getThrowsFor?: string[];
   resolveThrows?: boolean;
+  /** Resolving a `user_answer` (only) fails — the global `resolveThrows` would also break the deny. */
+  resolveUserAnswerThrows?: boolean;
+  /** A real tool call lands during the deny's own resolve round-trip (races the cursor capture). */
+  raceItemOnDeny?: boolean;
   /** Withdrawing a queued message fails, as when core already dispatched it. */
   deleteQueuedThrows?: boolean;
   /** The environment status read reports the workspace unavailable. */
@@ -71,6 +80,11 @@ interface HostOptions {
 interface InterruptEvent {
   seq: number;
   reason: "manual-stop" | "host-daemon-restarted" | "provider-turn-idle";
+}
+
+interface ItemStartedEvent {
+  seq: number;
+  item: { type: string; tool?: string };
 }
 
 interface TreeFile {
@@ -169,6 +183,7 @@ function createHost(options: HostOptions = {}) {
   let maxSeq = 100;
   let queuedRows = options.queuedRows ?? [];
   let interrupts: Record<string, InterruptEvent[]> = {};
+  let itemEvents: Record<string, ItemStartedEvent[]> = {};
 
   const sdk: CreateFakePluginHostOptions["sdk"] = {
     plugins: {
@@ -241,10 +256,13 @@ function createHost(options: HostOptions = {}) {
         };
       },
       events: {
-        list: async (args: { threadId: string; afterSeq?: string; types?: readonly string[] }) =>
-          args.types?.includes("system/thread/interrupted") === true
-            ? (interrupts[args.threadId] ?? [])
-                .filter((event) => event.seq > Number(args.afterSeq ?? -1))
+        list: async (args: { threadId: string; afterSeq?: string; types?: readonly string[] }) => {
+          const after = Number(args.afterSeq ?? -1);
+          const rows: unknown[] = [];
+          if (args.types?.includes("system/thread/interrupted") === true) {
+            rows.push(
+              ...(interrupts[args.threadId] ?? [])
+                .filter((event) => event.seq > after)
                 .map((event) => ({
                   id: `ev-${args.threadId}-${event.seq}`,
                   scope: { kind: "thread" },
@@ -253,8 +271,26 @@ function createHost(options: HostOptions = {}) {
                   createdAt: 1_000,
                   type: "system/thread/interrupted",
                   data: { reason: event.reason },
-                }))
-            : [],
+                })),
+            );
+          }
+          if (args.types?.includes("item/started") === true) {
+            rows.push(
+              ...(itemEvents[args.threadId] ?? [])
+                .filter((event) => event.seq > after)
+                .map((event) => ({
+                  id: `ev-${args.threadId}-item-${event.seq}`,
+                  scope: { kind: "thread" },
+                  threadId: args.threadId,
+                  seq: event.seq,
+                  createdAt: 1_000,
+                  type: "item/started",
+                  data: { item: event.item, providerThreadId: "pt-1" },
+                })),
+            );
+          }
+          return rows;
+        },
       },
       list: async (args?: { parentThreadId?: string }) => {
         const rows = envThreads.map((entry) => ({
@@ -293,9 +329,25 @@ function createHost(options: HostOptions = {}) {
         },
       },
       interactions: {
-        resolve: async (args: { interactionId: string; resolution: unknown }) => {
+        resolve: async (args: { threadId: string; interactionId: string; resolution: unknown }) => {
           if (options.resolveThrows === true) {
             throw new Error("interaction already settled");
+          }
+          const resolution = args.resolution as { kind?: string; decision?: string } | null;
+          if (options.resolveUserAnswerThrows === true && resolution?.kind === "user_answer") {
+            throw new Error("answer already settled");
+          }
+          if (options.raceItemOnDeny === true && resolution?.decision === "deny") {
+            // A real tool call lands while this resolve is still in flight —
+            // a cursor captured only after it settles would already be past it.
+            maxSeq += 1;
+            itemEvents = {
+              ...itemEvents,
+              [args.threadId]: [
+                ...(itemEvents[args.threadId] ?? []),
+                { seq: maxSeq, item: { type: "toolCall", tool: "Bash" } },
+              ],
+            };
           }
           resolutions.push(args);
           return {};
@@ -387,6 +439,13 @@ function createHost(options: HostOptions = {}) {
       interrupts = {
         ...interrupts,
         [threadId]: [...(interrupts[threadId] ?? []), event],
+      };
+    },
+    /** Record an `item/started` event on a thread (default: the thread itself). */
+    startItem: (event: ItemStartedEvent, threadId: string = THREAD_ID) => {
+      itemEvents = {
+        ...itemEvents,
+        [threadId]: [...(itemEvents[threadId] ?? []), event],
       };
     },
     setQueuedRows: (next: QueuedRow[]) => {
@@ -483,6 +542,41 @@ function planInteraction(
 }
 
 function emitPlan(host: Host, interaction = planInteraction()) {
+  return host.harness.behavior.emitThreadEvent("interaction.pending", {
+    thread: thread(),
+    interaction,
+  } as never);
+}
+
+function userQuestionInteraction(
+  questions: Array<{ id: string; allowFreeText?: boolean }> = [{ id: "q1" }],
+  id = "uq-1",
+) {
+  return {
+    id,
+    threadId: THREAD_ID,
+    turnId: "turn-1",
+    status: "pending",
+    statusReason: null,
+    createdAt: 1,
+    resolvedAt: null,
+    resolution: null,
+    providerId: "claude-code",
+    providerRequestId: "req-2",
+    providerThreadId: "pt-1",
+    payload: {
+      kind: "user_question",
+      questions: questions.map((question) => ({
+        id: question.id,
+        prompt: "What should change in the plan?",
+        multiSelect: false,
+        allowFreeText: question.allowFreeText ?? true,
+      })),
+    },
+  };
+}
+
+function emitQuestion(host: Host, interaction = userQuestionInteraction()) {
   return host.harness.behavior.emitThreadEvent("interaction.pending", {
     thread: thread(),
     interaction,
@@ -1905,6 +1999,200 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
+  it("answers, in the user's name, a question the agent asks right after the deny", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    await emitPlan(host);
+    expect(host.metadata.planDenied).toMatchObject({ sinceSeq: 100 });
+    // The steered review is in the agent's hands before the question arrives,
+    // just as it is in production (core steers it in on the next tool result).
+    await host.harness.behavior.emitThreadEvent("message.dispatched", {
+      entry: queueEntry(),
+    });
+
+    const { errors } = await emitQuestion(host, userQuestionInteraction([{ id: "q1" }, { id: "q2" }]));
+    expect(errors).toEqual([]);
+    expect(host.resolutions.at(-1)).toEqual({
+      threadId: THREAD_ID,
+      interactionId: "uq-1",
+      resolution: {
+        kind: "user_answer",
+        answers: {
+          q1: { selected: [], freeText: PLAN_HOLD_ANSWER },
+          q2: { selected: [], freeText: PLAN_HOLD_ANSWER },
+        },
+      },
+    });
+    expect(PLAN_HOLD_ANSWER.startsWith(AUTO_REVIEW_MARKER)).toBe(true);
+    expect(host.metadata.planDenied).toBeUndefined();
+    expect(await lastFireOf(host)).toMatchObject({ outcome: "fired", reason: "plan-hold-answered" });
+    await host.harness.dispose();
+  });
+
+  it("captures the timeline cursor before the deny settles, not after", async () => {
+    // A real tool call lands while the deny's own resolve call is still in
+    // flight. A cursor taken only after that resolve settles would already be
+    // past it, making it invisible to the next-tool-call guard.
+    const host = createHost({ sendDelivery: "queued", raceItemOnDeny: true });
+    await plugin(host.bb);
+    await emitPlan(host);
+
+    const { errors } = await emitQuestion(host);
+    expect(errors).toEqual([]);
+    expect(host.resolutions.map((r) => r.interactionId)).toEqual(["pint-1"]);
+    expect(host.metadata.planDenied).toBeUndefined();
+    await host.harness.dispose();
+  });
+
+  it("auto-answers a question after a re-deny that beat the queued review", async () => {
+    const host = createHost({ sendDelivery: "queued", queuedRows: [{ id: "qm-1" }] });
+    await plugin(host.bb);
+    await emitPlan(host);
+    await emitPlan(host, planInteraction("# Plan, unreviewed", "pint-2"));
+    expect(host.resolutions.map((r) => r.interactionId)).toEqual(["pint-1", "pint-2"]);
+
+    const { errors } = await emitQuestion(host);
+    expect(errors).toEqual([]);
+    expect(host.resolutions.at(-1)).toMatchObject({
+      interactionId: "uq-1",
+      resolution: { kind: "user_answer" },
+    });
+    expect(host.metadata.planDenied).toBeUndefined();
+    await host.harness.dispose();
+  });
+
+  it("leaves a question alone once real tool work happened since the deny", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    await emitPlan(host);
+    host.startItem({ seq: 101, item: { type: "commandExecution" } });
+
+    const { errors } = await emitQuestion(host);
+    expect(errors).toEqual([]);
+    expect(host.resolutions.map((r) => r.interactionId)).toEqual(["pint-1"]);
+    expect(host.metadata.planDenied).toBeUndefined();
+    await host.harness.dispose();
+  });
+
+  it("ignores reasoning, agent talk, and the question's own item when checking for tool work", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    await emitPlan(host);
+    host.startItem({ seq: 101, item: { type: "reasoning" } });
+    host.startItem({ seq: 102, item: { type: "agentMessage" } });
+    host.startItem({ seq: 103, item: { type: "toolCall", tool: "AskUserQuestion" } });
+
+    const { errors } = await emitQuestion(host);
+    expect(errors).toEqual([]);
+    expect(host.resolutions.at(-1)).toMatchObject({ resolution: { kind: "user_answer" } });
+    await host.harness.dispose();
+  });
+
+  it("leaves a second question alone once the one-shot answer already fired", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    await emitPlan(host);
+    await emitQuestion(host);
+    expect(host.resolutions).toHaveLength(2);
+
+    const { errors } = await emitQuestion(host, userQuestionInteraction([{ id: "q1" }], "uq-2"));
+    expect(errors).toEqual([]);
+    expect(host.resolutions).toHaveLength(2);
+    await host.harness.dispose();
+  });
+
+  it("leaves a question alone once the turn has ended", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    await emitPlan(host);
+    await emitIdle(host);
+    expect(host.metadata.planDenied).toBeUndefined();
+
+    const { errors } = await emitQuestion(host);
+    expect(errors).toEqual([]);
+    expect(host.resolutions.map((r) => r.interactionId)).toEqual(["pint-1"]);
+    await host.harness.dispose();
+  });
+
+  it("clears a pending plan-hold answer through an idle mid awaiting-review", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    await emitPlan(host);
+    await startReview(host, THREAD_ID);
+    await emitIdle(host);
+    expect(host.metadata.planDenied).toBeUndefined();
+    await host.harness.dispose();
+  });
+
+  it("leaves a question alone once the deny-answer window has passed", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    await emitPlan(host);
+    const denied = host.metadata.planDenied as { at: number; sinceSeq: number };
+    host.metadata.planDenied = { ...denied, at: denied.at - PLAN_DENY_ANSWER_WINDOW_MS - 1_000 };
+
+    const { errors } = await emitQuestion(host);
+    expect(errors).toEqual([]);
+    expect(host.resolutions.map((r) => r.interactionId)).toEqual(["pint-1"]);
+    expect(host.metadata.planDenied).toBeUndefined();
+    await host.harness.dispose();
+  });
+
+  it("ignores a question with no prior plan-hold", async () => {
+    const host = createHost();
+    await plugin(host.bb);
+    const { errors } = await emitQuestion(host);
+    expect(errors).toEqual([]);
+    expect(host.resolutions).toHaveLength(0);
+    await host.harness.dispose();
+  });
+
+  it("leaves a question alone when auto-review is skipped for the thread", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    await emitPlan(host);
+    await host.harness.runCli(["skip", THREAD_ID]);
+
+    const { errors } = await emitQuestion(host);
+    expect(errors).toEqual([]);
+    expect(host.resolutions.map((r) => r.interactionId)).toEqual(["pint-1"]);
+    expect(host.metadata.planDenied).toBeUndefined();
+    await host.harness.dispose();
+  });
+
+  it("leaves a question alone, without using up the one-shot, when any option disallows free text", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    await emitPlan(host);
+
+    const { errors } = await emitQuestion(
+      host,
+      userQuestionInteraction([{ id: "q1", allowFreeText: false }]),
+    );
+    expect(errors).toEqual([]);
+    expect(host.resolutions.map((r) => r.interactionId)).toEqual(["pint-1"]);
+    // Not consumed: userQuestionOf returned null before any guard ran, so a
+    // later free-text question can still match.
+    expect(typeof host.metadata.planDenied).toBe("object");
+    await host.harness.dispose();
+  });
+
+  it("logs a warning and still clears planDenied when the auto-answer resolve fails", async () => {
+    const host = createHost({ sendDelivery: "queued", resolveUserAnswerThrows: true });
+    await plugin(host.bb);
+    await emitPlan(host);
+    expect(host.metadata.planReviewEntryId).toBe("qm-1");
+
+    const { errors } = await emitQuestion(host);
+    expect(errors).toEqual([]);
+    expect(host.metadata.planDenied).toBeUndefined();
+    // The plan-gate keys the still-queued review needs stay exactly as they were.
+    expect(host.metadata.planReviewEntryId).toBe("qm-1");
+    expect(typeof host.metadata.planReviewArmedAt).toBe("number");
+    expect(warnings(host).some((message) => message.includes("could not auto-answer"))).toBe(true);
+    await host.harness.dispose();
+  });
+
   it("reports status for a thread named by argument", async () => {
     const host = createHost();
     await plugin(host.bb);
@@ -1991,18 +2279,33 @@ describe("auto-review plugin", () => {
   it("asks top-level user threads to present a plan outside plan mode while auto-review is on", async () => {
     const host = createHost();
     await plugin(host.bb);
-    const resolve = (parentThreadId: string | null, pluginId: string | null) =>
+    const resolve = (
+      parentThreadId: string | null,
+      pluginId: string | null,
+      providerId = "claude-code",
+    ) =>
       host.harness.resolveAgentConfiguration(
         makePluginAgentConfigurationContext({
           thread: { id: THREAD_ID, parentThreadId },
           origin: { kind: pluginId === null ? null : "fork", pluginId },
+          provider: { id: providerId },
         }),
       );
 
-    expect(await resolve(null, null)).toEqual({
+    // Claude Code is the only provider whose plan approvals reach the gate,
+    // so it alone gets the gated instructions.
+    expect(await resolve(null, null, "claude-code")).toEqual({
       tools: [],
       skills: ["auto-review"],
       instructions: PLAN_FIRST_INSTRUCTIONS,
+    });
+    // Every other top-level provider — the ACP bridge auto-approves every
+    // permission request in `full` mode and never raises a plan approval in
+    // any other mode — gets the no-gate variant instead.
+    expect(await resolve(null, null, "acp-claude-work")).toEqual({
+      tools: [],
+      skills: ["auto-review"],
+      instructions: PLAN_FIRST_INSTRUCTIONS_NO_GATE,
     });
     // The plan gate never serves these, so they keep the skill but get no instruction.
     for (const [parentThreadId, pluginId] of [["parent-1", null], [null, "side-chat"]] as const) {

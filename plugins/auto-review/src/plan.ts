@@ -1,7 +1,13 @@
-import type { PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
+import type { BbPluginApi, PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
 import type { ThreadState } from "./state.js";
 
 type PendingInteraction = PluginThreadEventPayloads["interaction.pending"]["interaction"];
+type ThreadEventRow = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["events"]["list"]>>[number];
+
+/** The payload of a pending interaction, or null once it has settled. */
+function pendingPayload(interaction: PendingInteraction): PendingInteraction["payload"] | null {
+  return interaction.status === "pending" ? interaction.payload : null;
+}
 
 export interface PlanApproval {
   interactionId: string;
@@ -11,16 +17,13 @@ export interface PlanApproval {
 
 /**
  * The plan-approval request a provider raises when an agent presents a plan
- * (Claude Code's ExitPlanMode, Codex's plan action), or null for any other
- * interaction. Only a pending approval that can be denied is gateable: the gate
- * works by denying the first presentation.
+ * (Claude Code's ExitPlanMode), or null for any other interaction. Only a
+ * pending approval that can be denied is gateable: the gate works by denying
+ * the first presentation.
  */
 export function planApprovalOf(interaction: PendingInteraction): PlanApproval | null {
-  if (interaction.status !== "pending") {
-    return null;
-  }
-  const payload = interaction.payload;
-  if (payload.kind !== "approval" || payload.subject.kind !== "plan") {
+  const payload = pendingPayload(interaction);
+  if (payload === null || payload.kind !== "approval" || payload.subject.kind !== "plan") {
     return null;
   }
   if (!payload.availableDecisions.includes("deny")) {
@@ -42,6 +45,53 @@ const COMMIT_PLAN_SENTINEL = /^[ \t]*<!--[ \t]*(?:devkit|k0d3):commit-plan[ \t]*
 
 export function isCommitPlan(plan: string): boolean {
   return COMMIT_PLAN_SENTINEL.test(plan);
+}
+
+export interface PendingUserQuestion {
+  interactionId: string;
+  questionIds: string[];
+}
+
+/**
+ * The native `AskUserQuestion` interaction (Claude Code; a `user_question`
+ * payload) a provider raises, or null for any other interaction — including
+ * the bb-bridge `mcp__bb-bridge__AskUserQuestion`, which raises a plugin
+ * interaction that cannot take a `user_answer` resolution. Only a question
+ * where every option allows free text can carry auto-review's answer.
+ */
+export function userQuestionOf(interaction: PendingInteraction): PendingUserQuestion | null {
+  const payload = pendingPayload(interaction);
+  if (payload === null || payload.kind !== "user_question") {
+    return null;
+  }
+  if (!payload.questions.every((question) => question.allowFreeText)) {
+    return null;
+  }
+  return {
+    interactionId: interaction.id,
+    questionIds: payload.questions.map((question) => question.id),
+  };
+}
+
+/**
+ * Whether every `item/started` event since a plan deny is harmless: the
+ * agent's own thinking or talking, or the `AskUserQuestion` item the held
+ * question itself raised. Any other item/started is real tool work done in
+ * between, so the question that follows it is not necessarily about the held
+ * plan — the deny's reason no longer reaches the agent as "the next thing".
+ */
+export function isImmediateReactionToDeny(events: readonly ThreadEventRow[]): boolean {
+  return events.every((event) => {
+    if (event.type !== "item/started") {
+      return true;
+    }
+    const { item } = event.data;
+    return (
+      item.type === "reasoning" ||
+      item.type === "agentMessage" ||
+      (item.type === "toolCall" && item.tool === "AskUserQuestion")
+    );
+  });
 }
 
 export type PlanGateAction = "review" | "hold" | "release" | "commit-plan";

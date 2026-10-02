@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
   isStale,
+  PLAN_DENY_ANSWER_WINDOW_MS,
+  planDenyFresh,
   planHoldExpired,
   readState,
   resetToIdlePatch,
@@ -115,6 +117,35 @@ describe("planHoldExpired", () => {
         now,
       ),
     ).toBe(true);
+  });
+});
+
+describe("planDenyFresh", () => {
+  it("is false when no plan deny is recorded", () => {
+    expect(planDenyFresh({ phase: "idle" }, Date.now())).toBe(false);
+  });
+
+  it("is false for a future at (clock skew)", () => {
+    const now = 10_000;
+    expect(
+      planDenyFresh({ phase: "idle", planDenied: { at: now + 1, sinceSeq: 1 } }, now),
+    ).toBe(false);
+  });
+
+  it("is true at the window edge and false just past it", () => {
+    const now = PLAN_DENY_ANSWER_WINDOW_MS * 10;
+    expect(
+      planDenyFresh(
+        { phase: "idle", planDenied: { at: now - PLAN_DENY_ANSWER_WINDOW_MS, sinceSeq: 1 } },
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      planDenyFresh(
+        { phase: "idle", planDenied: { at: now - PLAN_DENY_ANSWER_WINDOW_MS - 1, sinceSeq: 1 } },
+        now,
+      ),
+    ).toBe(false);
   });
 });
 

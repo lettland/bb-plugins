@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   passesThreadGate,
+  planGateServes,
+  PLAN_GATE_PROVIDER_ID,
   reviewInFlight,
   selfIsWorktree,
   type HeldReview,
@@ -12,6 +14,7 @@ const okThread = {
   originPluginId: null,
   visibility: "visible",
   environmentId: "env_1",
+  providerId: PLAN_GATE_PROVIDER_ID,
 };
 
 describe("passesThreadGate", () => {
@@ -144,6 +147,38 @@ describe("selfIsWorktree", () => {
   it("is false when the thread's entry is absent", () => {
     expect(
       selfIsWorktree(entries([{ id: "other", status: "idle" }]), "self"),
+    ).toBe(false);
+  });
+});
+
+const servingConfig = { enabled: true, skipped: false };
+
+describe("planGateServes", () => {
+  it("serves a top-level, enabled claude-code thread", () => {
+    expect(planGateServes(okThread, servingConfig)).toBe(true);
+  });
+
+  it("stands down for a different provider (e.g. the ACP bridge)", () => {
+    expect(
+      planGateServes({ ...okThread, providerId: "acp-claude-work" }, servingConfig),
+    ).toBe(false);
+  });
+
+  it("stands down for a skipped thread", () => {
+    expect(
+      planGateServes(okThread, { ...servingConfig, skipped: true }),
+    ).toBe(false);
+  });
+
+  it("stands down when auto-review is disabled", () => {
+    expect(
+      planGateServes(okThread, { ...servingConfig, enabled: false }),
+    ).toBe(false);
+  });
+
+  it("stands down for a child thread", () => {
+    expect(
+      planGateServes({ ...okThread, parentThreadId: "thr_p" }, servingConfig),
     ).toBe(false);
   });
 });

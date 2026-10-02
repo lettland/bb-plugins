@@ -71,6 +71,14 @@ export const threadStateSchema = z.object({
   planReviewArmedAt: z.number().optional(),
   /** The queued plan-review turn, until core dispatches it. */
   planReviewEntryId: z.string().optional(),
+  /**
+   * Set right after a plan deny settles, with the timeline cursor at that
+   * moment. A `user_question` the agent raises as its very next tool call
+   * reads as "what should change" — the provider's own deny text, not
+   * anything auto-review wrote — so this one-shot answers it instead of
+   * leaving the user to explain why they rejected a plan they never saw.
+   */
+  planDenied: z.object({ at: z.number(), sinceSeq: z.number().int().nonnegative() }).optional(),
 });
 export type ThreadState = z.infer<typeof threadStateSchema>;
 
@@ -144,7 +152,11 @@ export const LATCH_KEYS: readonly string[] = [
 export const PLAN_GATE_KEYS: readonly string[] = [
   "planReviewArmedAt",
   "planReviewEntryId",
+  "planDenied",
 ];
+
+/** How long a `user_question` can still count as the agent's reaction to a plan deny. */
+export const PLAN_DENY_ANSWER_WINDOW_MS = 120_000;
 
 export function resetToIdlePatch(): {
   set: Partial<ThreadState>;
@@ -168,6 +180,22 @@ function elapsedBeyond(
  */
 export function planHoldExpired(state: ThreadState, now: number): boolean {
   return elapsedBeyond(state.planReviewArmedAt, now, STALE_WINDOW_MS);
+}
+
+/**
+ * True only inside the short window right after a plan deny, while a
+ * `user_question` the agent raises is still plausibly its reaction to that
+ * deny rather than something unrelated. Written out instead of as
+ * `!elapsedBeyond(...)`, which would also answer a question raised before an
+ * already-stale `planDenied` is cleared, or one with a clock-skewed future `at`.
+ */
+export function planDenyFresh(state: ThreadState, now: number): boolean {
+  const { planDenied } = state;
+  return (
+    planDenied !== undefined &&
+    now >= planDenied.at &&
+    now - planDenied.at <= PLAN_DENY_ANSWER_WINDOW_MS
+  );
 }
 
 export function isStale(state: ThreadState, now: number): boolean {
