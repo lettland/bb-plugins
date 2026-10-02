@@ -21,13 +21,18 @@
 # (never trap the user in plan mode).
 #
 # Ownership split with auto-review: in a bb `claude-code` thread with auto-review
-# enabled, auto-review ALSO holds the first plan approval (its own gate, keyed off
-# `interaction.pending` with `subject.kind: "plan"`), so without a handoff a plan
-# in that thread gets reviewed twice. `bb auto-review status --json` reports
-# `planGate: true` exactly for the thread auto-review's gate owns; when it does,
-# this hook stands down INSTEAD of reviewing — it does not review on auto-review's
-# behalf, it defers to a review auto-review has already queued or will queue
-# itself. That handoff is only checked when `.permission_mode` is exactly "plan":
+# enabled, auto-review ALSO holds the first plan approval (its own native gate, keyed
+# off `interaction.pending` with `subject.kind: "plan"`), so without a handoff a plan
+# in that thread gets reviewed twice. auto-review also runs a second, provider-agnostic
+# path: a `PresentPlan` agent tool it offers on every provider, which an agent can call
+# (and this hook cannot see) before ever reaching ExitPlanMode — when that already
+# reviewed the thread's current plan, auto-review releases the native presentation
+# unreviewed too, so a plan already reviewed in text does not also get a 4-reviewer
+# pass here. `bb auto-review status --json` reports `planGate: true` exactly for the
+# thread auto-review's own review (either path) owns; when it does, this hook stands
+# down INSTEAD of reviewing — it does not review on auto-review's behalf, it defers to
+# a review auto-review has already run, already queued, or will queue itself. That
+# handoff is only checked when `.permission_mode` is exactly "plan":
 # outside plan mode, Claude Code's ExitPlanMode approves itself and never reaches
 # auto-review's gate at all, so standing down there would release the plan to the
 # user with no review from either side. Every other case (ACP, standalone Claude

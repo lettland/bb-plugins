@@ -12,7 +12,7 @@ import {
   type GlobalDefaults,
 } from "./config.js";
 import { removeDeferral } from "./deferrals.js";
-import { planGateServes } from "./gate.js";
+import { planGateActive } from "./gate.js";
 import {
   LATCH_KEYS,
   PLAN_GATE_KEYS,
@@ -303,7 +303,7 @@ export function registerAutoReviewCli(
         const state = await readState(bb, threadId);
         const project = await readProjectConfig(bb, projectId);
         const config = effectiveConfig(getGlobals(), project, state.skip === true);
-        const planGate = planGateServes(thread, config);
+        const planGate = planGateActive(thread, config, state, Date.now());
         const lastFire = await readLastFire(bb, projectId, threadId);
         const payload = {
           threadId,

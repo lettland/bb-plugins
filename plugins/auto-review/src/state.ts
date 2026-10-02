@@ -79,6 +79,20 @@ export const threadStateSchema = z.object({
    * leaving the user to explain why they rejected a plan they never saw.
    */
   planDenied: z.object({ at: z.number(), sinceSeq: z.number().int().nonnegative() }).optional(),
+  /**
+   * Set when the provider-agnostic `PresentPlan` tool armed a plan review for
+   * this thread (any provider); the next `PresentPlan` call on a fresh arm
+   * releases it and clears this key. Mirrors `planReviewArmedAt`'s loop-safety:
+   * the review edits the plan, so a content key would re-block the revised one.
+   */
+  presentPlanArmedAt: z.number().optional(),
+  /**
+   * Set once `PresentPlan`'s review has run for this thread's current plan.
+   * The native ExitPlanMode gate (and `status`'s `planGate`) treat a fresh one
+   * as "already reviewed" — the agent may still present the same plan through
+   * Claude Code's own plan-mode UI after `PresentPlan` reviewed it in text.
+   */
+  planPresentedAt: z.number().optional(),
 });
 export type ThreadState = z.infer<typeof threadStateSchema>;
 
@@ -153,6 +167,8 @@ export const PLAN_GATE_KEYS: readonly string[] = [
   "planReviewArmedAt",
   "planReviewEntryId",
   "planDenied",
+  "presentPlanArmedAt",
+  "planPresentedAt",
 ];
 
 /** How long a `user_question` can still count as the agent's reaction to a plan deny. */
@@ -203,4 +219,23 @@ export function isStale(state: ThreadState, now: number): boolean {
     state.phase !== "idle" &&
     elapsedBeyond(state.dispatchedAt, now, STALE_WINDOW_MS)
   );
+}
+
+/** True once `timestamp` is set and still within `window` of `now`. */
+function freshWithin(
+  timestamp: number | undefined,
+  now: number,
+  window: number,
+): boolean {
+  return timestamp !== undefined && !elapsedBeyond(timestamp, now, window);
+}
+
+/** True while a `PresentPlan` arm is still within the stale window — the next call releases it. */
+export function presentPlanArmed(state: ThreadState, now: number): boolean {
+  return freshWithin(state.presentPlanArmedAt, now, STALE_WINDOW_MS);
+}
+
+/** True while a `PresentPlan` review is still fresh enough for the native gate to trust it. */
+export function planPresentedFresh(state: ThreadState, now: number): boolean {
+  return freshWithin(state.planPresentedAt, now, STALE_WINDOW_MS);
 }

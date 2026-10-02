@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   passesThreadGate,
+  planGateActive,
   planGateServes,
   PLAN_GATE_PROVIDER_ID,
   reviewInFlight,
   selfIsWorktree,
   type HeldReview,
 } from "./gate.js";
-import { STALE_WINDOW_MS, type AutoReviewPhase } from "./state.js";
+import { STALE_WINDOW_MS, type AutoReviewPhase, type ThreadState } from "./state.js";
 
 const okThread = {
   parentThreadId: null,
@@ -179,6 +180,52 @@ describe("planGateServes", () => {
   it("stands down for a child thread", () => {
     expect(
       planGateServes({ ...okThread, parentThreadId: "thr_p" }, servingConfig),
+    ).toBe(false);
+  });
+});
+
+const idleState: ThreadState = { phase: "idle" };
+
+describe("planGateActive", () => {
+  it("is true wherever the native gate already serves (claude-code)", () => {
+    expect(planGateActive(okThread, servingConfig, idleState, NOW)).toBe(true);
+  });
+
+  it("is true on any other provider once PresentPlan reviewed a fresh plan", () => {
+    const acpThread = { ...okThread, providerId: "acp-claude-work" };
+    expect(planGateActive(acpThread, servingConfig, idleState, NOW)).toBe(false);
+    expect(
+      planGateActive(acpThread, servingConfig, { phase: "idle", planPresentedAt: NOW }, NOW),
+    ).toBe(true);
+  });
+
+  it("is false once the PresentPlan review has gone stale", () => {
+    const acpThread = { ...okThread, providerId: "acp-claude-work" };
+    expect(
+      planGateActive(
+        acpThread,
+        servingConfig,
+        { phase: "idle", planPresentedAt: NOW - STALE_WINDOW_MS - 1 },
+        NOW,
+      ),
+    ).toBe(false);
+  });
+
+  it("stands down for a skipped or disabled thread even with a fresh PresentPlan review", () => {
+    const acpThread = { ...okThread, providerId: "acp-claude-work" };
+    const presented: ThreadState = { phase: "idle", planPresentedAt: NOW };
+    expect(planGateActive(acpThread, { ...servingConfig, skipped: true }, presented, NOW)).toBe(
+      false,
+    );
+    expect(planGateActive(acpThread, { ...servingConfig, enabled: false }, presented, NOW)).toBe(
+      false,
+    );
+  });
+
+  it("stands down for a child thread even with a fresh PresentPlan review", () => {
+    const childThread = { ...okThread, providerId: "acp-claude-work", parentThreadId: "thr_p" };
+    expect(
+      planGateActive(childThread, servingConfig, { phase: "idle", planPresentedAt: NOW }, NOW),
     ).toBe(false);
   });
 });

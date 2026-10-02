@@ -5,15 +5,20 @@ auto-review injects one review-and-commit turn into the same thread: it reviews 
 changes, applies fixes, commits only the paths that turn touched, and on a personal
 mainline (e.g. `master`) merges the feature branch into it locally. It never pushes.
 
-It also reviews plans: the first presentation of a plan for approval is held back,
-reviewed, and revised before the user sees it. If the agent's very next tool call after
-the hold is the native `AskUserQuestion` (an MCP one, such as the bb-bridge tool of the
-same name, does not count) asking the user what to change, auto-review answers that one
-question itself (marked `[bb auto-review]`) so the queued review still reaches it instead
-of the user being asked to explain a rejection they never made. A thread instruction has Claude Code agents present
-a plan before substantial work, even outside plan mode, so the review has a plan to catch.
-Other providers' plan approvals never reach auto-review, so their agents are told to end the
-turn with the plan and wait for the user's explicit approval.
+It also reviews plans, on every provider. A thread instruction tells agents to write the
+plan to a file and call the `PresentPlan` tool before substantial work, even outside plan
+mode; `PresentPlan` holds the first call back for review and releases it on the second,
+after the agent applies the review's findings to the plan file — the agent then ends its
+turn and waits for the user's own, explicit approval, since a tool result is never
+treated as that approval. On Claude Code specifically, the first presentation of a plan
+through the native ExitPlanMode is held back the same way (queued, reviewed, revised)
+before the user sees it, and a plan already reviewed through `PresentPlan` is released to
+the user unreviewed when it is also presented that way, so the two paths never review the
+same plan twice. If the agent's very next tool call after an ExitPlanMode hold is the
+native `AskUserQuestion` (an MCP one, such as the bb-bridge tool of the same name, does
+not count) asking the user what to change, auto-review answers that one question itself
+(marked `[bb auto-review]`) so the queued review still reaches it instead of the user
+being asked to explain a rejection they never made.
 
 It ships enabled (opt-out).
 
@@ -74,7 +79,7 @@ All commands accept `--json`.
 
 | Command | What it does |
 |---|---|
-| `bb auto-review status` | Effective state (including `planGate`, whether this thread's plan review is served here) and last-fire outcome for the current thread |
+| `bb auto-review status` | Effective state (including `planGate`, whether this thread's plan review — the native gate or a fresh `PresentPlan` review — is served here) and last-fire outcome for the current thread |
 | `bb auto-review show` | Global defaults, project override and resolved settings for the current project |
 | `bb auto-review enable [--global \| --project <id>]` | Turn it on; bare `enable` is global |
 | `bb auto-review disable [--global \| --project <id>]` | Turn it off, same scoping |
