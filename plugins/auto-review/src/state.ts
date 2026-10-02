@@ -81,14 +81,17 @@ export const threadStateSchema = z.object({
   planDenied: z.object({ at: z.number(), sinceSeq: z.number().int().nonnegative() }).optional(),
   /**
    * Set when the provider-agnostic `PresentPlan` tool armed a plan review for
-   * this thread; the next `PresentPlan` call on a fresh arm releases it and
-   * clears this key. Mirrors `planReviewArmedAt`'s loop-safety: the review
-   * edits the plan, so a content key would re-block the revised one. Entirely
-   * separate from the native gate's own keys below: `PresentPlan` is offered
-   * only to providers whose plan approvals never reach that gate (see
-   * `configure` in server.ts), so the two never cover the same plan.
+   * this thread; the next `PresentPlan` call on a fresh arm FOR THE SAME PATH
+   * releases it and clears this key. Mirrors `planReviewArmedAt`'s
+   * loop-safety: the review edits the plan, so a content key would re-block
+   * the revised one. Entirely separate from the native gate's own keys below:
+   * `PresentPlan` is offered only to providers whose plan approvals never
+   * reach that gate (see `configure` in server.ts), so the two never cover
+   * the same plan.
    */
   presentPlanArmedAt: z.number().optional(),
+  /** The path armed above; a call with a different path never releases it. */
+  presentPlanArmedPath: z.string().optional(),
 });
 export type ThreadState = z.infer<typeof threadStateSchema>;
 
@@ -165,8 +168,11 @@ export const PLAN_GATE_KEYS: readonly string[] = [
   "planDenied",
 ];
 
-/** `PresentPlan`'s own key, cleared by `bb auto-review reset` alongside `PLAN_GATE_KEYS`. */
-export const PRESENT_PLAN_KEYS: readonly string[] = ["presentPlanArmedAt"];
+/** `PresentPlan`'s own keys, cleared by `bb auto-review reset` alongside `PLAN_GATE_KEYS`. */
+export const PRESENT_PLAN_KEYS: readonly string[] = [
+  "presentPlanArmedAt",
+  "presentPlanArmedPath",
+];
 
 /** How long a `user_question` can still count as the agent's reaction to a plan deny. */
 export const PLAN_DENY_ANSWER_WINDOW_MS = 120_000;
@@ -218,10 +224,19 @@ export function isStale(state: ThreadState, now: number): boolean {
   );
 }
 
-/** True while a `PresentPlan` arm is still within the stale window — the next call releases it. */
-export function presentPlanArmed(state: ThreadState, now: number): boolean {
+/**
+ * True while a `PresentPlan` arm is still within the stale window AND for the
+ * exact plan path this call presents — a call for a different path is a
+ * different plan to review, not a release of whatever was armed before.
+ */
+export function presentPlanArmed(
+  state: ThreadState,
+  planFilePath: string,
+  now: number,
+): boolean {
   return (
     state.presentPlanArmedAt !== undefined &&
+    state.presentPlanArmedPath === planFilePath &&
     !elapsedBeyond(state.presentPlanArmedAt, now, STALE_WINDOW_MS)
   );
 }

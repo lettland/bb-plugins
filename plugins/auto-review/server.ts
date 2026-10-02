@@ -193,12 +193,18 @@ export default async function plugin(bb: BbPluginApi) {
           };
         }
         const now = Date.now();
-        if (presentPlanArmed(state, now)) {
-          await writeState(bb, ctx.threadId, {}, ["presentPlanArmedAt"]);
+        if (presentPlanArmed(state, input.planFilePath, now)) {
+          await writeState(bb, ctx.threadId, {}, [
+            "presentPlanArmedAt",
+            "presentPlanArmedPath",
+          ]);
           await recordFire(ctx.projectId, ctx.threadId, "stood-down", "plan-reviewed");
           return PRESENT_PLAN_REVIEWED_MESSAGE;
         }
-        await writeState(bb, ctx.threadId, { presentPlanArmedAt: now });
+        await writeState(bb, ctx.threadId, {
+          presentPlanArmedAt: now,
+          presentPlanArmedPath: input.planFilePath,
+        });
         await recordFire(ctx.projectId, ctx.threadId, "fired", "plan-review");
         return buildPresentPlanReviewPrompt({
           reviewMode: config.reviewMode,

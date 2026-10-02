@@ -2453,6 +2453,32 @@ describe("auto-review plugin", () => {
       await host.harness.dispose();
     });
 
+    it("reviews a different plan instead of releasing it unreviewed, even while the first arm is fresh", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await host.harness.callAgentTool("PresentPlan", { planFilePath: "docs/plans/a.md" }, ctx);
+      const result = await host.harness.callAgentTool(
+        "PresentPlan",
+        { planFilePath: "docs/plans/b.md" },
+        ctx,
+      );
+      expect(result).toContain("Nobody rejected it");
+      expect(result).toContain("docs/plans/b.md");
+      expect(host.metadata.presentPlanArmedPath).toBe("docs/plans/b.md");
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "fired", reason: "plan-review" });
+
+      // b.md is now armed; presenting it again releases it, not a.md's leftover arm.
+      const released = await host.harness.callAgentTool(
+        "PresentPlan",
+        { planFilePath: "docs/plans/b.md" },
+        ctx,
+      );
+      expect(released).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+      expect(host.metadata.presentPlanArmedAt).toBeUndefined();
+      expect(host.metadata.presentPlanArmedPath).toBeUndefined();
+      await host.harness.dispose();
+    });
+
     it("tells the agent review is off, without touching state, when auto-review is disabled", async () => {
       const host = createHost();
       await plugin(host.bb);

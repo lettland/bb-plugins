@@ -100,7 +100,10 @@ the gate — the agent is told to enter plan mode (EnterPlanMode) and present it
 (ExitPlanMode). Every other top-level provider instead gets the `PresentPlan` tool and an
 instruction to write the plan to a file and call it, follow its result, and never treat a
 tool result — including ExitPlanMode's own "approved" outcome — as the user's approval;
-only the user's own, explicit reply in chat approves a plan. Small fixes, work under an
+only the user's own, explicit reply in chat approves a plan. These agents are told not to
+call ExitPlanMode or any other plan-approval tool at all — `PresentPlan` is the only way to
+present a plan on these providers — since agent-hooks' own ExitPlanMode hook does not know
+about `PresentPlan` and would review the same plan a second time. Small fixes, work under an
 already-approved plan, and auto-review's own turns are exempt either way. Child threads and
 threads a plugin spawned (side chats, automations) never get either instruction or the
 tool: neither gate reviews their plans, and nobody may be there to approve one. The

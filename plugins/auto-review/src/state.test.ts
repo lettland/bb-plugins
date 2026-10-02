@@ -134,24 +134,44 @@ describe("PLAN_GATE_KEYS", () => {
 });
 
 describe("PRESENT_PLAN_KEYS", () => {
-  it("is PresentPlan's own key, kept separate from the native gate's", () => {
-    expect(PRESENT_PLAN_KEYS).toEqual(["presentPlanArmedAt"]);
+  it("is PresentPlan's own keys, kept separate from the native gate's", () => {
+    expect(PRESENT_PLAN_KEYS).toEqual(["presentPlanArmedAt", "presentPlanArmedPath"]);
   });
 });
 
 describe("presentPlanArmed", () => {
   it("is false when PresentPlan never armed", () => {
-    expect(presentPlanArmed({ phase: "idle" }, Date.now())).toBe(false);
+    expect(presentPlanArmed({ phase: "idle" }, "a.md", Date.now())).toBe(false);
   });
 
-  it("is true inside the window and false past it", () => {
+  it("is true inside the window and false past it, for the armed path", () => {
     const now = STALE_WINDOW_MS * 10;
     expect(
-      presentPlanArmed({ phase: "idle", presentPlanArmedAt: now - 1_000 }, now),
+      presentPlanArmed(
+        { phase: "idle", presentPlanArmedAt: now - 1_000, presentPlanArmedPath: "a.md" },
+        "a.md",
+        now,
+      ),
     ).toBe(true);
     expect(
       presentPlanArmed(
-        { phase: "idle", presentPlanArmedAt: now - STALE_WINDOW_MS - 1 },
+        {
+          phase: "idle",
+          presentPlanArmedAt: now - STALE_WINDOW_MS - 1,
+          presentPlanArmedPath: "a.md",
+        },
+        "a.md",
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it("is false for a different path than the one armed, even while fresh", () => {
+    const now = STALE_WINDOW_MS * 10;
+    expect(
+      presentPlanArmed(
+        { phase: "idle", presentPlanArmedAt: now - 1_000, presentPlanArmedPath: "a.md" },
+        "b.md",
         now,
       ),
     ).toBe(false);

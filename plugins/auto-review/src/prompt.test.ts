@@ -415,6 +415,15 @@ describe("PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN", () => {
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/only the user's explicit reply in chat approves a plan/);
   });
 
+  it("forbids ExitPlanMode or any other plan-approval tool on this path", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(
+      /Do not call ExitPlanMode or any other plan-approval tool/,
+    );
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(
+      /PresentPlan is the only way to present a plan here/,
+    );
+  });
+
   it("exempts small fixes, approved plans, and auto-review's own turns", () => {
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/small, contained fixes/);
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/already approved in this thread/);
