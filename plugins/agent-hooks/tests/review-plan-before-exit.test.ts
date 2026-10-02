@@ -126,6 +126,31 @@ describe("review-plan-before-exit.sh — auto-review handoff", () => {
     expect(existsSync(gatePath(projectDir))).toBe(true);
   });
 
+  it("falls back to deny+arm when bb hangs past the timeout", async () => {
+    const marker = markerPath();
+    // Sleeps well past the 1s override below, then would answer planGate:true
+    // if ever allowed to finish — proving the fallback fires because of the
+    // timeout and not some other failure.
+    const bb = fakeBb(marker, "sleep 3; echo '{\"planGate\": true}'");
+    const projectDir = project();
+
+    const start = Date.now();
+    const result = await runHook(
+      "review-plan-before-exit.sh",
+      { plan: PLAN },
+      {
+        projectDir,
+        toolName: "ExitPlanMode",
+        env: { BB_CLI: bb, BB_THREAD_ID: "thr_1", AGENT_HOOKS_BB_TIMEOUT: "1" },
+      },
+    );
+    const elapsed = Date.now() - start;
+
+    expect(isDeny(result.stdout)).toBe(true);
+    expect(existsSync(gatePath(projectDir))).toBe(true);
+    expect(elapsed).toBeLessThan(2500);
+  });
+
   it("denies and arms without invoking bb when BB_THREAD_ID is unset", async () => {
     const marker = markerPath();
     const bb = fakeBb(marker, "echo '{\"planGate\": true}'");

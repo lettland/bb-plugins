@@ -29,8 +29,11 @@
 # (ACP, standalone Claude Code, auto-review off/skipped, a child thread) gets no
 # such report (or none at all) and this hook reviews as it always has. Any
 # failure reading that report — `bb` missing, a non-zero exit, output that is not
-# JSON, no `planGate` field — falls through to today's deny+arm: worst case is a
-# duplicate review, never a missed one.
+# JSON, no `planGate` field, or the call running past AGENT_HOOKS_BB_TIMEOUT
+# seconds (default 5) — falls through to today's deny+arm: worst case is a
+# duplicate review, never a missed one. The call is bounded with perl's alarm()
+# since macOS ships no `timeout` coreutil; without perl on PATH it runs
+# unwrapped, the same exposure this hook always had before the bound existed.
 #
 # Output contract mirrors completeness-gate.sh: exit 0 + hookSpecificOutput JSON
 # with permissionDecision "deny" on the block; exit 0 with no output to allow.
@@ -98,19 +101,44 @@ fi
 # so nothing to stand down for); the bb binary (BB_CLI, else whatever `command -v
 # bb` finds) is asked for THIS thread's planGate explicitly, since the hook has
 # no other way to name the thread. Any failure here — no bb on PATH, a non-zero
-# exit, output jq can't parse, a response with no planGate field — leaves
-# $SERVED empty and falls through to the normal deny+arm below.
+# exit, a stalled call past the timeout, output jq can't parse, a response with
+# no planGate field — leaves $SERVED empty and falls through to the normal
+# deny+arm below.
+#
+# Bounded so a stalled bb can never hang this hook (and so the agent waiting on
+# it). Output goes to a temp FILE rather than through `$(...)`: killing the
+# exec'd process when the alarm fires does not kill any grandchild it forked,
+# and a pipe-based capture blocks until every process holding its write end —
+# including an orphaned grandchild — closes it, which can take as long as that
+# grandchild keeps running. A file has no such multi-writer handshake: reading
+# it back is a plain read-to-EOF the instant the direct child (the one the
+# alarm kills) exits, whatever its own children are still doing.
+# perl's alarm() stands in for `timeout`, which macOS does not ship; without
+# perl on PATH the call runs unwrapped. AGENT_HOOKS_BB_TIMEOUT overrides the 5s
+# default (tests use this to keep a deliberately-slow fake bb fast).
+run_bb_status() {
+  if command -v perl > /dev/null 2>&1; then
+    perl -e 'alarm shift; exec @ARGV' "$BB_TIMEOUT" "$BB_BIN" auto-review status "$BB_THREAD_ID" --json > "$1" 2> /dev/null
+  else
+    "$BB_BIN" auto-review status "$BB_THREAD_ID" --json > "$1" 2> /dev/null
+  fi
+}
+
 if [ -n "${BB_THREAD_ID:-}" ]; then
   BB_BIN="${BB_CLI:-}"
   [ -z "$BB_BIN" ] && BB_BIN=$(command -v bb 2> /dev/null || true)
-  if [ -n "$BB_BIN" ] && STATUS_JSON=$("$BB_BIN" auto-review status "$BB_THREAD_ID" --json 2> /dev/null); then
-    SERVED=$(printf '%s' "$STATUS_JSON" | jq -r 'if .planGate == true then "true" else empty end' 2> /dev/null || true)
+  BB_TIMEOUT="${AGENT_HOOKS_BB_TIMEOUT:-5}"
+  STATUS_FILE=$(mktemp 2> /dev/null || true)
+  if [ -n "$BB_BIN" ] && [ -n "$STATUS_FILE" ] && run_bb_status "$STATUS_FILE"; then
+    SERVED=$(jq -r 'if .planGate == true then "true" else empty end' < "$STATUS_FILE" 2> /dev/null || true)
     if [ "$SERVED" = "true" ]; then
       printf -- "- \`%s\` | PLAN-REVIEW | SKIP | auto-review gates this thread (%s)\n" \
         "$(date +"%Y-%m-%d %H:%M:%S")" "$BB_THREAD_ID" >> "$LOG_DIR/incident-log.md" 2> /dev/null || true
+      rm -f "$STATUS_FILE" 2> /dev/null
       exit 0
     fi
   fi
+  [ -n "$STATUS_FILE" ] && rm -f "$STATUS_FILE" 2> /dev/null
 fi
 
 # First presentation: arm the gate and route Claude through the reviewers.
