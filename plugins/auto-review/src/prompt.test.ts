@@ -403,7 +403,7 @@ describe("PLAN_FIRST_INSTRUCTIONS_NO_GATE", () => {
 
   it("waits for the user's own approval instead of a self-approving plan tool", () => {
     expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE).toMatch(/Do not use ExitPlanMode or another plan-approval tool/);
-    expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE).toMatch(/approves itself in this thread/);
+    expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE).toMatch(/may approve itself here without asking the user/);
     expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE).toMatch(/is not the user's approval/);
     expect(PLAN_FIRST_INSTRUCTIONS_NO_GATE).toMatch(/plan review is not automatic in this thread/);
   });

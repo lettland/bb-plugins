@@ -43,10 +43,14 @@ approves. That second presentation goes straight to the user and resets the gate
 thread's next plan. A re-presentation that arrives before the review turn has been
 delivered is denied again, so the user never gets an unreviewed plan — but only while that
 review is actually still in the queue. If it has already left the queue (its dispatch
-event was missed), the re-presentation is the reviewed plan and goes to the user. If it is
-still queued after 30 minutes, auto-review withdraws it and releases the plan (reason
-`plan-hold-expired`), so a stuck review can never turn into a permanent deny. Once
-the plan is approved and implemented, the normal post-turn code review runs on turn end.
+event was missed), the re-presentation is the reviewed plan and goes to the user — unless
+the gate has been armed for longer than the 30-minute stale window, in which case whatever
+review was queued is long gone and never re-presented anything (a crashed review turn, a
+dispatch this plugin never saw): that presentation is treated as a fresh plan and held for
+review instead of released unreviewed. If it is still queued after 30 minutes, auto-review
+withdraws it and releases the plan (reason `plan-hold-expired`), so a stuck review can
+never turn into a permanent deny. Once the plan is approved and implemented, the normal
+post-turn code review runs on turn end.
 
 Reading only the bare deny, an agent commonly reacts by asking the user what to change
 (Claude Code's native `AskUserQuestion`) — a question the user cannot really answer, since
@@ -54,14 +58,20 @@ they never saw the plan. auto-review answers that one question itself, in the us
 with a free-text note explaining the hold (marked `[bb auto-review]`) — reason
 `plan-hold-answered` — so the queued review still reaches the agent on its next tool result
 and the user is never asked to explain a rejection they didn't make. The answer only fires
-when the question is the agent's immediate reaction to the deny: no other tool call since the
-deny (after one, the agent may already have the review, so its question may be a real one),
-within two minutes of the deny, the first question since it (one-shot), the
-turn hasn't ended, auto-review enabled and not skipped for the thread, and every question in
-it allowing free text (true for Claude Code today; otherwise the question is left alone
-without using up the one-shot). Only the native `AskUserQuestion` is in scope: the bb-bridge
-`mcp__bb-bridge__AskUserQuestion` raises a plugin interaction that can't take this kind of
-answer, so it is left alone.
+when the question is the agent's immediate reaction to the deny: no other `item/started`
+event since the deny — including the agent's own text, since a text-only response ends the
+model's turn and Claude Code injects the steered review into that same turn (core records
+that steer as `provider/unhandled`, not a `userMessage` item, so the agent's own text is the
+only observable sign it already happened) — is reasoning or the question's own native
+`AskUserQuestion` item; after any other item, the agent may already have the review, so its
+question may be a real one. Also required: within two minutes of the deny, the first
+question since it (one-shot), the turn hasn't ended, auto-review enabled and not skipped for
+the thread, and every question in it allowing free text (true for Claude Code today;
+otherwise the question is left alone without using up the one-shot). Only the native
+`AskUserQuestion` is in scope: the bb-bridge `mcp__bb-bridge__AskUserQuestion` — and any
+other MCP tool core also classifies as tool `AskUserQuestion`, distinguished only by a
+`server` field the native one lacks — raises a plugin interaction that can't take this kind
+of answer, so it is left alone.
 
 The gate only sees a plan that is presented for approval, and an agent outside plan mode
 would otherwise go straight from its own design to edits. So while auto-review is enabled

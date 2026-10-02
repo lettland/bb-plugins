@@ -6,10 +6,11 @@ changes, applies fixes, commits only the paths that turn touched, and on a perso
 mainline (e.g. `master`) merges the feature branch into it locally. It never pushes.
 
 It also reviews plans: the first presentation of a plan for approval is held back,
-reviewed, and revised before the user sees it. If the agent reacts to the hold by asking
-the user what to change, auto-review answers that one question itself (marked
-`[bb auto-review]`) so the queued review still reaches it instead of the user being asked
-to explain a rejection they never made. A thread instruction has Claude Code agents present
+reviewed, and revised before the user sees it. If the agent's very next tool call after
+the hold is the native `AskUserQuestion` (an MCP one, such as the bb-bridge tool of the
+same name, does not count) asking the user what to change, auto-review answers that one
+question itself (marked `[bb auto-review]`) so the queued review still reaches it instead
+of the user being asked to explain a rejection they never made. A thread instruction has Claude Code agents present
 a plan before substantial work, even outside plan mode, so the review has a plan to catch.
 Other providers' plan approvals never reach auto-review, so their agents are told to end the
 turn with the plan and wait for the user's explicit approval.
@@ -79,6 +80,10 @@ All commands accept `--json`.
 | `bb auto-review disable [--global \| --project <id>]` | Turn it off, same scoping |
 | `bb auto-review skip <thread-id>` / `unskip <thread-id>` | Skip one thread, or clear that skip |
 | `bb auto-review reset <thread-id>` | Clear a wedged loop-guard latch. On a `deferred` thread this cancels the pending review |
+
+The agent-hooks plugin's `review-plan-before-exit.sh` reads `planGate` from
+`bb auto-review status --json` and stands down where it is true, so a plan is reviewed
+once rather than twice. Renaming or removing this field brings back the duplicate review.
 
 ## Install
 

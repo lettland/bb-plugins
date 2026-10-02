@@ -84,7 +84,7 @@ interface InterruptEvent {
 
 interface ItemStartedEvent {
   seq: number;
-  item: { type: string; tool?: string };
+  item: { type: string; tool?: string; server?: string };
 }
 
 interface TreeFile {
@@ -1847,6 +1847,19 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
+  it("does not gate a plan on a thread running a different provider", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    const { errors } = await host.harness.behavior.emitThreadEvent("interaction.pending", {
+      thread: thread("codex-1"),
+      interaction: { ...planInteraction(), threadId: "codex-1" },
+    } as never);
+    expect(errors).toEqual([]);
+    expect(host.sends).toHaveLength(0);
+    expect(host.resolutions).toHaveLength(0);
+    await host.harness.dispose();
+  });
+
   it("releases the reviewed plan to the user and re-arms for the next plan", async () => {
     const host = createHost({ sendDelivery: "queued" });
     await plugin(host.bb);
@@ -2074,17 +2087,43 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
-  it("ignores reasoning, agent talk, and the question's own item when checking for tool work", async () => {
+  it("ignores reasoning and the question's own native item when checking for tool work", async () => {
     const host = createHost({ sendDelivery: "queued" });
     await plugin(host.bb);
     await emitPlan(host);
     host.startItem({ seq: 101, item: { type: "reasoning" } });
-    host.startItem({ seq: 102, item: { type: "agentMessage" } });
-    host.startItem({ seq: 103, item: { type: "toolCall", tool: "AskUserQuestion" } });
+    host.startItem({ seq: 102, item: { type: "toolCall", tool: "AskUserQuestion" } });
 
     const { errors } = await emitQuestion(host);
     expect(errors).toEqual([]);
     expect(host.resolutions.at(-1)).toMatchObject({ resolution: { kind: "user_answer" } });
+    await host.harness.dispose();
+  });
+
+  it("leaves a question alone once agent text closed the turn the steer rides in on", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    await emitPlan(host);
+    host.startItem({ seq: 101, item: { type: "agentMessage" } });
+
+    const { errors } = await emitQuestion(host);
+    expect(errors).toEqual([]);
+    expect(host.resolutions.map((r) => r.interactionId)).toEqual(["pint-1"]);
+    await host.harness.dispose();
+  });
+
+  it("leaves a question alone when AskUserQuestion came from an MCP server, not the native tool", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    await emitPlan(host);
+    host.startItem({
+      seq: 101,
+      item: { type: "toolCall", tool: "AskUserQuestion", server: "bb-bridge" },
+    });
+
+    const { errors } = await emitQuestion(host);
+    expect(errors).toEqual([]);
+    expect(host.resolutions.map((r) => r.interactionId)).toEqual(["pint-1"]);
     await host.harness.dispose();
   });
 

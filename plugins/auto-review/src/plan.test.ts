@@ -6,6 +6,7 @@ import {
   planGateAction,
   userQuestionOf,
 } from "./plan.js";
+import { STALE_WINDOW_MS } from "./state.js";
 
 function approval(overrides: Record<string, unknown> = {}, subject: Record<string, unknown> = {}) {
   return {
@@ -98,12 +99,11 @@ describe("isImmediateReactionToDeny", () => {
     return { type: "item/started", data: { item } } as never;
   }
 
-  it("is true with no events, or only reasoning/agent talk and the question's own item", () => {
+  it("is true with no events, or only reasoning and the question's own native item", () => {
     expect(isImmediateReactionToDeny([])).toBe(true);
     expect(
       isImmediateReactionToDeny([
         itemStarted({ type: "reasoning" }),
-        itemStarted({ type: "agentMessage" }),
         itemStarted({ type: "toolCall", tool: "AskUserQuestion" }),
       ]),
     ).toBe(true);
@@ -113,6 +113,18 @@ describe("isImmediateReactionToDeny", () => {
     expect(isImmediateReactionToDeny([{ type: "system/thread/interrupted", data: {} } as never])).toBe(
       true,
     );
+  });
+
+  it("is false once agent text closed the turn the steer rides in on", () => {
+    expect(isImmediateReactionToDeny([itemStarted({ type: "agentMessage" })])).toBe(false);
+  });
+
+  it("is false for an MCP AskUserQuestion, which cannot take this resolution", () => {
+    expect(
+      isImmediateReactionToDeny([
+        itemStarted({ type: "toolCall", tool: "AskUserQuestion", server: "bb-bridge" }),
+      ]),
+    ).toBe(false);
   });
 
   it("is false once a real tool call happened", () => {
@@ -125,18 +137,44 @@ describe("isImmediateReactionToDeny", () => {
 });
 
 describe("planGateAction", () => {
+  const NOW = STALE_WINDOW_MS * 10;
+
   it("reviews the first presentation and releases the next", () => {
-    expect(planGateAction({ phase: "idle" }, "# Plan")).toBe("review");
-    expect(planGateAction({ phase: "idle", planReviewArmedAt: 1 }, "# Plan")).toBe("release");
+    expect(planGateAction({ phase: "idle" }, "# Plan", NOW)).toBe("review");
+    expect(
+      planGateAction({ phase: "idle", planReviewArmedAt: NOW - 1_000 }, "# Plan", NOW),
+    ).toBe("release");
   });
 
   it("holds a re-presentation while the review is still queued", () => {
     expect(
-      planGateAction({ phase: "idle", planReviewArmedAt: 1, planReviewEntryId: "qm" }, "# Plan"),
+      planGateAction(
+        { phase: "idle", planReviewArmedAt: NOW - 1_000, planReviewEntryId: "qm" },
+        "# Plan",
+        NOW,
+      ),
     ).toBe("hold");
   });
 
+  it("treats a presentation after the hold has gone stale as a fresh review, not a release", () => {
+    expect(
+      planGateAction(
+        { phase: "idle", planReviewArmedAt: NOW - STALE_WINDOW_MS - 1 },
+        "# Plan",
+        NOW,
+      ),
+    ).toBe("review");
+  });
+
+  it("still releases right at the edge of the stale window", () => {
+    expect(
+      planGateAction({ phase: "idle", planReviewArmedAt: NOW - STALE_WINDOW_MS }, "# Plan", NOW),
+    ).toBe("release");
+  });
+
   it("passes a commit plan without touching the gate", () => {
-    expect(planGateAction({ phase: "idle" }, "<!-- devkit:commit-plan -->")).toBe("commit-plan");
+    expect(planGateAction({ phase: "idle" }, "<!-- devkit:commit-plan -->", NOW)).toBe(
+      "commit-plan",
+    );
   });
 });

@@ -33,6 +33,7 @@ import {
   isBusyStatus,
   passesThreadGate,
   PLAN_GATE_PROVIDER_ID,
+  planGateServes,
   reviewInFlight,
   selfIsWorktree,
   type GateThread,
@@ -625,11 +626,11 @@ export default async function plugin(bb: BbPluginApi) {
     const state = await readState(bb, thread.id);
     const project = await readProjectConfig(bb, thread.projectId);
     const config = effectiveConfig(globals, project, state.skip === true);
-    if (!config.enabled || config.skipped) {
+    if (!planGateServes(thread, config)) {
       return;
     }
 
-    const action = planGateAction(state, approval.plan);
+    const action = planGateAction(state, approval.plan, Date.now());
     if (action === "commit-plan") {
       await recordFire(thread.projectId, thread.id, "stood-down", "commit-plan");
       return;
@@ -785,7 +786,15 @@ export default async function plugin(bb: BbPluginApi) {
       return false;
     }
     if (sinceSeq !== null) {
-      await writeState(bb, thread.id, { planDenied: { at: Date.now(), sinceSeq } });
+      try {
+        await writeState(bb, thread.id, { planDenied: { at: Date.now(), sinceSeq } });
+      } catch (error) {
+        bb.log.warn(
+          `auto-review: could not arm the plan-hold answer cursor in ${thread.id}; a hold question will not be auto-answered: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
     }
     return true;
   }
@@ -816,11 +825,21 @@ export default async function plugin(bb: BbPluginApi) {
     if (!config.enabled || config.skipped) {
       return;
     }
-    const events = await bb.sdk.threads.events.list({
-      threadId: thread.id,
-      afterSeq: String(sinceSeq),
-      types: ["item/started"],
-    });
+    let events: Awaited<ReturnType<typeof bb.sdk.threads.events.list>>;
+    try {
+      events = await bb.sdk.threads.events.list({
+        threadId: thread.id,
+        afterSeq: String(sinceSeq),
+        types: ["item/started"],
+      });
+    } catch (error) {
+      bb.log.warn(
+        `auto-review: could not read events to check the plan-hold reaction in ${thread.id}; leaving it for the user: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return;
+    }
     if (!isImmediateReactionToDeny(events)) {
       // Real tool work happened since the deny, so this question is not
       // necessarily about the held plan — leave it with the user.
@@ -914,7 +933,15 @@ export default async function plugin(bb: BbPluginApi) {
       // later turn is never mistaken for a reaction to this one's deny.
       const state = await readState(bb, thread.id);
       if (state.planDenied !== undefined) {
-        await writeState(bb, thread.id, {}, ["planDenied"]);
+        try {
+          await writeState(bb, thread.id, {}, ["planDenied"]);
+        } catch (error) {
+          bb.log.warn(
+            `auto-review: could not clear planDenied in ${thread.id}; continuing: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
       await handleIdle(thread);
     });
