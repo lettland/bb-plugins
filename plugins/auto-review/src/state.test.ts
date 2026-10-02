@@ -6,8 +6,8 @@ import {
   PLAN_GATE_KEYS,
   planDenyFresh,
   planHoldExpired,
-  planPresentedFresh,
   presentPlanArmed,
+  PRESENT_PLAN_KEYS,
   readState,
   resetToIdlePatch,
   STALE_WINDOW_MS,
@@ -124,14 +124,18 @@ describe("planHoldExpired", () => {
 });
 
 describe("PLAN_GATE_KEYS", () => {
-  it("includes the PresentPlan keys alongside the native gate's", () => {
+  it("is the native gate's own keys, not PresentPlan's", () => {
     expect(PLAN_GATE_KEYS).toEqual([
       "planReviewArmedAt",
       "planReviewEntryId",
       "planDenied",
-      "presentPlanArmedAt",
-      "planPresentedAt",
     ]);
+  });
+});
+
+describe("PRESENT_PLAN_KEYS", () => {
+  it("is PresentPlan's own key, kept separate from the native gate's", () => {
+    expect(PRESENT_PLAN_KEYS).toEqual(["presentPlanArmedAt"]);
   });
 });
 
@@ -148,25 +152,6 @@ describe("presentPlanArmed", () => {
     expect(
       presentPlanArmed(
         { phase: "idle", presentPlanArmedAt: now - STALE_WINDOW_MS - 1 },
-        now,
-      ),
-    ).toBe(false);
-  });
-});
-
-describe("planPresentedFresh", () => {
-  it("is false when PresentPlan never reviewed a plan", () => {
-    expect(planPresentedFresh({ phase: "idle" }, Date.now())).toBe(false);
-  });
-
-  it("is true inside the window and false past it", () => {
-    const now = STALE_WINDOW_MS * 10;
-    expect(
-      planPresentedFresh({ phase: "idle", planPresentedAt: now - 1_000 }, now),
-    ).toBe(true);
-    expect(
-      planPresentedFresh(
-        { phase: "idle", planPresentedAt: now - STALE_WINDOW_MS - 1 },
         now,
       ),
     ).toBe(false);

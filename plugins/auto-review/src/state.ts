@@ -81,18 +81,14 @@ export const threadStateSchema = z.object({
   planDenied: z.object({ at: z.number(), sinceSeq: z.number().int().nonnegative() }).optional(),
   /**
    * Set when the provider-agnostic `PresentPlan` tool armed a plan review for
-   * this thread (any provider); the next `PresentPlan` call on a fresh arm
-   * releases it and clears this key. Mirrors `planReviewArmedAt`'s loop-safety:
-   * the review edits the plan, so a content key would re-block the revised one.
+   * this thread; the next `PresentPlan` call on a fresh arm releases it and
+   * clears this key. Mirrors `planReviewArmedAt`'s loop-safety: the review
+   * edits the plan, so a content key would re-block the revised one. Entirely
+   * separate from the native gate's own keys below: `PresentPlan` is offered
+   * only to providers whose plan approvals never reach that gate (see
+   * `configure` in server.ts), so the two never cover the same plan.
    */
   presentPlanArmedAt: z.number().optional(),
-  /**
-   * Set once `PresentPlan`'s review has run for this thread's current plan.
-   * The native ExitPlanMode gate (and `status`'s `planGate`) treat a fresh one
-   * as "already reviewed" — the agent may still present the same plan through
-   * Claude Code's own plan-mode UI after `PresentPlan` reviewed it in text.
-   */
-  planPresentedAt: z.number().optional(),
 });
 export type ThreadState = z.infer<typeof threadStateSchema>;
 
@@ -162,14 +158,15 @@ export const LATCH_KEYS: readonly string[] = [
   "heldBy",
 ];
 
-/** Plan-gate keys, cleared together whenever the gate disarms. */
+/** Native plan-gate keys, cleared together whenever that gate disarms. */
 export const PLAN_GATE_KEYS: readonly string[] = [
   "planReviewArmedAt",
   "planReviewEntryId",
   "planDenied",
-  "presentPlanArmedAt",
-  "planPresentedAt",
 ];
+
+/** `PresentPlan`'s own key, cleared by `bb auto-review reset` alongside `PLAN_GATE_KEYS`. */
+export const PRESENT_PLAN_KEYS: readonly string[] = ["presentPlanArmedAt"];
 
 /** How long a `user_question` can still count as the agent's reaction to a plan deny. */
 export const PLAN_DENY_ANSWER_WINDOW_MS = 120_000;
@@ -221,21 +218,10 @@ export function isStale(state: ThreadState, now: number): boolean {
   );
 }
 
-/** True once `timestamp` is set and still within `window` of `now`. */
-function freshWithin(
-  timestamp: number | undefined,
-  now: number,
-  window: number,
-): boolean {
-  return timestamp !== undefined && !elapsedBeyond(timestamp, now, window);
-}
-
 /** True while a `PresentPlan` arm is still within the stale window — the next call releases it. */
 export function presentPlanArmed(state: ThreadState, now: number): boolean {
-  return freshWithin(state.presentPlanArmedAt, now, STALE_WINDOW_MS);
-}
-
-/** True while a `PresentPlan` review is still fresh enough for the native gate to trust it. */
-export function planPresentedFresh(state: ThreadState, now: number): boolean {
-  return freshWithin(state.planPresentedAt, now, STALE_WINDOW_MS);
+  return (
+    state.presentPlanArmedAt !== undefined &&
+    !elapsedBeyond(state.presentPlanArmedAt, now, STALE_WINDOW_MS)
+  );
 }

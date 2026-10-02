@@ -1,7 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
   isStale,
-  planPresentedFresh,
   REVIEW_IN_FLIGHT_PHASES,
   type ThreadState,
 } from "./state.js";
@@ -30,16 +29,14 @@ export function passesThreadGate(thread: GateThread): boolean {
   return true;
 }
 
-/** The only provider whose plan approvals reach auto-review's NATIVE gate (see server.ts). */
+/** The only provider whose plan approvals reach auto-review's gate (see server.ts). */
 export const PLAN_GATE_PROVIDER_ID = "claude-code";
 
 /**
- * Whether auto-review's NATIVE plan gate (the `interaction.pending` / ExitPlanMode
- * handler in server.ts) owns this thread's plan review. True only for a top-level,
- * visible, environment-bound `claude-code` thread with auto-review on — every other
- * thread (ACP, standalone, disabled/skipped, child) never raises the plan-approval
- * interaction this gate holds, so its plan review runs through `PresentPlan` instead
- * (see `planGateActive` below for the status/handoff view of both paths combined).
+ * Whether auto-review's plan gate owns this thread's plan review. True only for a
+ * top-level, visible, environment-bound `claude-code` thread with auto-review on —
+ * every other thread (ACP, standalone, disabled/skipped, child) falls to whatever
+ * reviews plans outside auto-review instead (e.g. agent-hooks' own hook).
  */
 export function planGateServes(
   thread: GateThread,
@@ -50,30 +47,6 @@ export function planGateServes(
     !config.skipped &&
     thread.providerId === PLAN_GATE_PROVIDER_ID &&
     passesThreadGate(thread)
-  );
-}
-
-/**
- * Whether `bb auto-review status`'s `planGate` should read true for this thread:
- * either the native ExitPlanMode gate (`planGateServes`, claude-code only), or — on
- * any provider — a fresh `PresentPlan` review already covers the thread's current
- * plan. Either way, a gate outside auto-review (e.g. agent-hooks'
- * `review-plan-before-exit.sh`) should stand down instead of reviewing it again.
- */
-export function planGateActive(
-  thread: GateThread,
-  config: { enabled: boolean; skipped: boolean },
-  state: ThreadState,
-  now: number,
-): boolean {
-  if (planGateServes(thread, config)) {
-    return true;
-  }
-  return (
-    config.enabled &&
-    !config.skipped &&
-    passesThreadGate(thread) &&
-    planPresentedFresh(state, now)
   );
 }
 

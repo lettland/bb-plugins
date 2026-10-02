@@ -48,21 +48,22 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   latch (persisted in plugin metadata) so it never reviews its own review turn. When that
   turn commits, it judges from the thread's plan whether work remains and continues any
   genuinely-unfinished planned work instead of halting mid-plan (never inventing work).
-- Reviews plans too, on every provider, via the `PresentPlan` agent tool it registers and
-  offers through `bb.agents.configure` to the same top-level, user-started threads that
-  get the plan-first instruction: the agent writes its plan to a file and calls
-  `PresentPlan(planFilePath)`; the first call arms a review and returns the review
-  instructions, and the second call (after the agent applies the findings) releases it —
-  the agent then ends its turn and waits for the user's own, explicit approval, since a
-  tool result is never the user's approval. On Claude Code, the native ExitPlanMode path
-  still runs alongside this: it fires on `interaction.pending` for a plan approval, holds
-  the first presentation back (queues a review-plan turn, then denies the approval), and
-  releases the revised plan on its re-presentation — and when `PresentPlan` already
-  reviewed the thread's current plan, that native presentation is released unreviewed
-  instead, so the two paths never review the same plan twice. If the agent reacts to the
-  bare ExitPlanMode deny by asking the user what to change, auto-review auto-answers that
-  one question itself (reason `plan-hold-answered`) so the user is never asked to explain
-  a rejection they never made.
+- Reviews plans too, on every provider, through two paths kept strictly separate by
+  provider capability so one plan is never reviewed twice. On Claude Code, whose
+  ExitPlanMode routes to a real `interaction.pending` with `subject.kind: "plan"` the
+  native gate can hold, it fires on that event, holds the first presentation back (queues
+  a review-plan turn, then denies the approval), and releases the revised plan on its
+  re-presentation. If the agent reacts to the bare deny by asking the user what to
+  change, auto-review auto-answers that one question itself (reason
+  `plan-hold-answered`) so the user is never asked to explain a rejection they never made.
+  Every other provider's plan approvals never reach that gate, so instead those threads
+  get the `PresentPlan` agent tool via `bb.agents.configure`: the agent writes its plan to
+  a file and calls `PresentPlan(planFilePath)`; the first call arms a review and returns
+  the review instructions, and the second call (after the agent applies the findings)
+  releases it — the agent then ends its turn and waits for the user's own, explicit
+  approval, since a tool result is never the user's approval. Claude Code never gets
+  `PresentPlan`, and no other provider gets the native gate's instructions, so the two
+  paths never compete for the same plan.
 - Ships enabled (opt-out). Turn it off globally or per project, or skip a single
   thread, with `bb auto-review`.
 
@@ -71,8 +72,9 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
 - Settings: global `enabled`, default `mergeEligibleMainlines`, default `reviewMode`.
 - Per-project overrides and per-thread skip live in the plugin's own storage.
 - CLI: `bb auto-review status|show|enable|disable|skip|unskip|reset` (all `--json`). `status`
-  reports `planGate`: true for a top-level, enabled, non-skipped `claude-code` thread (the
-  native gate owns it), or for any other such thread with a fresh `PresentPlan` review —
-  either way its plan review is owned here rather than by another gate (e.g. agent-hooks).
+  reports `planGate`: whether this thread is a top-level, enabled, non-skipped `claude-code`
+  thread, so its plan review is owned here, by the native gate, rather than by another gate
+  (e.g. agent-hooks). It does not reflect `PresentPlan`, which has no equivalent gate to hand
+  off from on its own providers.
 
 See `skills/auto-review/SKILL.md` for details.

@@ -625,27 +625,6 @@ describe("auto-review cli: status — planGate", () => {
     );
   });
 
-  it("is true for an ACP thread once PresentPlan reviewed a fresh plan", async () => {
-    await withHost(
-      { threads: { [THREAD_ID]: { ...claudeCodeThread, providerId: "acp-claude-work" } } },
-      async (host) => {
-        host.metadataFor(THREAD_ID).planPresentedAt = Date.now();
-        const result = await host.run(["status", THREAD_ID, "--json"]);
-        expect(parse(result.stdout)).toMatchObject({ planGate: true });
-      },
-    );
-  });
-
-  it("is false for an ACP thread without a fresh PresentPlan review", async () => {
-    await withHost(
-      { threads: { [THREAD_ID]: { ...claudeCodeThread, providerId: "acp-claude-work" } } },
-      async (host) => {
-        const result = await host.run(["status", THREAD_ID, "--json"]);
-        expect(parse(result.stdout)).toMatchObject({ planGate: false });
-      },
-    );
-  });
-
   it("is false for a skipped thread", async () => {
     await withHost({ threads: { [THREAD_ID]: claudeCodeThread } }, async (host) => {
       host.metadataFor(THREAD_ID).skip = true;

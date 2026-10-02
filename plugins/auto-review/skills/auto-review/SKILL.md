@@ -28,48 +28,47 @@ It ships **enabled** (opt-out).
 
 ## Plan review
 
-A plan gets reviewed before the user sees it, on every provider, through the `PresentPlan`
-agent tool auto-review registers. The agent writes its plan to a file and calls
-`PresentPlan(planFilePath)`. The **first** call for a given plan arms a review and returns
-the review instructions (devkit's calibrated review in `plan` scope, or a self-review, per
-the review mode); the agent applies every valid finding to the plan file and calls
-`PresentPlan` again with the same path. The **second** call releases the review (reason
-`plan-reviewed`) and tells the agent to end its turn with the revised plan and a short
-summary of what changed, then wait for the user's own, explicit approval — a tool result is
-never treated as that approval. An arm left for more than the 30-minute stale window is
-treated as gone (a crashed turn, a session that never came back): the next call reviews
-again rather than releasing unreviewed.
+A plan gets reviewed before the user sees it, on every provider, through one of two paths
+kept strictly separate by provider capability: a thread gets exactly one of them, never
+both, so one plan is never reviewed twice.
 
-On Claude Code specifically, the native ExitPlanMode path runs alongside `PresentPlan` and
-reviews the **first** native presentation of a plan too. When an agent presents a plan for
-approval (Claude Code's ExitPlanMode) and `PresentPlan` has not already reviewed that plan,
-auto-review queues a review turn and then denies that approval. The deny's own text —
-the provider's, not auto-review's — reaches the agent first and reads as the user rejecting
-the plan; the queued review only reaches the agent after its next tool result (Claude Code
-hands a steered message to the model only then), so for a moment the agent has only the
-bare deny to go on. The agent reviews the plan file (devkit's calibrated review in `plan`
-scope, or a self-review, per the review mode), applies every valid finding to the plan, and
-presents it again. The review turn carries the thread's permission mode and can take the
-agent out of plan mode, where Claude Code's ExitPlanMode would approve itself, so the agent
-re-enters plan mode (EnterPlanMode) before presenting and then stops until the user
-approves. That second presentation goes straight to the user and resets the gate for the
-thread's next plan. A re-presentation that arrives before the review turn has been
-delivered is denied again, so the user never gets an unreviewed plan — but only while that
-review is actually still in the queue. If it has already left the queue (its dispatch
-event was missed), the re-presentation is the reviewed plan and goes to the user — unless
-the gate has been armed for longer than the 30-minute stale window, in which case whatever
-review was queued is long gone and never re-presented anything (a crashed review turn, a
-dispatch this plugin never saw): that presentation is treated as a fresh plan and held for
-review instead of released unreviewed. If it is still queued after 30 minutes, auto-review
-withdraws it and releases the plan (reason `plan-hold-expired`), so a stuck review can
-never turn into a permanent deny. Once the plan is approved and implemented, the normal
-post-turn code review runs on turn end.
+On Claude Code, when an agent presents a plan for approval (Claude Code's ExitPlanMode),
+auto-review holds back the **first** presentation. It queues a review turn and then denies
+that approval. The deny's own text — the provider's, not auto-review's — reaches the agent
+first and reads as the user rejecting the plan; the queued review only reaches the agent
+after its next tool result (Claude Code hands a steered message to the model only then), so
+for a moment the agent has only the bare deny to go on. The agent reviews the plan file
+(devkit's calibrated review in `plan` scope, or a self-review, per the review mode), applies
+every valid finding to the plan, and presents it again. The review turn carries the thread's
+permission mode and can take the agent out of plan mode, where Claude Code's ExitPlanMode
+would approve itself, so the agent re-enters plan mode (EnterPlanMode) before presenting
+and then stops until the user approves. That second presentation goes straight to the user
+and resets the gate for the thread's next plan. A re-presentation that arrives before the
+review turn has been delivered is denied again, so the user never gets an unreviewed plan —
+but only while that review is actually still in the queue. If it has already left the queue
+(its dispatch event was missed), the re-presentation is the reviewed plan and goes to the
+user — unless the gate has been armed for longer than the 30-minute stale window, in which
+case whatever review was queued is long gone and never re-presented anything (a crashed
+review turn, a dispatch this plugin never saw): that presentation is treated as a fresh plan
+and held for review instead of released unreviewed. If it is still queued after 30 minutes,
+auto-review withdraws it and releases the plan (reason `plan-hold-expired`), so a stuck
+review can never turn into a permanent deny. Once the plan is approved and implemented, the
+normal post-turn code review runs on turn end.
 
-The two paths never review the same plan twice: if `PresentPlan` already reviewed a
-thread's current plan, a native ExitPlanMode presentation of it that follows is released to
-the user unreviewed instead of denied again — the agent may still present through Claude
-Code's own plan-mode UI even after reviewing in text via `PresentPlan`, and that
-presentation is the already-reviewed plan reaching the user, not a fresh one to hold.
+Every other provider's plan approvals never reach that gate (the ACP bridge auto-approves
+every permission request in `full` mode and raises no plan-subject approval in any other
+mode), so instead auto-review registers a `PresentPlan` agent tool and offers it only to
+those threads. The agent writes its plan to a file and calls `PresentPlan(planFilePath)`.
+The **first** call for a given plan arms a review and returns the review instructions
+(devkit's calibrated review in `plan` scope, or a self-review, per the review mode); the
+agent applies every valid finding to the plan file and calls `PresentPlan` again with the
+same path. The **second** call releases the review (reason `plan-reviewed`) and tells the
+agent to end its turn with the revised plan and a short summary of what changed, then wait
+for the user's own, explicit approval — a tool result is never treated as that approval. An
+arm left for more than the 30-minute stale window is treated as gone (a crashed turn, a
+session that never came back): the next call reviews again rather than releasing
+unreviewed. Claude Code never gets `PresentPlan`, and no other provider gets the native
+gate's instructions, so the two review paths can never land on the same plan.
 
 Reading only the bare deny, an agent commonly reacts by asking the user what to change
 (Claude Code's native `AskUserQuestion`) — a question the user cannot really answer, since
@@ -92,28 +91,33 @@ other MCP tool core also classifies as tool `AskUserQuestion`, distinguished onl
 `server` field the native one lacks — raises a plugin interaction that can't take this kind
 of answer, so it is left alone.
 
-An agent outside plan mode would otherwise go straight from its own design to edits, with
-no plan presented for either gate to see. So while auto-review is enabled globally it adds
-one thread instruction, the same on every provider: before substantial work (a new module,
-a multi-file change, a design the user has not seen) write the plan to a file and call
-`PresentPlan`, follow its result, and never treat a tool result — including ExitPlanMode's
-own "approved" outcome — as the user's approval; only the user's own, explicit reply in
-chat approves a plan, and in Claude Code plan mode ExitPlanMode should only be called after
-that approval. Small fixes, work under an already-approved plan, and auto-review's own
-turns are exempt. Child threads and threads a plugin spawned (side chats, automations)
-never get the tool or the instruction: neither gate reviews their plans, and nobody may be
-there to approve one. The instruction and tool follow the global switch only, so a project
-or thread with auto-review off still gets both, and `PresentPlan` then tells the agent
-review is off here rather than silently reviewing nothing. A running session keeps the
-instructions and tools it started with, so the change applies from the next session start.
+The gate only sees a plan that is presented for approval, and an agent outside plan mode
+would otherwise go straight from its own design to edits. So while auto-review is enabled
+globally it adds a thread instruction: before substantial work (a new module, a
+multi-file change, a design the user has not seen) the agent presents a plan, even when the
+thread is not in plan mode. On Claude Code — the only provider whose plan approvals reach
+the gate — the agent is told to enter plan mode (EnterPlanMode) and present it
+(ExitPlanMode). Every other top-level provider instead gets the `PresentPlan` tool and an
+instruction to write the plan to a file and call it, follow its result, and never treat a
+tool result — including ExitPlanMode's own "approved" outcome — as the user's approval;
+only the user's own, explicit reply in chat approves a plan. Small fixes, work under an
+already-approved plan, and auto-review's own turns are exempt either way. Child threads and
+threads a plugin spawned (side chats, automations) never get either instruction or the
+tool: neither gate reviews their plans, and nobody may be there to approve one. The
+instruction (and, where it applies, the tool) follows the global switch only, so a project
+or thread with auto-review off still gets it — `PresentPlan` then tells the agent review is
+off here rather than silently reviewing nothing, while a disabled native gate just lets the
+plan through unreviewed. A running session keeps the instructions and tools it started
+with, so the change applies from the next session start.
 
 A plan carrying the `<!-- devkit:commit-plan -->` sentinel on a line of its own (devkit's
 commit workflow) is bookkeeping, not code, and passes through the native gate unreviewed
 (`PresentPlan` has no equivalent skip, since nothing but the calling agent decides to call
 it on a commit plan in the first place). `skip` and `disable` turn plan review off along
-with code review, on both paths; `reset` also clears a gate left armed by a review that
-never re-presented its plan, a `PresentPlan` arm or review left behind the same way, and a
-pending plan-hold answer.
+with code review, on both paths; `reset` also clears a native gate left armed by a review
+that never re-presented its plan, a pending plan-hold answer, and a `PresentPlan` arm left
+behind the same way — each kept in its own set of keys, so resetting one path never
+disturbs state the other path owns.
 
 ## CLI
 
@@ -121,11 +125,12 @@ All commands accept `--json`.
 
 - `bb auto-review status` — effective state and last-fire outcome for the current thread
   (enabled, skipped, reviewMode, `planGate`, loop-guard phase, last-fire reason and time).
-  `planGate` is true for a top-level, visible, environment-bound thread with auto-review
-  enabled and not skipped, and either `claude-code` (the native gate owns it) or any
-  provider with a fresh `PresentPlan` review (see *Plan review* above) — either way
-  auto-review's own plan review owns this thread's plan instead of another gate (e.g.
-  agent-hooks' `review-plan-before-exit.sh`, which stands down when this is true).
+  `planGate` is true only for a top-level, visible, environment-bound `claude-code` thread
+  with auto-review enabled and not skipped — the one case where auto-review's own native
+  plan gate (see *Plan review* above) owns this thread's plan review instead of another
+  gate (e.g. agent-hooks' `review-plan-before-exit.sh`, which stands down when this is
+  true). It says nothing about `PresentPlan`, which has no other gate to hand off from on
+  its own providers.
 - `bb auto-review show` — full effective settings for the current project (global
   defaults, project override, resolved values).
 - `bb auto-review enable [--global | --project <id>]` — turn it on. **Bare `enable`

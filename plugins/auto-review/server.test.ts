@@ -10,6 +10,7 @@ import plugin from "./server.js";
 import {
   AUTO_REVIEW_MARKER,
   PLAN_FIRST_INSTRUCTIONS,
+  PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
   PLAN_HOLD_ANSWER,
   PRESENT_PLAN_INVALID_PATH_MESSAGE,
   PRESENT_PLAN_OFF_MESSAGE,
@@ -1862,9 +1863,12 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
-  it("releases an ExitPlanMode presentation unreviewed once PresentPlan already reviewed it", async () => {
+  it("still runs the normal native review after a PresentPlan cycle on the same thread (no cross-path bypass)", async () => {
     const host = createHost({ sendDelivery: "queued" });
     await plugin(host.bb);
+    // PresentPlan is never offered to a claude-code thread (see the configure
+    // test below), but defensively calling it anyway must not let a later
+    // native ExitPlanMode presentation skip the native gate's own review.
     await host.harness.callAgentTool(
       "PresentPlan",
       { planFilePath: "docs/plans/p.md" },
@@ -1875,35 +1879,6 @@ describe("auto-review plugin", () => {
       { planFilePath: "docs/plans/p.md" },
       { threadId: THREAD_ID, projectId: "project-1" },
     );
-    expect(typeof host.metadata.planPresentedAt).toBe("number");
-
-    const { errors } = await emitPlan(host);
-    expect(errors).toEqual([]);
-    // No native review queued and no deny: the plan goes straight to the user.
-    expect(host.sends).toHaveLength(0);
-    expect(host.resolutions).toHaveLength(0);
-    expect(host.metadata.planPresentedAt).toBeUndefined();
-    expect(await lastFireOf(host)).toMatchObject({
-      outcome: "stood-down",
-      reason: "plan-reviewed",
-    });
-    await host.harness.dispose();
-  });
-
-  it("reviews normally through the native gate once the PresentPlan review has gone stale", async () => {
-    const host = createHost({ sendDelivery: "queued" });
-    await plugin(host.bb);
-    await host.harness.callAgentTool(
-      "PresentPlan",
-      { planFilePath: "docs/plans/p.md" },
-      { threadId: THREAD_ID, projectId: "project-1" },
-    );
-    await host.harness.callAgentTool(
-      "PresentPlan",
-      { planFilePath: "docs/plans/p.md" },
-      { threadId: THREAD_ID, projectId: "project-1" },
-    );
-    host.metadata.planPresentedAt = Date.now() - STALE_WINDOW_MS - 1_000;
 
     const { errors } = await emitPlan(host);
     expect(errors).toEqual([]);
@@ -1911,6 +1886,17 @@ describe("auto-review plugin", () => {
     expect(host.resolutions).toEqual([
       { threadId: THREAD_ID, interactionId: "pint-1", resolution: { decision: "deny" } },
     ]);
+    await host.harness.dispose();
+  });
+
+  it("status planGate stays false on a non-claude-code thread even right after a PresentPlan cycle", async () => {
+    const host = createHost();
+    await plugin(host.bb);
+    const ctx = { threadId: "codex-1", projectId: "project-1" };
+    await host.harness.callAgentTool("PresentPlan", { planFilePath: "docs/plans/p.md" }, ctx);
+    await host.harness.callAgentTool("PresentPlan", { planFilePath: "docs/plans/p.md" }, ctx);
+    const result = await host.harness.runCli(["status", "codex-1", "--json"]);
+    expect(JSON.parse(result.stdout ?? "")).toMatchObject({ planGate: false });
     await host.harness.dispose();
   });
 
@@ -2369,7 +2355,7 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
-  it("gives every top-level user thread PresentPlan and the unified plan-first instructions", async () => {
+  it("gives claude-code the native-gate instructions and every other provider PresentPlan", async () => {
     const host = createHost();
     await plugin(host.bb);
     const resolve = (
@@ -2385,13 +2371,20 @@ describe("auto-review plugin", () => {
         }),
       );
 
-    // Plan review is provider-agnostic now: every provider gets the same
-    // tool and instructions, not just Claude Code.
-    for (const providerId of ["claude-code", "acp-claude-work", "codex"]) {
+    // Claude Code's ExitPlanMode routes to the native gate — no PresentPlan
+    // tool there, or one plan could be reviewed by both paths.
+    const claudeCode = await resolve(null, null, "claude-code");
+    expect(claudeCode.tools).toEqual([]);
+    expect(claudeCode.skills).toEqual(["auto-review"]);
+    expect(claudeCode.instructions).toBe(PLAN_FIRST_INSTRUCTIONS);
+
+    // Every other provider's plan approvals never reach the native gate, so
+    // they get PresentPlan plus its own instructions instead.
+    for (const providerId of ["acp-claude-work", "codex"]) {
       const resolved = await resolve(null, null, providerId);
       expect(resolved.tools.map((tool) => tool.name)).toEqual(["PresentPlan"]);
       expect(resolved.skills).toEqual(["auto-review"]);
-      expect(resolved.instructions).toBe(PLAN_FIRST_INSTRUCTIONS);
+      expect(resolved.instructions).toBe(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN);
     }
     // The plan gate never serves these, so they keep the skill but get no
     // tool or instruction.
@@ -2403,7 +2396,7 @@ describe("auto-review plugin", () => {
     }
 
     await host.harness.setSettings({ enabled: false });
-    const disabled = await resolve(null, null);
+    const disabled = await resolve(null, null, "acp-claude-work");
     expect(disabled.tools).toEqual([]);
     expect(disabled.instructions).toBeNull();
     await host.harness.dispose();
@@ -2423,7 +2416,6 @@ describe("auto-review plugin", () => {
       expect(result).toContain("Nobody rejected it");
       expect(result).toContain("docs/plans/p.md");
       expect(typeof host.metadata.presentPlanArmedAt).toBe("number");
-      expect(host.metadata.planPresentedAt).toBeUndefined();
       expect(await lastFireOf(host)).toMatchObject({ outcome: "fired", reason: "plan-review" });
       await host.harness.dispose();
     });
@@ -2439,7 +2431,6 @@ describe("auto-review plugin", () => {
       );
       expect(result).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
       expect(host.metadata.presentPlanArmedAt).toBeUndefined();
-      expect(typeof host.metadata.planPresentedAt).toBe("number");
       expect(await lastFireOf(host)).toMatchObject({
         outcome: "stood-down",
         reason: "plan-reviewed",
@@ -2459,7 +2450,6 @@ describe("auto-review plugin", () => {
       );
       expect(result).toContain("Nobody rejected it");
       expect(typeof host.metadata.presentPlanArmedAt).toBe("number");
-      expect(host.metadata.planPresentedAt).toBeUndefined();
       await host.harness.dispose();
     });
 

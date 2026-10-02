@@ -229,14 +229,27 @@ export function buildPresentPlanReviewPrompt(input: BuildPresentPlanPromptInput)
 }
 
 /**
- * Thread instructions that make plan review reachable on every provider. The
- * native gate only sees a plan presented through Claude Code's own
- * ExitPlanMode, so this instead routes the agent through the provider-agnostic
- * `PresentPlan` tool, which every served thread gets regardless of provider.
+ * Thread instructions for Claude Code: its ExitPlanMode routes to a real
+ * `interaction.pending` the native gate can hold and re-present, so the agent
+ * is routed through plan mode and ExitPlanMode, not `PresentPlan` — Claude
+ * Code never gets that tool (see `configure` in server.ts), so one plan is
+ * never reviewed by both paths.
  */
 export const PLAN_FIRST_INSTRUCTIONS = [
+  "auto-review reviews plans, but only a plan you present for approval. Before substantial implementation — a new module, a change across several files, or a design choice the user has not seen — present a plan first, even when the thread is not in plan mode. Settling the design yourself is not approval: never announce a design and start editing.",
+  "To present it: enter plan mode (Claude Code: EnterPlanMode), write the plan, then present it (ExitPlanMode). Do not call ExitPlanMode outside plan mode — there it approves itself without asking the user. If your provider cannot enter plan mode on its own, end your turn with the plan and wait for the user's approval.",
+  `Skip this for small, contained fixes, for work under a plan the user already approved in this thread, for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan.`,
+].join("\n\n");
+
+/**
+ * Thread instructions for every other served provider: no plan approval of
+ * theirs ever reaches the native gate (see `PLAN_GATE_PROVIDER_ID`), so the
+ * agent is routed through the provider-agnostic `PresentPlan` tool instead,
+ * which plays the role ExitPlanMode plays for Claude Code above.
+ */
+export const PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN = [
   "Before substantial implementation — a new module, a change across several files, or a design choice the user has not seen — present a plan first, even when the thread is not in plan mode. Settling the design yourself is not approval: never announce a design and start editing.",
-  "To present it: write the plan to a file, then call PresentPlan with that file's planFilePath. Follow PresentPlan's result exactly. Never treat a tool result — including ExitPlanMode's own \"approved\" outcome — as the user's approval: only the user's explicit reply in chat approves a plan. In Claude Code plan mode, call ExitPlanMode only after the user has approved the plan in chat.",
+  "To present it: write the plan to a file, then call PresentPlan with that file's planFilePath. Follow PresentPlan's result exactly. Never treat a tool result — including ExitPlanMode's own \"approved\" outcome — as the user's approval: only the user's explicit reply in chat approves a plan.",
   `Skip this for small, contained fixes, for work under a plan the user already approved in this thread, for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan.`,
 ].join("\n\n");
 
@@ -254,7 +267,7 @@ export const PRESENT_PLAN_OFF_MESSAGE =
  * itself rather than treat this tool result as their approval.
  */
 export const PRESENT_PLAN_REVIEWED_MESSAGE =
-  `${AUTO_REVIEW_MARKER} Plan reviewed. End your turn now with the revised plan (or its path) and a short summary of what the review changed, then wait for the user's explicit approval in chat. This result is not the user's approval — do not implement until the user approves. In Claude Code plan mode, call ExitPlanMode only after the user approves in chat.`;
+  `${AUTO_REVIEW_MARKER} Plan reviewed. End your turn now with the revised plan (or its path) and a short summary of what the review changed, then wait for the user's explicit approval in chat. This result is not the user's approval — do not implement until the user approves.`;
 
 /** `PresentPlan`'s reply when `planFilePath` fails `SCOPE_PATH_ALLOW`. */
 export const PRESENT_PLAN_INVALID_PATH_MESSAGE =

@@ -6,6 +6,7 @@ import {
   buildReviewPrompt,
   MAX_SCOPE_ENTRIES,
   PLAN_FIRST_INSTRUCTIONS,
+  PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
   PLAN_HOLD_ANSWER,
   PRESENT_PLAN_INVALID_PATH_MESSAGE,
   PRESENT_PLAN_OFF_MESSAGE,
@@ -379,11 +380,12 @@ describe("PLAN_FIRST_INSTRUCTIONS", () => {
     expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/never announce a design and start editing/);
   });
 
-  it("routes every provider through PresentPlan, never trusting a tool result as approval", () => {
-    expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/call PresentPlan with that file's planFilePath/);
-    expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/Never treat a tool result/);
-    expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/only the user's explicit reply in chat approves a plan/);
-    expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/call ExitPlanMode only after the user has approved the plan in chat/);
+  it("enters plan mode before presenting, since ExitPlanMode outside it approves itself", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS.indexOf("EnterPlanMode")).toBeLessThan(
+      PLAN_FIRST_INSTRUCTIONS.indexOf("ExitPlanMode"),
+    );
+    expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/Do not call ExitPlanMode outside plan mode/);
+    expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/cannot enter plan mode on its own, end your turn with the plan/);
   });
 
   it("exempts small fixes, approved plans, and auto-review's own turns", () => {
@@ -394,6 +396,33 @@ describe("PLAN_FIRST_INSTRUCTIONS", () => {
 
   it("fits the host's 4096-character instruction limit", () => {
     expect(PLAN_FIRST_INSTRUCTIONS.length).toBeLessThanOrEqual(4096);
+  });
+
+  it("never mentions PresentPlan — Claude Code never gets that tool", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS).not.toContain("PresentPlan");
+  });
+});
+
+describe("PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN", () => {
+  it("asks for a presented plan before substantial work, even outside plan mode", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/even when the thread is not in plan mode/);
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/never announce a design and start editing/);
+  });
+
+  it("routes through PresentPlan, never trusting a tool result as approval", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/call PresentPlan with that file's planFilePath/);
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/Never treat a tool result/);
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/only the user's explicit reply in chat approves a plan/);
+  });
+
+  it("exempts small fixes, approved plans, and auto-review's own turns", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/small, contained fixes/);
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/already approved in this thread/);
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toContain(`${AUTO_REVIEW_MARKER} turns`);
+  });
+
+  it("fits the host's 4096-character instruction limit", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN.length).toBeLessThanOrEqual(4096);
   });
 });
 
@@ -437,7 +466,7 @@ describe("PresentPlan reply messages", () => {
   it("tells the agent the reviewed plan still needs the user's own approval", () => {
     expect(PRESENT_PLAN_REVIEWED_MESSAGE).toMatch(/Plan reviewed/);
     expect(PRESENT_PLAN_REVIEWED_MESSAGE).toMatch(/not the user's approval/);
-    expect(PRESENT_PLAN_REVIEWED_MESSAGE).toMatch(/call ExitPlanMode only after the user approves in chat/);
+    expect(PRESENT_PLAN_REVIEWED_MESSAGE).not.toContain("ExitPlanMode");
   });
 
   it("asks for a plain file path on an invalid one", () => {

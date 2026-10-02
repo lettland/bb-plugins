@@ -33,6 +33,7 @@ import {
 import {
   isBusyStatus,
   passesThreadGate,
+  PLAN_GATE_PROVIDER_ID,
   planGateServes,
   reviewInFlight,
   selfIsWorktree,
@@ -51,6 +52,7 @@ import {
   buildPresentPlanReviewPrompt,
   buildReviewPrompt,
   PLAN_FIRST_INSTRUCTIONS,
+  PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
   PLAN_HOLD_ANSWER,
   PRESENT_PLAN_INVALID_PATH_MESSAGE,
   PRESENT_PLAN_OFF_MESSAGE,
@@ -64,7 +66,6 @@ import {
   PLAN_GATE_KEYS,
   planDenyFresh,
   planHoldExpired,
-  planPresentedFresh,
   presentPlanArmed,
   readState,
   REVIEW_IN_FLIGHT_PHASES,
@@ -128,37 +129,45 @@ export default async function plugin(bb: BbPluginApi) {
     globals = globalDefaultsFrom(next);
   });
 
-  // Only threads the plan gate can serve get the plan-first tool and
+  // Only threads the plan gate can serve get a plan-first tool and
   // instruction: a child or plugin-spawned thread would stop for an approval
   // nobody reviews or may be watching. The callback must be synchronous, so it
   // follows the global switch only: a project or thread that turned
-  // auto-review off still gets both, and `PresentPlan` then tells the agent
-  // plan review is off here (see its `execute` below) rather than silently
-  // reviewing nothing.
+  // auto-review off still gets one of these, and its plan then goes to the
+  // user unreviewed (or, on `PresentPlan`, is told review is off here — see
+  // its `execute` below).
   //
-  // `PresentPlan` makes plan review provider-agnostic: every served thread
-  // gets it, regardless of what `interaction.pending` shapes its provider
-  // raises. Claude Code remains special only for the NATIVE gate below
-  // (`gatePlan`): its ExitPlanMode routes to a real `interaction.pending` with
-  // `subject.kind: "plan"`, even in the `full` permission mode, which is what
-  // lets that gate hold and re-present a plan by denying its own approval. No
-  // other provider's plan interaction can be held that way (the ACP bridge
-  // auto-approves every permission request in `full` mode and raises no
-  // plan-subject approval in any other mode), so on every other provider
-  // `PresentPlan` is the only review path — and on Claude Code it is also
-  // available as a second path: an agent that calls it and later also
-  // presents the same plan through ExitPlanMode gets that presentation
-  // released unreviewed (see `gatePlan`'s `planPresentedFresh` check).
+  // Claude Code is the only provider whose plan approvals reach the NATIVE
+  // gate (`gatePlan`): its ExitPlanMode routes to a real `interaction.pending`
+  // with `subject.kind: "plan"`, even in the `full` permission mode, which is
+  // what lets that gate hold and re-present a plan by denying its own
+  // approval. The ACP bridge, by contrast, auto-approves every permission
+  // request in `full` mode (`handlePermissionRequest`), and in its other modes
+  // raises only a generic approval, never one with that subject kind — the
+  // SDK has no capability flag for this, so there is nothing to branch on but
+  // the provider id. On every other provider the native gate never sees a
+  // plan, so instead those threads get the `PresentPlan` tool: a
+  // provider-agnostic review path the agent drives itself (write the plan to
+  // a file, call `PresentPlan`, apply its findings, call it again to
+  // release). Claude Code never gets this tool — it already has a review path
+  // through the native gate, and offering both would let one plan be reviewed
+  // twice or let a `PresentPlan` cycle (which the native gate cannot see)
+  // stand in for a native review it never actually ran.
   bb.agents.configure((context) => {
     const served =
       globals.enabled &&
       context.thread.parentThreadId === null &&
       context.origin.pluginId === null;
-    return {
-      tools: served ? [PRESENT_PLAN_TOOL_NAME] : [],
-      skills: ["auto-review"],
-      ...(served ? { instructions: PLAN_FIRST_INSTRUCTIONS } : {}),
-    };
+    if (!served) {
+      return { tools: [], skills: ["auto-review"] };
+    }
+    return context.provider.id === PLAN_GATE_PROVIDER_ID
+      ? { tools: [], skills: ["auto-review"], instructions: PLAN_FIRST_INSTRUCTIONS }
+      : {
+          tools: [PRESENT_PLAN_TOOL_NAME],
+          skills: ["auto-review"],
+          instructions: PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
+        };
   });
 
   bb.agents.registerTool({
@@ -185,9 +194,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
         const now = Date.now();
         if (presentPlanArmed(state, now)) {
-          await writeState(bb, ctx.threadId, { planPresentedAt: now }, [
-            "presentPlanArmedAt",
-          ]);
+          await writeState(bb, ctx.threadId, {}, ["presentPlanArmedAt"]);
           await recordFire(ctx.projectId, ctx.threadId, "stood-down", "plan-reviewed");
           return PRESENT_PLAN_REVIEWED_MESSAGE;
         }
@@ -655,24 +662,6 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   /**
-   * `PresentPlan` already reviewed this thread's current plan (any provider):
-   * an ExitPlanMode presentation that follows is that already-reviewed plan
-   * reaching the user through Claude Code's own plan-mode UI, not a fresh one
-   * to hold — release it unreviewed. Returns whether it did.
-   */
-  async function releasePresentPlanReviewed(
-    thread: GateThreadLike,
-    state: ThreadState,
-  ): Promise<boolean> {
-    if (!planPresentedFresh(state, Date.now())) {
-      return false;
-    }
-    await writeState(bb, thread.id, {}, ["planPresentedAt"]);
-    await recordFire(thread.projectId, thread.id, "stood-down", "plan-reviewed");
-    return true;
-  }
-
-  /**
    * Hold a plan's first presentation for review. The review turn is queued
    * BEFORE the approval is denied: a thread awaiting an interaction cannot take
    * a prompt, so the turn waits on the approval and core steers it the moment
@@ -689,9 +678,6 @@ export default async function plugin(bb: BbPluginApi) {
     approval: PlanApproval,
   ): Promise<void> {
     const state = await readState(bb, thread.id);
-    if (await releasePresentPlanReviewed(thread, state)) {
-      return;
-    }
     const project = await readProjectConfig(bb, thread.projectId);
     const config = effectiveConfig(globals, project, state.skip === true);
     if (!planGateServes(thread, config)) {

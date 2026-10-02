@@ -42,15 +42,15 @@ Providers: `claude-code` (`~/.claude`), `claude-work` (`~/.claude-work`), `codex
 |---|---|---|
 | `guard-bash.sh` | PreToolUse(Bash) | Catastrophic `rm`, force push, secret exfiltration, environment dumps |
 | `secret-scan.sh` | PreToolUse(Write\|Edit) | Refuses to write a credential into a file that could be committed |
-| `review-plan-before-exit.sh` | PreToolUse(ExitPlanMode) | Denies a plan's first presentation until it has been reviewed — in plan mode, defers to auto-review where it already owns the review, whether through its native gate or a fresh `PresentPlan` call (`bb auto-review status --json` reports `planGate: true`) |
+| `review-plan-before-exit.sh` | PreToolUse(ExitPlanMode) | Denies a plan's first presentation until it has been reviewed — in plan mode, defers to auto-review's own plan gate where it already owns the review (`bb auto-review status --json` reports `planGate: true`) |
 | `verify-before-stop.sh` | Stop, SubagentStop | Blocks one stop when this turn's tool output shows an unresolved failure |
 | `session-reset.sh` | SessionStart | Prunes stale plan-review gates so a crashed session cannot deadlock the next |
 
-Deferring to auto-review is not a guarantee a review happens: auto-review's own plan
-review — native gate or `PresentPlan` — can itself release a plan unreviewed on its own
-failure (queue failed, deny failed, hold went stale — each recorded as a reason in
-`bb auto-review status`'s `lastFire`). The hook's deny+arm only falls back when reading
-`planGate` itself fails; it does not re-check whether auto-review's review actually ran.
+Deferring to auto-review is not a guarantee a review happens: auto-review's own plan gate
+can itself release a plan unreviewed on its own failure (queue failed, deny failed, hold
+went stale — each recorded as a reason in `bb auto-review status`'s `lastFire`). The hook's
+deny+arm only falls back when reading `planGate` itself fails; it does not re-check whether
+auto-review's review actually ran.
 
 ## Two design rules worth not re-litigating
 
