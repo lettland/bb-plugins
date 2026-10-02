@@ -61,9 +61,13 @@ export function makeGitRepo({ ignored = [], tracked = [] } = {}) {
  * Returns { exitCode, stdout, verdict, reason }.
  * @param {string} script
  * @param {unknown} toolInput
- * @param {{ projectDir?: string, env?: Record<string, string>, toolName?: string }} [options]
+ * @param {{ projectDir?: string, env?: Record<string, string>, toolName?: string, permissionMode?: string }} [options]
  */
-export function runHook(script, toolInput, { projectDir, env = {}, toolName = "Bash" } = {}) {
+export function runHook(
+  script,
+  toolInput,
+  { projectDir, env = {}, toolName = "Bash", permissionMode } = {},
+) {
   const dir = projectDir ?? makeProjectDir();
   const owned = projectDir === undefined;
   const envelope = JSON.stringify({
@@ -72,6 +76,7 @@ export function runHook(script, toolInput, { projectDir, env = {}, toolName = "B
     hook_event_name: "PreToolUse",
     tool_name: toolName,
     tool_input: toolInput,
+    ...(permissionMode === undefined ? {} : { permission_mode: permissionMode }),
   });
 
   return new Promise((resolve) => {

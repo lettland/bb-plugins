@@ -69,14 +69,19 @@ describe("review-plan-before-exit.sh — auto-review handoff", () => {
     const result = await runHook(
       "review-plan-before-exit.sh",
       { plan: PLAN },
-      { projectDir, toolName: "ExitPlanMode", env: { BB_CLI: bb, BB_THREAD_ID: "thr_1" } },
+      {
+        projectDir,
+        toolName: "ExitPlanMode",
+        permissionMode: "plan",
+        env: { BB_CLI: bb, BB_THREAD_ID: "thr_1" },
+      },
     );
 
     expect(result.verdict).toBe("allow");
     expect(existsSync(marker)).toBe(true);
     expect(existsSync(gatePath(projectDir))).toBe(false);
     expect(incidentLog(projectDir)).toContain(
-      "PLAN-REVIEW | SKIP | auto-review gates this thread (thr_1)",
+      "PLAN-REVIEW | SKIP | deferred to auto-review (thr_1)",
     );
   });
 
@@ -88,7 +93,12 @@ describe("review-plan-before-exit.sh — auto-review handoff", () => {
     const result = await runHook(
       "review-plan-before-exit.sh",
       { plan: PLAN },
-      { projectDir, toolName: "ExitPlanMode", env: { BB_CLI: bb, BB_THREAD_ID: "thr_1" } },
+      {
+        projectDir,
+        toolName: "ExitPlanMode",
+        permissionMode: "plan",
+        env: { BB_CLI: bb, BB_THREAD_ID: "thr_1" },
+      },
     );
 
     expect(existsSync(marker)).toBe(true);
@@ -104,7 +114,12 @@ describe("review-plan-before-exit.sh — auto-review handoff", () => {
     const result = await runHook(
       "review-plan-before-exit.sh",
       { plan: PLAN },
-      { projectDir, toolName: "ExitPlanMode", env: { BB_CLI: bb, BB_THREAD_ID: "thr_1" } },
+      {
+        projectDir,
+        toolName: "ExitPlanMode",
+        permissionMode: "plan",
+        env: { BB_CLI: bb, BB_THREAD_ID: "thr_1" },
+      },
     );
 
     expect(isDeny(result.stdout)).toBe(true);
@@ -119,7 +134,12 @@ describe("review-plan-before-exit.sh — auto-review handoff", () => {
     const result = await runHook(
       "review-plan-before-exit.sh",
       { plan: PLAN },
-      { projectDir, toolName: "ExitPlanMode", env: { BB_CLI: bb, BB_THREAD_ID: "thr_1" } },
+      {
+        projectDir,
+        toolName: "ExitPlanMode",
+        permissionMode: "plan",
+        env: { BB_CLI: bb, BB_THREAD_ID: "thr_1" },
+      },
     );
 
     expect(isDeny(result.stdout)).toBe(true);
@@ -141,6 +161,7 @@ describe("review-plan-before-exit.sh — auto-review handoff", () => {
       {
         projectDir,
         toolName: "ExitPlanMode",
+        permissionMode: "plan",
         env: { BB_CLI: bb, BB_THREAD_ID: "thr_1", AGENT_HOOKS_BB_TIMEOUT: "1" },
       },
     );
@@ -161,7 +182,70 @@ describe("review-plan-before-exit.sh — auto-review handoff", () => {
       { plan: PLAN },
       // Force-clear BB_THREAD_ID: this hook itself may be running inside bb,
       // so the host's own env could otherwise leak a real thread id in.
-      { projectDir, toolName: "ExitPlanMode", env: { BB_CLI: bb, BB_THREAD_ID: "" } },
+      {
+        projectDir,
+        toolName: "ExitPlanMode",
+        permissionMode: "plan",
+        env: { BB_CLI: bb, BB_THREAD_ID: "" },
+      },
+    );
+
+    expect(isDeny(result.stdout)).toBe(true);
+    expect(existsSync(gatePath(projectDir))).toBe(true);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("denies and arms without invoking bb when BB_THREAD_ID is malformed", async () => {
+    const marker = markerPath();
+    const bb = fakeBb(marker, "echo '{\"planGate\": true}'");
+    const projectDir = project();
+
+    const result = await runHook(
+      "review-plan-before-exit.sh",
+      { plan: PLAN },
+      {
+        projectDir,
+        toolName: "ExitPlanMode",
+        permissionMode: "plan",
+        env: { BB_CLI: bb, BB_THREAD_ID: "thr 1; rm -rf /" },
+      },
+    );
+
+    expect(isDeny(result.stdout)).toBe(true);
+    expect(existsSync(gatePath(projectDir))).toBe(true);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("denies and arms without invoking bb when permission_mode is not plan", async () => {
+    const marker = markerPath();
+    const bb = fakeBb(marker, "echo '{\"planGate\": true}'");
+    const projectDir = project();
+
+    const result = await runHook(
+      "review-plan-before-exit.sh",
+      { plan: PLAN },
+      {
+        projectDir,
+        toolName: "ExitPlanMode",
+        permissionMode: "acceptEdits",
+        env: { BB_CLI: bb, BB_THREAD_ID: "thr_1" },
+      },
+    );
+
+    expect(isDeny(result.stdout)).toBe(true);
+    expect(existsSync(gatePath(projectDir))).toBe(true);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("denies and arms without invoking bb when permission_mode is absent", async () => {
+    const marker = markerPath();
+    const bb = fakeBb(marker, "echo '{\"planGate\": true}'");
+    const projectDir = project();
+
+    const result = await runHook(
+      "review-plan-before-exit.sh",
+      { plan: PLAN },
+      { projectDir, toolName: "ExitPlanMode", env: { BB_CLI: bb, BB_THREAD_ID: "thr_1" } },
     );
 
     expect(isDeny(result.stdout)).toBe(true);

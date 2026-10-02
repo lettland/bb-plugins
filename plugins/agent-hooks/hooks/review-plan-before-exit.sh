@@ -25,15 +25,34 @@
 # `interaction.pending` with `subject.kind: "plan"`), so without a handoff a plan
 # in that thread gets reviewed twice. `bb auto-review status --json` reports
 # `planGate: true` exactly for the thread auto-review's gate owns; when it does,
-# this hook stands down for that plan instead of also arming. Every other thread
-# (ACP, standalone Claude Code, auto-review off/skipped, a child thread) gets no
-# such report (or none at all) and this hook reviews as it always has. Any
-# failure reading that report — `bb` missing, a non-zero exit, output that is not
-# JSON, no `planGate` field, or the call running past AGENT_HOOKS_BB_TIMEOUT
-# seconds (default 5) — falls through to today's deny+arm: worst case is a
-# duplicate review, never a missed one. The call is bounded with perl's alarm()
-# since macOS ships no `timeout` coreutil; without perl on PATH it runs
-# unwrapped, the same exposure this hook always had before the bound existed.
+# this hook stands down INSTEAD of reviewing — it does not review on auto-review's
+# behalf, it defers to a review auto-review has already queued or will queue
+# itself. That handoff is only checked when `.permission_mode` is exactly "plan":
+# outside plan mode, Claude Code's ExitPlanMode approves itself and never reaches
+# auto-review's gate at all, so standing down there would release the plan to the
+# user with no review from either side. Every other case (ACP, standalone Claude
+# Code, auto-review off/skipped, a child thread, outside plan mode) gets no report
+# standing down could rely on (or none at all) and this hook reviews as it always
+# has. BB_THREAD_ID is trusted only when it looks like a thread id
+# (`^[A-Za-z0-9_-]+$`); anything else (unset, empty, garbage) falls through to
+# review. A nested Claude session that inherits its parent's BB_THREAD_ID is
+# treated as that same thread — standing down for it is correct exactly when
+# auto-review's gate on the outer thread really does cover the nested session's
+# plan too.
+#
+# The handoff is NOT a guarantee auto-review reviews every plan it takes custody
+# of: auto-review's own gate can itself stand down on a failure (the review
+# could not be queued, the deny failed, the hold went stale) and release a plan
+# unreviewed — deliberately, the same fail-open posture this hook has always
+# had, recorded as a reason in `bb auto-review status`'s `lastFire`. Standing
+# down here only means "auto-review owns this plan's review," not "a review
+# happened." Any failure reading the `planGate` report itself — `bb` missing, a
+# non-zero exit, output that is not JSON, no `planGate` field, or the call
+# running past AGENT_HOOKS_BB_TIMEOUT seconds (default 5) — falls through to
+# this hook's own deny+arm: worst case then is a duplicate review, never a
+# missed one. The call is bounded with perl's alarm() since macOS ships no
+# `timeout` coreutil; without perl on PATH it runs unwrapped, the same exposure
+# this hook always had before the bound existed.
 #
 # Output contract mirrors completeness-gate.sh: exit 0 + hookSpecificOutput JSON
 # with permissionDecision "deny" on the block; exit 0 with no output to allow.
@@ -51,6 +70,7 @@ command -v jq > /dev/null 2>&1 || exit 0
 
 INPUT=$(cat)
 TOOL=$(printf '%s' "$INPUT" | jq -r '.tool_name // empty' 2> /dev/null || echo '')
+PERMISSION_MODE=$(printf '%s' "$INPUT" | jq -r '.permission_mode // empty' 2> /dev/null || echo '')
 
 # Defensive guard: the hooks.json matcher already scopes this to ExitPlanMode,
 # but re-check so a loose matcher can never block an unrelated tool.
@@ -97,13 +117,15 @@ if [ -f "$GATE" ]; then
 fi
 
 # auto-review's own plan gate owns this thread: stand down instead of also
-# arming. BB_THREAD_ID is unset outside a bb-run session (nothing to ask about,
-# so nothing to stand down for); the bb binary (BB_CLI, else whatever `command -v
-# bb` finds) is asked for THIS thread's planGate explicitly, since the hook has
-# no other way to name the thread. Any failure here — no bb on PATH, a non-zero
-# exit, a stalled call past the timeout, output jq can't parse, a response with
-# no planGate field — leaves $SERVED empty and falls through to the normal
-# deny+arm below.
+# arming. Only attempted outside plan mode would be wrong (see the header), so
+# this is skipped unless PERMISSION_MODE is exactly "plan". BB_THREAD_ID is
+# unset outside a bb-run session (nothing to ask about, so nothing to stand
+# down for) or rejected when it does not look like a thread id; the bb binary
+# (BB_CLI, else whatever `command -v bb` finds) is asked for THIS thread's
+# planGate explicitly, since the hook has no other way to name the thread. Any
+# failure here — no bb on PATH, a non-zero exit, a stalled call past the
+# timeout, output jq can't parse, a response with no planGate field — leaves
+# $SERVED empty and falls through to the normal deny+arm below.
 #
 # Bounded so a stalled bb can never hang this hook (and so the agent waiting on
 # it). Output goes to a temp FILE rather than through `$(...)`: killing the
@@ -124,7 +146,8 @@ run_bb_status() {
   fi
 }
 
-if [ -n "${BB_THREAD_ID:-}" ]; then
+if [ "$PERMISSION_MODE" = "plan" ] && [ -n "${BB_THREAD_ID:-}" ] &&
+  [[ "$BB_THREAD_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
   BB_BIN="${BB_CLI:-}"
   [ -z "$BB_BIN" ] && BB_BIN=$(command -v bb 2> /dev/null || true)
   BB_TIMEOUT="${AGENT_HOOKS_BB_TIMEOUT:-5}"
@@ -132,7 +155,7 @@ if [ -n "${BB_THREAD_ID:-}" ]; then
   if [ -n "$BB_BIN" ] && [ -n "$STATUS_FILE" ] && run_bb_status "$STATUS_FILE"; then
     SERVED=$(jq -r 'if .planGate == true then "true" else empty end' < "$STATUS_FILE" 2> /dev/null || true)
     if [ "$SERVED" = "true" ]; then
-      printf -- "- \`%s\` | PLAN-REVIEW | SKIP | auto-review gates this thread (%s)\n" \
+      printf -- "- \`%s\` | PLAN-REVIEW | SKIP | deferred to auto-review (%s)\n" \
         "$(date +"%Y-%m-%d %H:%M:%S")" "$BB_THREAD_ID" >> "$LOG_DIR/incident-log.md" 2> /dev/null || true
       rm -f "$STATUS_FILE" 2> /dev/null
       exit 0

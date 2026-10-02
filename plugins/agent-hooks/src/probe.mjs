@@ -69,7 +69,11 @@ function runOne(scriptPath, probe, projectDir) {
   });
   return new Promise((resolve) => {
     const child = spawn("bash", [scriptPath], {
-      env: { ...process.env, CLAUDE_PROJECT_DIR: projectDir },
+      // review-plan-before-exit.sh stands down instead of denying when
+      // BB_THREAD_ID names a thread auto-review's plan gate serves. Cleared
+      // here so a probe run from inside a real (gated) bb thread still
+      // exercises this hook's own deny, not auto-review's handoff.
+      env: { ...process.env, CLAUDE_PROJECT_DIR: projectDir, BB_THREAD_ID: "" },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
