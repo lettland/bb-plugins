@@ -10,5 +10,5 @@
     "allowJs": true,
     "types": ["node"]
   },
-  "include": ["server.ts", "server.test.ts", "src/**/*.ts", "src/**/*.mjs", "vitest.config.ts"]
+  "include": ["server.ts", "server.test.ts", "src/**/*.ts", "src/**/*.mjs", "tests/**/*.ts", "vitest.config.ts"]
 }

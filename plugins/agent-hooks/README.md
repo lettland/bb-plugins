@@ -15,7 +15,7 @@ full rationale.
 |---|---|---|
 | `guard-bash.sh` | PreToolUse(Bash) | Blocks catastrophic `rm` (system paths, a home directory or its direct children), force push, secret exfiltration, environment dumps |
 | `secret-scan.sh` | PreToolUse(Write\|Edit) | Refuses to write a credential into a file that could be committed |
-| `review-plan-before-exit.sh` | PreToolUse(ExitPlanMode) | Denies a plan's first presentation until it has been reviewed |
+| `review-plan-before-exit.sh` | PreToolUse(ExitPlanMode) | Denies a plan's first presentation until it has been reviewed — stands down in a bb thread where auto-review's own plan gate already owns the review (`bb auto-review status --json` reports `planGate: true`) |
 | `verify-before-stop.sh` | Stop, SubagentStop | Blocks one stop when this turn's tool output shows an unresolved failure |
 | `session-reset.sh` | SessionStart | Prunes stale plan-review gates so a crashed session cannot deadlock the next |
 

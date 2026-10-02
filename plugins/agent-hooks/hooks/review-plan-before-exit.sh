@@ -20,6 +20,18 @@
 # CLAUDE_PROJECT_DIR, a non-ExitPlanMode tool, or an un-writable gate dir → exit 0
 # (never trap the user in plan mode).
 #
+# Ownership split with auto-review: in a bb `claude-code` thread with auto-review
+# enabled, auto-review ALSO holds the first plan approval (its own gate, keyed off
+# `interaction.pending` with `subject.kind: "plan"`), so without a handoff a plan
+# in that thread gets reviewed twice. `bb auto-review status --json` reports
+# `planGate: true` exactly for the thread auto-review's gate owns; when it does,
+# this hook stands down for that plan instead of also arming. Every other thread
+# (ACP, standalone Claude Code, auto-review off/skipped, a child thread) gets no
+# such report (or none at all) and this hook reviews as it always has. Any
+# failure reading that report — `bb` missing, a non-zero exit, output that is not
+# JSON, no `planGate` field — falls through to today's deny+arm: worst case is a
+# duplicate review, never a missed one.
+#
 # Output contract mirrors completeness-gate.sh: exit 0 + hookSpecificOutput JSON
 # with permissionDecision "deny" on the block; exit 0 with no output to allow.
 
@@ -79,6 +91,26 @@ fi
 if [ -f "$GATE" ]; then
   rm -f "$GATE" 2> /dev/null
   exit 0
+fi
+
+# auto-review's own plan gate owns this thread: stand down instead of also
+# arming. BB_THREAD_ID is unset outside a bb-run session (nothing to ask about,
+# so nothing to stand down for); the bb binary (BB_CLI, else whatever `command -v
+# bb` finds) is asked for THIS thread's planGate explicitly, since the hook has
+# no other way to name the thread. Any failure here — no bb on PATH, a non-zero
+# exit, output jq can't parse, a response with no planGate field — leaves
+# $SERVED empty and falls through to the normal deny+arm below.
+if [ -n "${BB_THREAD_ID:-}" ]; then
+  BB_BIN="${BB_CLI:-}"
+  [ -z "$BB_BIN" ] && BB_BIN=$(command -v bb 2> /dev/null || true)
+  if [ -n "$BB_BIN" ] && STATUS_JSON=$("$BB_BIN" auto-review status "$BB_THREAD_ID" --json 2> /dev/null); then
+    SERVED=$(printf '%s' "$STATUS_JSON" | jq -r 'if .planGate == true then "true" else empty end' 2> /dev/null || true)
+    if [ "$SERVED" = "true" ]; then
+      printf -- "- \`%s\` | PLAN-REVIEW | SKIP | auto-review gates this thread (%s)\n" \
+        "$(date +"%Y-%m-%d %H:%M:%S")" "$BB_THREAD_ID" >> "$LOG_DIR/incident-log.md" 2> /dev/null || true
+      exit 0
+    fi
+  fi
 fi
 
 # First presentation: arm the gate and route Claude through the reviewers.

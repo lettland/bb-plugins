@@ -59,6 +59,9 @@ export function makeGitRepo({ ignored = [], tracked = [] } = {}) {
 /**
  * Run a hook script with a real event envelope on stdin.
  * Returns { exitCode, stdout, verdict, reason }.
+ * @param {string} script
+ * @param {unknown} toolInput
+ * @param {{ projectDir?: string, env?: Record<string, string>, toolName?: string }} [options]
  */
 export function runHook(script, toolInput, { projectDir, env = {}, toolName = "Bash" } = {}) {
   const dir = projectDir ?? makeProjectDir();
