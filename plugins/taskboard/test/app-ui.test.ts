@@ -339,3 +339,21 @@ test('reconciles provider identity from the cached-list response', () => {
   assert.match(app, /const provider = result\.provider/u);
   assert.doesNotMatch(app, /rpc\.call\('status', \{ projectId \}\)/u);
 });
+
+test('keeps committed-query responses valid across query edits', () => {
+  const hook = body(['useQueryCommit']);
+  assert.match(hook, /setCommittedQuery\(query\.trim\(\)\)/u);
+  assert.equal(countOf(hook, /requestRevisionRef\.current \+= 1/gu), 1);
+  assert.match(
+    hook,
+    /\(\) => \(\) => \{\s*requestRevisionRef\.current \+= 1;\s*\}/u
+  );
+});
+
+test('opens tracker links only through the http(s) allowlist', () => {
+  assert.match(
+    body(['TrackerDetailActions']),
+    /safeExternalUrl\(item\.url\)/u
+  );
+  assert.doesNotMatch(app, /href=\{item\.url\}/u);
+});

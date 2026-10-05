@@ -9,6 +9,7 @@ import {
   type WorkItem,
   type WorkItemDetail
 } from '../../contract.js';
+import { safeExternalUrl } from '../shared/safe-url.js';
 import { SourceMark, sourceName } from '../shared/source.js';
 import { formatUpdatedAt } from '../shared/format.js';
 import { type TrackerRoute } from '../shared/route.js';
@@ -82,14 +83,17 @@ function TrackerDetailActions({
 }) {
   const navigate = useBbNavigate();
   const prompt = formatWorkItemHandoffPrompt(item);
+  const externalUrl = safeExternalUrl(item.url);
   return (
     <div className="flex shrink-0 flex-wrap gap-2">
-      <Button variant="outline" size="sm" asChild>
-        <a href={item.url} target="_blank" rel="noreferrer">
-          <Icon name="ExternalLink" className="size-3.5" />
-          Open
-        </a>
-      </Button>
+      {externalUrl ? (
+        <Button variant="outline" size="sm" asChild>
+          <a href={externalUrl} target="_blank" rel="noreferrer">
+            <Icon name="ExternalLink" className="size-3.5" />
+            Open
+          </a>
+        </Button>
+      ) : null}
       {onAddToComposer ? (
         <Button
           type="button"

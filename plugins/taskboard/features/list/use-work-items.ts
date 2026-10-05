@@ -108,7 +108,6 @@ export function useQueryCommit(
   requestRevisionRef: MutableRefObject<number>
 ): void {
   useEffect(() => {
-    requestRevisionRef.current += 1;
     const timeout = window.setTimeout(
       () => setCommittedQuery(query.trim()),
       160
