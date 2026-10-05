@@ -226,6 +226,14 @@ test('centralizes and reuses decorative filter icons across surfaces', () => {
   assert.match(sectionLabel, /name=\{presentation\.icon\}/u);
   assert.match(sectionLabel, /\{presentation\.label\}/u);
 
+  // Intent: the narrow Filters menu's search text survives a width change. TrackerFilterBar
+  // stays mounted at both widths while ConstrainedFacetMenu unmounts, so the state lives in
+  // the former and the latter only receives it as props.
+  const filterBar = body(['TrackerFilterBar']);
+  assert.match(filterBar, /useState\(''\)/u);
+  assert.match(filterBar, /facetQuery/u);
+  assert.doesNotMatch(body(['ConstrainedFacetMenu']), /useState\(/u);
+
   const presentation = body(['FILTER_PRESENTATION']);
   for (const filter of filters) {
     assert.match(presentation, new RegExp(`\\b${filter}: \\{`));
