@@ -2,11 +2,17 @@ import { z } from "zod";
 
 const THREAD_SCOPES = ["any", "top-level", "child"] as const;
 
+const globs = z
+  .union([z.string(), z.array(z.string())])
+  .transform((value) => (Array.isArray(value) ? value : [value]))
+  .pipe(z.array(z.string().trim().min(1)).min(1));
+
 const ruleSchema = z
   .object({
     provider: z.string().trim().min(1).optional(),
     model: z.string().trim().min(1).optional(),
-    project: z.string().trim().min(1).optional(),
+    project: globs.optional(),
+    skipProjects: globs.optional(),
     threads: z.enum(THREAD_SCOPES).default("any"),
     instructions: z
       .union([z.string(), z.array(z.string())])
@@ -63,7 +69,14 @@ function matches(rule: Rule, target: Target): boolean {
   if (rule.provider && !globToRegExp(rule.provider).test(target.provider))
     return false;
   if (rule.model && !globToRegExp(rule.model).test(target.model)) return false;
-  if (rule.project && !globToRegExp(rule.project).test(target.project))
+  if (
+    rule.project &&
+    !rule.project.some((glob) => globToRegExp(glob).test(target.project))
+  )
+    return false;
+  if (
+    rule.skipProjects?.some((glob) => globToRegExp(glob).test(target.project))
+  )
     return false;
   if (rule.threads === "top-level") return target.parentThreadId === null;
   if (rule.threads === "child") return target.parentThreadId !== null;

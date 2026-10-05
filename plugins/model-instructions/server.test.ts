@@ -55,6 +55,45 @@ describe("resolveInstructions", () => {
     expect(resolveInstructions([rule], target("claude-opus-5-5", null, "claude-code", "opshub"))).toBeNull();
   });
 
+  it("accepts an array of project globs, any of which may match", () => {
+    const [rule] = parseRules(JSON.stringify([{ project: ["opshub-*", "bb-*"], instructions: "x" }]));
+    expect(resolveInstructions([rule], target("claude-opus-5-5"))).toBe("x");
+    expect(resolveInstructions([rule], target("claude-opus-5-5", null, "claude-code", "opshub-web"))).toBe("x");
+    expect(resolveInstructions([rule], target("claude-opus-5-5", null, "claude-code", "other"))).toBeNull();
+  });
+
+  it("skips projects given as a string or an array", () => {
+    const [asString] = parseRules(JSON.stringify([{ skipProjects: "bb-*", instructions: "x" }]));
+    expect(resolveInstructions([asString], target("claude-opus-5-5"))).toBeNull();
+    expect(resolveInstructions([asString], target("claude-opus-5-5", null, "claude-code", "opshub"))).toBe("x");
+    const [asArray] = parseRules(JSON.stringify([{ skipProjects: ["bb-*", "legacy"], instructions: "x" }]));
+    expect(resolveInstructions([asArray], target("claude-opus-5-5"))).toBeNull();
+    expect(resolveInstructions([asArray], target("claude-opus-5-5", null, "claude-code", "legacy"))).toBeNull();
+    expect(resolveInstructions([asArray], target("claude-opus-5-5", null, "claude-code", "opshub"))).toBe("x");
+  });
+
+  it("lets skipProjects win over project", () => {
+    const [rule] = parseRules(
+      JSON.stringify([{ project: ["opshub-*", "bb-*"], skipProjects: "opshub-legacy", instructions: "x" }]),
+    );
+    expect(resolveInstructions([rule], target("claude-opus-5-5", null, "claude-code", "opshub-web"))).toBe("x");
+    expect(resolveInstructions([rule], target("claude-opus-5-5", null, "claude-code", "opshub-legacy"))).toBeNull();
+    expect(resolveInstructions([rule], target("claude-opus-5-5", null, "claude-code", "other"))).toBeNull();
+  });
+
+  it("applies skipProjects before the thread scope", () => {
+    const [topLevel, child] = parseRules(
+      JSON.stringify([
+        { skipProjects: "bb-*", threads: "top-level", instructions: "x" },
+        { skipProjects: "bb-*", threads: "child", instructions: "y" },
+      ]),
+    );
+    expect(resolveInstructions([topLevel], target("claude-opus-5-5"))).toBeNull();
+    expect(resolveInstructions([child], target("claude-opus-5-5", "parent-1"))).toBeNull();
+    expect(resolveInstructions([topLevel], target("claude-opus-5-5", null, "claude-code", "opshub"))).toBe("x");
+    expect(resolveInstructions([child], target("claude-opus-5-5", "parent-1", "claude-code", "opshub"))).toBe("y");
+  });
+
   it("requires every filter to match alongside the project", () => {
     const [rule] = parseRules(
       JSON.stringify([{ project: "bb-*", model: "claude-sonnet-*", threads: "child", instructions: "x" }]),
@@ -83,6 +122,12 @@ describe("parseRules", () => {
     ['[{"instructions": "x", "threads": "root"}]', "threads"],
     ['[{"instructions": "x", "modle": "y"}]', "modle"],
     ['[{"instructions": "x", "project": "  "}]', "project"],
+    ['[{"instructions": "x", "project": []}]', "project"],
+    ['[{"instructions": "x", "skipProjects": []}]', "skipProjects"],
+    ['[{"instructions": "x", "skipProjects": "  "}]', "skipProjects"],
+    ['[{"instructions": "x", "project": ["bb-*", " "]}]', "project"],
+    ['[{"instructions": "x", "skipProjects": [5]}]', "skipProjects"],
+    ['[{"instructions": "x", "skipProject": "bb-*"}]', "skipProject"],
   ])("rejects %s", (json, message) => {
     expect(() => parseRules(json)).toThrow(message);
   });
@@ -147,6 +192,18 @@ describe("plugin", () => {
     await plugin(host.bb);
     expect((await resolve(host, "claude-opus-5-5", null, "opshub")).instructions).toBe("OpsHub only.");
     expect((await resolve(host, "claude-opus-5-5")).instructions).toBeNull();
+    await host.harness.dispose();
+  });
+
+  it("applies array project and skipProjects through the plugin", async () => {
+    const host = createHost({
+      rules: JSON.stringify([
+        { project: ["opshub-*", "bb-*"], skipProjects: "opshub-legacy", instructions: "Active projects." },
+      ]),
+    });
+    await plugin(host.bb);
+    expect((await resolve(host, "claude-opus-5-5", null, "opshub-web")).instructions).toBe("Active projects.");
+    expect((await resolve(host, "claude-opus-5-5", null, "opshub-legacy")).instructions).toBeNull();
     await host.harness.dispose();
   });
 });

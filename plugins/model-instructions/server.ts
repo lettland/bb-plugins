@@ -12,7 +12,7 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Rules",
       description:
-        'JSON array of rules. Each rule: { "provider"?: glob, "model"?: glob, "project"?: glob, "threads"?: "any" | "top-level" | "child", "instructions": string | string[] }. Every matching rule\'s instructions are added to the thread, in order.',
+        'JSON array of rules. Each rule: { "provider"?: glob, "model"?: glob, "project"?: glob | glob[], "skipProjects"?: glob | glob[], "threads"?: "any" | "top-level" | "child", "instructions": string | string[] }. Every matching rule\'s instructions are added to the thread, in order. skipProjects wins over project.',
       experimental_multiline: true,
       experimental_schema: rulesSettingSchema,
       default: "[]",
