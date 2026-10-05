@@ -3,6 +3,7 @@
   "version": "0.1.16",
   "type": "module",
   "description": "Review, commit, and locally merge into a personal mainline (e.g. master) the changes an agent made this turn.",
+  "license": "BSD-2-Clause",
   "engines": {
     "bb": ">=0.0"
   },

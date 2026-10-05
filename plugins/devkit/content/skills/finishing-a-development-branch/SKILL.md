@@ -13,6 +13,8 @@ metadata:
   owns: finishing-branch
 ---
 
+_Adapted from obra/superpowers (MIT); modified. See THIRD_PARTY_NOTICES.md._
+
 # Finishing a Development Branch
 
 **Core principle:** verify tests → detect environment → present options → execute choice → clean up.

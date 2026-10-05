@@ -12,6 +12,8 @@ metadata:
   owns: brainstorming
 ---
 
+_Adapted from obra/superpowers (MIT); modified. See THIRD_PARTY_NOTICES.md._
+
 # Brainstorming
 
 Help turn ideas into fully-formed designs through natural collaborative dialogue.

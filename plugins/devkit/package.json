@@ -3,6 +3,7 @@
   "version": "0.1.9",
   "type": "module",
   "description": "devkit's skill library, locator, and calibrated review — as a provider-neutral bb plugin.",
+  "license": "BSD-2-Clause AND Apache-2.0 AND MIT",
   "engines": {
     "bb": ">=0.0"
   },
@@ -27,7 +28,8 @@
     "skills",
     "skills-generated",
     "content",
-    "dist"
+    "dist",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "publishConfig": {
     "access": "public"

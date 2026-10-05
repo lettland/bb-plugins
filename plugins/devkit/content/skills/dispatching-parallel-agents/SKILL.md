@@ -13,6 +13,8 @@ metadata:
   owns: parallel-agents
 ---
 
+_Adapted from obra/superpowers (MIT); modified. See THIRD_PARTY_NOTICES.md._
+
 # Dispatching Parallel Agents
 
 **Iron Law: one agent per INDEPENDENT problem domain. Never parallelize when failures share state, when agents would edit the same files, or when one fix could resolve multiple symptoms — investigate sequentially first.**

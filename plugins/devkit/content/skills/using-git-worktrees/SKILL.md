@@ -12,6 +12,8 @@ metadata:
   owns: git-worktrees
 ---
 
+_Adapted from obra/superpowers (MIT); modified. See THIRD_PARTY_NOTICES.md._
+
 # Using Git Worktrees
 
 Ensure work happens in an isolated workspace. Prefer your platform's native worktree tools. Fall back to manual git worktrees only when no native tool is available.

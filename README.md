@@ -94,3 +94,7 @@ install those with `@next` or an exact version.
 Adding a new plugin needs no workflow edits: create `plugins/<name>/` with a
 `package.json` (name `@lettland/bb-plugin-<name>`, `publishConfig.access: public`)
 and a `bb` manifest, add it to `.bb/plugins.json`, and CI picks it up.
+
+## License
+
+BSD-2-Clause (LICENSE). taskboard is MIT (plugins/taskboard/LICENSE); devkit includes third-party content under Apache-2.0 and MIT (plugins/devkit/THIRD_PARTY_NOTICES.md).

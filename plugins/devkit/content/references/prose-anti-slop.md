@@ -86,4 +86,4 @@ Borrowed from stop-slop but **deliberately rejected** for devkit — do not "com
 
 ---
 
-_Adapted from [stop-slop](https://github.com/hardikpandya/stop-slop) (MIT, Hardik Pandya), curated for technical writing — same precedent as the [caveman](https://github.com/JuliusBrussee/caveman) credit in `concise-output`._
+_Adapted from [stop-slop](https://github.com/hardikpandya/stop-slop) (MIT, Hardik Pandya; see THIRD_PARTY_NOTICES.md), curated for technical writing — same precedent as the [caveman](https://github.com/JuliusBrussee/caveman) credit in `concise-output`._
