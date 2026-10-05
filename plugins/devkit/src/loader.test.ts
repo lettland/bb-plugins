@@ -124,6 +124,14 @@ describe("loadSkill", () => {
   });
 });
 
+const REVIEWER_LENSES = [
+  "reviewer-senior-dev",
+  "reviewer-senior-qa",
+  "reviewer-security",
+  "reviewer-end-user",
+  "reviewer-compliance",
+];
+
 describe("review-code content", () => {
   const contentRoot = path.join(import.meta.dirname, "..", "content");
 
@@ -140,16 +148,49 @@ describe("review-code content", () => {
     normalized = content.replace(/\s+/g, " ");
   });
 
-  it("cites only references that load, including all four reviewer calibrations", async () => {
+  it("cites only references that load, including all five reviewer calibrations", async () => {
     const cited = new Set(
       [...content.matchAll(/reference: "([a-z0-9-]+)"|`(reviewer-[a-z-]+)`/g)].map((m) => m[1] ?? m[2]),
     );
-    for (const lens of ["reviewer-senior-dev", "reviewer-senior-qa", "reviewer-security", "reviewer-end-user"]) {
+    for (const lens of REVIEWER_LENSES) {
       expect(cited).toContain(lens);
     }
     for (const reference of cited) {
       const loaded = await loadSkill(contentRoot, undefined, reference);
       expect(loaded.ok, reference).toBe(true);
+    }
+  });
+
+  it.each(REVIEWER_LENSES)("%s calibration loads whole and keeps the output contract", async (lens) => {
+    const r = await loadSkill(contentRoot, undefined, lens);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.truncated).toBe(false);
+    for (const header of ["### Blockers", "### Concerns", "### Advisories", "### Verdict:"]) {
+      expect(r.content, header).toContain(header);
+    }
+    expect(r.content).toContain("Always emit all four sections");
+    expect(r.content).toContain("`(spec)`");
+    expect(r.content).toContain("`(code)`");
+  });
+
+  it("names every lens from the review-code table in skill routing and generated-file exclusion", async () => {
+    const tableLenses = [...content.matchAll(/^\|[^|]*\| `(reviewer-[a-z-]+)`/gm)].map((m) => m[1]);
+    expect(tableLenses.sort()).toEqual([...REVIEWER_LENSES].sort());
+    for (const reference of ["review-skill-routing", "review-generated-file-exclusion"]) {
+      const r = await loadSkill(contentRoot, undefined, reference);
+      expect(r.ok, reference).toBe(true);
+      if (!r.ok) continue;
+      for (const lens of tableLenses) expect(r.content, `${reference} names ${lens}`).toContain(lens);
+    }
+  });
+
+  it("keeps stale four-lens counts out of review-code, planning and security-auditor", async () => {
+    const stale = /\bfour (calibrated|reviewers?|lens(es)?)\b|one of four/;
+    for (const slug of ["review-code", "planning", "security-auditor"]) {
+      const r = await loadSkill(contentRoot, slug);
+      expect(r.ok, slug).toBe(true);
+      if (r.ok) expect(r.content.replace(/\s+/g, " "), slug).not.toMatch(stale);
     }
   });
 

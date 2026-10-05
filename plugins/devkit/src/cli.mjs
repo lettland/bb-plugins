@@ -39,7 +39,7 @@ function reviewInstruction(mode, target) {
     "",
     `Run the devkit calibrated review over ${scope}.`,
     "Load the workflow with devkit_load_skill({ slug: \"review-code\" }) and follow it:",
-    "apply the four reviewer lenses, consolidate into Blockers/Concerns/Advisories/Verdict, then disposition.",
+    "apply the five reviewer lenses, consolidate into Blockers/Concerns/Advisories/Verdict, then disposition.",
   ];
   if (mode === "plan") lines.push("", PLAN_STOP);
   return lines.join("\n");

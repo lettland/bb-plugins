@@ -162,12 +162,13 @@ BASE_SHA=$(git rev-parse HEAD~1)         # or origin/main
 HEAD_SHA=$(git rev-parse HEAD)
 ```
 
-Use `Agent(code-reviewer)` for single-perspective review. For plans or major implementations, use devkit's calibrated review (`bb devkit review plan <path>` or `bb devkit review impl <base>..<head>`) — both apply the calibrated four-reviewer cohort:
+Use `Agent(code-reviewer)` for single-perspective review. For plans or major implementations, use devkit's calibrated review (`bb devkit review plan <path>` or `bb devkit review impl <base>..<head>`) — both apply the calibrated five-reviewer cohort:
 
 - `reviewer-senior-dev` — architecture, maintainability, complexity
 - `reviewer-senior-qa` — testability, edge cases, failure modes
 - `reviewer-security` — auth, injection, supply chain, secrets
 - `reviewer-end-user` — usability, error messages, docs
+- `reviewer-compliance` — privacy, licensing, regulatory obligations
 
 **Reviewer prompt template:**
 

@@ -72,7 +72,7 @@ If the block is absent or reads `none`, audit as usual.
 
 ## Hand-off
 
-For implementation of a fix, hand back to the relevant language expert (`Agent(python-expert)`, `Agent(go-expert)`, etc.) with the specific finding. For calibrated multi-perspective review (where security is one of four), use `Agent(reviewer-security)` instead.
+For implementation of a fix, hand back to the relevant language expert (`Agent(python-expert)`, `Agent(go-expert)`, etc.) with the specific finding. For calibrated multi-perspective review (where security is one of five), use `Agent(reviewer-security)` instead.
 
 ## Related devkit skills
 

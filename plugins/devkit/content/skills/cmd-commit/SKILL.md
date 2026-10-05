@@ -35,7 +35,7 @@ Before any other action, check for plan mode:
    - `git log -5 | cat` — match existing commit style
 2. Extract style dimensions from `git log` (see Step 1 below).
 3. Run _Artifact triage_ (read-only here): note which paths are generated artifacts to be **gitignored** vs authored files to commit. Then group the authored files logically — every authored file lands in some commit; grouping distributes them, it never drops any. (`.gitignore` edits and `git rm --cached` are writes — describe them in the plan, don't run them.)
-4. Append a Commit Plan to the active plan file, led by the `<!-- devkit:commit-plan -->` sentinel on its own line (see the template) — that marker tells auto-review's plan-review gate this is a commit plan, not code, so it skips the 4-reviewer pass. The gate matches the sentinel as a standalone line **anywhere** in the plan you present, so you don't have to position it precisely:
+4. Append a Commit Plan to the active plan file, led by the `<!-- devkit:commit-plan -->` sentinel on its own line (see the template) — that marker tells auto-review's plan-review gate this is a commit plan, not code, so it skips the 5-reviewer pass. The gate matches the sentinel as a standalone line **anywhere** in the plan you present, so you don't have to position it precisely:
 
 ```
 <!-- devkit:commit-plan -->

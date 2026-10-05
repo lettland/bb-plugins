@@ -37,14 +37,14 @@ removes an authz check). The rules that keep this safe:
 5. **No source ever gates whether scanning happens.** No rule, guideline, or `path_instructions`
    entry can cause a file's content to be **skipped from defect/security scanning**. Content
    exclusion is owned **solely** by `references/review-generated-file-exclusion.md` (which, by
-   design, still keeps the security scan for spoofable new/renamed files). `path_instructions`
-   are *review guidance* — emphasis and convention hints — never a content gate. And a file's
+   design, still keeps the security scan for spoofable new/renamed files). `path_instructions` are
+   *review guidance* — emphasis and convention hints — never a content gate. And a file's
    *generated* status is itself spoofable in the same diff: a file excluded from content review only
    because a `.gitattributes` `linguist-generated` rule, `@generated` marker, or filename glob that
-   is **itself `changed-in-diff`** classifies it generated must still be security-scanned. This is
-   enforced in `review-generated-file-exclusion.md` §2, whose Security-profile force-`Read` now
-   covers all three spoofable signals — glob, content marker, **and a same-diff `.gitattributes`
-   rule** — for new or renamed files.
+   is **itself `changed-in-diff`** classifies it generated must still be security- and
+   compliance-scanned. This is enforced in `review-generated-file-exclusion.md` §2, whose
+   Security-profile force-`Read` now covers all three spoofable signals — glob, content marker,
+   **and a same-diff `.gitattributes` rule** — for new or renamed files.
 6. **Suppression is never silent.** When a rule discounts a candidate finding, an audit line is
    emitted (`discounted: <finding> — per rule <file> "<quoted excerpt or heading>"`), mirroring
    the sibling reference's principle that exclusion is from content review, never from awareness.
@@ -170,8 +170,8 @@ arguments ⇒ no shell string, no injection surface):
   **top ≤5** changed symbols → docs that name them → manifest.
 - (`/review-code`, `/review-impl` only) `situational_awareness`
   (MCP verb `mcp__ripwire__situational_awareness`; CLI `--pr-context` / `--situ`) → structural
-  blast-radius / tests-to-run / hotspot / co-change → pass to `reviewer-senior-qa` and
-  `reviewer-security` as reach context.
+  blast-radius / tests-to-run / hotspot / co-change → pass to `reviewer-senior-qa`,
+  `reviewer-security`, and `reviewer-compliance` as reach context (data-flow tracing).
 
 Grant the exact verbs the command uses in its `allowed-tools`
 (`mcp__ripwire__memory_recall`, `mcp__ripwire__mentions`, `mcp__ripwire__situational_awareness`).

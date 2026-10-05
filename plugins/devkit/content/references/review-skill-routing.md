@@ -59,6 +59,7 @@ From the candidates, pick a tailored subset for each reviewer by slug family:
 | `reviewer-senior-qa`  | the stack's testing skill if a candidate exists (`python-testing`, `rust-testing`, `ts-vitest`); otherwise `testing-strategy`.                                                                                                                                               |
 | `reviewer-security`   | `security`. (Its inline Go/Python/React vuln guidance already covers stack specifics; `security` adds OWASP/SAST depth.)                                                                                                                                                     |
 | `reviewer-end-user`   | **only** when a UI or public API surface changed. Frontend/React → `ux-essentials` + `ux-wcag-a11y`. HTTP API (candidates include `rest-essentials`, `python-fastapi`, `python-django`, `go-chi`, `graphql-essentials`) → `rest-essentials`. Pure internal backend → `none`. |
+| `reviewer-compliance` | `security` when auth, logging, or data handling changed; otherwise `none`.                                                                                                                                                                                                   |
 
 Rules:
 

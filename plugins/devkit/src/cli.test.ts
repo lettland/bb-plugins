@@ -38,6 +38,7 @@ describe("runDevkitCli", () => {
     const r = await runDevkitCli(["review", "code"], deps());
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("review-code");
+    expect(r.stdout).toContain("five reviewer lenses");
   });
 
   it("review without a mode fails", async () => {

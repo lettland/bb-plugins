@@ -128,7 +128,7 @@ function reviewStep(mode: ReviewMode, committedSince: string | null, aislopScan:
 }
 
 const PLAN_SELF_REVIEW =
-  "a focused self-review of the plan from four angles — architecture and feasibility, testability and edge cases, security, and user-facing clarity";
+  "a focused self-review of the plan from five angles — architecture and feasibility, testability and edge cases, security, user-facing clarity, and compliance (privacy, licensing, regulatory)";
 
 function planReviewStep(mode: ReviewMode, target: string): string {
   switch (mode) {

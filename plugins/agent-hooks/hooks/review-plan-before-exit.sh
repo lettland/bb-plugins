@@ -4,7 +4,7 @@
 #
 # Single-fire per presentation (mirrors verify-before-stop): the FIRST ExitPlanMode
 # of a plan is DENIED with an instruction to run bb devkit review plan and apply the
-# four reviewers' findings; the gate file is ARMED on that deny, so the
+# five reviewers' findings; the gate file is ARMED on that deny, so the
 # re-presentation after the review passes straight through (gate consumed). The
 # gate self-re-arms for the next plan in the session — no persistent ledger.
 #
@@ -92,7 +92,7 @@ GATE="$LOG_DIR/.plan-review-gate${SID:+-$SID}"
 mkdir -p "$LOG_DIR" 2> /dev/null || exit 0
 
 # Commit plans are not code — bb devkit run commit leads the plan it presents with a
-# `<!-- agent-hooks:commit-plan -->` sentinel so this gate skips the 4-reviewer pass on it.
+# `<!-- agent-hooks:commit-plan -->` sentinel so this gate skips the 5-reviewer pass on it.
 # Match the EXACT marker (close `-->` anchored) on ANY standalone line of the plan, not
 # just line 1: /commit appends its Commit Plan to the active plan file, so the marker is
 # rarely the literal first line of the presented string. The `^...[[:space:]]*$` anchor
@@ -180,12 +180,12 @@ fi
 SHORT="agent-hooks: plan not yet reviewed — run bb devkit review plan on the plan file, apply the findings, then present."
 CONTEXT="agent-hooks: this plan has not been reviewed. Before presenting it: if the plan is not already saved \
 to a file, save it (e.g. docs/plans/<name>.md); then run bb devkit review plan <path-to-that-plan-file> — \
-pass the path explicitly. Let the 4 calibrated reviewers run, apply their findings to the plan, then \
+pass the path explicitly. Let the 5 calibrated reviewers run, apply their findings to the plan, then \
 call ExitPlanMode again to present the improved plan; the re-presentation passes this gate and goes to the \
 user for approval. Edit only the plan file and do not implement anything until the user approves. If you \
 are no longer in plan mode (for example an injected turn took you out of it), call EnterPlanMode first: \
 outside plan mode ExitPlanMode approves itself without asking the user. \
-Note: this is a 4-reviewer pass (tokens + latency). The gate can only be disabled by launching Claude \
+Note: this is a 5-reviewer pass (tokens + latency). The gate can only be disabled by launching Claude \
 with AGENT_HOOKS_SKIP_PLAN_REVIEW=1 in the environment — it cannot be toggled from inside a running session."
 
 # Best-effort observability (fail-soft); mirrors completeness-gate / verify-before-stop.

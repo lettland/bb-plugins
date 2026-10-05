@@ -8,7 +8,7 @@ reviewers see, and **lists** what it removed so nothing is hidden.
 ## Why this exists (and what it is NOT)
 
 Auto-generated output — lockfiles, protobuf stubs, minified bundles, a `NOTICE` file a
-script rebuilds — can be thousands of lines per change. Feeding it verbatim to four reviewer
+script rebuilds — can be thousands of lines per change. Feeding it verbatim to five reviewer
 agents costs tokens and surfaces nothing: nobody hand-wrote those lines, so any real defect
 lives in the **generator's source**, not its output, and that source is reviewed normally.
 
@@ -59,20 +59,22 @@ which is a security finding, not a maintainability one.
 
 - **Standard** — for `reviewer-senior-dev`, `reviewer-senior-qa`, `reviewer-end-user`, and the
   non-security work of `/review`. Exclude **all** generated categories, lockfiles included.
-- **Security** — for `reviewer-security`, the security lens of single-pass `/review`, and
-  `/security-audit`'s `security-auditor`. Exclude all generated categories **except lockfiles**;
-  lockfiles are fed in full for supply-chain inspection. Vendored / build / codegen content stays
-  excluded here too, but the **spoofable** signals are not trusted to hide a change from security:
-  a filename glob (§1.3) and an in-file `@generated` / `DO NOT EDIT` marker (§1.5) can both be
-  forged by renaming or header-stamping a hand-written payload — and a **repo-declared**
+- **Security** — for `reviewer-security`, `reviewer-compliance`, the security lens of single-pass
+  `/review`, and `/security-audit`'s `security-auditor`. Exclude all generated categories **except
+  lockfiles**; lockfiles are fed in full for supply-chain inspection. Vendored / build / codegen
+  content stays excluded here too, but the **spoofable** signals are not trusted to hide a change
+  from security: a filename glob (§1.3) and an in-file `@generated` / `DO NOT EDIT` marker (§1.5)
+  can both be forged by renaming or header-stamping a hand-written payload — and a **repo-declared**
   classification (§1.1) is equally forgeable **when the `.gitattributes` rule that produces it was
   itself added or modified in the diff under review** (an attacker marking a hand-written payload
   `linguist-generated=true` in the same PR). A *pre-existing* `linguist-generated` declaration is
   trusted; only a same-diff one is suspect. So the security profile **directs** the reviewer to
-  `Read` every manifest entry that is a **new or renamed** file excluded _only_ by a glob, a
-  content marker, or a `.gitattributes` rule that is itself changed in this diff — not lockfiles
-  (already fed in full) and not bulk vendored/build trees (manifest-only; `Read` a specific path on
-  demand if a lockfile bump points at one).
+  `Read` every manifest entry that is a **new or renamed** file excluded _only_ by a glob, a content
+  marker, or a `.gitattributes` rule that is itself changed in this diff — not lockfiles (already
+  fed in full) and not bulk vendored/build trees (manifest-only; `Read` a specific path on demand if
+  a lockfile bump points at one). `reviewer-compliance` also `Read`s the LICENSE / COPYING / NOTICE
+  / THIRD_PARTY* files of vendored, `third_party/`, or generated manifest entries, since license
+  text is what its licensing checks cite.
 
 ## 3. Build the reviewer diff
 
@@ -87,10 +89,11 @@ which is a security finding, not a maintainability one.
 3. Construct each reviewer's diff with pathspec exclusion, anchored by a positive `.` pathspec —
    an exclude-only pathspec matches nothing against the working tree:
    `git diff <scope> -- . ':(exclude)<gen1>' ':(exclude)<gen2>' …`. When a command dispatches the
-   four-reviewer cohort, build **two** diffs: the **Standard** diff (every generated path excluded,
+   five-reviewer cohort, build **two** diffs: the **Standard** diff (every generated path excluded,
    lockfiles included) for `reviewer-senior-dev` / `-senior-qa` / `-end-user`, and the **Security**
    diff (same exclude list **minus** the lockfile paths, so lockfile content stays in) for
-   `reviewer-security`. Single-pass `/review` and `/security-audit` build only the Security diff.
+   `reviewer-security` and `reviewer-compliance`. Single-pass `/review` and `/security-audit`
+   build only the Security diff.
 4. **Empty-after-exclusion is not an empty scope.** If every change was generated, do **not**
    trigger the command's "no changes" STOP — run the review with an empty/near-empty source
    diff plus the manifest; the security profile still carries the lockfile content.
@@ -100,13 +103,14 @@ which is a security finding, not a maintainability one.
 When at least one file was excluded, emit this block — include it **in every reviewer's
 dispatch input** and **in the consolidated summary**. One line per file: path, `git`'s
 `+adds/−dels` (or `(binary)`), and the matched reason. For the multi-reviewer commands, mark
-lockfiles `[security sees full content]` so the reader knows the security reviewer still got them.
+lockfiles `[security + compliance see full content]` so the reader knows those reviewers still
+got them.
 Single-pass `/review` and `/security-audit` review lockfiles themselves (no separate security
 agent), so drop that annotation there.
 
 ```
 Excluded generated artifacts (content not reviewed; listed so changes still surface):
-- pnpm-lock.yaml          (+412/−118)   — lockfile [security sees full content]
+- pnpm-lock.yaml          (+412/−118)   — lockfile [security + compliance see full content]
 - NOTICE                  (+8021/−7994) — @generated header
 - api/v1/service.pb.go    (+260/−0)     — codegen:*.pb.go
 - vendor/golang.org/x/... (+1024/−0)    — vendored

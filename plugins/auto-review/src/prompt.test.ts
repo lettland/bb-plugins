@@ -370,6 +370,8 @@ describe("buildPlanReviewPrompt", () => {
     );
     const self = buildPlanReviewPrompt({ reviewMode: "self", planFilePath: "/p.md" });
     expect(self).toMatch(/focused self-review of the plan/);
+    expect(self).toMatch(/five angles/);
+    expect(self).toMatch(/compliance/);
     expect(self).not.toContain("devkit_load_skill");
   });
 });
@@ -462,6 +464,8 @@ describe("buildPresentPlanReviewPrompt", () => {
     );
     const self = buildPresentPlanReviewPrompt({ reviewMode: "self", planFilePath: "p.md" });
     expect(self).toMatch(/focused self-review of the plan/);
+    expect(self).toMatch(/five angles/);
+    expect(self).toMatch(/compliance/);
     expect(self).not.toContain("devkit_load_skill");
   });
 });
