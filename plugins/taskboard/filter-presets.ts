@@ -53,47 +53,38 @@ export const filterPresetProjectIdSchema = z
     }
   );
 
-export const filterPresetIdSchema = z
-  .string()
-  .superRefine((value, context) => {
-    if (value.length > FILTER_PRESET_ID_MAX_LENGTH) {
-      context.addIssue({
-        code: 'custom',
-        message: `Preset id must contain at most ${FILTER_PRESET_ID_MAX_LENGTH} characters`
-      });
-      return;
-    }
-    if (hasUnsafeControlCharacters(value)) {
-      context.addIssue({
-        code: 'custom',
-        message: 'Preset id cannot contain control characters'
-      });
-    }
-  })
-  .trim()
-  .min(1)
-  .max(FILTER_PRESET_ID_MAX_LENGTH);
+function presetTextSchema(label: 'id' | 'name', maxLength: number) {
+  return z
+    .string()
+    .superRefine((value, context) => {
+      if (value.length > maxLength) {
+        context.addIssue({
+          code: 'custom',
+          message: `Preset ${label} must contain at most ${maxLength} characters`
+        });
+        return;
+      }
+      if (hasUnsafeControlCharacters(value)) {
+        context.addIssue({
+          code: 'custom',
+          message: `Preset ${label} cannot contain control characters`
+        });
+      }
+    })
+    .trim()
+    .min(1)
+    .max(maxLength);
+}
 
-export const filterPresetNameSchema = z
-  .string()
-  .superRefine((value, context) => {
-    if (value.length > FILTER_PRESET_NAME_MAX_LENGTH) {
-      context.addIssue({
-        code: 'custom',
-        message: `Preset name must contain at most ${FILTER_PRESET_NAME_MAX_LENGTH} characters`
-      });
-      return;
-    }
-    if (hasUnsafeControlCharacters(value)) {
-      context.addIssue({
-        code: 'custom',
-        message: 'Preset name cannot contain control characters'
-      });
-    }
-  })
-  .trim()
-  .min(1)
-  .max(FILTER_PRESET_NAME_MAX_LENGTH);
+export const filterPresetIdSchema = presetTextSchema(
+  'id',
+  FILTER_PRESET_ID_MAX_LENGTH
+);
+
+export const filterPresetNameSchema = presetTextSchema(
+  'name',
+  FILTER_PRESET_NAME_MAX_LENGTH
+);
 
 function inspectBoundedString(
   value: unknown,
