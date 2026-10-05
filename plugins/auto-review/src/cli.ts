@@ -225,7 +225,7 @@ export function registerAutoReviewCli(
             const { status } = await bb.sdk.threads.get({ threadId });
             if (isBusyStatus(status)) {
               return {
-                refused: `thread ${threadId} is ${status}; reset only clears a stuck latch on an idle thread — wait for the turn to end (or stop it with \`bb thread stop ${threadId}\`), then retry.`,
+                refused: `thread ${threadId} is ${status}; reset only clears a stuck latch on an idle thread — wait for the turn to end, then retry.`,
               };
             }
             const before = await readState(bb, threadId);

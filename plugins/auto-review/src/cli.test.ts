@@ -312,7 +312,7 @@ describe("auto-review cli: reset", () => {
           });
           const message =
             `thread ${THREAD_ID} is ${status}; reset only clears a stuck latch on an idle thread — ` +
-            `wait for the turn to end (or stop it with \`bb thread stop ${THREAD_ID}\`), then retry.`;
+            `wait for the turn to end, then retry.`;
           const text = await host.run(["reset", THREAD_ID]);
           expect(text.exitCode).toBe(2);
           expect(text.stderr).toBe(`${message}\n`);
