@@ -368,6 +368,9 @@ describe("buildPlanReviewPrompt", () => {
     expect(buildPlanReviewPrompt({ reviewMode: "devkit", planFilePath: "/p.md" })).toMatch(
       /do not fall back to a self-review/,
     );
+    const auto = buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p.md" });
+    expect(auto).toMatch(/otherwise do a focused self-review of the plan from five angles/);
+    expect(auto).toMatch(/compliance/);
     const self = buildPlanReviewPrompt({ reviewMode: "self", planFilePath: "/p.md" });
     expect(self).toMatch(/focused self-review of the plan/);
     expect(self).toMatch(/five angles/);
@@ -462,6 +465,9 @@ describe("buildPresentPlanReviewPrompt", () => {
     expect(buildPresentPlanReviewPrompt({ reviewMode: "devkit", planFilePath: "p.md" })).toMatch(
       /do not fall back to a self-review/,
     );
+    const auto = buildPresentPlanReviewPrompt({ reviewMode: "auto", planFilePath: "p.md" });
+    expect(auto).toMatch(/otherwise do a focused self-review of the plan from five angles/);
+    expect(auto).toMatch(/compliance/);
     const self = buildPresentPlanReviewPrompt({ reviewMode: "self", planFilePath: "p.md" });
     expect(self).toMatch(/focused self-review of the plan/);
     expect(self).toMatch(/five angles/);

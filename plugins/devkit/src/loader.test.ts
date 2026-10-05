@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -172,6 +172,7 @@ describe("review-code content", () => {
     expect(r.content).toContain("Always emit all four sections");
     expect(r.content).toContain("`(spec)`");
     expect(r.content).toContain("`(code)`");
+    if (lens === "reviewer-compliance") expect(r.content).toContain("Frameworks considered:");
   });
 
   it("names every lens from the review-code table in skill routing and generated-file exclusion", async () => {
@@ -185,12 +186,32 @@ describe("review-code content", () => {
     }
   });
 
-  it("keeps stale four-lens counts out of review-code, planning and security-auditor", async () => {
-    const stale = /\bfour (calibrated|reviewers?|lens(es)?)\b|one of four/;
-    for (const slug of ["review-code", "planning", "security-auditor"]) {
-      const r = await loadSkill(contentRoot, slug);
-      expect(r.ok, slug).toBe(true);
-      if (r.ok) expect(r.content.replace(/\s+/g, " "), slug).not.toMatch(stale);
+  it("carries the compliance Frameworks considered line into the consolidated summary", () => {
+    const section4 = normalized.slice(normalized.indexOf("## 4."), normalized.indexOf("## 5."));
+    expect(section4).toContain("`Frameworks considered:`");
+  });
+
+  it("gives the closure reviewer and compliance the license-file hunks, patterns included", async () => {
+    const r = await loadSkill(contentRoot, undefined, "review-generated-file-exclusion");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const text = r.content.replace(/\s+/g, " ");
+    expect(text).toContain("closure reviewer");
+    expect(text).toContain("`LICEN[CS]E*`");
+  });
+
+  it("keeps stale four-lens counts out of every skill that names the cohort", async () => {
+    const stale = /\b(four|4)[- ](calibrated|reviewers?|lens(es)?)\b|security is one of four/;
+    const scanned: string[] = [];
+    for (const slug of await readdir(path.join(contentRoot, "skills"))) {
+      const body = await readFile(path.join(contentRoot, "skills", slug, "SKILL.md"), "utf8").catch(() => "");
+      const text = body.replace(/\s+/g, " ");
+      if (!/reviewer-(senior-dev|senior-qa|security|end-user|compliance)|calibrated[\w -]{0,30}review/i.test(text)) continue;
+      scanned.push(slug);
+      expect(text, slug).not.toMatch(stale);
+    }
+    for (const slug of ["review-code", "planning", "security-auditor", "cmd-commit", "code-review"]) {
+      expect(scanned, slug).toContain(slug);
     }
   });
 

@@ -46,8 +46,16 @@ so its next plan presentation would be approved without reaching the user. A pla
 ends with the revised plan presented for the user's approval, never with implementation.
 
 The review applies five lenses: senior-dev, senior-qa, security, end-user, and compliance. The
-compliance lens is applicability-gated and not legal advice; declare which regimes apply (GDPR,
-SOC 2, …) through `guidelines` in `.devkit/review.yml`. It always runs.
+compliance lens always runs but is applicability-gated and not legal advice: to declare which
+regimes apply (GDPR, SOC 2, …), list a tracked doc that states them under `guidelines` in
+`.devkit/review.yml`. The declaration takes effect for later changes once committed: a `guidelines`
+doc or `review.yml` added or edited in the change under review carries no weight in that change's
+own review. Example:
+
+```yaml
+guidelines:
+  - docs/COMPLIANCE.md   # e.g. "GDPR applies; not in PCI scope"
+```
 
 Under bb, the review's five lens reviewers (and its closure review) run as bb child threads; outside
 bb, or when spawning one fails, they run as the provider's own subagents, or sequentially in the
@@ -55,9 +63,9 @@ orchestrating thread as a last resort. See `review-code`'s `§3` for the recipe 
 full review costs about six provider sessions (five lenses plus closure), more when lockfiles
 change. Archived reviewer threads stay openable, so their transcripts keep the reviewed diff,
 including any secret values in it — run `bb thread delete --yes <id>` on one after reviewing a diff
-with a leaked secret, rather than waiting on its parent (`--yes` skips a confirmation prompt an
-unattended agent would otherwise hang on). They're spawned with `--lifecycle-owner-thread`, so
-they're deleted along with their parent anyway.
+with a leaked secret or real personal data, rather than waiting on its parent (`--yes` skips a
+confirmation prompt an unattended agent would otherwise hang on). They're spawned with
+`--lifecycle-owner-thread`, so they're deleted along with their parent anyway.
 
 ## Install
 

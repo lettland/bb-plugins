@@ -208,7 +208,8 @@ a reviewer missing.
 ## 4. Consolidate
 
 Produce one summary: **Blockers / Concerns / Advisories / Verdict**, opening with each reviewer's
-own verdict line so the user can see all five ran. Dedupe findings raised by more than one
+own verdict line so the user can see all five ran; carry the compliance reviewer's
+`Frameworks considered:` line next to its verdict line. Dedupe findings raised by more than one
 reviewer, keep the highest severity, and attribute each to the reviewers that raised it. Do not
 re-classify a reviewer's severity, and keep each finding's `(spec)`/`(code)` tag. Verdict is NEEDS
 WORK if any blocker, CONCERNS REMAIN if only concerns, else PASS. When files were excluded as

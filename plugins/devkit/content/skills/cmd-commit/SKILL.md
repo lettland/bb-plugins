@@ -68,7 +68,7 @@ Before any other action, check for plan mode:
    - Files staged: M
    - Where the work will land (per the line above)
    - Review the plan; after exiting plan mode, run `/commit` again to execute.
-7. The gate scans the plan string you pass to `ExitPlanMode` (not the plan file on disk) for the `<!-- devkit:commit-plan -->` sentinel on a line of its own — **anywhere** in the plan, with leading/trailing whitespace and a trailing CR tolerated. So presenting the whole plan file is fine: as long as the sentinel appears as a standalone line (the template puts it at the top of the Commit Plan block), the gate passes the commit plan straight through instead of running the 4 calibrated reviewers — a commit plan is bookkeeping, not code. A sentinel buried mid-sentence (not on its own line) does not count; omit the marker entirely only if you _want_ the full plan review (worst case of a missing marker is just that review, never a block).
+7. The gate scans the plan string you pass to `ExitPlanMode` (not the plan file on disk) for the `<!-- devkit:commit-plan -->` sentinel on a line of its own — **anywhere** in the plan, with leading/trailing whitespace and a trailing CR tolerated. So presenting the whole plan file is fine: as long as the sentinel appears as a standalone line (the template puts it at the top of the Commit Plan block), the gate passes the commit plan straight through instead of running the 5 calibrated reviewers — a commit plan is bookkeeping, not code. A sentinel buried mid-sentence (not on its own line) does not count; omit the marker entirely only if you _want_ the full plan review (worst case of a missing marker is just that review, never a block).
 
 ### If plan mode is NOT active → execute commits
 

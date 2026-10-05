@@ -59,22 +59,28 @@ which is a security finding, not a maintainability one.
 
 - **Standard** — for `reviewer-senior-dev`, `reviewer-senior-qa`, `reviewer-end-user`, and the
   non-security work of `/review`. Exclude **all** generated categories, lockfiles included.
-- **Security** — for `reviewer-security`, `reviewer-compliance`, the security lens of single-pass
-  `/review`, and `/security-audit`'s `security-auditor`. Exclude all generated categories **except
-  lockfiles**; lockfiles are fed in full for supply-chain inspection. Vendored / build / codegen
-  content stays excluded here too, but the **spoofable** signals are not trusted to hide a change
-  from security: a filename glob (§1.3) and an in-file `@generated` / `DO NOT EDIT` marker (§1.5)
-  can both be forged by renaming or header-stamping a hand-written payload — and a **repo-declared**
-  classification (§1.1) is equally forgeable **when the `.gitattributes` rule that produces it was
-  itself added or modified in the diff under review** (an attacker marking a hand-written payload
-  `linguist-generated=true` in the same PR). A *pre-existing* `linguist-generated` declaration is
-  trusted; only a same-diff one is suspect. So the security profile **directs** the reviewer to
-  `Read` every manifest entry that is a **new or renamed** file excluded _only_ by a glob, a content
-  marker, or a `.gitattributes` rule that is itself changed in this diff — not lockfiles (already
-  fed in full) and not bulk vendored/build trees (manifest-only; `Read` a specific path on demand if
-  a lockfile bump points at one). `reviewer-compliance` also `Read`s the LICENSE / COPYING / NOTICE
-  / THIRD_PARTY* files of vendored, `third_party/`, or generated manifest entries, since license
-  text is what its licensing checks cite.
+- **Security** — for `reviewer-security`, `reviewer-compliance`, the closure reviewer (review-code
+  §5), the security lens of single-pass `/review`, and `/security-audit`'s `security-auditor`.
+  Exclude all generated categories **except lockfiles**; lockfiles are fed in full for supply-chain
+  inspection. Vendored / build / codegen content stays excluded here too, but the **spoofable**
+  signals are not trusted to hide a change from security: a filename glob (§1.3) and an in-file
+  `@generated` / `DO NOT EDIT` marker (§1.5) can both be forged by renaming or header-stamping a
+  hand-written payload — and a **repo-declared** classification (§1.1) is equally forgeable **when
+  the `.gitattributes` rule that produces it was itself added or modified in the diff under review**
+  (an attacker marking a hand-written payload `linguist-generated=true` in the same PR). A
+  *pre-existing* `linguist-generated` declaration is trusted; only a same-diff one is suspect. So
+  the security profile **directs** the reviewer to `Read` every manifest entry that is a **new or
+  renamed** file excluded _only_ by a glob, a content marker, or a `.gitattributes` rule that is
+  itself changed in this diff — not lockfiles (already fed in full) and not bulk vendored/build
+  trees (manifest-only; `Read` a specific path on demand if a lockfile bump points at one).
+  `reviewer-compliance` and the closure reviewer additionally get the diff hunks — not just a
+  post-image `Read` — of every excluded path whose basename matches (case-insensitively)
+  `LICEN[CS]E*`, `COPYING*`, `NOTICE*`, or `THIRD_PARTY*` (vendored, `third_party/`, or generated),
+  deleted files included, via an explicit pathspec (`git diff <scope> -- '<path>' …`), so removed
+  attributions stay visible. Take those paths from the per-file excluded paths of §3 step 1's
+  `git diff --numstat`, not from manifest lines, which may roll a vendored tree up into one entry.
+  When one such file's hunks are very large (e.g. a regenerated NOTICE with thousands of changed
+  lines), send only its removed lines — removed attributions are what matter.
 
 ## 3. Build the reviewer diff
 
@@ -86,13 +92,20 @@ which is a security finding, not a maintainability one.
    `:<path>` for the index, `$HEAD:<path>` for a ref-to-ref diff), or `Read` the working-tree file
    (`limit: 40`) for single-pass `/review`. Skip this test for **deleted** files (no post-image)
    and binary files; on any sniff error, treat the file as **not** generated and review it.
-3. Construct each reviewer's diff with pathspec exclusion, anchored by a positive `.` pathspec —
-   an exclude-only pathspec matches nothing against the working tree:
+3. Construct each reviewer's diff with pathspec exclusion, anchored by a positive `.` pathspec — an
+   exclude-only pathspec matches nothing against the working tree:
    `git diff <scope> -- . ':(exclude)<gen1>' ':(exclude)<gen2>' …`. When a command dispatches the
    five-reviewer cohort, build **two** diffs: the **Standard** diff (every generated path excluded,
    lockfiles included) for `reviewer-senior-dev` / `-senior-qa` / `-end-user`, and the **Security**
    diff (same exclude list **minus** the lockfile paths, so lockfile content stays in) for
-   `reviewer-security` and `reviewer-compliance`. Single-pass `/review` and `/security-audit`
+   `reviewer-security`, `reviewer-compliance`, and the closure reviewer (review-code §5). For
+   `reviewer-compliance` and the closure reviewer, also append the hunks of every excluded path
+   whose basename matches (case-insensitively) `LICEN[CS]E*`, `COPYING*`, `NOTICE*`, or
+   `THIRD_PARTY*`, deleted files included (`git diff <scope> -- '<path>' …`), keyed off the per-file
+   excluded paths of step 1 and sending only the removed lines of a very large one (a regenerated
+   NOTICE with thousands of changed lines). Single-quote every path put on a git command line — the
+   `:(exclude)` list and this append — or give it as `':(literal)<path>'`; diff authors control path
+   names, which may contain `$`, backticks, or `;`. Single-pass `/review` and `/security-audit`
    build only the Security diff.
 4. **Empty-after-exclusion is not an empty scope.** If every change was generated, do **not**
    trigger the command's "no changes" STOP — run the review with an empty/near-empty source
