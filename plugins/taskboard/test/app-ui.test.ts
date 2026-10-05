@@ -1,21 +1,21 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { declarationBody, loadAppSource } from './app-source.ts';
 
-const app = await readFile(new URL('../app.tsx', import.meta.url), 'utf8');
+// app.tsx plus every module under features/, so the checks survive file splits.
+const app = await loadAppSource();
+const body = (names: readonly string[]) => declarationBody(app, names);
+const countOf = (text: string, pattern: RegExp) => [...text.matchAll(pattern)].length;
 
 test('registers Taskboard for existing-thread and New Thread right panels', () => {
   assert.match(app, /app\.slots\.threadPanelAction\(\{[\s\S]*?id: THREAD_PANEL_ACTION_ID[\s\S]*?component: TaskboardThreadPanel[\s\S]*?layout: 'flush'/u);
   assert.match(app, /app\.slots\.experimental_newThreadPanelAction\(\{[\s\S]*?id: 'taskboard-new-thread-panel'[\s\S]*?component: TaskboardNewThreadPanel[\s\S]*?layout: 'flush'/u);
-  assert.match(app, /function TaskboardNewThreadPanel\(\{ projectId \}[\s\S]*?<TaskboardRightPanel projectId=\{projectId\}/u);
+  assert.match(body(['TaskboardNewThreadPanel']), /<TaskboardRightPanel projectId=\{projectId\}/u);
   assert.match(app, /surfaceMode="constrained"/u);
 });
 
 test('accepts bounded Taskboard drops only on the visible composer textbox', () => {
-  const dropHook = app.match(
-    /function useTaskboardComposerDrop[\s\S]*?\nfunction TaskboardRightPanel/u
-  )?.[0];
-  assert.ok(dropHook, 'Missing useTaskboardComposerDrop');
+  const dropHook = body(['useTaskboardComposerDrop']);
   assert.match(dropHook, /hasTaskboardComposerDragType\(transfer\.types\)/u);
   assert.match(app, /\[contenteditable="true"\]\[role="textbox"\]/u);
   assert.match(dropHook, /parseTaskboardComposerMention/u);
@@ -25,10 +25,7 @@ test('accepts bounded Taskboard drops only on the visible composer textbox', () 
   assert.match(dropHook, /COMPOSER_DROP_CUE_TEXT/u);
   assert.match(dropHook, /clearTarget\(\)/u);
 
-  const insertion = app.match(
-    /const insertComposerMention = useCallback[\s\S]*?useTaskboardComposerDrop\(insertComposerMention\)/u
-  )?.[0];
-  assert.ok(insertion, 'Missing route-bound composer insertion');
+  const insertion = body(['insertComposerMention']);
   assert.match(insertion, /serializeTaskboardComposerMention/u);
   assert.match(insertion, /composer\.insertMention\(safeMention\)/u);
   assert.match(insertion, /composer\.focus\(\)/u);
@@ -37,15 +34,13 @@ test('accepts bounded Taskboard drops only on the visible composer textbox', () 
 });
 
 test('makes constrained List and Kanban tickets composer drag sources', () => {
-  const row = app.match(/function WorkItemRow[\s\S]*?\nfunction ListStateGroups/u)?.[0];
-  assert.ok(row, 'Missing WorkItemRow');
+  const row = body(['WorkItemRow', 'WorkItemDragHandle']);
   assert.match(row, /draggable=\{composerDragEnabled\}/u);
   assert.match(row, /writeTaskboardComposerDrag\(event\.dataTransfer, item, 'copy'\)/u);
   assert.match(row, /name="DragDropVertical"/u);
   assert.match(app, /composerDragEnabled=\{surfaceMode === 'constrained'\}/u);
 
-  const kanban = app.match(/function KanbanBoard[\s\S]*?\nfunction TrackerList/u)?.[0];
-  assert.ok(kanban, 'Missing KanbanBoard');
+  const kanban = body(['KanbanBoard', 'KanbanCard', 'KanbanLane']);
   assert.match(kanban, /event\.dataTransfer\.effectAllowed = composerDragEnabled[\s\S]*?'copyMove'[\s\S]*?: 'move'/u);
   assert.match(kanban, /event\.dataTransfer\.setData\('text\/plain', itemId\)/u);
   assert.match(kanban, /writeTaskboardComposerDrag\([\s\S]*?'copyMove'/u);
@@ -53,8 +48,7 @@ test('makes constrained List and Kanban tickets composer drag sources', () => {
 });
 
 test('offers an accessible non-drag Add to chat detail action', () => {
-  const detail = app.match(/function TrackerDetail[\s\S]*?\nfunction configFingerprint/u)?.[0];
-  assert.ok(detail, 'Missing TrackerDetail');
+  const detail = body(['TrackerDetail', 'TrackerDetailActions']);
   assert.match(detail, /type="button"[\s\S]*?variant="outline"[\s\S]*?onClick=\{\(\) => onAddToComposer\(item\)\}/u);
   assert.match(detail, /MessageCirclePlus/u);
   assert.match(detail, /Add to chat/u);
@@ -99,12 +93,16 @@ test('applies project presets through the released preference store', () => {
 });
 
 test('keeps preset refreshes, drafts, and focus non-disruptive', () => {
-  const hook = app.match(
-    /function useProjectFilterPresets[\s\S]*?\nfunction loadRightPanelPinned/u
-  )?.[0];
-  assert.ok(hook, 'Missing project preset hook');
+  const hook = body(['useProjectFilterPresets']);
+  // Intent: realtime, reconnect, and mutation reconciliation reload in the background,
+  // whether written inline or through one local alias called from each site.
+  const aliasDefinition = /const (\w+) = (?:useCallback\(\s*)?\(\) =>\s*(?:void )?reload\(\{ background: true \}\)/u;
+  const alias = hook.match(aliasDefinition)?.[1];
+  const backgroundReloads =
+    countOf(hook, /(?<!=>\s*)void reload\(\{ background: true \}\)/gu) +
+    (alias ? countOf(hook, new RegExp(`\\b${alias}\\(\\)`, 'gu')) : 0);
   assert.ok(
-    [...hook.matchAll(/void reload\(\{ background: true \}\)/gu)].length >= 3,
+    backgroundReloads >= 3,
     'Realtime, reconnect, and mutation reconciliation must stay in the background'
   );
   assert.match(hook, /if \(options\.background\) \{\s*setRefreshError\(message\)/u);
@@ -134,10 +132,7 @@ test('keeps List measured and Kanban unconstrained', () => {
   assert.match(app, /data-taskboard-state-glyph/u);
   assert.doesNotMatch(app, /max-w-\[110rem\]/u);
   assert.match(app, /aria-expanded=\{!collapsed\}/u);
-  const glyph = app.match(
-    /function WorkStateGlyph[\s\S]*?\nfunction SidebarRow/u
-  )?.[0];
-  assert.ok(glyph, 'Missing WorkStateGlyph implementation');
+  const glyph = body(['WorkStateGlyph']);
   assert.doesNotMatch(glyph, /data-status-tone/u);
   assert.doesNotMatch(glyph, /workflowStatusTone/u);
   assert.match(app, /disabled=\{searchActive\}/u);
@@ -184,20 +179,33 @@ test('centralizes and reuses decorative filter icons across surfaces', () => {
     /satisfies Record<FilterPresentationKey, FilterPresentation>/u
   );
   assert.match(app, /BOARD_FILTER_FIELDS\.map\(field =>/u);
-  assert.deepEqual(
-    [...app.matchAll(/<FilterSectionLabel filter="([^"]+)"/gu)].map(
-      match => match[1]
-    ),
-    filters
+  // Intent: filter sections render in this exact order, as literal labels or from an
+  // ordered table (a literal `source` label followed by a mapped list is also accepted).
+  const orderedKeys = (keys: readonly string[]) =>
+    new RegExp(`\\[\\s*${keys.map(key => `'${key}'`).join('\\s*,\\s*')}\\s*,?\\s*\\]`, 'u');
+  const labelOrder = [...app.matchAll(/<FilterSectionLabel filter="([^"]+)"/gu)].map(
+    match => match[1]
   );
+  assert.ok(
+    labelOrder.join() === filters.join() ||
+      orderedKeys(filters).test(app) ||
+      (labelOrder.join() === filters[0] &&
+        orderedKeys(filters.slice(1)).test(app) &&
+        /<FilterSectionLabel filter=\{/u.test(app)),
+    `Filter sections must render in order: ${filters.join(', ')}`
+  );
+  const presentation = body(['FILTER_PRESENTATION']);
   for (const filter of filters) {
+    // Intent: each filter reuses its centralized FILTER_PRESENTATION icon and label,
+    // via a literal `.filter.` access or a generic `[key]` lookup backed by a table entry.
+    assert.match(presentation, new RegExp(`\\b${filter}: \\{`));
     assert.match(
       app,
-      new RegExp(`icon=\\{FILTER_PRESENTATION\\.${filter}\\.icon\\}`)
+      new RegExp(`icon=\\{FILTER_PRESENTATION(?:\\.${filter}|\\[[^\\]]+\\])\\.icon\\}`)
     );
     assert.match(
       app,
-      new RegExp(`label=\\{FILTER_PRESENTATION\\.${filter}\\.label\\}`)
+      new RegExp(`label=\\{FILTER_PRESENTATION(?:\\.${filter}|\\[[^\\]]+\\])\\.label\\}`)
     );
   }
   assert.match(app, /name=\{presentation\.icon\}[\s\S]*?aria-hidden="true"/u);
@@ -220,10 +228,7 @@ test('supports direct and manual composer capture through one dialog', () => {
   assert.match(app, /assigneeConfirmation: AssigneeConfirmation/u);
   assert.match(app, /'New issue'/u);
 
-  const createBody = app.match(
-    /const create = async[\s\S]*?\n  const canSubmit/u
-  )?.[0];
-  assert.ok(createBody, 'Missing create submit implementation');
+  const createBody = body(['CreateIssueDialog', 'useCreateIssueSubmit']);
   const createCallIndex = createBody.indexOf("rpc.call('createIssue'");
   const rememberIndex = createBody.indexOf(
     'rememberCreateAssigneeAfterSuccess('
@@ -264,8 +269,14 @@ test('captures the original composer prompt locally exactly once per open', () =
   assert.match(app, /Prompt copied for review/u);
   assert.match(app, /copied into these editable fields/u);
   assert.match(app, /Nothing\s*is\s+created until you select Create/u);
+  // Intent: captured fields stay visible in the error, loading, and unavailable states,
+  // via one gated render per state or a single gated render hoisted above those branches.
+  const gatedFields = /\{assisted \? editablePromptFields : null\}/gu;
+  const dialog = body(['CreateIssueDialog', 'CreateIssueDialogBody']);
   assert.ok(
-    [...app.matchAll(/\{assisted \? editablePromptFields : null\}/gu)].length >= 3,
+    countOf(app, gatedFields) >= 3 ||
+      (countOf(dialog, gatedFields) >= 1 &&
+        dialog.search(gatedFields) < dialog.indexOf('contextError ?')),
     'Captured fields must remain visible while the provider loads or is unavailable'
   );
   assert.match(app, /<form id=\{formId\}[\s\S]*?onSubmit=\{create\}/u);
