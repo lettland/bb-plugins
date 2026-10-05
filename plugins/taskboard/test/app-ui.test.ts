@@ -354,10 +354,10 @@ test('keeps committed-query responses valid across query edits', () => {
     hook,
     /\(\) => \(\) => \{\s*requestRevisionRef\.current \+= 1;\s*\}/u
   );
-  const queryEffect = hook.slice(
-    hook.indexOf('useEffect('),
-    hook.indexOf('[query]')
-  );
+  const effectStart = hook.indexOf('useEffect(');
+  const effectEnd = hook.indexOf('[query]');
+  assert.ok(effectStart >= 0 && effectEnd > effectStart);
+  const queryEffect = hook.slice(effectStart, effectEnd);
   assert.doesNotMatch(queryEffect, /requestRevisionRef/u);
 });
 

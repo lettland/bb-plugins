@@ -1,5 +1,9 @@
+import fs from "node:fs";
+import path from "node:path";
+
 import {
   ISOLATION_SELF_TEST_OPERATION,
+  deny,
   requireManifest,
   assertManifestCurrent,
 } from "./runtime-common.mjs";
@@ -81,12 +85,31 @@ export async function executeContainerOperation(policy, workspace, operation, op
   return prependLockWaitMessages(results, lockWaits.messages);
 }
 
+async function assertSearchPathInsideWorkspace(hostRoot, searchPath) {
+  let target;
+  try {
+    target = await fs.promises.realpath(path.resolve(hostRoot, searchPath));
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  const root = await fs.promises.realpath(hostRoot);
+  if (target !== root && !target.startsWith(root + path.sep)) {
+    deny("path escapes the workspace");
+  }
+}
+
 export async function executeSearch(policy, workspace, input, options = {}) {
   const manifest = requireManifest(policy);
-  return runInvocation(
-    buildSearchInvocation(workspace.hostRoot, input, manifest.search.defaultPath),
-    options,
+  const invocation = buildSearchInvocation(
+    workspace.hostRoot,
+    input,
+    manifest.search.defaultPath,
   );
+  await assertSearchPathInsideWorkspace(workspace.hostRoot, invocation.args.at(-1));
+  return runInvocation(invocation, options);
 }
 
 export function formatResults(results) {

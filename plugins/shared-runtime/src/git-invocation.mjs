@@ -11,6 +11,9 @@ function validateRelativePath(value, { allowRoot = false } = {}) {
     deny("path must be relative and may not be an option");
   }
   const normalized = path.posix.normalize(slashed);
+  if (normalized.startsWith("-")) {
+    deny("path must be relative and may not be an option");
+  }
   if (normalized.replace(/\/+$/u, "") === ".") {
     if (allowRoot) {
       return ".";

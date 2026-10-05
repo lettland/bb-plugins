@@ -28,7 +28,7 @@ export function buildRuntimeGitTool({
     description:
       "Run a typed Git status, diff, log, add, commit, primary rebase or recovery, or primary fast-forward operation in the authorized checkout of the current project.",
     instructions:
-      "Use runtime_git when its fixed operations fit. Add accepts explicit relative paths only; commit rejects control tags and prohibited trailers and runs the project's declared commit preparation generators first. rebase_primary and fast_forward_primary accept no ref or target and operate only between the current managed BB branch and a primary checkout already on main/master. If rebase_primary stops for conflicts, use rebase_continue after resolving them or rebase_abort to restore the branch.",
+      "Use runtime_git when its fixed operations fit. Add accepts explicit relative paths only, taken literally (no globs or pathspec magic); commit rejects control tags and prohibited trailers and runs the project's declared commit preparation generators first. rebase_primary and fast_forward_primary accept no ref or target and operate only between the current managed BB branch and a primary checkout already on main/master. If rebase_primary stops for conflicts, use rebase_continue after resolving them or rebase_abort to restore the branch.",
     presentation: {
       label: { pending: "Running typed Git", completed: "Ran typed Git" },
       icon: { glyph: "GitBranch" },
