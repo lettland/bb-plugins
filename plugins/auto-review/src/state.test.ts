@@ -44,9 +44,9 @@ describe("threadStateSchema", () => {
     expect(parsed.phase).toBe("idle");
   });
 
-  it("preserves a skip flag with a defaulted phase", () => {
+  it("strips a leftover skip flag from old stored state", () => {
     const parsed = threadStateSchema.parse({ skip: true });
-    expect(parsed).toEqual({ phase: "idle", skip: true });
+    expect(parsed).toEqual({ phase: "idle" });
   });
 
   it("round-trips a full latched state", () => {
@@ -254,7 +254,7 @@ describe("readState", () => {
   it("returns a fresh idle object each time, never the shared constant", async () => {
     const { bb } = fakeBb(null);
     const first = await readState(bb, "t");
-    first.skip = true;
+    first.turnDecided = true;
     expect(await readState(bb, "t")).toEqual({ phase: "idle" });
   });
 });
@@ -262,8 +262,8 @@ describe("readState", () => {
 describe("writeState", () => {
   it("omits the remove list when there is nothing to remove", async () => {
     const { bb, updates } = fakeBb({});
-    await writeState(bb, "t", { skip: true });
-    expect(updates).toEqual([{ threadId: "t", set: { skip: true } }]);
+    await writeState(bb, "t", { turnDecided: true });
+    expect(updates).toEqual([{ threadId: "t", set: { turnDecided: true } }]);
   });
 
   it("forwards the keys to remove", async () => {

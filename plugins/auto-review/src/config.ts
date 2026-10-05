@@ -6,6 +6,7 @@ export const REVIEW_MODES = ["auto", "devkit", "self"] as const;
 
 export const DEFAULT_MERGE_ELIGIBLE_MAINLINES = ["master"];
 
+// "skipped" and "commit-plan" are legacy: accepted from old stored state, never written.
 export const FIRE_REASONS = [
   "fired",
   "deferred",
@@ -58,7 +59,6 @@ export interface EffectiveConfig {
   enabled: boolean;
   mergeEligibleMainlines: string[];
   reviewMode: ReviewMode;
-  skipped: boolean;
 }
 
 export function parseMainlines(csv: string): string[] {
@@ -117,14 +117,12 @@ export function globalDefaultsFrom(values: {
 export function effectiveConfig(
   globals: GlobalDefaults,
   project: ProjectConfig,
-  skipped: boolean,
 ): EffectiveConfig {
   return {
     enabled: project.enabled ?? globals.enabled,
     mergeEligibleMainlines:
       project.mergeEligibleMainlines ?? globals.mergeEligibleMainlines,
     reviewMode: project.reviewMode ?? globals.reviewMode,
-    skipped,
   };
 }
 

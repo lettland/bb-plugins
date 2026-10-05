@@ -35,10 +35,9 @@ Before any other action, check for plan mode:
    - `git log -5 | cat` — match existing commit style
 2. Extract style dimensions from `git log` (see Step 1 below).
 3. Run _Artifact triage_ (read-only here): note which paths are generated artifacts to be **gitignored** vs authored files to commit. Then group the authored files logically — every authored file lands in some commit; grouping distributes them, it never drops any. (`.gitignore` edits and `git rm --cached` are writes — describe them in the plan, don't run them.)
-4. Append a Commit Plan to the active plan file, led by the `<!-- devkit:commit-plan -->` sentinel on its own line (see the template) — that marker tells auto-review's plan-review gate this is a commit plan, not code, so it skips the 5-reviewer pass. The gate matches the sentinel as a standalone line **anywhere** in the plan you present, so you don't have to position it precisely:
+4. Write the Commit Plan to its own plan file, or replace a stale implementation plan with it, so the plan review covers only the commit plan and not unrelated earlier work:
 
 ```
-<!-- devkit:commit-plan -->
 ## Commit Plan
 
 ### Artifacts to gitignore (if any)
@@ -67,8 +66,8 @@ Before any other action, check for plan mode:
    - Commits planned: N
    - Files staged: M
    - Where the work will land (per the line above)
+   - The commit plan goes through the calibrated plan review before it reaches you; that review checks grouping, file coverage, artifact and secret triage, and message style, so what you see has already been revised.
    - Review the plan; after exiting plan mode, run `/commit` again to execute.
-7. The gate scans the plan string you pass to `ExitPlanMode` (not the plan file on disk) for the `<!-- devkit:commit-plan -->` sentinel on a line of its own — **anywhere** in the plan, with leading/trailing whitespace and a trailing CR tolerated. So presenting the whole plan file is fine: as long as the sentinel appears as a standalone line (the template puts it at the top of the Commit Plan block), the gate passes the commit plan straight through instead of running the 5 calibrated reviewers — a commit plan is bookkeeping, not code. A sentinel buried mid-sentence (not on its own line) does not count; omit the marker entirely only if you _want_ the full plan review (worst case of a missing marker is just that review, never a block).
 
 ### If plan mode is NOT active → execute commits
 

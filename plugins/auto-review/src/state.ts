@@ -61,7 +61,6 @@ export const threadStateSchema = z.object({
    * was folded into the user's queued next turn — is still covered.
    */
   turnDecided: z.literal(true).optional(),
-  skip: z.literal(true).optional(),
   /**
    * Set when a plan's first presentation was held back for review; the next
    * presentation (the reviewed plan) is released to the user and clears it.

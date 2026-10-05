@@ -60,22 +60,17 @@ describe("effectiveConfig", () => {
   };
 
   it("uses globals when there is no project override", () => {
-    expect(effectiveConfig(globals, {}, false)).toEqual({
+    expect(effectiveConfig(globals, {})).toEqual({
       enabled: true,
       mergeEligibleMainlines: ["master"],
       reviewMode: "auto",
-      skipped: false,
     });
   });
 
   it("applies a partial project override without clobbering the rest", () => {
-    const config = effectiveConfig(globals, { enabled: false }, false);
+    const config = effectiveConfig(globals, { enabled: false });
     expect(config.enabled).toBe(false);
     expect(config.mergeEligibleMainlines).toEqual(["master"]);
     expect(config.reviewMode).toBe("auto");
-  });
-
-  it("carries the per-thread skip flag through", () => {
-    expect(effectiveConfig(globals, {}, true).skipped).toBe(true);
   });
 });

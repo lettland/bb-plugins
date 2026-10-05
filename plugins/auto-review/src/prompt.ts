@@ -254,8 +254,8 @@ export const PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN = [
 ].join("\n\n");
 
 /**
- * `PresentPlan`'s reply when auto-review is off for the thread (disabled or
- * skipped): nothing reviews the plan here, so the agent is told to fall back
+ * `PresentPlan`'s reply when auto-review is off for the thread (disabled):
+ * nothing reviews the plan here, so the agent is told to fall back
  * to ending its turn and waiting for the user directly.
  */
 export const PRESENT_PLAN_OFF_MESSAGE =

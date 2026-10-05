@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  isCommitPlan,
   isImmediateReactionToDeny,
   planApprovalOf,
   planGateAction,
@@ -38,19 +37,6 @@ describe("planApprovalOf", () => {
     (undeniable as { payload: { availableDecisions: string[] } }).payload.availableDecisions = ["allow_once"];
     expect(planApprovalOf(undeniable)).toBeNull();
     expect(planApprovalOf({ id: "x", status: "pending", payload: { kind: "user_question" } } as never)).toBeNull();
-  });
-});
-
-describe("isCommitPlan", () => {
-  it("matches the sentinel on a line of its own, anywhere in the plan", () => {
-    expect(isCommitPlan("# Plan\n\n## Commit Plan\n<!-- devkit:commit-plan -->\n- a")).toBe(true);
-    expect(isCommitPlan("  <!--devkit:commit-plan-->  \r\nrest")).toBe(true);
-    expect(isCommitPlan("<!-- k0d3:commit-plan -->")).toBe(true);
-  });
-
-  it("ignores an in-prose mention or a near miss", () => {
-    expect(isCommitPlan("see <!-- devkit:commit-plan --> above")).toBe(false);
-    expect(isCommitPlan("<!-- devkit:commit-planner -->")).toBe(false);
   });
 });
 
@@ -140,17 +126,16 @@ describe("planGateAction", () => {
   const NOW = STALE_WINDOW_MS * 10;
 
   it("reviews the first presentation and releases the next", () => {
-    expect(planGateAction({ phase: "idle" }, "# Plan", NOW)).toBe("review");
-    expect(
-      planGateAction({ phase: "idle", planReviewArmedAt: NOW - 1_000 }, "# Plan", NOW),
-    ).toBe("release");
+    expect(planGateAction({ phase: "idle" }, NOW)).toBe("review");
+    expect(planGateAction({ phase: "idle", planReviewArmedAt: NOW - 1_000 }, NOW)).toBe(
+      "release",
+    );
   });
 
   it("holds a re-presentation while the review is still queued", () => {
     expect(
       planGateAction(
         { phase: "idle", planReviewArmedAt: NOW - 1_000, planReviewEntryId: "qm" },
-        "# Plan",
         NOW,
       ),
     ).toBe("hold");
@@ -160,7 +145,6 @@ describe("planGateAction", () => {
     expect(
       planGateAction(
         { phase: "idle", planReviewArmedAt: NOW - STALE_WINDOW_MS - 1 },
-        "# Plan",
         NOW,
       ),
     ).toBe("review");
@@ -168,13 +152,7 @@ describe("planGateAction", () => {
 
   it("still releases right at the edge of the stale window", () => {
     expect(
-      planGateAction({ phase: "idle", planReviewArmedAt: NOW - STALE_WINDOW_MS }, "# Plan", NOW),
+      planGateAction({ phase: "idle", planReviewArmedAt: NOW - STALE_WINDOW_MS }, NOW),
     ).toBe("release");
-  });
-
-  it("passes a commit plan without touching the gate", () => {
-    expect(planGateAction({ phase: "idle" }, "<!-- devkit:commit-plan -->", NOW)).toBe(
-      "commit-plan",
-    );
   });
 });

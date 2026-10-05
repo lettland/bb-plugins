@@ -135,7 +135,7 @@ Fix issues inline. If a spec requirement has no task, add the task.
 
 ## Calibrated review
 
-Self-review is single-author — you check your own work. Before the execution handoff, get **independent perspectives**: run the calibrated plan review — `devkit_load_skill({ slug: "review-code" })` with scope `plan <saved-plan-path>` — to apply the five calibrated lenses (senior-dev, senior-qa, security, end-user, compliance) to the plan. Disposition their findings per `references/review-finding-disposition.md` — validate each against the plan, apply every valid revision directly to the plan document, skip false positives with a one-line reason — then proceed to the handoff. On bb, native plan mode reaches the same review automatically: auto-review holds a plan's first presentation, runs this review, and releases the revised plan to the user, so a plan is never handed off un-reviewed. (Opt out per thread with `bb auto-review skip <thread-id>`.)
+Self-review is single-author — you check your own work. Before the execution handoff, get **independent perspectives**: run the calibrated plan review — `devkit_load_skill({ slug: "review-code" })` with scope `plan <saved-plan-path>` — to apply the five calibrated lenses (senior-dev, senior-qa, security, end-user, compliance) to the plan. Disposition their findings per `references/review-finding-disposition.md` — validate each against the plan, apply every valid revision directly to the plan document, skip false positives with a one-line reason — then proceed to the handoff. On bb, native plan mode reaches the same review automatically: auto-review holds a plan's first presentation, runs this review, and releases the revised plan to the user, so a plan is never handed off un-reviewed.
 
 ## Execution handoff
 

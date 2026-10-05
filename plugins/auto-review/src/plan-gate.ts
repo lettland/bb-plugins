@@ -47,16 +47,12 @@ export async function gatePlan(
   const { bb } = ctx;
   const state = await readState(bb, thread.id);
   const project = await readProjectConfig(bb, thread.projectId);
-  const config = effectiveConfig(ctx.globals, project, state.skip === true);
+  const config = effectiveConfig(ctx.globals, project);
   if (!planGateServes(thread, config)) {
     return;
   }
 
-  const action = planGateAction(state, approval.plan, Date.now());
-  if (action === "commit-plan") {
-    await recordFire(ctx, thread.projectId, thread.id, "stood-down", "commit-plan");
-    return;
-  }
+  const action = planGateAction(state, Date.now());
   if (action === "release") {
     await writeState(bb, thread.id, {}, [...PLAN_GATE_KEYS]);
     await recordFire(ctx, thread.projectId, thread.id, "stood-down", "plan-reviewed");
@@ -251,8 +247,8 @@ export async function answerPlanHoldQuestion(
     return;
   }
   const project = await readProjectConfig(bb, thread.projectId);
-  const config = effectiveConfig(ctx.globals, project, state.skip === true);
-  if (!config.enabled || config.skipped) {
+  const config = effectiveConfig(ctx.globals, project);
+  if (!config.enabled) {
     return;
   }
   let events: Awaited<ReturnType<typeof bb.sdk.threads.events.list>>;

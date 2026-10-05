@@ -1168,13 +1168,30 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
-  it("skips a thread when the per-thread skip flag is set", async () => {
+  it("still reviews a thread carrying a skip flag from old stored state", async () => {
     const host = createHost();
     await plugin(host.bb);
-    await host.harness.runCli(["skip", THREAD_ID]);
+    host.metadata.skip = true;
     await emitActive(host);
     await emitIdle(host);
-    expect(host.sends).toHaveLength(0);
+    expect(host.sends).toHaveLength(1);
+    await host.harness.dispose();
+  });
+
+  it("refuses to reset a thread mid-turn, so the turn still gets its review at idle", async () => {
+    const host = createHost();
+    await plugin(host.bb);
+    host.setEnvThreads([{ id: THREAD_ID, status: "active" }]);
+    await emitActive(host);
+
+    const reset = await host.harness.runCli(["reset", THREAD_ID]);
+    expect(reset.exitCode).toBe(2);
+    expect(reset.stderr).toBe("reset only clears a stuck latch on an idle thread\n");
+    expect(host.metadata.turnStart).toBeDefined();
+
+    host.setEnvThreads([{ id: THREAD_ID, status: "idle" }]);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
     await host.harness.dispose();
   });
 
@@ -1995,23 +2012,23 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
-  it("passes a commit plan straight through", async () => {
+  it("holds a plan carrying the old commit-plan marker for review", async () => {
     const host = createHost({ sendDelivery: "queued" });
     await plugin(host.bb);
     await emitPlan(host, planInteraction("## Commit Plan\n<!-- devkit:commit-plan -->\n- a"));
-    expect(host.sends).toHaveLength(0);
-    expect(host.resolutions).toHaveLength(0);
-    expect(host.metadata.planReviewArmedAt).toBeUndefined();
+    expect(host.sends).toHaveLength(1);
+    expect(host.resolutions).toHaveLength(1);
+    expect(typeof host.metadata.planReviewArmedAt).toBe("number");
     await host.harness.dispose();
   });
 
-  it("leaves the plan alone when auto-review is skipped for the thread", async () => {
+  it("still holds the plan for a thread carrying a skip flag from old stored state", async () => {
     const host = createHost({ sendDelivery: "queued" });
     await plugin(host.bb);
-    await host.harness.runCli(["skip", THREAD_ID]);
+    host.metadata.skip = true;
     await emitPlan(host);
-    expect(host.sends).toHaveLength(0);
-    expect(host.resolutions).toHaveLength(0);
+    expect(host.sends).toHaveLength(1);
+    expect(host.resolutions).toHaveLength(1);
     await host.harness.dispose();
   });
 
@@ -2226,15 +2243,18 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
-  it("leaves a question alone when auto-review is skipped for the thread", async () => {
+  it("still answers the question for a thread carrying a skip flag from old stored state", async () => {
     const host = createHost({ sendDelivery: "queued" });
     await plugin(host.bb);
     await emitPlan(host);
-    await host.harness.runCli(["skip", THREAD_ID]);
+    host.metadata.skip = true;
 
     const { errors } = await emitQuestion(host);
     expect(errors).toEqual([]);
-    expect(host.resolutions.map((r) => r.interactionId)).toEqual(["pint-1"]);
+    expect(host.resolutions.at(-1)).toMatchObject({
+      interactionId: "uq-1",
+      resolution: { kind: "user_answer" },
+    });
     expect(host.metadata.planDenied).toBeUndefined();
     await host.harness.dispose();
   });
@@ -2493,16 +2513,17 @@ describe("auto-review plugin", () => {
       await host.harness.dispose();
     });
 
-    it("tells the agent review is off when the thread is skipped", async () => {
+    it("still arms for a thread carrying a skip flag from old stored state", async () => {
       const host = createHost();
       await plugin(host.bb);
-      await host.harness.runCli(["skip", THREAD_ID]);
+      host.metadata.skip = true;
       const result = await host.harness.callAgentTool(
         "PresentPlan",
         { planFilePath: "docs/plans/p.md" },
         ctx,
       );
-      expect(result).toBe(PRESENT_PLAN_OFF_MESSAGE);
+      expect(result).not.toBe(PRESENT_PLAN_OFF_MESSAGE);
+      expect(typeof host.metadata.presentPlanArmedAt).toBe("number");
       await host.harness.dispose();
     });
 

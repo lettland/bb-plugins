@@ -36,17 +36,6 @@ export function planApprovalOf(interaction: PendingInteraction): PlanApproval | 
   };
 }
 
-/**
- * devkit's commit workflow leads the plan it presents with this marker on a line
- * of its own: a commit plan is bookkeeping, not code, so it skips plan review.
- * The k0d3 spelling is still honoured for plans written by the older plugin.
- */
-const COMMIT_PLAN_SENTINEL = /^[ \t]*<!--[ \t]*(?:devkit|k0d3):commit-plan[ \t]*-->[ \t]*\r?$/mu;
-
-export function isCommitPlan(plan: string): boolean {
-  return COMMIT_PLAN_SENTINEL.test(plan);
-}
-
 export interface PendingUserQuestion {
   interactionId: string;
   questionIds: string[];
@@ -106,7 +95,7 @@ export function isImmediateReactionToDeny(events: readonly ThreadEventRow[]): bo
   });
 }
 
-export type PlanGateAction = "review" | "hold" | "release" | "commit-plan";
+export type PlanGateAction = "review" | "hold" | "release";
 
 /**
  * Single-fire per presentation, loop-safe by construction: the review edits the
@@ -129,10 +118,7 @@ export type PlanGateAction = "review" | "hold" | "release" | "commit-plan";
  * treating it as "release" would hand the user a plan auto-review never
  * touched. Treated as "review" instead, same as a thread with no arm at all.
  */
-export function planGateAction(state: ThreadState, plan: string, now: number): PlanGateAction {
-  if (isCommitPlan(plan)) {
-    return "commit-plan";
-  }
+export function planGateAction(state: ThreadState, now: number): PlanGateAction {
   if (state.planReviewArmedAt === undefined) {
     return "review";
   }

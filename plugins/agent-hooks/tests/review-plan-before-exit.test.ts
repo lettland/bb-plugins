@@ -271,7 +271,7 @@ describe("review-plan-before-exit.sh — auto-review handoff", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  it("still skips a commit-plan without consulting auto-review", async () => {
+  it("denies and arms a plan carrying the old commit-plan marker when permission_mode is absent", async () => {
     const marker = markerPath();
     const bb = fakeBb(marker, "echo '{\"planGate\": false}'");
     const projectDir = project();
@@ -283,8 +283,65 @@ describe("review-plan-before-exit.sh — auto-review handoff", () => {
       { projectDir, toolName: "ExitPlanMode", env: { BB_CLI: bb, BB_THREAD_ID: "thr_1" } },
     );
 
-    expect(result.verdict).toBe("allow");
-    expect(existsSync(gatePath(projectDir))).toBe(false);
+    expect(isDeny(result.stdout)).toBe(true);
+    expect(existsSync(gatePath(projectDir))).toBe(true);
     expect(existsSync(marker)).toBe(false);
+  });
+
+  it("stands down to auto-review for a marker plan when planGate serves the thread", async () => {
+    const marker = markerPath();
+    const bb = fakeBb(marker, "echo '{\"planGate\": true}'");
+    const projectDir = project();
+    const plan = "Some plan\n<!-- agent-hooks:commit-plan -->\nmore text\n";
+
+    const result = await runHook(
+      "review-plan-before-exit.sh",
+      { plan },
+      {
+        projectDir,
+        toolName: "ExitPlanMode",
+        permissionMode: "plan",
+        env: { BB_CLI: bb, BB_THREAD_ID: "thr_1" },
+      },
+    );
+
+    expect(result.verdict).toBe("allow");
+    expect(existsSync(marker)).toBe(true);
+    expect(existsSync(gatePath(projectDir))).toBe(false);
+  });
+
+  it("denies and arms a marker plan when planGate does not serve the thread", async () => {
+    const marker = markerPath();
+    const bb = fakeBb(marker, "echo '{\"planGate\": false}'");
+    const projectDir = project();
+    const plan = "Some plan\n<!-- agent-hooks:commit-plan -->\nmore text\n";
+
+    const result = await runHook(
+      "review-plan-before-exit.sh",
+      { plan },
+      {
+        projectDir,
+        toolName: "ExitPlanMode",
+        permissionMode: "plan",
+        env: { BB_CLI: bb, BB_THREAD_ID: "thr_1" },
+      },
+    );
+
+    expect(isDeny(result.stdout)).toBe(true);
+    expect(existsSync(marker)).toBe(true);
+    expect(existsSync(gatePath(projectDir))).toBe(true);
+  });
+
+  it("ignores the removed AGENT_HOOKS_SKIP_PLAN_REVIEW variable", async () => {
+    const projectDir = project();
+
+    const result = await runHook(
+      "review-plan-before-exit.sh",
+      { plan: PLAN },
+      { projectDir, toolName: "ExitPlanMode", env: { AGENT_HOOKS_SKIP_PLAN_REVIEW: "1" } },
+    );
+
+    expect(isDeny(result.stdout)).toBe(true);
+    expect(existsSync(gatePath(projectDir))).toBe(true);
   });
 });

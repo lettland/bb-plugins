@@ -12,7 +12,7 @@ import {
   type GlobalDefaults,
 } from "./config.js";
 import { removeDeferral } from "./deferrals.js";
-import { planGateServes } from "./gate.js";
+import { isBusyStatus, planGateServes } from "./gate.js";
 import {
   LATCH_KEYS,
   PLAN_GATE_KEYS,
@@ -189,19 +189,9 @@ export function registerAutoReviewCli(
         usage: "bb auto-review disable [--global | --project <id>] [--json]",
       },
       {
-        name: "skip",
-        summary: "Skip auto-review for one thread",
-        usage: "bb auto-review skip <thread-id> [--json]",
-      },
-      {
-        name: "unskip",
-        summary: "Clear the skip flag for one thread",
-        usage: "bb auto-review unskip <thread-id> [--json]",
-      },
-      {
         name: "reset",
         summary:
-          "Clear a wedged latch (and skip) for one thread — also DROPS a deferred turn's pending review",
+          "Clear a wedged latch for one idle thread — also DROPS a deferred turn's pending review",
         usage: "bb auto-review reset <thread-id> [--json]",
       },
     ],
@@ -217,73 +207,80 @@ export function registerAutoReviewCli(
         return setScope(bb, settings, context, parsed, false);
       }
 
-      if (command === "skip" || command === "unskip" || command === "reset") {
+      if (command === "skip" || command === "unskip") {
+        return {
+          exitCode: 2,
+          stderr: `\`${command}\` was removed: auto-review reviews every turn and plan.\n`,
+        };
+      }
+
+      if (command === "reset") {
         const threadId = parsed.positionals[0] ?? context.threadId ?? null;
         if (threadId === null || threadId === undefined) {
           return {
             exitCode: 2,
-            stderr: `A thread id is required: bb auto-review ${command} <thread-id>\n`,
+            stderr: `A thread id is required: bb auto-review reset <thread-id>\n`,
           };
         }
         try {
-          if (command === "skip") {
-            await writeState(bb, threadId, { skip: true });
-          } else if (command === "unskip") {
-            await writeState(bb, threadId, {}, ["skip"]);
-          } else {
-            // Under the same lock the event drivers use: reset now writes both
-            // thread state and the deferral index, and an unlocked interleave
-            // with a concurrent evaluate could delete an index entry that
-            // evaluate had just written, re-stranding the thread.
-            const prior = await withThreadLock(threadId, async () => {
-              const before = await readState(bb, threadId);
-              await writeState(bb, threadId, { phase: "idle" }, [
-                ...LATCH_KEYS,
-                "skip",
-                ...PLAN_GATE_KEYS,
-                ...PRESENT_PLAN_KEYS,
-              ]);
-              await removeDeferral(bb, threadId);
-              return before;
-            });
-            const payload = {
-              ok: true,
-              command,
-              threadId,
-              priorPhase: prior.phase,
-              wasLatched: prior.phase !== "idle",
-              droppedDeferral: prior.phase === "deferred",
-            };
-            if (wantsJson) {
-              return json(payload);
-            }
-            if (prior.phase === "idle") {
-              return {
-                exitCode: 0,
-                stdout: `reset ${threadId} (was already idle; nothing latched).\n`,
-              };
-            }
-            if (prior.phase === "deferred") {
-              return {
-                exitCode: 0,
-                stdout:
-                  `reset ${threadId} (dropped a deferred turn).\n` +
-                  `That turn was ${droppedDeferralWaitText(prior.heldBy)} — ` +
-                  "its review and commit will now never run.\n",
-              };
-            }
+          // Resetting a thread mid-turn would delete its `turnStart` and make the
+          // turn in progress stand down unreviewed, so only an idle thread resets.
+          const { status } = await bb.sdk.threads.get({ threadId });
+          if (isBusyStatus(status)) {
+            const message = "reset only clears a stuck latch on an idle thread";
+            return wantsJson
+              ? json({ ok: false, threadId, error: message }, 2)
+              : { exitCode: 2, stderr: `${message}\n` };
+          }
+          // Under the same lock the event drivers use: reset now writes both
+          // thread state and the deferral index, and an unlocked interleave
+          // with a concurrent evaluate could delete an index entry that
+          // evaluate had just written, re-stranding the thread.
+          const prior = await withThreadLock(threadId, async () => {
+            const before = await readState(bb, threadId);
+            await writeState(bb, threadId, { phase: "idle" }, [
+              ...LATCH_KEYS,
+              // Leftover from the removed per-thread skip flag.
+              "skip",
+              ...PLAN_GATE_KEYS,
+              ...PRESENT_PLAN_KEYS,
+            ]);
+            await removeDeferral(bb, threadId);
+            return before;
+          });
+          const payload = {
+            ok: true,
+            command,
+            threadId,
+            priorPhase: prior.phase,
+            wasLatched: prior.phase !== "idle",
+            droppedDeferral: prior.phase === "deferred",
+          };
+          if (wantsJson) {
+            return json(payload);
+          }
+          if (prior.phase === "idle") {
             return {
               exitCode: 0,
-              stdout: `reset ${threadId} (cleared ${prior.phase} latch).\n`,
+              stdout: `reset ${threadId} (was already idle; nothing latched).\n`,
             };
           }
+          if (prior.phase === "deferred") {
+            return {
+              exitCode: 0,
+              stdout:
+                `reset ${threadId} (dropped a deferred turn).\n` +
+                `That turn was ${droppedDeferralWaitText(prior.heldBy)} — ` +
+                "its review and commit will now never run.\n",
+            };
+          }
+          return {
+            exitCode: 0,
+            stdout: `reset ${threadId} (cleared ${prior.phase} latch).\n`,
+          };
         } catch {
           return threadError(threadId, wantsJson);
         }
-        const payload = { ok: true, command, threadId };
-        return wantsJson
-          ? json(payload)
-          : { exitCode: 0, stdout: `${command} applied to ${threadId}.\n` };
       }
 
       if (command === "status") {
@@ -304,14 +301,13 @@ export function registerAutoReviewCli(
         const projectId = thread.projectId;
         const state = await readState(bb, threadId);
         const project = await readProjectConfig(bb, projectId);
-        const config = effectiveConfig(getGlobals(), project, state.skip === true);
+        const config = effectiveConfig(getGlobals(), project);
         const planGate = planGateServes(thread, config);
         const lastFire = await readLastFire(bb, projectId, threadId);
         const payload = {
           threadId,
           projectId,
           enabled: config.enabled,
-          skipped: config.skipped,
           reviewMode: config.reviewMode,
           mergeEligibleMainlines: config.mergeEligibleMainlines,
           planGate,
@@ -339,7 +335,6 @@ export function registerAutoReviewCli(
           exitCode: 0,
           stdout:
             `enabled: ${config.enabled}\n` +
-            `skipped: ${config.skipped}\n` +
             `reviewMode: ${config.reviewMode}\n` +
             `mergeEligibleMainlines: ${config.mergeEligibleMainlines.join(", ")}\n` +
             `planGate: ${planGate}\n` +
@@ -358,7 +353,7 @@ export function registerAutoReviewCli(
         const project =
           projectId === null ? {} : await readProjectConfig(bb, projectId);
         const globals = getGlobals();
-        const config = effectiveConfig(globals, project, false);
+        const config = effectiveConfig(globals, project);
         const payload = {
           projectId,
           globals,
@@ -385,7 +380,7 @@ export function registerAutoReviewCli(
       return {
         exitCode: 2,
         stderr:
-          "Usage: bb auto-review <status|show|enable|disable|skip|unskip|reset> [--json]\n",
+          "Usage: bb auto-review <status|show|enable|disable|reset> [--json]\n",
       };
     },
   });

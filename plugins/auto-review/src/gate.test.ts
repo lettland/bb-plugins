@@ -151,7 +151,7 @@ describe("selfIsWorktree", () => {
   });
 });
 
-const servingConfig = { enabled: true, skipped: false };
+const servingConfig = { enabled: true };
 
 describe("planGateServes", () => {
   it("serves a top-level, enabled claude-code thread", () => {
@@ -161,12 +161,6 @@ describe("planGateServes", () => {
   it("stands down for a different provider (e.g. the ACP bridge)", () => {
     expect(
       planGateServes({ ...okThread, providerId: "acp-claude-work" }, servingConfig),
-    ).toBe(false);
-  });
-
-  it("stands down for a skipped thread", () => {
-    expect(
-      planGateServes(okThread, { ...servingConfig, skipped: true }),
     ).toBe(false);
   });
 

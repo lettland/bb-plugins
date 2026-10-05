@@ -35,16 +35,15 @@ export const PLAN_GATE_PROVIDER_ID = "claude-code";
 /**
  * Whether auto-review's plan gate owns this thread's plan review. True only for a
  * top-level, visible, environment-bound `claude-code` thread with auto-review on —
- * every other thread (ACP, standalone, disabled/skipped, child) falls to whatever
+ * every other thread (ACP, standalone, disabled, child) falls to whatever
  * reviews plans outside auto-review instead (e.g. agent-hooks' own hook).
  */
 export function planGateServes(
   thread: GateThread,
-  config: { enabled: boolean; skipped: boolean },
+  config: { enabled: boolean },
 ): boolean {
   return (
     config.enabled &&
-    !config.skipped &&
     thread.providerId === PLAN_GATE_PROVIDER_ID &&
     passesThreadGate(thread)
   );

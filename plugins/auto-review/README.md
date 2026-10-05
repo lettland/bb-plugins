@@ -71,7 +71,7 @@ subagents, or sequentially in the same thread); `self` mode and the no-devkit ca
 still review in the same thread. A full calibrated review costs about six sessions on the
 provider (five lenses plus closure).
 
-Per-project overrides and per-thread skips are stored in the plugin's own storage.
+Per-project overrides are stored in the plugin's own storage.
 
 ## CLI
 
@@ -83,8 +83,7 @@ All commands accept `--json`.
 | `bb auto-review show` | Global defaults, project override and resolved settings for the current project |
 | `bb auto-review enable [--global \| --project <id>]` | Turn it on; bare `enable` is global |
 | `bb auto-review disable [--global \| --project <id>]` | Turn it off, same scoping |
-| `bb auto-review skip <thread-id>` / `unskip <thread-id>` | Skip one thread, or clear that skip |
-| `bb auto-review reset <thread-id>` | Clear a wedged loop-guard latch. On a `deferred` thread this cancels the pending review |
+| `bb auto-review reset <thread-id>` | Clear a wedged loop-guard latch on an idle thread; refused while the thread is running. On a `deferred` thread this cancels the pending review |
 
 The agent-hooks plugin's `review-plan-before-exit.sh` reads `planGate` from
 `bb auto-review status --json` and stands down where it is true, so a plan is reviewed

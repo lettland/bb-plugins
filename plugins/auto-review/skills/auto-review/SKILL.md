@@ -1,6 +1,6 @@
 ---
 name: auto-review
-description: Control bb's automatic post-turn review, commit, and local merge — enable/disable globally or per project, skip a thread, and read why it did or did not fire.
+description: Control bb's automatic post-turn review, commit, and local merge — enable/disable globally or per project, and read why it did or did not fire.
 ---
 
 # Auto review
@@ -83,7 +83,7 @@ that steer as `provider/unhandled`, not a `userMessage` item, so the agent's own
 only observable sign it already happened) — is reasoning or the question's own native
 `AskUserQuestion` item; after any other item, the agent may already have the review, so its
 question may be a real one. Also required: within two minutes of the deny, the first
-question since it (one-shot), the turn hasn't ended, auto-review enabled and not skipped for
+question since it (one-shot), the turn hasn't ended, auto-review enabled for
 the thread, and every question in it allowing free text (true for Claude Code today;
 otherwise the question is left alone without using up the one-shot). Only the native
 `AskUserQuestion` is in scope: the bb-bridge `mcp__bb-bridge__AskUserQuestion` — and any
@@ -116,11 +116,9 @@ off here rather than silently reviewing nothing, while a disabled native gate ju
 plan through unreviewed. A running session keeps the instructions and tools it started
 with, so the change applies from the next session start.
 
-A plan carrying the `<!-- devkit:commit-plan -->` sentinel on a line of its own (devkit's
-commit workflow) is bookkeeping, not code, and passes through the native gate unreviewed
-(`PresentPlan` has no equivalent skip, since nothing but the calling agent decides to call
-it on a commit plan in the first place). `skip` and `disable` turn plan review off along
-with code review, on both paths; `reset` also clears a native gate left armed by a review
+Every plan is reviewed, commit plans included: there is no marker, flag or environment
+variable that waves a plan through. `disable` turns plan review off along with code
+review, on both paths; `reset` also clears a native gate left armed by a review
 that never re-presented its plan, a pending plan-hold answer, and a `PresentPlan` arm left
 behind the same way — each kept in its own set of keys, so resetting one path never
 disturbs state the other path owns.
@@ -130,9 +128,9 @@ disturbs state the other path owns.
 All commands accept `--json`.
 
 - `bb auto-review status` — effective state and last-fire outcome for the current thread
-  (enabled, skipped, reviewMode, `planGate`, loop-guard phase, last-fire reason and time).
+  (enabled, reviewMode, `planGate`, loop-guard phase, last-fire reason and time).
   `planGate` is true only for a top-level, visible, environment-bound `claude-code` thread
-  with auto-review enabled and not skipped — the one case where auto-review's own native
+  with auto-review enabled — the one case where auto-review's own native
   plan gate (see *Plan review* above) owns this thread's plan review instead of another
   gate (e.g. agent-hooks' `review-plan-before-exit.sh`, which stands down when this is
   true). It says nothing about `PresentPlan`, which has no other gate to hand off from on
@@ -143,11 +141,10 @@ All commands accept `--json`.
   defaults to `--global`** (the kill switch). `--project <id>` (or `--project` inside a
   thread) sets a per-project override.
 - `bb auto-review disable [--global | --project <id>]` — turn it off, same scoping rules.
-- `bb auto-review skip <thread-id>` — skip auto-review for one thread.
-- `bb auto-review unskip <thread-id>` — clear that thread's skip.
-- `bb auto-review reset <thread-id>` — clear a wedged loop-guard latch (and skip) for a
-  thread whose review never completed. Use this if `status` shows a non-`idle` phase that
-  never clears. **On a `deferred` thread this is not an unstick — it cancels.** That phase
+- `bb auto-review reset <thread-id>` — clear a wedged loop-guard latch for an idle thread
+  whose review never completed. It refuses (exit 2) while the thread is running, since
+  resetting mid-turn would drop that turn's review. Use this if `status` shows a non-`idle`
+  phase that never clears. **On a `deferred` thread this is not an unstick — it cancels.** That phase
   is a normal wait that resolves on its own — behind another review on the same provider,
   or behind a spawned child still running (see *One review per provider*); resetting it
   throws away that turn's pending review and commit.
@@ -174,7 +171,9 @@ Its findings are advice: only real problems in the turn's own changed lines
 are fixed; false positives and findings that go against the project's own rules are
 left alone and listed with a one-line reason.
 
-Per-project overrides and per-thread skip are stored by the plugin, not in settings.
+Per-project overrides are stored by the plugin, not in settings.
+
+`enable`, `disable` and `reset` are for the user to run, never for agents.
 
 ## Branch policy
 
@@ -256,11 +255,7 @@ instead — its review and commit then never run.
   provider-turn watchdog) does not count. Stopping a spawned child does not count either,
   and does not stand the turn down — an agent's own `bb thread stop` on a child it is done
   with records the same reason a user's manual stop would. Taking over from a child this
-  way still lets its wake-up turn review the child's work, which a reviewer stepping in may
-  not want: to stop that review instead, run `bb auto-review skip <thread-id>` or
-  `bb auto-review reset <thread-id>`, best before stopping the child; either still works
-  until the wake-up turn ends, and only then is it too late. `skip` stays on for every
-  later turn of the thread until `bb auto-review unskip <thread-id>`.
+  way still lets its wake-up turn review the child's work.
 - `user-queued` — the turn ended with a message of the user's already queued (or its turn
   already started). Paired with outcome `deferred`: no review fires next to their message;
   the turn-start cursor is carried into that next turn, and the review fires at the first
@@ -269,7 +264,7 @@ instead — its review and commit then never run.
   A turn's cursor is only replaced once an idle has decided that turn, so this holds even
   when the next turn's start reaches the plugin before the finished turn's idle.
 - `disabled` — disabled globally or for this project.
-- `skipped` — this thread has a skip flag set.
+- `skipped` — legacy: only on records stored before the per-thread skip flag was removed.
 Outcomes are `fired`, `deferred` (parked, will still run) and `stood-down` (will not run).
 - `send-failed` — injecting the review turn failed; the latch was cleared.
 - `not-a-branch` — the checkout is not on a git branch (detached/unborn/unknown).

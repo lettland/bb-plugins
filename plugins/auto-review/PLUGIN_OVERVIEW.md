@@ -64,15 +64,15 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   approval, since a tool result is never the user's approval. Claude Code never gets
   `PresentPlan`, and no other provider gets the native gate's instructions, so the two
   paths never compete for the same plan.
-- Ships enabled (opt-out). Turn it off globally or per project, or skip a single
-  thread, with `bb auto-review`.
+- Ships enabled (opt-out). Turn it off globally or per project with `bb auto-review`;
+  there is no per-thread skip.
 
 ## Surfaces
 
 - Settings: global `enabled`, default `mergeEligibleMainlines`, default `reviewMode`.
-- Per-project overrides and per-thread skip live in the plugin's own storage.
-- CLI: `bb auto-review status|show|enable|disable|skip|unskip|reset` (all `--json`). `status`
-  reports `planGate`: whether this thread is a top-level, enabled, non-skipped `claude-code`
+- Per-project overrides live in the plugin's own storage.
+- CLI: `bb auto-review status|show|enable|disable|reset` (all `--json`). `status`
+  reports `planGate`: whether this thread is a top-level, enabled `claude-code`
   thread, so its plan review is owned here, by the native gate, rather than by another gate
   (e.g. agent-hooks). It does not reflect `PresentPlan`, which has no equivalent gate to hand
   off from on its own providers.

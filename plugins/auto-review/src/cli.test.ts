@@ -244,74 +244,29 @@ describe("auto-review cli: enable / disable", () => {
   });
 });
 
-describe("auto-review cli: skip / unskip", () => {
-  it("sets and clears the per-thread skip flag", async () => {
+describe("auto-review cli: skip / unskip (removed)", () => {
+  it.each(["skip", "unskip"])("exits 2 with the removal message for %s", async (command) => {
     await withHost({}, async (host) => {
-      const skipped = await host.run(["skip", THREAD_ID]);
-      expect(skipped.exitCode).toBe(0);
-      expect(skipped.stdout).toBe(`skip applied to ${THREAD_ID}.\n`);
-      expect(host.metadataFor(THREAD_ID).skip).toBe(true);
-
-      const unskipped = await host.run(["unskip", THREAD_ID, "--json"]);
-      expect(parse(unskipped.stdout)).toEqual({
-        ok: true,
-        command: "unskip",
-        threadId: THREAD_ID,
-      });
-      expect(host.metadataFor(THREAD_ID)).not.toHaveProperty("skip");
-    });
-  });
-
-  it("falls back to the invoking thread when no id is given", async () => {
-    await withHost({}, async (host) => {
-      await host.run(["skip"], OTHER_ID);
-      expect(host.metadataFor(OTHER_ID).skip).toBe(true);
-      expect(host.metadataFor(THREAD_ID)).not.toHaveProperty("skip");
-    });
-  });
-
-  it("prefers the named thread over the invoking one", async () => {
-    await withHost({}, async (host) => {
-      await host.run(["skip", OTHER_ID], THREAD_ID);
-      expect(host.metadataFor(OTHER_ID).skip).toBe(true);
-      expect(host.metadataFor(THREAD_ID)).not.toHaveProperty("skip");
-    });
-  });
-
-  it("requires a thread id outside a thread", async () => {
-    await withHost({}, async (host) => {
-      const result = await host.run(["unskip"]);
+      const result = await host.run([command, THREAD_ID]);
       expect(result.exitCode).toBe(2);
       expect(result.stderr).toBe(
-        "A thread id is required: bb auto-review unskip <thread-id>\n",
+        `\`${command}\` was removed: auto-review reviews every turn and plan.\n`,
       );
-    });
-  });
-
-  it("reports an unknown thread on stderr", async () => {
-    await withHost({}, async (host) => {
-      const result = await host.run(["skip", "ghost"]);
-      expect(result.exitCode).toBe(1);
-      expect(result.stderr).toBe("Thread ghost not found or unavailable.\n");
       expect(result.stdout).toBe("");
+      expect(host.metadataFor(THREAD_ID)).not.toHaveProperty("skip");
     });
   });
 
-  it("reports an unknown thread as JSON when asked", async () => {
+  it("is not listed in the usage text", async () => {
     await withHost({}, async (host) => {
-      const result = await host.run(["skip", "ghost", "--json"]);
-      expect(result.exitCode).toBe(1);
-      expect(parse(result.stdout)).toEqual({
-        ok: false,
-        threadId: "ghost",
-        error: "Thread ghost not found or unavailable.",
-      });
+      const result = await host.run(["frobnicate"]);
+      expect(result.stderr).toContain("<status|show|enable|disable|reset>");
     });
   });
 });
 
 describe("auto-review cli: reset", () => {
-  it("clears a latch, the skip flag and the plan gate, keeping unrelated keys", async () => {
+  it("clears a latch, a leftover skip flag and the plan gate, keeping unrelated keys", async () => {
     await withHost({}, async (host) => {
       Object.assign(host.metadataFor(THREAD_ID), {
         phase: "awaiting-review",
@@ -330,6 +285,37 @@ describe("auto-review cli: reset", () => {
       expect(host.metadataFor(THREAD_ID)).toEqual({ phase: "idle", unrelated: "kept" });
     });
   });
+
+  it.each(["active", "starting", "stopping"])(
+    "refuses to reset a %s thread and leaves its state alone",
+    async (status) => {
+      await withHost(
+        { threads: { [THREAD_ID]: { projectId: PROJECT_ID, status } } },
+        async (host) => {
+          Object.assign(host.metadataFor(THREAD_ID), {
+            phase: "awaiting-review",
+            turnStart: { sinceSeq: 4 },
+          });
+          const text = await host.run(["reset", THREAD_ID]);
+          expect(text.exitCode).toBe(2);
+          expect(text.stderr).toBe("reset only clears a stuck latch on an idle thread\n");
+          expect(text.stdout).toBe("");
+
+          const payload = await host.run(["reset", THREAD_ID, "--json"]);
+          expect(payload.exitCode).toBe(2);
+          expect(parse(payload.stdout)).toEqual({
+            ok: false,
+            threadId: THREAD_ID,
+            error: "reset only clears a stuck latch on an idle thread",
+          });
+          expect(host.metadataFor(THREAD_ID)).toEqual({
+            phase: "awaiting-review",
+            turnStart: { sinceSeq: 4 },
+          });
+        },
+      );
+    },
+  );
 
   it("reports an already-idle thread as nothing latched", async () => {
     await withHost({}, async (host) => {
@@ -464,7 +450,6 @@ describe("auto-review cli: status", () => {
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe(
         "enabled: true\n" +
-          "skipped: false\n" +
           "reviewMode: auto\n" +
           "mergeEligibleMainlines: master\n" +
           "planGate: false\n" +
@@ -474,7 +459,7 @@ describe("auto-review cli: status", () => {
     });
   });
 
-  it("layers the project override and skip flag over the globals", async () => {
+  it("layers the project override over the globals and ignores an old skip flag", async () => {
     await withHost(
       {
         globals: {
@@ -491,7 +476,6 @@ describe("auto-review cli: status", () => {
           threadId: THREAD_ID,
           projectId: PROJECT_ID,
           enabled: false,
-          skipped: true,
           reviewMode: "self",
           mergeEligibleMainlines: ["master", "main"],
           planGate: false,
@@ -533,6 +517,21 @@ describe("auto-review cli: status", () => {
       await host.kv.set(`lastfire:${PROJECT_ID}:${THREAD_ID}`, { outcome: "fired" });
       const result = await host.run(["status", THREAD_ID, "--json"]);
       expect(parse(result.stdout).lastFire).toBeNull();
+    });
+  });
+
+  it("still shows a stored last fire whose reason is the legacy skipped", async () => {
+    await withHost({}, async (host) => {
+      await host.kv.set(
+        `lastfire:${PROJECT_ID}:${THREAD_ID}`,
+        lastFire({ outcome: "stood-down", reason: "skipped" }),
+      );
+      const text = await host.run(["status", THREAD_ID]);
+      expect(text.stdout).toContain("lastFire: stood-down (skipped) at ");
+      const payload = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(payload.stdout)).toMatchObject({
+        lastFire: { outcome: "stood-down", reason: "skipped" },
+      });
     });
   });
 
@@ -625,11 +624,11 @@ describe("auto-review cli: status — planGate", () => {
     );
   });
 
-  it("is false for a skipped thread", async () => {
+  it("is true for a thread carrying a skip flag from old stored state", async () => {
     await withHost({ threads: { [THREAD_ID]: claudeCodeThread } }, async (host) => {
       host.metadataFor(THREAD_ID).skip = true;
       const result = await host.run(["status", THREAD_ID, "--json"]);
-      expect(parse(result.stdout)).toMatchObject({ planGate: false });
+      expect(parse(result.stdout)).toMatchObject({ planGate: true });
     });
   });
 

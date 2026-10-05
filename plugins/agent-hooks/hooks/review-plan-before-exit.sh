@@ -12,13 +12,8 @@
 # re-presented plan has different text. A hash key would re-block in a loop. The
 # single-fire gate is loop-safe by construction.
 #
-# Escape hatch: AGENT_HOOKS_SKIP_PLAN_REVIEW=1 → allow immediately (mirrors
-# AGENT_HOOKS_SKIP_VALIDATOR). Per-plan skip: a plan containing the
-# `<!-- agent-hooks:commit-plan -->` sentinel on a standalone line (emitted by
-# bb devkit run commit) is allowed without arming the gate — a commit plan is not
-# code. Fail-soft: missing jq, unset
-# CLAUDE_PROJECT_DIR, a non-ExitPlanMode tool, or an un-writable gate dir → exit 0
-# (never trap the user in plan mode).
+# Fail-soft: missing jq, unset CLAUDE_PROJECT_DIR, a non-ExitPlanMode tool, or an
+# un-writable gate dir → exit 0 (never trap the user in plan mode).
 #
 # Ownership split with auto-review: in a bb `claude-code` thread with auto-review
 # enabled, auto-review ALSO holds the first plan approval (its own gate, keyed off
@@ -31,7 +26,7 @@
 # outside plan mode, Claude Code's ExitPlanMode approves itself and never reaches
 # auto-review's gate at all, so standing down there would release the plan to the
 # user with no review from either side. Every other case (ACP, standalone Claude
-# Code, auto-review off/skipped, a child thread, outside plan mode) gets no report
+# Code, auto-review off, a child thread, outside plan mode) gets no report
 # standing down could rely on (or none at all) and this hook reviews as it always
 # has. BB_THREAD_ID is trusted only when it looks like a thread id
 # (`^[A-Za-z0-9_-]+$`); anything else (unset, empty, garbage) falls through to
@@ -66,9 +61,6 @@
 
 set -uo pipefail
 
-# Per-need opt-out.
-[ "${AGENT_HOOKS_SKIP_PLAN_REVIEW:-}" = "1" ] && exit 0
-
 # jq parses the event envelope; without it, allow.
 command -v jq > /dev/null 2>&1 || exit 0
 
@@ -90,32 +82,6 @@ LOG_DIR="$CLAUDE_PROJECT_DIR/.claude/logs"
 SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2> /dev/null || echo '')
 GATE="$LOG_DIR/.plan-review-gate${SID:+-$SID}"
 mkdir -p "$LOG_DIR" 2> /dev/null || exit 0
-
-# Commit plans are not code — bb devkit run commit leads the plan it presents with a
-# `<!-- agent-hooks:commit-plan -->` sentinel so this gate skips the 5-reviewer pass on it.
-# Match the EXACT marker (close `-->` anchored) on ANY standalone line of the plan, not
-# just line 1: /commit appends its Commit Plan to the active plan file, so the marker is
-# rarely the literal first line of the presented string. The `^...[[:space:]]*$` anchor
-# keeps it to a line of its own (CR absorbed by the trailing class), so an in-prose
-# mention or a near-miss like `agent-hooks:commit-planner` still gets the normal review.
-# Accepted false-skip: a real code plan carrying the exact sentinel on its own line (a
-# meta-plan documenting this hook, even inside a fenced block) also skips — fine, the
-# token is agent-hooks-internal and the gate is fail-open. Allow immediately and WITHOUT
-# touching the single-fire gate, so a code plan later in the session is still reviewed.
-#
-# awk (one process) yields the 1-based line number of the FIRST standalone-line match,
-# or empty if none — used only to enrich the skip log. Preferred over `grep -n | head |
-# cut` because awk reads the final record even when the plan has no trailing newline
-# (grep's behavior on an unterminated last line is POSIX-undefined), and it carries no
-# pipefail/SIGPIPE or colon-split fragility.
-PLAN=$(printf '%s' "$INPUT" | jq -r '.tool_input.plan // empty' 2> /dev/null || echo '')
-MARKER_LINE=$(printf '%s' "$PLAN" |
-  awk '/^[[:space:]]*<!--[[:space:]]*agent-hooks:commit-plan[[:space:]]*-->[[:space:]]*$/ { print NR; exit }')
-if [ -n "$MARKER_LINE" ]; then
-  printf -- "- \`%s\` | PLAN-REVIEW | SKIP | commit-plan marker on line %s (session %s), review bypassed\n" \
-    "$(date +"%Y-%m-%d %H:%M:%S")" "$MARKER_LINE" "${SID:-none}" >> "$LOG_DIR/incident-log.md" 2> /dev/null || true
-  exit 0
-fi
 
 # Re-presentation after review: consume the gate and let the plan through.
 if [ -f "$GATE" ]; then
@@ -185,8 +151,7 @@ call ExitPlanMode again to present the improved plan; the re-presentation passes
 user for approval. Edit only the plan file and do not implement anything until the user approves. If you \
 are no longer in plan mode (for example an injected turn took you out of it), call EnterPlanMode first: \
 outside plan mode ExitPlanMode approves itself without asking the user. \
-Note: this is a 5-reviewer pass (tokens + latency). The gate can only be disabled by launching Claude \
-with AGENT_HOOKS_SKIP_PLAN_REVIEW=1 in the environment — it cannot be toggled from inside a running session."
+Note: this is a 5-reviewer pass (tokens + latency). This review always runs."
 
 # Best-effort observability (fail-soft); mirrors completeness-gate / verify-before-stop.
 printf -- "- \`%s\` | PLAN-REVIEW | DENY | armed gate, routed to /review:review-plan\n" \

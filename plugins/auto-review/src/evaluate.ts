@@ -117,10 +117,6 @@ async function eligibleTurnStart(
     await standDown(ctx, thread, state, "disabled");
     return null;
   }
-  if (config.skipped) {
-    await standDown(ctx, thread, state, "skipped");
-    return null;
-  }
   if (state.turnStart === undefined) {
     await standDown(ctx, thread, state, "no-turn-start");
     return null;
@@ -254,7 +250,7 @@ export async function evaluate(
     await writeState(bb, thread.id, { turnDecided: true });
   }
   const project = await readProjectConfig(bb, thread.projectId);
-  const config = effectiveConfig(ctx.globals, project, state.skip === true);
+  const config = effectiveConfig(ctx.globals, project);
 
   const turnStart = await eligibleTurnStart(ctx, thread, state, config);
   if (turnStart === null) {

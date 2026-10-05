@@ -73,7 +73,7 @@ Glob the corpus (the `*.md` skill/command/agent/reference files), then for each 
 - **File / script paths:** backtick-quoted paths containing `/` and an extension (e.g., `scripts/foo.sh`, `hooks/baz.sh`, a `references/` page). Confirm each with `Read` / `Glob`.
 - **Slugs:** skill, command, and agent names invoked in bodies (`Skill(...)`, `/...`, `Agent(...)`) with no matching definition under `$TARGET_SKILLS` / `$TARGET_COMMANDS` / `$TARGET_AGENTS`. (`related:` slugs are already gated by the frontmatter validator — focus on body invocations.)
 - **Bundled package ids:** server package names referenced by name in skills/docs that no longer match `.mcp.json`.
-- **Tool flags / env vars:** flags and `DEVKIT_*` env vars named in docs that aren't defined or read by any script, hook, or `settings.json`. A var consumed only by the agent/harness at runtime (e.g. `DEVKIT_SKIP_PLAN_REVIEW`) is valid — don't flag it for being absent from shell scripts.
+- **Tool flags / env vars:** flags and `DEVKIT_*` env vars named in docs that aren't defined or read by any script, hook, or `settings.json`. A var consumed only by the agent/harness at runtime (e.g. a `DEVKIT_<NAME>` var) is valid — don't flag it for being absent from shell scripts.
 
 **Ignore illustrative references.** Flag only references the doc presents as real. Skip example and placeholder tokens: angle-bracket placeholders (`<slug>`, `exact/path/to/file.py`), and any path or `Skill()` / `Agent()` token inside a fenced code block used as a syntax example or template — the same way Step 6 ignores `[[ -f x ]]`-style non-references.
 

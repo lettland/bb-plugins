@@ -77,8 +77,8 @@ export function registerPlanTools(review: ReviewContext): void {
       return withThreadLock(ctx.threadId, async () => {
         const state = await readState(bb, ctx.threadId);
         const project = await readProjectConfig(bb, ctx.projectId);
-        const config = effectiveConfig(review.globals, project, state.skip === true);
-        if (!config.enabled || config.skipped) {
+        const config = effectiveConfig(review.globals, project);
+        if (!config.enabled) {
           return PRESENT_PLAN_OFF_MESSAGE;
         }
         if (!SCOPE_PATH_ALLOW.test(input.planFilePath)) {
