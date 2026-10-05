@@ -1,3 +1,4 @@
+// aislop-ignore-file ai-slop/narrative-comment -- vendored from bb shadcn registry
 import type { MouseEvent } from "react";
 import { cn } from "../../lib/utils";
 

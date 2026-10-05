@@ -1,3 +1,4 @@
+// aislop-ignore-file ai-slop/narrative-comment complexity/file-too-large code-quality/duplicate-block -- vendored from bb shadcn registry
 import * as React from "react";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 

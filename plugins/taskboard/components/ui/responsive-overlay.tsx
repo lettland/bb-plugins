@@ -1,3 +1,4 @@
+// aislop-ignore-file ai-slop/narrative-comment -- vendored from bb shadcn registry
 import * as React from "react";
 import { Slot } from "@radix-ui/react-slot";
 

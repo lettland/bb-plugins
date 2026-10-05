@@ -1,6 +1,7 @@
 import { truncateToBytes } from "./loader.mjs";
 
 /** Fixed, non-parameterized host — the query/libraryId never control the origin (no SSRF surface). */
+// aislop-ignore-next-line ai-slop/hardcoded-url -- fixed public API endpoint
 export const CONTEXT7_BASE = "https://context7.com/api/v1";
 export const MAX_DOCS_BYTES = 60_000;
 

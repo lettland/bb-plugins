@@ -11,6 +11,7 @@ import type {
 } from './types.js';
 import { withoutComments } from './types.js';
 
+// aislop-ignore-next-line ai-slop/hardcoded-url -- fixed public API endpoint
 const LINEAR_API = 'https://api.linear.app/graphql';
 
 const issueFields = `
