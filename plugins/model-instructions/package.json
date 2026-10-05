@@ -1,6 +1,6 @@
 {
   "name": "@lettland/bb-plugin-model-instructions",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "type": "module",
   "description": "Add custom instructions to a thread by its provider, model, project, and whether it is a top-level or child thread.",
   "license": "BSD-2-Clause",

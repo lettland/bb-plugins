@@ -1,6 +1,6 @@
 {
   "name": "@lettland/bb-plugin-taskboard",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Bring each BB project's GitHub, Linear, or Jira tasks into one focused taskboard.",
   "type": "module",
   "license": "MIT",
