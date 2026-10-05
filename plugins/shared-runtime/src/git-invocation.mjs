@@ -2,24 +2,22 @@ import path from "node:path";
 
 import { deny, assertNonEmptyString } from "./runtime-common.mjs";
 
-function validateRelativePath(value, { allowRootSlash = false } = {}) {
+function validateRelativePath(value, { allowRoot = false } = {}) {
   if (typeof value !== "string" || value === "" || value.includes("\0")) {
     deny("path is missing or invalid");
   }
-  if (path.isAbsolute(value) || value.startsWith("-")) {
+  const slashed = value.replaceAll("\\", "/");
+  if (path.posix.isAbsolute(slashed) || slashed.startsWith("-")) {
     deny("path must be relative and may not be an option");
   }
-  const normalized = path.posix.normalize(value.replaceAll("\\", "/"));
-  const isRoot = normalized.replace(/\/+$/u, "") === ".";
-  if (isRoot && normalized !== "." && allowRootSlash) {
-    return ".";
+  const normalized = path.posix.normalize(slashed);
+  if (normalized.replace(/\/+$/u, "") === ".") {
+    if (allowRoot) {
+      return ".";
+    }
+    deny("path may not be the workspace root; list explicit paths");
   }
-  if (
-    isRoot ||
-    normalized === ".." ||
-    normalized.startsWith("../") ||
-    normalized.includes("/../")
-  ) {
+  if (normalized === ".." || normalized.startsWith("../") || normalized.includes("/../")) {
     deny("path escapes the workspace");
   }
   return normalized;
@@ -36,7 +34,7 @@ export function buildSearchInvocation(workspaceRoot, input, defaultPath = ".") {
     typeof requestedPath === "string" && requestedPath.trim() === ""
       ? fallback
       : (requestedPath ?? fallback);
-  const searchPath = rawPath === "." ? "." : validateRelativePath(rawPath, { allowRootSlash: true });
+  const searchPath = validateRelativePath(rawPath, { allowRoot: true });
   return {
     acceptedExitCodes: [0, 1],
     command: "rg",
@@ -94,7 +92,12 @@ export function buildGitInvocation(workspaceRoot, input) {
       }
       return {
         command: "git",
-        args: safeGitArgs(["add", "--", ...input.paths.map((value) => validateRelativePath(value))]),
+        args: safeGitArgs([
+          "--literal-pathspecs",
+          "add",
+          "--",
+          ...input.paths.map((value) => validateRelativePath(value)),
+        ]),
         cwd: workspaceRoot,
       };
     }

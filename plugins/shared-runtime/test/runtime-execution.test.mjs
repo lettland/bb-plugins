@@ -496,7 +496,7 @@ test("commits regenerate outputs, hard-link mirrors, and stage them before commi
     "fixture_app mkdir -p",
     "fixture_app [isolated] php gen.php",
     "fixture_app [isolated] make strict",
-    "git add -- generated.json mirror/README.md",
+    "git --literal-pathspecs add -- generated.json mirror/README.md",
     "fixture_app rm -rf",
     "git commit --no-verify -m Regenerate outputs",
   ]);

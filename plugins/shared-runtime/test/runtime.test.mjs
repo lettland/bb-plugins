@@ -1067,7 +1067,7 @@ test("git operations cannot inject options, paths, or commit control text", () =
       operation: "add",
       paths: ["src/go/a.go", "src/symfony/a.php"],
     }).args,
-    [...gitSafetyArgs, "add", "--", "src/go/a.go", "src/symfony/a.php"],
+    [...gitSafetyArgs, "--literal-pathspecs", "add", "--", "src/go/a.go", "src/symfony/a.php"],
   );
   for (const paths of [["--all"], ["../outside"], ["src/a\0b"]]) {
     assert.throws(
