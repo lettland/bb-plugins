@@ -2,7 +2,7 @@ import path from "node:path";
 
 import { deny, assertNonEmptyString } from "./runtime-common.mjs";
 
-function validateRelativePath(value) {
+function validateRelativePath(value, { allowRootSlash = false } = {}) {
   if (typeof value !== "string" || value === "" || value.includes("\0")) {
     deny("path is missing or invalid");
   }
@@ -10,8 +10,12 @@ function validateRelativePath(value) {
     deny("path must be relative and may not be an option");
   }
   const normalized = path.posix.normalize(value.replaceAll("\\", "/"));
+  const isRoot = normalized.replace(/\/+$/u, "") === ".";
+  if (isRoot && normalized !== "." && allowRootSlash) {
+    return ".";
+  }
   if (
-    normalized === "." ||
+    isRoot ||
     normalized === ".." ||
     normalized.startsWith("../") ||
     normalized.includes("/../")
@@ -32,7 +36,7 @@ export function buildSearchInvocation(workspaceRoot, input, defaultPath = ".") {
     typeof requestedPath === "string" && requestedPath.trim() === ""
       ? fallback
       : (requestedPath ?? fallback);
-  const searchPath = rawPath === "." ? "." : validateRelativePath(rawPath);
+  const searchPath = rawPath === "." ? "." : validateRelativePath(rawPath, { allowRootSlash: true });
   return {
     acceptedExitCodes: [0, 1],
     command: "rg",
@@ -90,7 +94,7 @@ export function buildGitInvocation(workspaceRoot, input) {
       }
       return {
         command: "git",
-        args: safeGitArgs(["add", "--", ...input.paths.map(validateRelativePath)]),
+        args: safeGitArgs(["add", "--", ...input.paths.map((value) => validateRelativePath(value))]),
         cwd: workspaceRoot,
       };
     }

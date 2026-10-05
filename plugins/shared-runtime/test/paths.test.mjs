@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildGitInvocation } from "../src/runtime.mjs";
+import { buildGitInvocation, buildSearchInvocation } from "../src/runtime.mjs";
 
 const WORKSPACE = "/workspace/platform";
 
@@ -45,9 +45,27 @@ test("paths escaping the workspace are rejected", () => {
     "a\\..\\..\\x",
     ".",
     "a/..",
+    "./",
+    ".//",
+    "a/../",
   ];
   for (const value of escapes) {
     assert.throws(() => addPaths([value]), /escapes the workspace/, value);
+  }
+});
+
+test("search accepts the workspace root and normalizes it to dot", () => {
+  const searchPath = (path) => {
+    const { args } = buildSearchInvocation(WORKSPACE, { query: "q", path });
+    return args.at(-1);
+  };
+  assert.equal(searchPath("./"), ".");
+  assert.equal(searchPath(".//"), ".");
+  assert.equal(searchPath("a/../"), ".");
+  assert.equal(searchPath("."), ".");
+  assert.equal(searchPath("a/b"), "a/b");
+  for (const value of ["a/..", "../x"]) {
+    assert.throws(() => searchPath(value), /escapes the workspace/, value);
   }
 });
 
