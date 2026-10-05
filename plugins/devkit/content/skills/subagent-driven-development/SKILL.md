@@ -14,8 +14,6 @@ metadata:
   owns: subagent-driven-development
 ---
 
-_Adapted from obra/superpowers (MIT); modified. See THIRD_PARTY_NOTICES.md._
-
 # Subagent-Driven Development
 
 Execute plan by dispatching fresh subagent per task, with two-stage review after each: spec compliance review first, then code quality review.

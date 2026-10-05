@@ -273,7 +273,7 @@ SOFTWARE.
   `content/skills/receiving-code-review/SKILL.md`,
   `content/skills/subagent-driven-development/SKILL.md`,
   `content/skills/debugging/SKILL.md` (from `systematic-debugging`; its generated
-  copy `skills-generated/debugging/SKILL.md` carries the same note),
+  copy is `skills-generated/debugging/SKILL.md`),
   `content/skills/tdd/SKILL.md` (from `test-driven-development`),
   `content/skills/planning/SKILL.md` (from `writing-plans`).
 

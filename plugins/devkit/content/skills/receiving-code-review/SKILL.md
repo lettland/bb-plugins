@@ -12,8 +12,6 @@ metadata:
   owns: receiving-code-review
 ---
 
-_Adapted from obra/superpowers (MIT); modified. See THIRD_PARTY_NOTICES.md._
-
 # Code Review Reception
 
 Code review requires technical evaluation, not emotional performance.

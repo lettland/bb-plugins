@@ -83,7 +83,3 @@ Borrowed from stop-slop but **deliberately rejected** for devkit — do not "com
 - **Wh- sentence-starter ban** ("What", "When", "Why"…) — fine in technical prose, especially in headings and FAQ-shaped docs.
 - **Blanket adverb ban / blanket passive-voice ban** — both are sometimes correct. Passive is right when the actor is irrelevant or unknown ("the row is locked for the duration"). Cut adverbs that pad; keep ones that carry meaning.
 - **The 35/50 scoring rubric** — devkit scores writing via `scripts/_sharpness_check.py` (skill voice) and reader-fit (see `Skill(technical-writing)`), not a numeric prose rubric.
-
----
-
-_Adapted from [stop-slop](https://github.com/hardikpandya/stop-slop) (MIT, Hardik Pandya; see THIRD_PARTY_NOTICES.md), curated for technical writing — same precedent as the [caveman](https://github.com/JuliusBrussee/caveman) credit in `concise-output`._
