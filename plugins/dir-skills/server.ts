@@ -107,9 +107,7 @@ function parseScopes(file: string): Scope[] {
   return scopes;
 }
 
-// The plugin's scopes.json ships neutral defaults; the per-user file keeps
-// private directory names out of the repository. A user scope replaces the
-// shipped scope of the same name and any other user scope is added.
+/** Shipped neutral scopes.json plus the private per-user file; a user scope replaces a shipped one of the same name. */
 function loadScopes(root: string): Scope[] {
   const merged = new Map<string, Scope>();
   for (const scope of parseScopes(path.join(root, "scopes.json")))

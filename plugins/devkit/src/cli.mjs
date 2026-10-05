@@ -59,6 +59,94 @@ async function dispatch(instruction, requestedMessage, deps) {
   return { exitCode: 0, stdout: `${instruction}\n` };
 }
 
+const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+/** Validate the review target for `impl`/`plan`; returns an error result or undefined. */
+function validateReviewTarget(mode, target) {
+  if (target === undefined || target.length === 0) {
+    return { exitCode: 2, stderr: `review ${mode} needs ${mode === "impl" ? "<base>..<head>" : "<path>"}\n` };
+  }
+  if (!TARGET_RE.test(target)) {
+    return { exitCode: 2, stderr: `review ${mode}: invalid target (max 200 printable characters, no newlines)\n` };
+  }
+  if (mode === "impl") {
+    const parts = target.split("..");
+    if (parts.length !== 2 || parts[0].length === 0 || parts[1].length === 0) {
+      return { exitCode: 2, stderr: `review impl needs a range like <base>..<head> (got '${target}')\n` };
+    }
+  }
+  return undefined;
+}
+
+function runReview(rest, deps) {
+  const [mode, target] = rest;
+  if (mode === undefined || !REVIEW_MODES.has(mode)) {
+    return { exitCode: 2, stderr: "review needs a mode: code | impl <base>..<head> | plan <path>\n" };
+  }
+  if (mode === "impl" || mode === "plan") {
+    const invalid = validateReviewTarget(mode, target);
+    if (invalid !== undefined) return invalid;
+  }
+  // A plan review is printed, never injected: an injected turn carries the thread's permission
+  // mode, which takes the agent out of plan mode, so its next plan presentation is approved
+  // without ever reaching the user. Printed, the agent follows it in its current turn.
+  if (mode === "plan") return { exitCode: 0, stdout: `${reviewInstruction(mode, target)}\n` };
+  return dispatch(
+    reviewInstruction(mode, target),
+    "Review requested — the coding agent will run it as the next turn in this thread.\n",
+    deps,
+  );
+}
+
+function listCommands(deps) {
+  const cmds = deps.index.skills
+    .filter((s) => s.slug.startsWith("cmd-"))
+    .map((s) => `${s.slug.slice(4)}: ${s.description.replace(/^Command — /, "")}`)
+    .sort(byText);
+  if (cmds.length === 0) return { exitCode: 0, stdout: "No command workflows available.\n" };
+  return { exitCode: 0, stdout: `Run one with 'bb devkit run <name>':\n${cmds.join("\n")}\n` };
+}
+
+function runCommand(rest, deps) {
+  const [name, ...args] = rest;
+  if (name === undefined) return { exitCode: 2, stderr: "run needs a command name (see 'bb devkit commands')\n" };
+  const slug = `cmd-${name}`;
+  if (!deps.index.skills.some((s) => s.slug === slug)) {
+    return { exitCode: 1, stderr: `Unknown command '${name}'. See 'bb devkit commands'.\n` };
+  }
+  const argLine = args.join(" ").trim();
+  const argNote = argLine.length > 0 && TARGET_RE.test(argLine) ? ` Arguments: ${argLine}.` : "";
+  const instruction = `${AGENT_NOTE_RUN}\n\nLoad the devkit command workflow with devkit_load_skill({ slug: "${slug}" }) and follow it.${argNote}`;
+  return dispatch(
+    instruction,
+    `Command '${name}' requested — the coding agent will run it as the next turn in this thread.\n`,
+    deps,
+  );
+}
+
+async function runSkills(rest, deps) {
+  const [sub, ...args] = rest;
+  if (sub === "list") {
+    const lines = deps.index.skills.map((s) => `${s.slug}: ${s.description}`).sort(byText);
+    return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
+  }
+  if (sub === "find") {
+    const topic = args.join(" ").trim();
+    if (topic.length === 0) return { exitCode: 2, stderr: "skills find needs a topic\n" };
+    const hits = rankSkills(deps.index.skills, topic, 15);
+    if (hits.length === 0) return { exitCode: 0, stdout: `No devkit skill matched "${topic}".\n` };
+    return { exitCode: 0, stdout: `${hits.map((h) => `${h.slug}: ${h.description}`).join("\n")}\n` };
+  }
+  if (sub === "show") {
+    const slug = args[0];
+    if (slug === undefined) return { exitCode: 2, stderr: "skills show needs a slug\n" };
+    const result = await loadSkill(deps.dataRoot, slug);
+    if (!result.ok) return { exitCode: 1, stderr: `${result.message}\n` };
+    return { exitCode: 0, stdout: result.content.endsWith("\n") ? result.content : `${result.content}\n` };
+  }
+  return { exitCode: 2, stderr: `unknown skills subcommand.\n${USAGE}\n` };
+}
+
 /**
  * Dispatch a `bb devkit ...` invocation. Pure over its deps so it is unit-testable without bb.
  * @param {readonly string[]} argv argv with the top-level command name already stripped
@@ -71,87 +159,9 @@ export async function runDevkitCli(argv, deps) {
   if (command === undefined || command === "help" || command === "--help" || command === "-h") {
     return { exitCode: 0, stdout: `${USAGE}\n` };
   }
-
-  if (command === "review") {
-    const [mode, target] = rest;
-    if (mode === undefined || !REVIEW_MODES.has(mode)) {
-      return { exitCode: 2, stderr: "review needs a mode: code | impl <base>..<head> | plan <path>\n" };
-    }
-    if (mode === "impl" || mode === "plan") {
-      if (target === undefined || target.length === 0) {
-        return { exitCode: 2, stderr: `review ${mode} needs ${mode === "impl" ? "<base>..<head>" : "<path>"}\n` };
-      }
-      if (!TARGET_RE.test(target)) {
-        return { exitCode: 2, stderr: `review ${mode}: invalid target (max 200 printable characters, no newlines)\n` };
-      }
-      if (mode === "impl") {
-        const parts = target.split("..");
-        if (parts.length !== 2 || parts[0].length === 0 || parts[1].length === 0) {
-          return { exitCode: 2, stderr: `review impl needs a range like <base>..<head> (got '${target}')\n` };
-        }
-      }
-    }
-    // A plan review is printed, never injected: an injected turn carries the thread's permission
-    // mode, which takes the agent out of plan mode, so its next plan presentation is approved
-    // without ever reaching the user. Printed, the agent follows it in its current turn.
-    if (mode === "plan") return { exitCode: 0, stdout: `${reviewInstruction(mode, target)}\n` };
-    return dispatch(
-      reviewInstruction(mode, target),
-      "Review requested — the coding agent will run it as the next turn in this thread.\n",
-      deps,
-    );
-  }
-
-  if (command === "commands") {
-    const cmds = deps.index.skills
-      .filter((s) => s.slug.startsWith("cmd-"))
-      .map((s) => `${s.slug.slice(4)}: ${s.description.replace(/^Command — /, "")}`)
-      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-    if (cmds.length === 0) return { exitCode: 0, stdout: "No command workflows available.\n" };
-    return { exitCode: 0, stdout: `Run one with 'bb devkit run <name>':\n${cmds.join("\n")}\n` };
-  }
-
-  if (command === "run") {
-    const [name, ...args] = rest;
-    if (name === undefined) return { exitCode: 2, stderr: "run needs a command name (see 'bb devkit commands')\n" };
-    const slug = `cmd-${name}`;
-    if (!deps.index.skills.some((s) => s.slug === slug)) {
-      return { exitCode: 1, stderr: `Unknown command '${name}'. See 'bb devkit commands'.\n` };
-    }
-    const argLine = args.join(" ").trim();
-    const argNote = argLine.length > 0 && TARGET_RE.test(argLine) ? ` Arguments: ${argLine}.` : "";
-    const instruction = `${AGENT_NOTE_RUN}\n\nLoad the devkit command workflow with devkit_load_skill({ slug: "${slug}" }) and follow it.${argNote}`;
-    return dispatch(
-      instruction,
-      `Command '${name}' requested — the coding agent will run it as the next turn in this thread.\n`,
-      deps,
-    );
-  }
-
-  if (command === "skills") {
-    const [sub, ...args] = rest;
-    if (sub === "list") {
-      const lines = deps.index.skills
-        .map((s) => `${s.slug}: ${s.description}`)
-        .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-      return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
-    }
-    if (sub === "find") {
-      const topic = args.join(" ").trim();
-      if (topic.length === 0) return { exitCode: 2, stderr: "skills find needs a topic\n" };
-      const hits = rankSkills(deps.index.skills, topic, 15);
-      if (hits.length === 0) return { exitCode: 0, stdout: `No devkit skill matched "${topic}".\n` };
-      return { exitCode: 0, stdout: `${hits.map((h) => `${h.slug}: ${h.description}`).join("\n")}\n` };
-    }
-    if (sub === "show") {
-      const slug = args[0];
-      if (slug === undefined) return { exitCode: 2, stderr: "skills show needs a slug\n" };
-      const result = await loadSkill(deps.dataRoot, slug);
-      if (!result.ok) return { exitCode: 1, stderr: `${result.message}\n` };
-      return { exitCode: 0, stdout: result.content.endsWith("\n") ? result.content : `${result.content}\n` };
-    }
-    return { exitCode: 2, stderr: `unknown skills subcommand.\n${USAGE}\n` };
-  }
-
+  if (command === "review") return runReview(rest, deps);
+  if (command === "commands") return listCommands(deps);
+  if (command === "run") return runCommand(rest, deps);
+  if (command === "skills") return runSkills(rest, deps);
   return { exitCode: 2, stderr: `unknown command '${command}'.\n${USAGE}\n` };
 }
