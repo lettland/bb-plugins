@@ -1,7 +1,9 @@
 export function safeExternalUrl(url: string): string | null {
   try {
-    const { protocol } = new URL(url);
-    return protocol === 'https:' || protocol === 'http:' ? url : null;
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:'
+      ? parsed.href
+      : null;
   } catch {
     return null;
   }

@@ -343,17 +343,28 @@ test('reconciles provider identity from the cached-list response', () => {
 test('keeps committed-query responses valid across query edits', () => {
   const hook = body(['useQueryCommit']);
   assert.match(hook, /setCommittedQuery\(query\.trim\(\)\)/u);
-  assert.equal(countOf(hook, /requestRevisionRef\.current \+= 1/gu), 1);
+  assert.equal(
+    countOf(
+      hook,
+      /requestRevisionRef\.current\s*(?:\+=\s*1|\+\+)|\+\+\s*requestRevisionRef\.current/gu
+    ),
+    1
+  );
   assert.match(
     hook,
     /\(\) => \(\) => \{\s*requestRevisionRef\.current \+= 1;\s*\}/u
   );
+  const queryEffect = hook.slice(
+    hook.indexOf('useEffect('),
+    hook.indexOf('[query]')
+  );
+  assert.doesNotMatch(queryEffect, /requestRevisionRef/u);
 });
 
 test('opens tracker links only through the http(s) allowlist', () => {
-  assert.match(
-    body(['TrackerDetailActions']),
-    /safeExternalUrl\(item\.url\)/u
-  );
+  const actions = body(['TrackerDetailActions']);
+  assert.match(actions, /href=\{externalUrl\}/u);
+  assert.equal(countOf(actions, /item\.url/gu), 1);
+  assert.match(actions, /safeExternalUrl\(item\.url\)/u);
   assert.doesNotMatch(app, /href=\{item\.url\}/u);
 });
