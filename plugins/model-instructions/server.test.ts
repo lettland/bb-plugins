@@ -81,7 +81,7 @@ describe("resolveInstructions", () => {
     expect(resolveInstructions([rule], target("claude-opus-5-5", null, "claude-code", "other"))).toBeNull();
   });
 
-  it("applies skipProjects before the thread scope", () => {
+  it("skips a project regardless of thread scope", () => {
     const [topLevel, child] = parseRules(
       JSON.stringify([
         { skipProjects: "bb-*", threads: "top-level", instructions: "x" },
@@ -127,6 +127,8 @@ describe("parseRules", () => {
     ['[{"instructions": "x", "skipProjects": "  "}]', "skipProjects"],
     ['[{"instructions": "x", "project": ["bb-*", " "]}]', "project"],
     ['[{"instructions": "x", "skipProjects": [5]}]', "skipProjects"],
+    ['[{"instructions": "x", "skipProjects": 5}]', "expected a glob or an array of globs"],
+    ['[{"instructions": "x", "project": "bb-*", "skipProjects": []}]', "skipProjects"],
     ['[{"instructions": "x", "skipProject": "bb-*"}]', "skipProject"],
   ])("rejects %s", (json, message) => {
     expect(() => parseRules(json)).toThrow(message);

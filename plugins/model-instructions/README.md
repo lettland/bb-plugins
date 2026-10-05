@@ -71,7 +71,7 @@ Combine with `project` to narrow to a set first, e.g. `"project": ["opshub-*", "
 
 - The combined instructions for one thread are truncated to 4096 characters.
 - Side chats never receive plugin instructions.
-- After saving rules that use an array `project` or `skipProjects`, an older plugin version rejects the whole setting and applies no rules.
+- After saving rules that use `skipProjects` (in any form) or an array `project`, an older plugin version rejects the whole setting and applies no rules.
 - A `threads: child` rule also reaches devkit `review-code`'s lens and closure-review threads,
   since those are ordinary bb child threads. That skill's review-only brief asks the reviewer to
   ignore whatever this plugin injects into them — a prompt-level ask, not an enforced one (see

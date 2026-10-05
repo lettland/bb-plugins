@@ -3,7 +3,9 @@ import { z } from "zod";
 const THREAD_SCOPES = ["any", "top-level", "child"] as const;
 
 const globs = z
-  .union([z.string(), z.array(z.string())])
+  .union([z.string(), z.array(z.string())], {
+    error: "expected a glob or an array of globs",
+  })
   .transform((value) => (Array.isArray(value) ? value : [value]))
   .pipe(z.array(z.string().trim().min(1)).min(1));
 

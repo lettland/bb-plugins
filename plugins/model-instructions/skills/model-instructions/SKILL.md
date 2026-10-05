@@ -60,7 +60,7 @@ List model ids with `bb provider models <provider>` and project names with
 
 - The combined instructions for one thread are truncated to 4096 characters.
 - Side chats never receive plugin instructions.
-- After saving rules that use an array `project` or `skipProjects`, an older plugin version rejects the whole setting and applies no rules.
+- After saving rules that use `skipProjects` (in any form) or an array `project`, an older plugin version rejects the whole setting and applies no rules.
 - Instructions only guide the model; they do not enforce anything. To stop Claude
   Code delegating through its own Task tool instead of bb threads, turn on the
   Claude Code provider's "Disable provider subagents" setting.
