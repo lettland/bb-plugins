@@ -733,6 +733,51 @@ describe("workspace capture edge cases", () => {
       expect(diffFilesCalls.sort()).toEqual(["bad", "bad", "gone", "gone", "good", "good", "old"]);
     });
 
+    describe("fast forward from the turn-start head", () => {
+      const current = ws({
+        checkout: { kind: "branch", headSha: "own" },
+        mergeBase: {
+          files: [],
+          commits: [{ sha: "own" }, { sha: "pulled" }, { sha: "unlisted" }],
+        },
+      });
+      // The ancestry lookup carries authoredAt, but has no entry for "unlisted".
+      const ancestry = ws({
+        mergeBase: {
+          baseRef: "h0",
+          files: [],
+          commits: [
+            { sha: "own", authoredAt: 2_000 },
+            { sha: "pulled", authoredAt: 500 },
+          ],
+        },
+      });
+      const fastForward = () =>
+        fakeBb({
+          status: async () => ({ outcome: "available", workspace: ancestry }),
+          diffFiles: async ({ sha }) => ({
+            outcome: "available",
+            files: [{ path: `${sha}.ts`, previousPath: null }],
+          }),
+        }).bb;
+      const before = { headSha: "h0", files: {}, commits: ["old"] };
+
+      it("ignores commits authored before the turn began, such as pulled ones", async () => {
+        const changed = await treeChangedPaths(fastForward(), "env", before, current, 1_000);
+        expect(changed).toEqual({
+          paths: ["own.ts", "unlisted.ts"],
+          commits: ["own", "unlisted"],
+          committedPaths: ["own.ts", "unlisted.ts"],
+        });
+      });
+
+      it("claims every commit when the turn start time is unknown", async () => {
+        const changed = await treeChangedPaths(fastForward(), "env", before, current);
+        expect(changed.commits).toEqual(["own", "pulled", "unlisted"]);
+        expect(changed.committedPaths).toEqual(["own.ts", "pulled.ts", "unlisted.ts"]);
+      });
+    });
+
     it("reads no commits when the head did not move", async () => {
       const { bb, diffFilesCalls } = fakeBb({});
       const before = { headSha: "h0", files: {}, commits: [] };

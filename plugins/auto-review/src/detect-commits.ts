@@ -155,6 +155,32 @@ async function mainlineNovelCommits(input: MainlineReplayInput): Promise<string[
   });
 }
 
+/**
+ * Every commit in a fast-forward range descends from the turn-start head, so
+ * one authored before the turn began was brought in (pull, merge,
+ * cherry-pick), not written this turn. A commit with no metadata is kept:
+ * nothing proves it came from elsewhere.
+ */
+function authoredDuringTurn(
+  commits: readonly string[],
+  metadata: readonly RecentCommit[],
+  startedAt?: number,
+): string[] {
+  if (startedAt === undefined) {
+    return [...commits];
+  }
+  return commits.filter((sha) => {
+    const commit = metadata.find((candidate) => candidate.sha === sha);
+    return commit === undefined || commit.authoredAt >= startedAt;
+  });
+}
+
+/**
+ * The commits of `commits` this turn authored. After a fast forward from the
+ * turn-start head, those authored at or after `startedAt`; commits pulled in
+ * from upstream predate the turn. Otherwise, those whose patch is not one that
+ * was already there at turn start, so a rebase replay is not claimed.
+ */
 export async function novelCommits(
   bb: BbPluginApi,
   environmentId: string,
@@ -178,7 +204,7 @@ export async function novelCommits(
         ancestry.outcome === "available" &&
         ancestry.workspace.mergeBase?.baseRef === before.headSha
       ) {
-        return [...commits];
+        return authoredDuringTurn(commits, ancestry.workspace.mergeBase.commits, startedAt);
       }
     } catch {
       // An inaccessible old head cannot prove that this was a fast forward.
