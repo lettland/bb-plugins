@@ -97,4 +97,7 @@ and a `bb` manifest, add it to `.bb/plugins.json`, and CI picks it up.
 
 ## License
 
-BSD-2-Clause (LICENSE). taskboard is MIT (plugins/taskboard/LICENSE); devkit includes third-party content under Apache-2.0 and MIT (plugins/devkit/THIRD_PARTY_NOTICES.md).
+BSD-2-Clause ([`LICENSE`](LICENSE)). taskboard is MIT
+([`plugins/taskboard/LICENSE`](plugins/taskboard/LICENSE)); devkit includes
+third-party content under Apache-2.0 and MIT
+([`plugins/devkit/THIRD_PARTY_NOTICES.md`](plugins/devkit/THIRD_PARTY_NOTICES.md)).
