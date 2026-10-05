@@ -325,8 +325,15 @@ function ConstrainedFacetSections({
   );
 }
 
-function ConstrainedFacetMenu({ props }: { props: TrackerFilterBarProps }) {
-  const [facetQuery, setFacetQuery] = useState('');
+function ConstrainedFacetMenu({
+  props,
+  facetQuery,
+  setFacetQuery
+}: {
+  props: TrackerFilterBarProps;
+  facetQuery: string;
+  setFacetQuery: (query: string) => void;
+}) {
   const facetSearchRef = useRef<HTMLInputElement>(null);
   const normalizedFacetQuery = facetQuery.trim().toLocaleLowerCase();
   const matchesFacet = (label: string) =>
@@ -419,7 +426,15 @@ function ConstrainedFacetMenu({ props }: { props: TrackerFilterBarProps }) {
   );
 }
 
-function ConstrainedFilterBar({ props }: { props: TrackerFilterBarProps }) {
+function ConstrainedFilterBar({
+  props,
+  facetQuery,
+  setFacetQuery
+}: {
+  props: TrackerFilterBarProps;
+  facetQuery: string;
+  setFacetQuery: (query: string) => void;
+}) {
   return (
     <div
       role="search"
@@ -442,15 +457,25 @@ function ConstrainedFilterBar({ props }: { props: TrackerFilterBarProps }) {
           <span />
         )}
         <FilterBarPresets props={props} constrained />
-        <ConstrainedFacetMenu props={props} />
+        <ConstrainedFacetMenu
+          props={props}
+          facetQuery={facetQuery}
+          setFacetQuery={setFacetQuery}
+        />
       </div>
     </div>
   );
 }
 
 export function TrackerFilterBar(props: TrackerFilterBarProps) {
+  // Held here, not in the constrained menu, so the text survives a width change.
+  const [facetQuery, setFacetQuery] = useState('');
   return props.surfaceMode === 'constrained' ? (
-    <ConstrainedFilterBar props={props} />
+    <ConstrainedFilterBar
+      props={props}
+      facetQuery={facetQuery}
+      setFacetQuery={setFacetQuery}
+    />
   ) : (
     <FullFilterBar props={props} />
   );

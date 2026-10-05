@@ -17,6 +17,7 @@ test('registers Taskboard for existing-thread and New Thread right panels', () =
 test('accepts bounded Taskboard drops only on the visible composer textbox', () => {
   const dropHook = body(['useTaskboardComposerDrop']);
   assert.match(dropHook, /hasTaskboardComposerDragType\(transfer\.types\)/u);
+  assert.match(app, /useTaskboardComposerDrop\(insertComposerMention\)/u);
   assert.match(app, /\[contenteditable="true"\]\[role="textbox"\]/u);
   assert.match(dropHook, /parseTaskboardComposerMention/u);
   assert.match(dropHook, /event\.preventDefault\(\)/u);
@@ -178,35 +179,56 @@ test('centralizes and reuses decorative filter icons across surfaces', () => {
     app,
     /satisfies Record<FilterPresentationKey, FilterPresentation>/u
   );
-  assert.match(app, /BOARD_FILTER_FIELDS\.map\(field =>/u);
-  // Intent: filter sections render in this exact order, as literal labels or from an
-  // ordered table (a literal `source` label followed by a mapped list is also accepted).
+  // Intent: filter sections render in this exact order. `source` is a literal section
+  // rendered before the mapped list, and the mapped list follows BOARD_FILTER_FIELDS as
+  // defined (not a reordered or filtered copy).
   const orderedKeys = (keys: readonly string[]) =>
     new RegExp(`\\[\\s*${keys.map(key => `'${key}'`).join('\\s*,\\s*')}\\s*,?\\s*\\]`, 'u');
-  const labelOrder = [...app.matchAll(/<FilterSectionLabel filter="([^"]+)"/gu)].map(
-    match => match[1]
+  const mapMarker = 'BOARD_FILTER_FIELDS.map(field =>';
+  assert.match(
+    body(['BOARD_FILTER_FIELDS']),
+    orderedKeys(filters.slice(1))
+  );
+  assert.doesNotMatch(
+    app,
+    /BOARD_FILTER_FIELDS\]?\.(?:reverse|sort|filter)\(|\[\.\.\.BOARD_FILTER_FIELDS\]/u
+  );
+
+  const sections = body(['ConstrainedFacetSections']);
+  const sourceLabelIndex = sections.indexOf('<FilterSectionLabel filter="source" />');
+  const sectionsMapIndex = sections.indexOf(mapMarker);
+  assert.ok(sourceLabelIndex >= 0, 'Missing literal source section label');
+  assert.ok(sectionsMapIndex >= 0, 'Missing BOARD_FILTER_FIELDS section map');
+  assert.ok(
+    sourceLabelIndex < sectionsMapIndex,
+    'The source section must render before the mapped filter sections'
   );
   assert.ok(
-    labelOrder.join() === filters.join() ||
-      orderedKeys(filters).test(app) ||
-      (labelOrder.join() === filters[0] &&
-        orderedKeys(filters.slice(1)).test(app) &&
-        /<FilterSectionLabel filter=\{/u.test(app)),
-    `Filter sections must render in order: ${filters.join(', ')}`
+    sections.indexOf('<FilterSectionLabel filter={field} />', sectionsMapIndex) > sectionsMapIndex,
+    'The mapped sections must render <FilterSectionLabel filter={field} />'
   );
+
+  const chips = body(['FullFilterChips']);
+  const chipsMapIndex = chips.indexOf(mapMarker);
+  assert.ok(chipsMapIndex >= 0, 'Missing BOARD_FILTER_FIELDS chip map');
+  for (const part of ['icon', 'label']) {
+    const sourceIndex = chips.indexOf(`${part}={FILTER_PRESENTATION.source.${part}}`);
+    assert.ok(sourceIndex >= 0, `Source chip must use FILTER_PRESENTATION.source.${part}`);
+    assert.ok(sourceIndex < chipsMapIndex, 'The source chip must render before the mapped chips');
+    // Both mapped chips (state and the generic facets) reuse the table entry for `field`.
+    assert.equal(
+      countOf(chips.slice(chipsMapIndex), new RegExp(`${part}=\\{FILTER_PRESENTATION\\[field\\]\\.${part}\\}`, 'gu')),
+      2
+    );
+  }
+  const sectionLabel = body(['FilterSectionLabel']);
+  assert.match(sectionLabel, /FILTER_PRESENTATION\[filter\]/u);
+  assert.match(sectionLabel, /name=\{presentation\.icon\}/u);
+  assert.match(sectionLabel, /\{presentation\.label\}/u);
+
   const presentation = body(['FILTER_PRESENTATION']);
   for (const filter of filters) {
-    // Intent: each filter reuses its centralized FILTER_PRESENTATION icon and label,
-    // via a literal `.filter.` access or a generic `[key]` lookup backed by a table entry.
     assert.match(presentation, new RegExp(`\\b${filter}: \\{`));
-    assert.match(
-      app,
-      new RegExp(`icon=\\{FILTER_PRESENTATION(?:\\.${filter}|\\[[^\\]]+\\])\\.icon\\}`)
-    );
-    assert.match(
-      app,
-      new RegExp(`label=\\{FILTER_PRESENTATION(?:\\.${filter}|\\[[^\\]]+\\])\\.label\\}`)
-    );
   }
   assert.match(app, /name=\{presentation\.icon\}[\s\S]*?aria-hidden="true"/u);
   assert.match(app, /name=\{option\.icon\}[\s\S]*?aria-hidden="true"/u);
@@ -228,7 +250,7 @@ test('supports direct and manual composer capture through one dialog', () => {
   assert.match(app, /assigneeConfirmation: AssigneeConfirmation/u);
   assert.match(app, /'New issue'/u);
 
-  const createBody = body(['CreateIssueDialog', 'useCreateIssueSubmit']);
+  const createBody = body(['useCreateIssueSubmit']);
   const createCallIndex = createBody.indexOf("rpc.call('createIssue'");
   const rememberIndex = createBody.indexOf(
     'rememberCreateAssigneeAfterSuccess('

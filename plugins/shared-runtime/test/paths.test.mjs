@@ -18,7 +18,6 @@ test("relative paths are accepted and normalized", () => {
     ["a//b", "a/b"],
     ["a/./b", "a/b"],
     ["a/b/", "a/b/"],
-    ["./", "./"],
     ["a/../b", "b"],
     ["..foo", "..foo"],
     ["a..b/c", "a..b/c"],

@@ -114,8 +114,8 @@ test('upsert inserts then updates an item and get returns it', () => {
 
 test('upsert rejects an item that fails the work item schema', () => {
   const { store } = createStore();
-  assert.throws(() => store.upsert(item({ locator: '' })));
-  assert.throws(() => store.upsert(item({ bbProjectId: 'not-a-project' })));
+  assert.throws(() => store.upsert(item({ locator: '' })), /Too small: expected string to have >=1 characters/);
+  assert.throws(() => store.upsert(item({ bbProjectId: 'not-a-project' })), /Invalid string: must start with/);
 });
 
 test('list orders by updatedAt descending and honors limit', () => {
@@ -330,10 +330,11 @@ test('saveProjectConfig normalizes the Jira URL and rejects invalid input', () =
   });
   assert.equal(saved.jiraBaseUrl, 'https://example.atlassian.net');
 
-  assert.throws(() =>
-    store.saveProjectConfig({ ...jiraConfig(A), jiraBaseUrl: 'http://example.atlassian.net' })
+  assert.throws(
+    () => store.saveProjectConfig({ ...jiraConfig(A), jiraBaseUrl: 'http://example.atlassian.net' }),
+    /Jira URL must be an HTTPS atlassian\.net origin/
   );
-  assert.throws(() => store.saveProjectConfig({ ...jiraConfig(A), jiraJql: '  ' }));
+  assert.throws(() => store.saveProjectConfig({ ...jiraConfig(A), jiraJql: '  ' }), /Too small: expected string to have >=1 characters/);
   assert.equal(store.projectConfig(A, DEFAULTS).jiraBaseUrl, 'https://example.atlassian.net');
 });
 
@@ -384,13 +385,15 @@ test('saveProjectBoardSettings rejects duplicate filters and statuses without wr
     enabledFilters: ['state' as const],
     statusOrder: ['Todo']
   };
-  assert.throws(() =>
-    store.saveProjectBoardSettings({ ...base, enabledFilters: ['state', 'state'] })
+  assert.throws(
+    () => store.saveProjectBoardSettings({ ...base, enabledFilters: ['state', 'state'] }),
+    /Filter fields must be unique/
   );
-  assert.throws(() =>
-    store.saveProjectBoardSettings({ ...base, statusOrder: ['Todo', ' todo '] })
+  assert.throws(
+    () => store.saveProjectBoardSettings({ ...base, statusOrder: ['Todo', ' todo '] }),
+    /Workflow statuses must be unique/
   );
-  assert.throws(() => store.saveProjectBoardSettings({ ...base, statusOrder: [] }));
+  assert.throws(() => store.saveProjectBoardSettings({ ...base, statusOrder: [] }), /Too small: expected array to have >=1 items/);
   assert.deepEqual(store.projectBoardSettings(A), {
     projectId: A,
     defaultView: 'list',
