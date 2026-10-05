@@ -12,6 +12,8 @@ export type TrackerRoute =
       locator: string;
     };
 
+export type ItemRoute = Extract<TrackerRoute, { kind: 'item' }>;
+
 function encodeLocator(locator: string): string {
   // encodeURIComponent deliberately leaves "~" untouched, but this route uses
   // it as the percent-escape marker. Escape literal tildes first so arbitrary
