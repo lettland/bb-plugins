@@ -93,7 +93,7 @@ test('applies project presets through the released preference store', () => {
 });
 
 test('keeps preset refreshes, drafts, and focus non-disruptive', () => {
-  const hook = body(['useProjectFilterPresets']);
+  const hook = body(['useProjectFilterPresets', 'usePresetReload']);
   // Intent: realtime, reconnect, and mutation reconciliation reload in the background,
   // whether written inline or through one local alias called from each site.
   const aliasDefinition = /const (\w+) = (?:useCallback\(\s*)?\(\) =>\s*(?:void )?reload\(\{ background: true \}\)/u;

@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  type MutableRefObject,
+  useCallback,
+  useEffect,
+  useRef,
+  useState
+} from 'react';
 import { useRealtime, useRpc } from '@get-bb/plugin-sdk/app';
 import {
   type FilterPreset,
@@ -10,15 +16,16 @@ import {
   useRefreshOnReconnect
 } from '../shared/format.js';
 
-export function useProjectFilterPresets(projectId: string | null): {
+export interface ProjectFilterPresets {
   presets: readonly FilterPreset[];
   error: string | null;
   refreshError: string | null;
   loading: boolean;
   reload: (options?: { background?: boolean }) => Promise<void>;
   setAuthoritative: (presets: readonly FilterPreset[]) => void;
-} {
-  const rpc = useRpc<TaskboardRpcContract>();
+}
+
+function usePresetState(projectId: string | null) {
   const [presets, setPresets] = useState<readonly FilterPreset[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
@@ -26,15 +33,40 @@ export function useProjectFilterPresets(projectId: string | null): {
   const [loadedProjectId, setLoadedProjectId] = useState<string | null>(
     projectId
   );
-  const requestRevisionRef = useRef(0);
-  const projectIdRef = useRef(projectId);
-  projectIdRef.current = projectId;
+  return {
+    presets,
+    setPresets,
+    error,
+    setError,
+    refreshError,
+    setRefreshError,
+    loading,
+    setLoading,
+    loadedProjectId,
+    setLoadedProjectId
+  };
+}
 
-  const reload = useCallback(async (
+type PresetState = ReturnType<typeof usePresetState>;
+
+function usePresetReload(
+  projectId: string | null,
+  state: PresetState,
+  requestRevisionRef: MutableRefObject<number>,
+  projectIdRef: MutableRefObject<string | null>
+) {
+  const rpc = useRpc<TaskboardRpcContract>();
+  const { setPresets, setError, setRefreshError } = state;
+  const { setLoading, setLoadedProjectId } = state;
+
+  return useCallback(async (
     options: { background?: boolean } = {}
   ) => {
     if (projectIdRef.current !== projectId) return;
     const requestRevision = ++requestRevisionRef.current;
+    const isCurrent = () =>
+      requestRevision === requestRevisionRef.current &&
+      projectIdRef.current === projectId;
     if (projectId === null) {
       setPresets([]);
       setError(null);
@@ -52,23 +84,13 @@ export function useProjectFilterPresets(projectId: string | null): {
     setRefreshError(null);
     try {
       const result = await rpc.call('listFilterPresets', { projectId });
-      if (
-        requestRevision !== requestRevisionRef.current ||
-        projectIdRef.current !== projectId
-      ) {
-        return;
-      }
+      if (!isCurrent()) return;
       setPresets(result.presets);
       setError(null);
       setRefreshError(null);
       setLoadedProjectId(projectId);
     } catch (nextError) {
-      if (
-        requestRevision !== requestRevisionRef.current ||
-        projectIdRef.current !== projectId
-      ) {
-        return;
-      }
+      if (!isCurrent()) return;
       const message = describeError(nextError);
       if (options.background) {
         setRefreshError(message);
@@ -78,14 +100,24 @@ export function useProjectFilterPresets(projectId: string | null): {
       }
       setLoadedProjectId(projectId);
     } finally {
-      if (
-        requestRevision === requestRevisionRef.current &&
-        projectIdRef.current === projectId
-      ) {
-        setLoading(false);
-      }
+      if (isCurrent()) setLoading(false);
     }
   }, [projectId, rpc]);
+}
+
+export function useProjectFilterPresets(
+  projectId: string | null
+): ProjectFilterPresets {
+  const state = usePresetState(projectId);
+  const requestRevisionRef = useRef(0);
+  const projectIdRef = useRef(projectId);
+  projectIdRef.current = projectId;
+  const reload = usePresetReload(
+    projectId,
+    state,
+    requestRevisionRef,
+    projectIdRef
+  );
 
   useEffect(() => {
     void reload();
@@ -104,6 +136,8 @@ export function useProjectFilterPresets(projectId: string | null): {
     if (projectId !== null) void reload({ background: true });
   });
 
+  const { setPresets, setError, setRefreshError } = state;
+  const { setLoading, setLoadedProjectId } = state;
   const setAuthoritative = useCallback(
     (nextPresets: readonly FilterPreset[]) => {
       if (projectIdRef.current !== projectId) return;
@@ -121,12 +155,12 @@ export function useProjectFilterPresets(projectId: string | null): {
     [projectId, reload]
   );
 
-  const scopeMatches = loadedProjectId === projectId;
+  const scopeMatches = state.loadedProjectId === projectId;
   return {
-    presets: scopeMatches ? presets : [],
-    error: scopeMatches ? error : null,
-    refreshError: scopeMatches ? refreshError : null,
-    loading: scopeMatches ? loading : projectId !== null,
+    presets: scopeMatches ? state.presets : [],
+    error: scopeMatches ? state.error : null,
+    refreshError: scopeMatches ? state.refreshError : null,
+    loading: scopeMatches ? state.loading : projectId !== null,
     reload,
     setAuthoritative
   };
