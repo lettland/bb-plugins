@@ -73,8 +73,8 @@ function threadError(threadId: string, wantsJson: boolean): PluginCliResult {
     : { exitCode: 1, stderr: `${message}\n` };
 }
 
-/** What releases a deferred turn, and how to drop it instead, for `status`. */
-function deferredWaitText(threadId: string, heldBy: string[] | undefined): string {
+/** What releases a deferred turn, for `status`. */
+function deferredWaitText(heldBy: string[] | undefined): string {
   if (heldBy !== undefined) {
     return (
       `held by child threads (as of the last check): ${heldBy.join(", ")}\n` +
@@ -82,22 +82,13 @@ function deferredWaitText(threadId: string, heldBy: string[] | undefined): strin
       "of them ending, or by the 5-minute sweep once all of them have ended (idle, " +
       "errored, archived or deleted).\n" +
       "  Stop or archive a stuck child to release it — the turn is then re-checked for " +
-      "review.\n" +
-      `  To drop it instead: bb auto-review reset ${threadId}\n`
+      "review.\n"
     );
   }
   return (
     "waiting for another auto-review on the same provider to finish.\n" +
-    "  It fires automatically as soon as that review ends.\n" +
-    `  To drop it instead: bb auto-review reset ${threadId}\n`
+    "  It fires automatically as soon as that review ends.\n"
   );
-}
-
-/** What a dropped deferred turn was waiting on, for `reset`'s report. */
-function droppedDeferralWaitText(heldBy: string[] | undefined): string {
-  return heldBy !== undefined
-    ? `waiting for child threads to finish (${heldBy.join(", ")}), not stuck`
-    : "waiting for another review on its provider to finish, not stuck";
 }
 
 async function resolveProjectId(
@@ -191,7 +182,7 @@ export function registerAutoReviewCli(
       {
         name: "reset",
         summary:
-          "Clear a wedged latch for one idle thread — also DROPS a deferred turn's pending review",
+          "Clear a wedged latch for one idle thread; refused while it is running or holds a deferred turn",
         usage: "bb auto-review reset <thread-id> [--json]",
       },
     ],
@@ -208,10 +199,10 @@ export function registerAutoReviewCli(
       }
 
       if (command === "skip" || command === "unskip") {
-        return {
-          exitCode: 2,
-          stderr: `\`${command}\` was removed: auto-review reviews every turn and plan.\n`,
-        };
+        const message = `\`${command}\` was removed: auto-review reviews every turn and plan.`;
+        return wantsJson
+          ? json({ ok: false, command, error: message }, 2)
+          : { exitCode: 2, stderr: `${message}\n` };
       }
 
       if (command === "reset") {
@@ -223,21 +214,29 @@ export function registerAutoReviewCli(
           };
         }
         try {
-          // Resetting a thread mid-turn would delete its `turnStart` and make the
-          // turn in progress stand down unreviewed, so only an idle thread resets.
-          const { status } = await bb.sdk.threads.get({ threadId });
-          if (isBusyStatus(status)) {
-            const message = "reset only clears a stuck latch on an idle thread";
-            return wantsJson
-              ? json({ ok: false, threadId, error: message }, 2)
-              : { exitCode: 2, stderr: `${message}\n` };
-          }
-          // Under the same lock the event drivers use: reset now writes both
-          // thread state and the deferral index, and an unlocked interleave
-          // with a concurrent evaluate could delete an index entry that
-          // evaluate had just written, re-stranding the thread.
-          const prior = await withThreadLock(threadId, async () => {
+          // Under the same lock the event drivers use: reset writes both thread
+          // state and the deferral index, and an unlocked interleave with a
+          // concurrent evaluate could delete an index entry that evaluate had
+          // just written, re-stranding the thread. The status is read under the
+          // lock too, so a turn that starts while reset waits for it is seen.
+          const outcome = await withThreadLock(threadId, async () => {
+            // Resetting a thread mid-turn would delete its `turnStart` and make the
+            // turn in progress stand down unreviewed, so only an idle thread resets.
+            const { status } = await bb.sdk.threads.get({ threadId });
+            if (isBusyStatus(status)) {
+              return {
+                refused: `thread ${threadId} is ${status}; reset only clears a stuck latch on an idle thread — wait for the turn to end (or stop it with \`bb thread stop ${threadId}\`), then retry.`,
+              };
+            }
             const before = await readState(bb, threadId);
+            // Its review runs when the hold clears; resetting would drop it.
+            if (before.phase === "deferred") {
+              return {
+                refused: `thread ${threadId} has a deferred turn; its review runs when the hold clears — reset would drop it. ` +
+                  `Check \`bb auto-review status ${threadId}\`; if the hold never clears, stop or archive the holding child thread, ` +
+                  "or send the thread another message (a new turn re-checks the deferred one and reviews it).",
+              };
+            }
             await writeState(bb, threadId, { phase: "idle" }, [
               ...LATCH_KEYS,
               // Leftover from the removed per-thread skip flag.
@@ -246,15 +245,20 @@ export function registerAutoReviewCli(
               ...PRESENT_PLAN_KEYS,
             ]);
             await removeDeferral(bb, threadId);
-            return before;
+            return { prior: before };
           });
+          if ("refused" in outcome) {
+            return wantsJson
+              ? json({ ok: false, threadId, error: outcome.refused }, 2)
+              : { exitCode: 2, stderr: `${outcome.refused}\n` };
+          }
+          const { prior } = outcome;
           const payload = {
             ok: true,
             command,
             threadId,
             priorPhase: prior.phase,
             wasLatched: prior.phase !== "idle",
-            droppedDeferral: prior.phase === "deferred",
           };
           if (wantsJson) {
             return json(payload);
@@ -263,15 +267,6 @@ export function registerAutoReviewCli(
             return {
               exitCode: 0,
               stdout: `reset ${threadId} (was already idle; nothing latched).\n`,
-            };
-          }
-          if (prior.phase === "deferred") {
-            return {
-              exitCode: 0,
-              stdout:
-                `reset ${threadId} (dropped a deferred turn).\n` +
-                `That turn was ${droppedDeferralWaitText(prior.heldBy)} — ` +
-                "its review and commit will now never run.\n",
             };
           }
           return {
@@ -329,7 +324,7 @@ export function registerAutoReviewCli(
         const deferredText =
           state.phase === "deferred" && state.deferredSince !== undefined
             ? `deferred for: ${Math.floor((Date.now() - state.deferredSince) / 60_000)} min — ` +
-              deferredWaitText(threadId, state.heldBy)
+              deferredWaitText(state.heldBy)
             : "";
         return {
           exitCode: 0,

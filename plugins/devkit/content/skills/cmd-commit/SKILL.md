@@ -35,7 +35,9 @@ Before any other action, check for plan mode:
    - `git log -5 | cat` — match existing commit style
 2. Extract style dimensions from `git log` (see Step 1 below).
 3. Run _Artifact triage_ (read-only here): note which paths are generated artifacts to be **gitignored** vs authored files to commit. Then group the authored files logically — every authored file lands in some commit; grouping distributes them, it never drops any. (`.gitignore` edits and `git rm --cached` are writes — describe them in the plan, don't run them.)
-4. Write the Commit Plan to its own plan file, or replace a stale implementation plan with it, so the plan review covers only the commit plan and not unrelated earlier work:
+4. The Commit Plan must be the content of the plan file you present — `ExitPlanMode` presents the harness's plan file, `PresentPlan` the file you name — because the plan review covers only that file. If it holds a plan whose work is implemented — committed, or about to be committed by this run — replace it with the Commit Plan. Only if it holds a plan whose work is not yet implemented (still in progress or not yet approved), stop and ask the user: "The plan file still holds an unfinished plan — replace it with the commit plan, or keep it and commit outside plan mode?"
+
+   Commit Plan template:
 
 ```
 ## Commit Plan
@@ -66,7 +68,7 @@ Before any other action, check for plan mode:
    - Commits planned: N
    - Files staged: M
    - Where the work will land (per the line above)
-   - The commit plan goes through the calibrated plan review before it reaches you; that review checks grouping, file coverage, artifact and secret triage, and message style, so what you see has already been revised.
+   - When auto-review's plan gate (`planGate: true` in `bb auto-review status --json`) or the agent-hooks plan-review hook (installed) is active, the commit plan goes through the calibrated plan review before it reaches you; that review checks grouping, file coverage, artifact and secret triage, and message style, so what you see has already been revised.
    - Review the plan; after exiting plan mode, run `/commit` again to execute.
 
 ### If plan mode is NOT active → execute commits

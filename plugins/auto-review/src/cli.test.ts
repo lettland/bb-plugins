@@ -5,6 +5,7 @@ import {
   type CreateFakePluginHostOptions,
 } from "@get-bb/plugin-sdk/testing";
 import { registerAutoReviewCli } from "./cli.js";
+import { withThreadLock } from "./state.js";
 import {
   defineAutoReviewSettings,
   type GlobalDefaults,
@@ -257,6 +258,19 @@ describe("auto-review cli: skip / unskip (removed)", () => {
     });
   });
 
+  it.each(["skip", "unskip"])("answers %s with a JSON error under --json", async (command) => {
+    await withHost({}, async (host) => {
+      const result = await host.run([command, THREAD_ID, "--json"]);
+      expect(result.exitCode).toBe(2);
+      expect(parse(result.stdout)).toEqual({
+        ok: false,
+        command,
+        error: `\`${command}\` was removed: auto-review reviews every turn and plan.`,
+      });
+      expect(result.stderr ?? "").toBe("");
+    });
+  });
+
   it("is not listed in the usage text", async () => {
     await withHost({}, async (host) => {
       const result = await host.run(["frobnicate"]);
@@ -296,9 +310,12 @@ describe("auto-review cli: reset", () => {
             phase: "awaiting-review",
             turnStart: { sinceSeq: 4 },
           });
+          const message =
+            `thread ${THREAD_ID} is ${status}; reset only clears a stuck latch on an idle thread — ` +
+            `wait for the turn to end (or stop it with \`bb thread stop ${THREAD_ID}\`), then retry.`;
           const text = await host.run(["reset", THREAD_ID]);
           expect(text.exitCode).toBe(2);
-          expect(text.stderr).toBe("reset only clears a stuck latch on an idle thread\n");
+          expect(text.stderr).toBe(`${message}\n`);
           expect(text.stdout).toBe("");
 
           const payload = await host.run(["reset", THREAD_ID, "--json"]);
@@ -306,7 +323,7 @@ describe("auto-review cli: reset", () => {
           expect(parse(payload.stdout)).toEqual({
             ok: false,
             threadId: THREAD_ID,
-            error: "reset only clears a stuck latch on an idle thread",
+            error: message,
           });
           expect(host.metadataFor(THREAD_ID)).toEqual({
             phase: "awaiting-review",
@@ -316,6 +333,45 @@ describe("auto-review cli: reset", () => {
       );
     },
   );
+
+  it("sees a turn that starts while it waits for the thread lock", async () => {
+    const threads: Record<string, ThreadFixture> = {
+      [THREAD_ID]: { projectId: PROJECT_ID, status: "idle" },
+    };
+    await withHost({ threads }, async (host) => {
+      Object.assign(host.metadataFor(THREAD_ID), {
+        phase: "awaiting-review",
+        turnStart: { sinceSeq: 4 },
+      });
+      // Relies on runCli invoking run synchronously and the fake threads.get reading
+      // status at call time, so the old pre-lock check would have read idle here.
+      let release: () => void = () => {};
+      let entered: () => void = () => {};
+      const lockTaken = new Promise<void>((resolve) => (entered = resolve));
+      const held = withThreadLock(
+        THREAD_ID,
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+            entered();
+          }),
+      );
+      await lockTaken;
+      const pending = host.run(["reset", THREAD_ID]);
+      // The thread turns active after reset was invoked but before it holds the lock.
+      threads[THREAD_ID] = { projectId: PROJECT_ID, status: "active" };
+      release();
+      await held;
+
+      const result = await pending;
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain(`thread ${THREAD_ID} is active;`);
+      expect(host.metadataFor(THREAD_ID)).toEqual({
+        phase: "awaiting-review",
+        turnStart: { sinceSeq: 4 },
+      });
+    });
+  });
 
   it("reports an already-idle thread as nothing latched", async () => {
     await withHost({}, async (host) => {
@@ -329,38 +385,49 @@ describe("auto-review cli: reset", () => {
         threadId: THREAD_ID,
         priorPhase: "idle",
         wasLatched: false,
-        droppedDeferral: false,
       });
     });
   });
 
-  it("drops a deferred turn together with its deferral index entry", async () => {
+  it("refuses to reset a deferred turn, leaving its state and deferral index untouched", async () => {
     await withHost({}, async (host) => {
-      Object.assign(host.metadataFor(THREAD_ID), {
+      const deferred = {
         phase: "deferred",
         deferredSince: 5,
         turnStart: { sinceSeq: 0 },
-      });
-      await host.kv.set(`deferral:${THREAD_ID}`, {
-        threadId: THREAD_ID,
-        projectId: PROJECT_ID,
-        environmentId: "env-1",
-      });
-      await host.kv.set(`deferral:${OTHER_ID}`, {
-        threadId: OTHER_ID,
-        projectId: PROJECT_ID,
-        environmentId: "env-1",
-      });
+      };
+      Object.assign(host.metadataFor(THREAD_ID), deferred);
+      for (const id of [THREAD_ID, OTHER_ID]) {
+        await host.kv.set(`deferral:${id}`, {
+          threadId: id,
+          projectId: PROJECT_ID,
+          environmentId: "env-1",
+        });
+      }
+      const message =
+        `thread ${THREAD_ID} has a deferred turn; its review runs when the hold clears — ` +
+        `reset would drop it. Check \`bb auto-review status ${THREAD_ID}\`; if the hold never ` +
+        "clears, stop or archive the holding child thread, or send the thread another message " +
+        "(a new turn re-checks the deferred one and reviews it).";
 
-      const result = await host.run(["reset", THREAD_ID]);
-      expect(result.stdout).toContain(`reset ${THREAD_ID} (dropped a deferred turn).`);
-      expect(result.stdout).toContain("will now never run");
-      expect(host.metadataFor(THREAD_ID)).toEqual({ phase: "idle" });
-      expect(await host.kv.list("deferral:")).toEqual([`deferral:${OTHER_ID}`]);
+      const text = await host.run(["reset", THREAD_ID]);
+      expect(text.exitCode).toBe(2);
+      expect(text.stderr).toBe(`${message}\n`);
+      expect(text.stdout).toBe("");
+
+      const payload = await host.run(["reset", THREAD_ID, "--json"]);
+      expect(payload.exitCode).toBe(2);
+      expect(parse(payload.stdout)).toEqual({ ok: false, threadId: THREAD_ID, error: message });
+
+      expect(host.metadataFor(THREAD_ID)).toEqual(deferred);
+      expect((await host.kv.list("deferral:")).sort()).toEqual([
+        `deferral:${THREAD_ID}`,
+        `deferral:${OTHER_ID}`,
+      ]);
     });
   });
 
-  it("drops a child-held deferred turn with wording naming the children", async () => {
+  it("refuses a child-held deferred turn too", async () => {
     await withHost({}, async (host) => {
       Object.assign(host.metadataFor(THREAD_ID), {
         phase: "deferred",
@@ -369,23 +436,9 @@ describe("auto-review cli: reset", () => {
         heldBy: ["child-1"],
       });
       const result = await host.run(["reset", THREAD_ID]);
-      expect(result.stdout).toContain(`reset ${THREAD_ID} (dropped a deferred turn).`);
-      expect(result.stdout).toContain(
-        "waiting for child threads to finish (child-1), not stuck",
-      );
-      expect(result.stdout).toContain("will now never run");
-    });
-  });
-
-  it("flags the dropped deferral in JSON", async () => {
-    await withHost({}, async (host) => {
-      Object.assign(host.metadataFor(THREAD_ID), { phase: "deferred" });
-      const result = await host.run(["reset", THREAD_ID, "--json"]);
-      expect(parse(result.stdout)).toMatchObject({
-        priorPhase: "deferred",
-        wasLatched: true,
-        droppedDeferral: true,
-      });
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain("has a deferred turn");
+      expect(host.metadataFor(THREAD_ID).phase).toBe("deferred");
     });
   });
 
@@ -535,14 +588,29 @@ describe("auto-review cli: status", () => {
     });
   });
 
-  it("explains how long a deferred turn has waited and how to drop it", async () => {
+  it("still shows a stored last fire whose reason is the legacy commit-plan", async () => {
+    await withHost({}, async (host) => {
+      await host.kv.set(
+        `lastfire:${PROJECT_ID}:${THREAD_ID}`,
+        lastFire({ outcome: "stood-down", reason: "commit-plan" }),
+      );
+      const text = await host.run(["status", THREAD_ID]);
+      expect(text.stdout).toContain("lastFire: stood-down (commit-plan) at ");
+      const payload = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(payload.stdout)).toMatchObject({
+        lastFire: { outcome: "stood-down", reason: "commit-plan" },
+      });
+    });
+  });
+
+  it("explains how long a deferred turn has waited", async () => {
     await withHost({}, async (host) => {
       const deferredSince = Date.now() - 7 * 60_000 - 5_000;
       Object.assign(host.metadataFor(THREAD_ID), { phase: "deferred", deferredSince });
       const text = await host.run(["status", THREAD_ID]);
       expect(text.stdout).toContain("phase: deferred\ndeferred for: 7 min — ");
       expect(text.stdout).toContain("It fires automatically as soon as that review ends.");
-      expect(text.stdout).toContain(`To drop it instead: bb auto-review reset ${THREAD_ID}\n`);
+      expect(text.stdout).not.toContain("reset");
 
       const payload = await host.run(["status", THREAD_ID, "--json"]);
       expect(parse(payload.stdout)).toMatchObject({ phase: "deferred", deferredSince });
@@ -577,7 +645,7 @@ describe("auto-review cli: status", () => {
       expect(text.stdout).toContain(
         "Stop or archive a stuck child to release it — the turn is then re-checked for review.",
       );
-      expect(text.stdout).toContain(`To drop it instead: bb auto-review reset ${THREAD_ID}\n`);
+      expect(text.stdout).not.toContain("reset");
       expect(text.stdout).not.toContain("waiting for another auto-review on the same provider");
 
       const payload = await host.run(["status", THREAD_ID, "--json"]);

@@ -83,7 +83,7 @@ All commands accept `--json`.
 | `bb auto-review show` | Global defaults, project override and resolved settings for the current project |
 | `bb auto-review enable [--global \| --project <id>]` | Turn it on; bare `enable` is global |
 | `bb auto-review disable [--global \| --project <id>]` | Turn it off, same scoping |
-| `bb auto-review reset <thread-id>` | Clear a wedged loop-guard latch on an idle thread; refused while the thread is running. On a `deferred` thread this cancels the pending review |
+| `bb auto-review reset <thread-id>` | Clear a wedged loop-guard latch on an idle thread; refused while the thread is running or holds a `deferred` turn (its review runs when the hold clears) |
 
 The agent-hooks plugin's `review-plan-before-exit.sh` reads `planGate` from
 `bb auto-review status --json` and stands down where it is true, so a plan is reviewed

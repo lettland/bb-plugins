@@ -918,6 +918,25 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
+  it("reviews a deferred turn with no index entry when the thread's next turn goes idle", async () => {
+    const host = createHost();
+    await plugin(host.bb);
+    await park(host, THREAD_ID);
+    await host.bb.storage.kv.delete(`deferral:${THREAD_ID}`);
+    expect(await host.bb.storage.kv.list("deferral:")).toEqual([]);
+
+    await emitActive(host);
+    // The next turn keeps the deferred turn's (earlier) cursor.
+    expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 0 });
+    await emitIdle(host);
+
+    expect(host.sends).toHaveLength(1);
+    expect(host.metadata.phase).toBe("awaiting-review");
+    expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 0 });
+    expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
+    await host.harness.dispose();
+  });
+
   it("unparks a deferred turn when the user stops the thread's next turn", async () => {
     const host = createHost();
     await plugin(host.bb);
@@ -1186,7 +1205,7 @@ describe("auto-review plugin", () => {
 
     const reset = await host.harness.runCli(["reset", THREAD_ID]);
     expect(reset.exitCode).toBe(2);
-    expect(reset.stderr).toBe("reset only clears a stuck latch on an idle thread\n");
+    expect(reset.stderr).toContain(`thread ${THREAD_ID} is active; reset only clears a stuck latch`);
     expect(host.metadata.turnStart).toBeDefined();
 
     host.setEnvThreads([{ id: THREAD_ID, status: "idle" }]);
@@ -1842,7 +1861,7 @@ describe("auto-review plugin", () => {
     const host = createHost();
     await plugin(host.bb);
     await park(host, THREAD_ID);
-    await host.harness.runCli(["reset", THREAD_ID]);
+    host.metadata.phase = "idle";
     await host.harness.runSchedule("sweep-deferrals");
     expect(host.sends).toHaveLength(0);
     expect(await host.bb.storage.kv.list("deferral:")).toEqual([]);
