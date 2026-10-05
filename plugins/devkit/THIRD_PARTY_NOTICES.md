@@ -272,8 +272,8 @@ SOFTWARE.
   `content/skills/using-git-worktrees/SKILL.md`,
   `content/skills/receiving-code-review/SKILL.md`,
   `content/skills/subagent-driven-development/SKILL.md`,
-  `content/skills/debugging/SKILL.md` (from `systematic-debugging`; its generated
-  copy is `skills-generated/debugging/SKILL.md`),
+  `content/skills/debugging/SKILL.md` (from `systematic-debugging`),
+  `skills-generated/debugging/SKILL.md` (generated from `content/skills/debugging/SKILL.md`),
   `content/skills/tdd/SKILL.md` (from `test-driven-development`),
   `content/skills/planning/SKILL.md` (from `writing-plans`).
 

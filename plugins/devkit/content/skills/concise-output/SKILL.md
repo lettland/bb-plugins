@@ -17,7 +17,7 @@ metadata:
 
 Natural-language on-ramp for terse, token-lean replies. The **durable** mechanism is the `devkit:concise` **output style** — it edits the system prompt, so it persists every turn and survives `/compact`. A skill body is one-shot (it fades across a session), so this skill handles the immediate request and signposts the durable switch.
 
-Borrowed from [caveman](https://github.com/JuliusBrussee/caveman), professionalized: same drop-the-fluff mechanism, no novelty register.
+Drop the fluff, stay professional — no novelty register.
 
 ## When invoked
 
