@@ -10,7 +10,12 @@ const FAKE_CREDENTIALS_URL = new URL('./fake-credentials.ts', import.meta.url);
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier === './credentials.js' && context.parentURL?.endsWith('/server.ts')) {
+    if (
+      (specifier === './credentials.js' &&
+        context.parentURL?.endsWith('/server.ts')) ||
+      (specifier === '../credentials.js' &&
+        context.parentURL?.endsWith('/server/context.ts'))
+    ) {
       return { shortCircuit: true, url: FAKE_CREDENTIALS_URL.href };
     }
     if (specifier.startsWith('.') && specifier.endsWith('.js')) {
