@@ -8,13 +8,18 @@ const state = {
 } as unknown as ThreadState;
 
 describe("committedSinceHead", () => {
-  it("gives the turn-start head when the turn's own commits touched paths", () => {
+  it("gives the turn-start head when the turn made commits", () => {
     const turn = { paths: ["a.ts"], commits: ["c1"], committedPaths: ["a.ts"] };
     expect(committedSinceHead(turn, state)).toBe("0123abcd");
   });
 
-  it("gives no committed range when the commits touched no path of their own", () => {
-    const turn = { paths: ["a.ts"], commits: ["merge"], committedPaths: [] };
+  it("still gives the head for a commit whose paths could not be read", () => {
+    const turn = { paths: [], commits: ["unread"], committedPaths: [] };
+    expect(committedSinceHead(turn, state)).toBe("0123abcd");
+  });
+
+  it("gives no committed range when the turn made no commits", () => {
+    const turn = { paths: ["a.ts"], commits: [], committedPaths: [] };
     const committedSince = committedSinceHead(turn, state);
     expect(committedSince).toBeNull();
     const text = buildReviewPrompt({

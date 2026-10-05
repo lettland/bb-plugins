@@ -15,11 +15,12 @@ import type { AvailableWorkspace } from "./detect-workspace.js";
  */
 export const MAX_NEW_COMMITS = 20;
 
+/** The paths a commit touched; null when they could not be read, [] when it touched none. */
 export async function commitPaths(
   bb: BbPluginApi,
   environmentId: string,
   sha: string,
-): Promise<string[]> {
+): Promise<string[] | null> {
   try {
     const result = await bb.sdk.environments.diffFiles({
       environmentId,
@@ -27,13 +28,13 @@ export async function commitPaths(
       sha,
     });
     if (result.outcome !== "available") {
-      return [];
+      return null;
     }
     return result.files.flatMap((file) =>
       file.previousPath === null ? [file.path] : [file.path, file.previousPath],
     );
   } catch {
-    return [];
+    return null;
   }
 }
 

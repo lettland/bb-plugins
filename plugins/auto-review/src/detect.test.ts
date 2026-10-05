@@ -778,6 +778,34 @@ describe("workspace capture edge cases", () => {
       });
     });
 
+    it("drops a commit that touched no path but keeps one whose paths could not be read", async () => {
+      const { bb } = fakeBb({
+        diffFiles: async ({ sha }) => {
+          if (sha === "merge") {
+            return { outcome: "available", files: [] };
+          }
+          if (sha === "unread") {
+            throw new Error("transient");
+          }
+          return { outcome: "available", files: [{ path: `${sha}.ts`, previousPath: null }] };
+        },
+      });
+      const changed = await treeChangedPaths(
+        bb,
+        "env",
+        { headSha: "h0", files: {}, commits: ["old"] },
+        ws({
+          checkout: { kind: "branch", headSha: "own" },
+          mergeBase: {
+            files: [],
+            commits: [{ sha: "own" }, { sha: "merge" }, { sha: "unread" }],
+          },
+        }),
+      );
+      expect(changed.commits).toEqual(["own", "unread"]);
+      expect(changed.committedPaths).toEqual(["own.ts"]);
+    });
+
     it("reads no commits when the head did not move", async () => {
       const { bb, diffFilesCalls } = fakeBb({});
       const before = { headSha: "h0", files: {}, commits: [] };

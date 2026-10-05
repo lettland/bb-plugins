@@ -57,17 +57,22 @@ export async function treeChangedPaths(
     }
   });
 
-  const commits = await novelCommits(
+  const novel = await novelCommits(
     bb,
     environmentId,
     before,
     await turnCommits(bb, environmentId, before, workspace),
     startedAt,
   );
-  const perCommit = await mapLimit(commits, HASH_CONCURRENCY, (sha) =>
-    commitPaths(bb, environmentId, sha),
-  );
-  const committedPaths = [...new Set(perCommit.flat())];
+  const perCommit = await mapLimit(novel, HASH_CONCURRENCY, async (sha) => ({
+    sha,
+    paths: await commitPaths(bb, environmentId, sha),
+  }));
+  // A commit read fine that touched no path, such as a clean merge from a pull,
+  // adds nothing to review; one that could not be read is kept to be safe.
+  const kept = perCommit.filter(({ paths }) => paths === null || paths.length > 0);
+  const commits = kept.map(({ sha }) => sha);
+  const committedPaths = [...new Set(kept.flatMap(({ paths }) => paths ?? []))];
   for (const path of committedPaths) {
     changed.add(path);
   }

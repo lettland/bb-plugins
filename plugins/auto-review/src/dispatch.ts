@@ -49,13 +49,12 @@ export interface DispatchInput {
 }
 
 /**
- * The turn-start head to diff the turn's commits from, or null when none of the
- * turn's own work is committed. Gated on `committedPaths`, not `commits`: a
- * merge commit from a pull is authored during the turn but touches no path of
- * its own, so the range would cover only code pulled in from upstream.
+ * The turn-start head to diff the turn's commits from, or null when the turn
+ * made none. A pathless merge from a pull is already dropped from `commits`; a
+ * commit whose paths could not be read still sets the range.
  */
 export function committedSinceHead(turn: TurnChanges, state: ThreadState): string | null {
-  return turn.committedPaths.length > 0 ? (state.turnStart?.tree?.headSha ?? null) : null;
+  return turn.commits.length > 0 ? (state.turnStart?.tree?.headSha ?? null) : null;
 }
 
 async function sendReview(
