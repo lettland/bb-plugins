@@ -12,6 +12,8 @@ metadata:
   owns: debugging
 ---
 
+_Adapted from obra/superpowers (MIT); modified. See THIRD_PARTY_NOTICES.md._
+
 # Systematic Debugging
 
 Random fixes waste time and create new bugs. Quick patches mask underlying issues.

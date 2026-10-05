@@ -12,6 +12,8 @@ metadata:
   owns: tdd
 ---
 
+_Adapted from obra/superpowers (MIT); modified. See THIRD_PARTY_NOTICES.md._
+
 # Test-Driven Development (TDD)
 
 Write the test first. Watch it fail. Write minimal code to pass.

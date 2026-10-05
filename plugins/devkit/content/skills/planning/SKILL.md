@@ -12,6 +12,8 @@ metadata:
   owns: planning
 ---
 
+_Adapted from obra/superpowers (MIT); modified. See THIRD_PARTY_NOTICES.md._
+
 # Planning
 
 Write comprehensive implementation plans assuming the engineer has zero context for your codebase and questionable taste.
