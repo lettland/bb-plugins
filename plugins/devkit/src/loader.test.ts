@@ -212,6 +212,94 @@ describe("review-code content", () => {
     expect(section4).toContain("`Frameworks considered:`");
   });
 
+  it("reviewer-security covers every OWASP Top 10:2025 category and the CVE-handling rules", async () => {
+    const r = await loadSkill(contentRoot, undefined, "reviewer-security");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const text = r.content.replace(/\s+/g, " ");
+    for (const title of [
+      "A01:2025 Broken Access Control",
+      "A02:2025 Security Misconfiguration",
+      "A03:2025 Software Supply Chain Failures",
+      "A04:2025 Cryptographic Failures",
+      "A05:2025 Injection",
+      "A06:2025 Insecure Design",
+      "A07:2025 Authentication Failures",
+      "A08:2025 Software or Data Integrity Failures",
+      "A09:2025 Security Logging and Alerting Failures",
+      "A10:2025 Mishandling of Exceptional Conditions",
+    ]) {
+      expect(text, title).toContain(title);
+    }
+    expect(text).not.toMatch(/\bA(0[1-9]|10)\b(?!:2025|:2021)/);
+    expect(text).toContain("A06:2021");
+    expect(text).toContain("A10:2021");
+    expect(text).toContain("A09:2021");
+    expect(text).toContain("`MAL-*`");
+    expect(text).toContain("**Blocker**");
+    expect(text).toContain("run no scanner and make no network call");
+    const verdict = r.content.slice(r.content.indexOf("### Verdict:"));
+    expect(verdict).toContain("CVE check:");
+  });
+
+  it("routes `security` to reviewer-security unconditionally, even with no stack keyword", async () => {
+    const routing = await loadSkill(contentRoot, undefined, "review-skill-routing");
+    expect(routing.ok).toBe(true);
+    if (!routing.ok) return;
+    const text = routing.content.replace(/\s+/g, " ");
+    expect(text).toContain("`reviewer-security` gets `Stack skills: security`");
+    expect(text).toContain("fixed slug");
+    expect(text).toContain("unconditional");
+    const security = await loadSkill(contentRoot, "security");
+    expect(security.ok).toBe(true);
+  });
+
+  it("documents the orchestrator-side CVE lookup and keeps scanner names to one sentence", async () => {
+    const r = await loadSkill(contentRoot, undefined, "review-cve-lookup");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const text = r.content.replace(/\s+/g, " ");
+    expect(text).toContain("https://api.osv.dev/v1/querybatch");
+    expect(text).toContain("DEVKIT_CVE_LOOKUP");
+    expect(text).toContain("private");
+    expect(text).toContain("Any failure ends the lookup");
+    expect(text).toContain("not run — plan review");
+    const scanners = ["npm audit", "pip-audit", "cargo audit", "osv-scanner", "govulncheck"];
+    const neverRun = text.match(/\*\*Never run\*\*[^.]*\./g) ?? [];
+    expect(neverRun).toHaveLength(1);
+    const [sentence = ""] = neverRun;
+    const rest = text.replace(sentence, "");
+    for (const scanner of scanners) {
+      expect(sentence, scanner).toContain(scanner);
+      expect(rest, scanner).not.toContain(scanner);
+    }
+  });
+
+  it("keeps every CVE check status line in reviewer-security inside the lookup grammar", async () => {
+    const security = await loadSkill(contentRoot, undefined, "reviewer-security");
+    expect(security.ok).toBe(true);
+    if (!security.ok) return;
+    const lookup = await loadSkill(contentRoot, undefined, "review-cve-lookup");
+    expect(lookup.ok).toBe(true);
+    if (!lookup.ok) return;
+    expect(lookup.content).toContain("api.osv.dev — N queried");
+    const counts = String.raw`\d+ queried(, \d+ skipped \([^)]+\))?, \d+ hits?`;
+    const grammar = new RegExp(
+      String.raw`^(api\.osv\.dev — ${counts}|partial — ${counts}; .+|not run — .+|no dependency changes)$`,
+    );
+    const lines = [...security.content.matchAll(/`CVE check: ([^`]+)`/g)]
+      .map((m) => (m[1] ?? "").trim())
+      .filter((line) => !line.startsWith("<"));
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) expect(line, line).toMatch(grammar);
+  });
+
+  it("references the CVE lookup from review-code and carries the CVE check line in §4", () => {
+    expect(normalized).toContain('devkit_load_skill({ reference: "review-cve-lookup" })');
+    const section4 = normalized.slice(normalized.indexOf("## 4."), normalized.indexOf("## 5."));
+    expect(section4).toContain("`CVE check:`");
+  });
+
   it("gives the closure reviewer and compliance the license-file hunks, patterns included", async () => {
     const r = await loadSkill(contentRoot, undefined, "review-generated-file-exclusion");
     expect(r.ok).toBe(true);

@@ -70,6 +70,12 @@ with a leaked secret or real personal data, rather than waiting on its parent (`
 confirmation prompt an unattended agent would otherwise hang on). They're spawned with
 `--lifecycle-owner-thread`, so they're deleted along with their parent anyway.
 
+Code and impl reviews also check added or changed **public** dependencies for known CVEs: the
+orchestrator sends only their names and versions to `api.osv.dev` (Google-operated OSV) and hands
+the result to the security reviewer. Packages from private sources are skipped. Set
+`DEVKIT_CVE_LOOKUP=off` to disable the lookup, and allowlist `curl` to `api.osv.dev` to avoid a
+permission prompt in unattended runs.
+
 ## Install
 
 ```sh

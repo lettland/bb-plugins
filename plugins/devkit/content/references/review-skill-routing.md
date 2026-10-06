@@ -41,13 +41,16 @@ For `/review-plan`, also add any language or framework the plan names explicitly
 (e.g. "Django", "Tailwind", "axum").
 
 If no keyword is found → **skip skill routing**; dispatch every reviewer with
-`Stack skills: none`.
+`Stack skills: none`, except that `reviewer-security` gets `Stack skills: security` (see Step 2).
 
 ## Step 2 — Resolve candidate slugs
 
 Invoke `Skill(skill-discovery)` once. For each detected keyword (and the framework names you
 found), read that keyword's row to collect the current candidate slugs. Never invent a slug —
 only use ones that appear in the skill-discovery output.
+
+One exemption: `security` for `reviewer-security` is a **fixed slug**. It bypasses discovery, so
+it is exempt from "Never invent a slug" and applies even when no keyword was found.
 
 ## Step 3 — Select per reviewer (cap ≤2 slugs each)
 
@@ -57,7 +60,7 @@ From the candidates, pick a tailored subset for each reviewer by slug family:
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `reviewer-senior-dev` | language idioms: `<lang>-essentials` (+ `go-concurrency` for Go). Frontend/React: `react` + the UI-framework skill present in the change (`frontend-tailwind`, `frontend-shadcn-ui`, `frontend-ant-design`, …).                                                              |
 | `reviewer-senior-qa`  | the stack's testing skill if a candidate exists (`python-testing`, `rust-testing`, `ts-vitest`); otherwise `testing-strategy`.                                                                                                                                               |
-| `reviewer-security`   | `security`. (Its inline Go/Python/React vuln guidance already covers stack specifics; `security` adds OWASP/SAST depth.)                                                                                                                                                     |
+| `reviewer-security`   | `security`, unconditional — including `/review-plan` and the no-keyword case. (Its inline vuln guidance already covers stack specifics; `security` adds OWASP/SAST depth.)                                                                                                   |
 | `reviewer-end-user`   | **only** when a UI or public API surface changed. Frontend/React → `ux-essentials` + `ux-wcag-a11y`. HTTP API (candidates include `rest-essentials`, `python-fastapi`, `python-django`, `go-chi`, `graphql-essentials`) → `rest-essentials`. Pure internal backend → `none`. |
 | `reviewer-compliance` | `security` when auth, logging, or data handling changed; otherwise `none`.                                                                                                                                                                                                   |
 
