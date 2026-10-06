@@ -56,7 +56,10 @@ task to an agent without rebuilding context by hand.
   assignee for that exact project and destination. Assisted creations attach a
   Taskboard mention so the thread continues with live issue context.
 - **Agent handoff** — prefill a BB prompt from any task or attach one with the
-  Taskboard mention result.
+  Taskboard mention result. Linear and Jira items appear under "Taskboard" in
+  `@` and `#` mentions. For GitHub-source projects, mentions come from the
+  GitHub plugin instead (groups "GitHub issues" and "GitHub pull requests");
+  reach closed GitHub items with `#`.
 - **CLI automation** — browse cached/live work, inspect transitions, move
   statuses, refresh providers, and manage project connections through
   `bb taskboard`. Issue creation remains an intentional review-and-confirm UI

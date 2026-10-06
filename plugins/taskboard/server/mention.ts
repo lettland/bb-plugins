@@ -1,7 +1,7 @@
 import { formatWorkItemContext, sourceName } from '../contract.js';
 import { assertSelectedSource } from './adapters.js';
 import type { TaskboardContext } from './context.js';
-import { assertProjectExists } from './projects.js';
+import { assertProjectExists, projectConfig } from './projects.js';
 import { mentionId, parseMentionId } from './util.js';
 
 export function registerMentionProvider(tc: TaskboardContext): void {
@@ -14,6 +14,7 @@ export function registerMentionProvider(tc: TaskboardContext): void {
       if (!projectId || trimmed.length < 2) return [];
       try {
         await assertProjectExists(tc, projectId);
+        if (projectConfig(tc, projectId, false).source === 'github') return [];
       } catch {
         return [];
       }

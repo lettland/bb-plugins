@@ -43,6 +43,10 @@ type Handlers = {
   ) => Promise<unknown>;
 };
 
+export type MentionProvider = Parameters<
+  BbPluginApi['ui']['registerMentionProvider']
+>[0];
+
 export interface Published {
   channel: string;
   payload: unknown;
@@ -54,6 +58,7 @@ export interface Harness {
   published: Published[];
   warnings: string[];
   cli: { register: unknown[]; run: (argv: string[]) => Promise<unknown> };
+  mentionProvider: MentionProvider;
   seedJiraProject: (token?: string) => void;
 }
 
@@ -82,6 +87,7 @@ export async function bootPlugin(
   const warnings: string[] = [];
   const registered: { handlers?: Handlers; cli?: { run: Function } } = {};
   const cliRegistrations: unknown[] = [];
+  let mentionProvider: MentionProvider | undefined;
   const bb = {
     storage: {
       database: () => db,
@@ -106,7 +112,11 @@ export async function bootPlugin(
       }
     },
     background: { service() {} },
-    ui: { registerMentionProvider() {} },
+    ui: {
+      registerMentionProvider: (provider: MentionProvider) => {
+        mentionProvider = provider;
+      }
+    },
     sdk: {
       projects: { list: async () => projects },
       plugins: {
@@ -121,6 +131,7 @@ export async function bootPlugin(
   return {
     db,
     handlers: registered.handlers!,
+    mentionProvider: mentionProvider!,
     published,
     warnings,
     cli: {
