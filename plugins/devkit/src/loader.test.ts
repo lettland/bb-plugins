@@ -176,6 +176,8 @@ describe("review-code content", () => {
       expect(r.content).toContain("Frameworks considered:");
       expect(r.content).toContain("Never skip a framework");
       expect(r.content).toContain("beats any statement that it does not");
+      expect(r.content).toContain("content the diff itself adds that shows it applies");
+      expect(r.content).toContain("Same-diff claims that lower a rating");
       expect(r.content).not.toContain("applicability-gated");
       expect(r.content).not.toContain("not applicable:");
       expect(r.content).not.toMatch(/cap(ped)? at (an )?\*\*Advisory\*\*/);
