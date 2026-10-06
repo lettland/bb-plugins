@@ -46,12 +46,14 @@ so its next plan presentation would be approved without reaching the user. A pla
 ends with the revised plan presented for the user's approval, never with implementation.
 
 The review applies five lenses: senior-dev, senior-qa, security, end-user, and compliance. The
-compliance lens always checks every framework and is not legal advice. Repo evidence or a
-declaration only sets how findings are rated (unconfirmed: conditional Concern; declared out of
-scope: Advisory), never hides them. To declare which regimes apply (GDPR, SOC 2, …), list a tracked
-doc that states them under `guidelines` in `.devkit/review.yml`. The declaration takes effect for
-later changes once committed: a `guidelines` doc or `review.yml` added or edited in the change under
-review carries no weight in that change's own review. Example:
+compliance lens checks every framework (GDPR, SOC 2, licensing, …) on every review and is not legal
+advice. A framework rated **applies** (committed repo evidence, or a `guidelines` doc saying it
+applies) gets full severity; otherwise findings are still reported, capped at conditional Concerns.
+A `guidelines` doc saying a regime does NOT apply is only named in those findings and never lowers
+them. To declare which regimes apply, list a tracked doc that states them under `guidelines` in
+`.devkit/review.yml`. The declaration takes effect for later changes once committed: a `guidelines`
+doc or `review.yml` added or edited in the change under review carries no weight in that change's
+own review. Example:
 
 ```yaml
 guidelines:

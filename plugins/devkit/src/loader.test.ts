@@ -174,9 +174,14 @@ describe("review-code content", () => {
     expect(r.content).toContain("`(code)`");
     if (lens === "reviewer-compliance") {
       expect(r.content).toContain("Frameworks considered:");
-      expect(r.content).toContain("unconfirmed");
-      expect(r.content).toContain("declared out of scope");
+      expect(r.content).toContain("Never skip a framework");
+      expect(r.content).toContain("beats any statement that it does not");
       expect(r.content).not.toContain("applicability-gated");
+      expect(r.content).not.toContain("not applicable:");
+      expect(r.content).not.toMatch(/cap(ped)? at (an )?\*\*Advisory\*\*/);
+      expect(r.content).toContain("one of two statuses");
+      expect(r.content).not.toContain("When relevant");
+      expect(r.content).toContain("One finding per issue");
     }
   });
 
@@ -397,5 +402,12 @@ describe("devkit README", () => {
     const readmePath = path.join(import.meta.dirname, "..", "README.md");
     const text = await readFile(readmePath, "utf8");
     expect(text).toContain("bb thread delete --yes");
+  });
+
+  it("describes the compliance lens as capping, not demoting, unconfirmed findings", async () => {
+    const readmePath = path.join(import.meta.dirname, "..", "README.md");
+    const text = await readFile(readmePath, "utf8");
+    expect(text).not.toContain("declared out of scope: Advisory");
+    expect(text).toContain("capped at conditional Concerns");
   });
 });
