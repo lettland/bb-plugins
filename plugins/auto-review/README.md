@@ -31,6 +31,9 @@ It ships enabled (opt-out).
   and harness state under `.claude/`, `.codex/` and `.bb/` are not claimed.
   Commits replayed by a rebase with the same patches as the turn started with do not
   count as new work; changed replayed patches still count.
+- Fixes and commits valid pre-existing issues the review finds in the files the turn touched,
+  except unrelated ones when the work is a named feature (a user-named `/` branch other than
+  `bb/…`, or a cited ticket).
 - Chooses commit and merge from a branch policy keyed on the mainline name. A feature
   branch (name contains a `/`, e.g. `fix/x`, `bb/<slug>`) merges into an eligible mainline;
   a top-level branch such as `develop` is never merged; a non-eligible (protected) mainline such as
@@ -105,11 +108,11 @@ Install [aislop](../aislop) alongside it and every code review also runs `bb ais
 on the branch's changes — also on the root branch itself, where it covers unpushed
 commits and uncommitted work, and from the turn-start commit when the turn already
 committed. Its findings are advisory: the review fixes the real ones in
-the turn's own changed lines, and it leaves false positives and anything against the
-project's own rules (CLAUDE.md / AGENTS.md, lint config, local conventions) unfixed,
-listing each with a reason. auto-review checks the plugin list before each review and
-asks for the scan only while a running plugin serves `bb aislop`; with aislop missing
-or disabled the step is left out, and each plugin works on its own.
+the files the turn touched, pre-existing lines included, and it leaves false positives and
+anything against the project's own rules (CLAUDE.md / AGENTS.md, lint config, local
+conventions) unfixed, listing each with a reason. auto-review checks the plugin list
+before each review and asks for the scan only while a running plugin serves `bb aislop`;
+with aislop missing or disabled the step is left out, and each plugin works on its own.
 
 ## Development
 

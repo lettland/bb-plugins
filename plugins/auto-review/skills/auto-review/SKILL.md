@@ -10,6 +10,10 @@ the feature branch's changes an agent made during a turn, in a worktree or the p
 checkout alike. It fires on turn end for top-level, git-branch, user coding threads, and
 attributes work only to that thread's own edits.
 
+Valid pre-existing issues the review finds in the files the turn touched are fixed and committed
+too, except unrelated ones when the work is a named feature (a user-named `/` branch other than
+`bb/…`, or a cited ticket).
+
 It commits only a complete, working change. The review turn is given the full list of
 files the turn authored, checks that everything the change depends on is staged with it
 (or already in this turn's own commits), and runs the project's typecheck/build and tests.
@@ -171,9 +175,9 @@ Every code review also runs `bb aislop scan` while the aislop plugin is installe
 running; with it missing or disabled, the review prompt leaves the step out. The scan
 also runs on the root branch itself (there it scans the unpushed commits and uncommitted
 changes), and against the turn-start commit when the turn already committed its work.
-Its findings are advice: only real problems in the turn's own changed lines
-are fixed; false positives and findings that go against the project's own rules are
-left alone and listed with a one-line reason.
+Its findings are advice: only real problems in the files the turn touched are fixed,
+pre-existing lines included; false positives and findings that go against the project's own
+rules are left alone and listed with a one-line reason.
 
 Per-project overrides are stored by the plugin, not in settings.
 

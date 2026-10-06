@@ -269,6 +269,10 @@ describe("buildReviewPrompt", () => {
       expect(text).not.toMatch(/bb aislop scan --base/);
       expect(text).toMatch(/even when the current branch is the root branch itself/);
       expect(text).toMatch(/prints an error instead of a report[^\n]*did not run/);
+      expect(text).toMatch(
+        /Treat its findings as advice[^\n]*files listed above, lines that predate this turn included[^\n]*named-feature exception[^\n]*never on edits or commits the user or another thread made meanwhile/u,
+      );
+      expect(text).not.toContain("on lines you changed this turn");
 
       const textCommitted = build(true, "abc1234");
       expect(textCommitted).toContain("`bb aislop scan --base abc1234`");
@@ -310,6 +314,37 @@ describe("buildReviewPrompt", () => {
           /1\. Review[^\n]*Review ONLY your own work from this turn: the files attributed to your turn above \(including any a note says were left off the list\)[^\n]*do not review them, report findings on them, or fix them/u,
         );
         expect(text.indexOf("```text auto-review-scope")).toBeLessThan(text.indexOf("1. Review"));
+      }
+    }
+  });
+
+  it("fixes valid pre-existing issues in the turn's files, skipping only unrelated ones of a named feature", () => {
+    for (const reviewMode of ["auto", "devkit", "self"] as const) {
+      for (const committedSince of ["0123abcd", null]) {
+        const text = buildReviewPrompt({
+          decision: { commit: true, merge: false },
+          reviewMode,
+          scope: baseScope,
+          committedSince,
+        });
+        expect(text).toMatch(
+          /1\. Review[^\n]*issue the review finds in code of those files that predates this turn[^\n]*turn-start commit[^\n]*is fixed too, whoever wrote it/u,
+        );
+        expect(text).toMatch(
+          /1\. Review[^\n]*Skip one only when this thread's work is a named feature[^\n]*name contains `\/`[^\n]*`bb\/<slug>`[^\n]*`dependabot\/…`[^\n]*`renovate\/…`[^\n]*an ordinary request with no named feature do not count[^\n]*unrelated to that feature: not in code the feature changes, calls, or is called by, and it does not affect the feature's behaviour\. When in doubt, it is not a named feature: fix it\./u,
+        );
+        expect(text).toMatch(/1\. Review[^\n]*Fix only in the listed files: report an issue outside them/u);
+        expect(text).toMatch(
+          /1\. Review[^\n]*uncommitted edits that were already in the checkout when the turn started, and edits or commits the user or another thread made meanwhile[^\n]*do not review them, report findings on them, or fix them/u,
+        );
+        expect(text).toMatch(
+          /1\. Review[^\n]*Commit a pre-existing fix in a file the feature did not otherwise change as its own focused commit; one in a file the feature also changed stays in that commit, and the commit message and your final reply say so/u,
+        );
+        expect(text).toMatch(
+          /1\. Review[^\n]*list pre-existing fixes separately[^\n]*every skipped finding with its reason/u,
+        );
+        expect(text).not.toContain("within them only the changes you made");
+        expect(text).not.toContain("on lines you changed this turn");
       }
     }
   });
