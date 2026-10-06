@@ -54,7 +54,8 @@ finding:
    **Pre-existing is not a reason to skip.** A valid finding is fixed whether or not the code
    predates the change. _Pre-existing_ means the code as it stood at the review's base (`HEAD` for
    code scope, `<base>` for `impl <base>..<head>`); the caller may name a different base, such as
-   a turn-start commit. The only allowed skip is **named feature + unrelated**:
+   a turn-start commit. The only allowed skip for being pre-existing is **named feature +
+   unrelated**:
    - _Named feature_: the work is explicitly scoped to a feature the user named — a feature branch
      the user named (its name contains `/`, e.g. `fix/oh-5843/drop-dead-rotations-feed`) or a
      ticket/feature the request explicitly cites. Tool-generated branches (`bb/<slug>`,
@@ -64,10 +65,10 @@ finding:
      changes, calls, or is called by, and does not affect the feature's behaviour. A nil-check bug
      in a helper the change calls is related; a typo in an untouched sibling function is not.
 
-   Fixes land in the files under review; a related issue elsewhere is reported, not edited. The
-   whole handed-over diff is the user's to fix. Only edits outside the scope the caller handed
-   over, or ones that appear after the review started, are off-limits: report them, do not fix
-   them.
+   Fixes land in the files under review; a related issue elsewhere is reported, not edited. Fix
+   everything in the handed-over scope, whoever wrote it. Only edits outside the scope the caller
+   handed over, or ones that appear after the review started, are off-limits: report them, do not
+   fix them.
 
 3. **Skip false positives.** If validation shows a finding is wrong or already handled, drop it —
    but say so in one line. Two more findings are skipped, never fixed: one _outside review scope_

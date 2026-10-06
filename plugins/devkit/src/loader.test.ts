@@ -264,7 +264,9 @@ describe("review-code content", () => {
     };
     const disposition = await collapse("review-finding-disposition");
     expect(disposition).toContain("**Pre-existing is not a reason to skip.**");
-    expect(disposition).toContain("The only allowed skip is **named feature + unrelated**");
+    expect(disposition).toContain("The only allowed skip for being pre-existing is **named feature + unrelated**");
+    expect(disposition).toContain("Fix everything in the handed-over scope, whoever wrote it.");
+    expect(disposition).not.toContain("is the user's to fix");
     expect(disposition).toContain("outside the files under review or the scope the caller set, or another party's in-flight edit");
     expect(disposition).toContain("_unrelated to named feature `<name>`_");
     expect(disposition).toContain("_outside review scope (reported)_");
@@ -284,9 +286,20 @@ describe("review-code content", () => {
     const compliance = await collapse("reviewer-compliance");
     expect(compliance).not.toContain("Pre-existing gaps in code the change does not touch are not findings");
     expect(compliance).toContain(
-      "Every finding anchors to a file under review or a plan step.** Report pre-existing gaps in those files at their true severity; disposition decides what is skipped",
+      "Every finding anchors to a file under review or a plan step.** Report pre-existing gaps in those files at their true severity; the orchestrator's disposition decides what is skipped",
     );
     expect(compliance).toContain("missing organizational documents are outside the diff");
+    expect(compliance).toContain(
+      "a concrete obligation breach in the code under review (introduced by this change or pre-existing)",
+    );
+    expect(compliance).toContain(
+      "Blockers require a **concrete obligation breach in the files under review**, introduced by this change or pre-existing",
+    );
+    expect(compliance).toContain("the same issue on a line under review");
+    expect(compliance).not.toContain("(see below)");
+    expect(compliance).toContain("If no line in the files under review touches any framework's subject matter");
+    expect(compliance).not.toContain("breach introduced by this change");
+    expect(compliance).not.toContain("If no changed line touches");
 
     const codeReviewer = await collapse(undefined, "code-reviewer");
     expect(codeReviewer).toContain("Likely false positive");
