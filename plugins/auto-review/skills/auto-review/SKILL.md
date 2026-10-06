@@ -143,27 +143,34 @@ Off by default, per project only (no global setting). With the Tools → Auto re
 auto-approve switch for a project, or `bb auto-review auto-approve on --project <id>`, a plan that **completed the review cycle**
 is approved automatically instead of waiting for the user (`off` reverts it). The
 agent is told so in the review prompt: it presents the revised plan again, and once that
-returns approved it implements it, unless the review left a decision only the user can make,
+returns approved it mentions in its reply that the project auto-approves reviewed plans, so
+the approval may have come from auto-review rather than from the user (it cannot tell: when
+the evidence is missing the user approves by hand), and implements it, unless the review left a decision only the user can make,
 which it asks the user first.
 
 What counts as a completed review cycle:
 
 - Native gate (Claude Code): the review was delivered to the agent (dispatched from the
-  queue, or sent straight into the turn), the review turn has not ended, the arm is within
-  the 30-minute stale window, and the agent completed at least one tool call of its own
-  (not ExitPlanMode, EnterPlanMode or AskUserQuestion) after the delivery — a steered
-  message reaches the model only after a tool result, so that is the proof the review was
-  in front of it. The plan is then resolved `allow_once` (reason `plan-approved`, also
+  queue, or sent straight into the turn), the arm is within the 30-minute stale window, and
+  the agent completed at least one tool call of its own (not ExitPlanMode, EnterPlanMode or
+  AskUserQuestion, and not a subagent's call) after the delivery with no turn ending since —
+  a steered message reaches the model only after a tool result, so that is the proof the
+  review was in front of it. Whether a turn ended comes from the event log: bb emits
+  `turn/completed` only when a turn really ends, never when it steers a queued message into
+  a running one. The plan is then resolved `allow_once` (reason `plan-approved`, also
   logged).
 - `PresentPlan`: a tool call (other than the gate's own) completed between the first and
   second call, and the second call then returns an explicit "approved automatically" result
-  (reason `plan-approved`). This catches an accidental back-to-back call; it cannot catch an
+  (reason `plan-approved`). A subagent's call counts here, since the review may run in one;
+  a turn that ended in between (`turn/completed`) does not. This catches an accidental
+  back-to-back call; it cannot catch an
   agent that deliberately skips the review in between — on both paths the agent itself
   performs the review.
 
 Everything else still goes to the user, as with the option off: no proof the review ran
-(including an events read that failed), a review turn that already ended (a stale arm must
-never approve a later plan), `plan-hold-expired`, a provider that offers no `allow_once`,
+(including an events read that failed), a turn that ended since the review was delivered
+(a stale arm must never approve a later plan; this holds even when the idle event was
+missed), `plan-hold-expired`, a provider that offers no `allow_once`,
 or a failed approval (reason `plan-reviewed`).
 
 The prompt only shapes wording; the gate's decision at release time wins. If auto-approve is
@@ -173,7 +180,11 @@ not.
 
 **Agents must never turn auto-approve on, through the CLI or the plugin's RPC/HTTP endpoint, unless the user explicitly asks for it in chat.**
 It removes the human checkpoint on plans, which is why `--project` is always required (it is
-never taken from the thread).
+never taken from the thread), the project must exist, and the CLI refuses `on` from inside a
+bb thread (only the settings page or a terminal outside a thread can turn it on; `off` is
+allowed everywhere). That refusal guards against accidental agent use; it keys off the
+thread context, which an agent could strip, so it is not a security boundary. Every flip is logged with its source (`cli` with the thread or
+`terminal`, or `rpc`).
 
 ## CLI
 
@@ -192,7 +203,8 @@ All commands accept `--json`.
   defaults, project override, resolved values, including `autoApprovePlans`).
 - `bb auto-review auto-approve <on|off> --project <id>` — approve reviewed plans
   automatically for one project (see *Auto-approve*). `--project` is required; there is no
-  global form, and a missing project, a missing or invalid value, or `--global` exits 2.
+  global form, and a missing project, an unknown project, a missing or invalid value,
+  `--global`, or `on` run from inside a thread exits 2.
 - `bb auto-review enable [--global | --project <id>]` — turn it on. **Bare `enable`
   defaults to `--global`** (the kill switch). `--project <id>` (or `--project` inside a
   thread) sets a per-project override.

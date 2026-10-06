@@ -92,7 +92,7 @@ interface InterruptEvent {
 
 interface ItemStartedEvent {
   seq: number;
-  item: { type: string; tool?: string; server?: string };
+  item: { type: string; tool?: string; server?: string; parentToolCallId?: string };
 }
 
 interface TreeFile {
@@ -193,8 +193,15 @@ function createHost(options: HostOptions = {}) {
   let interrupts: Record<string, InterruptEvent[]> = {};
   let itemEvents: Record<string, ItemStartedEvent[]> = {};
   let completedEvents: Record<string, ItemStartedEvent[]> = {};
+  let turnEnds: Record<string, number[]> = {};
 
-  const sdk: CreateFakePluginHostOptions["sdk"] = {
+  const sdk = {
+    projects: {
+      list: async () => [
+        { id: "project-1", name: "One" },
+        { id: "project-2", name: "Two" },
+      ],
+    },
     plugins: {
       list: async () => {
         if (options.plugins === "throws") {
@@ -313,6 +320,21 @@ function createHost(options: HostOptions = {}) {
                   createdAt: 1_000,
                   type: "item/completed",
                   data: { item: event.item, providerThreadId: "pt-1" },
+                })),
+            );
+          }
+          if (args.types?.includes("turn/completed") === true) {
+            rows.push(
+              ...(turnEnds[args.threadId] ?? [])
+                .filter((seq) => seq > after)
+                .map((seq) => ({
+                  id: `ev-${args.threadId}-turn-${seq}`,
+                  scope: { kind: "thread" },
+                  threadId: args.threadId,
+                  seq,
+                  createdAt: 1_000,
+                  type: "turn/completed",
+                  data: {},
                 })),
             );
           }
@@ -443,7 +465,7 @@ function createHost(options: HostOptions = {}) {
         };
       },
     },
-  };
+  } as unknown as CreateFakePluginHostOptions["sdk"];
 
   function metadataOf(threadId: string) {
     return bucket(threadId);
@@ -484,6 +506,10 @@ function createHost(options: HostOptions = {}) {
         ...completedEvents,
         [threadId]: [...(completedEvents[threadId] ?? []), event],
       };
+    },
+    /** Record a `turn/completed` event: the turn really ended (steering a message in emits none). */
+    completeTurn: (seq: number, threadId: string = THREAD_ID) => {
+      turnEnds = { ...turnEnds, [threadId]: [...(turnEnds[threadId] ?? []), seq] };
     },
     setQueuedRows: (next: QueuedRow[]) => {
       queuedRows = next;
@@ -2520,7 +2546,6 @@ describe("auto-review plugin", () => {
       expect(host.resolutions).toEqual([DENY, APPROVE]);
       expect(host.metadata.planReviewArmedAt).toBeUndefined();
       expect(host.metadata.planReviewDeliveredSeq).toBeUndefined();
-      expect(host.metadata.planReviewTurnEnded).toBeUndefined();
       expect(await lastFireOf(host)).toMatchObject({ outcome: "fired", reason: "plan-approved" });
       expect(
         host.harness.logEntries.some(
@@ -2596,15 +2621,15 @@ describe("auto-review plugin", () => {
       await holdAndDispatch(host);
       host.completeItem({ seq: 101, item: READ });
       // The review turn ended without a gated re-presentation (the agent
-      // self-approved ExitPlanMode outside plan mode); the arm stays.
-      await emitIdle(host);
+      // self-approved ExitPlanMode outside plan mode); the arm stays. No idle
+      // event is emitted: the event log alone says the turn is over.
+      host.completeTurn(102);
       expect(typeof host.metadata.planReviewArmedAt).toBe("number");
-      expect(host.metadata.planReviewTurnEnded).toBe(true);
 
       await emitPlan(host, planInteraction("# A later plan", "pint-2"));
       expect(host.resolutions).toEqual([DENY]);
       expect(host.metadata.planReviewArmedAt).toBeUndefined();
-      expect(host.metadata.planReviewTurnEnded).toBeUndefined();
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
 
       // The gate is armed afresh for the plan after that.
       await emitPlan(host, planInteraction("# The next plan", "pint-3"));
@@ -2613,12 +2638,76 @@ describe("auto-review plugin", () => {
       await host.harness.dispose();
     });
 
-    it("does not mark the turn ended before the review was delivered", async () => {
+    it("still approves when the review was steered into the running turn, which emits no turn end", async () => {
       const host = await hostWith();
-      await emitPlan(host);
+      await holdAndDispatch(host);
+      // A turn that ended before the delivery cursor is not this review's.
+      host.completeTurn(90);
+      host.completeItem({ seq: 101, item: READ });
       await emitIdle(host);
-      expect(host.metadata.planReviewTurnEnded).toBeUndefined();
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY, APPROVE]);
       await host.harness.dispose();
+    });
+
+    it("does not count a subagent's tool call as evidence", async () => {
+      const host = await hostWith();
+      await holdAndDispatch(host);
+      host.completeItem({ seq: 101, item: { ...READ, parentToolCallId: "toolu-parent" } });
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+      await host.harness.dispose();
+
+      const own = await hostWith();
+      await holdAndDispatch(own);
+      own.completeItem({ seq: 101, item: { ...READ, parentToolCallId: "toolu-parent" } });
+      own.completeItem({ seq: 102, item: READ });
+      await emitPlan(own, planInteraction("# Plan v2", "pint-2"));
+      expect(own.resolutions).toEqual([DENY, APPROVE]);
+      await own.harness.dispose();
+    });
+
+    describe("a new review cycle after an expired arm", () => {
+      const EXPIRED = () => Date.now() - STALE_WINDOW_MS - 1_000;
+      const STALE_DENIED = { at: 1, sinceSeq: 40 };
+
+      async function expiredHost() {
+        const host = await hostWith();
+        // What an earlier cycle left behind: a delivery cursor and a deny cursor.
+        host.metadata.planReviewArmedAt = EXPIRED();
+        host.metadata.planReviewDeliveredSeq = 50;
+        host.metadata.planDenied = STALE_DENIED;
+        host.completeItem({ seq: 60, item: READ });
+        return host;
+      }
+
+      it("never leaks the old delivery cursor into the new cycle", async () => {
+        const host = await expiredHost();
+        await emitPlan(host);
+        expect(host.sends).toHaveLength(1);
+        expect(host.resolutions).toEqual([DENY]);
+        expect(host.metadata.planReviewDeliveredSeq).toBeUndefined();
+        expect(host.metadata.planDenied).not.toEqual(STALE_DENIED);
+
+        // The dispatch event is missed, so nothing marks this cycle's delivery:
+        // the old cursor (50, before the completed tool call at 60) must not stand in.
+        host.setQueuedRows([]);
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions).toEqual([DENY]);
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+        await host.harness.dispose();
+      });
+
+      it("approves on the new cycle's own evidence", async () => {
+        const host = await expiredHost();
+        await holdAndDispatch(host);
+        expect(host.metadata.planReviewDeliveredSeq).toBe(100);
+        host.completeItem({ seq: 101, item: READ });
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions).toEqual([DENY, APPROVE]);
+        await host.harness.dispose();
+      });
     });
 
     it("never approves a plan held past the stale window", async () => {
@@ -2693,6 +2782,26 @@ describe("auto-review plugin", () => {
       expect(warnings(host).some((message) => message.includes("could not auto-approve"))).toBe(true);
       expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
       expect(host.metadata.planReviewArmedAt).toBeUndefined();
+      await host.harness.dispose();
+    });
+
+    it("does not fall back or log a failed approval when only the bookkeeping fails after a successful resolve", async () => {
+      const host = await hostWith();
+      await holdAndDispatch(host);
+      host.completeItem({ seq: 101, item: READ });
+      const { kv } = host.bb.storage;
+      const set = kv.set.bind(kv);
+      kv.set = async (key: string, value: unknown) => {
+        if (key.startsWith("lastfire:")) {
+          throw new Error("kv unavailable");
+        }
+        return set(key, value);
+      };
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2")).catch(() => undefined);
+      expect(host.resolutions).toEqual([DENY, APPROVE]);
+      expect(warnings(host).some((message) => message.includes("could not auto-approve"))).toBe(false);
+      kv.set = set;
+      expect(await lastFireOf(host)).not.toMatchObject({ reason: "plan-reviewed" });
       await host.harness.dispose();
     });
 
@@ -2828,6 +2937,40 @@ describe("auto-review plugin", () => {
         expect(host.metadata.presentPlanArmedAt).toBeUndefined();
         expect(host.metadata.presentPlanArmedSeq).toBeUndefined();
         expect(await lastFireOf(host)).toMatchObject({ outcome: "fired", reason: "plan-approved" });
+        await host.harness.dispose();
+      });
+
+      it("never approves from an arm left behind by a turn that ended", async () => {
+        const host = await armed();
+        host.completeItem({ seq: 101, item: { type: "toolCall", tool: "Read" } });
+        host.completeTurn(102);
+        const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
+        expect(result).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+        expect(host.metadata.presentPlanArmedAt).toBeUndefined();
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+        await host.harness.dispose();
+      });
+
+      it("counts a subagent's tool call, since the review may run in one", async () => {
+        const host = await armed();
+        host.completeItem({
+          seq: 101,
+          item: { type: "toolCall", tool: "Read", parentToolCallId: "toolu-parent" },
+        });
+        const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
+        expect(result).toBe(PRESENT_PLAN_APPROVED_MESSAGE);
+        await host.harness.dispose();
+      });
+
+      it("logs only the plan file's basename", async () => {
+        const host = await armed();
+        host.completeItem({ seq: 101, item: { type: "toolCall", tool: "Read" } });
+        await host.harness.callAgentTool("PresentPlan", path, ctx);
+        const info = host.harness.logEntries
+          .filter((entry) => entry.level === "info")
+          .map((entry) => entry.message);
+        expect(info).toContain(`auto-review: auto-approved the reviewed plan p.md in thread ${THREAD_ID}`);
+        expect(info.some((message) => message.includes("docs/plans"))).toBe(false);
         await host.harness.dispose();
       });
 

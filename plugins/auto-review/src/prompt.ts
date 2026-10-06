@@ -200,7 +200,7 @@ export function buildPlanReviewPrompt(input: BuildPlanPromptInput): string {
       "4. Present the revised plan again (ExitPlanMode). This project auto-approves reviewed plans, so it won't wait for the user; include a short summary of what the review changed.",
     );
     lines.push(
-      "5. If the review leaves a decision only the user can make (scope, a product trade-off), ask the user before presenting. Otherwise, once ExitPlanMode returns approved, implement the plan. If it is not approved, stop and wait for the user.",
+      "5. If the review leaves a decision only the user can make (scope, a product trade-off), ask the user before presenting. Otherwise, once ExitPlanMode returns approved, mention in your reply that this project auto-approves reviewed plans, so the approval may have come from auto-review rather than from the user, then implement the plan. If it is not approved, stop and wait for the user.",
     );
   } else {
     lines.push(
@@ -239,7 +239,7 @@ export function buildPresentPlanReviewPrompt(input: BuildPresentPlanPromptInput)
   lines.push(`1. ${planReviewStep(input.reviewMode, "that plan file")}`);
   lines.push(`2. ${APPLY_PLAN_FINDINGS}`);
   lines.push(
-    "3. Call PresentPlan again with the same planFilePath. Its result tells you whether to wait for the user or proceed.",
+    "3. If the review leaves a decision only the user can make (scope, a product trade-off), ask the user first, before calling PresentPlan again. Then call PresentPlan again with the same planFilePath. Its result tells you whether to wait for the user or proceed.",
   );
   return lines.join("\n");
 }
@@ -291,7 +291,7 @@ export const PRESENT_PLAN_REVIEWED_MESSAGE =
  * approval, and the one text the instructions above carve out as such.
  */
 export const PRESENT_PLAN_APPROVED_MESSAGE =
-  `${AUTO_REVIEW_MARKER} Plan reviewed and approved automatically (this project auto-approves reviewed plans). This PresentPlan result is your approval: summarize what the review changed in one or two lines, then implement the plan. If you are in plan mode, leave it with ExitPlanMode first.`;
+  `${AUTO_REVIEW_MARKER} Plan reviewed and approved automatically (this project auto-approves reviewed plans). This PresentPlan result is your approval: say in your reply that auto-review approved the plan automatically (the user did not), summarize what the review changed in one or two lines, then implement the plan. If you are in plan mode, leave it with ExitPlanMode first.`;
 
 /** `PresentPlan`'s reply when `planFilePath` fails `SCOPE_PATH_ALLOW`. */
 export const PRESENT_PLAN_INVALID_PATH_MESSAGE =

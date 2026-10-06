@@ -67,7 +67,11 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   paths never compete for the same plan.
 - Per project and off by default (the Plan auto-approve section on the settings page, or
   `bb auto-review auto-approve on --project <id>`), a plan is approved automatically once it completed the review cycle (reason `plan-approved`);
-  anything the gate cannot show was reviewed still goes to the user.
+  anything the gate cannot show was reviewed still goes to the user. The CLI validates the
+  project and refuses `on` from inside a bb thread (an accident guard keyed off the
+  thread context, not a security boundary); the agent mentions that the approval may have
+  come from auto-review rather than from the user. A turn that ended since the review was
+  delivered (a `turn/completed` event) voids the evidence.
 - Ships enabled (opt-out). Turn it off globally or per project with `bb auto-review`;
   there is no per-thread skip.
 

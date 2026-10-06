@@ -100,20 +100,34 @@ export function isImmediateReactionToDeny(events: readonly ThreadEventRow[]): bo
 
 /**
  * Whether the plan review reached the agent: at least one completed tool call
- * that is not one of the plan gate's own tools. A steered message only reaches
- * the model after a tool result that returns after its delivery, so a
- * completed non-gate tool call past the delivery cursor means the agent has
- * had the review in front of it. The inverse idea of `isImmediateReactionToDeny`.
+ * that is not one of the plan gate's own tools, and no turn that ended in
+ * between. A steered message only reaches the model after a tool result that
+ * returns after its delivery, so a completed non-gate tool call past the
+ * delivery cursor means the agent has had the review in front of it. bb
+ * emits `turn/completed` only when a turn really ends — steering a queued
+ * message into a running turn emits none — so one past the cursor means the
+ * review's turn is over and a plan presented now is not its re-presentation.
+ * The inverse idea of `isImmediateReactionToDeny`.
+ *
+ * A call with `parentToolCallId` is a subagent's; `countSubagentCalls` says
+ * whether that is evidence. The native gate needs the agent's own call (the
+ * steered review reaches the main model after its own tool result), while
+ * `PresentPlan` accepts a review run in a subagent.
  */
 export function reviewReachedAgent(
   events: readonly ThreadEventRow[],
   gateTools: readonly string[],
+  countSubagentCalls: boolean,
 ): boolean {
+  if (events.some((event) => event.type === "turn/completed")) {
+    return false;
+  }
   return events.some(
     (event) =>
       event.type === "item/completed" &&
       event.data.item.type === "toolCall" &&
-      !gateTools.includes(event.data.item.tool),
+      !gateTools.includes(event.data.item.tool) &&
+      (countSubagentCalls || event.data.item.parentToolCallId === undefined),
   );
 }
 
@@ -126,14 +140,15 @@ export async function reviewRanSince(
   threadId: string,
   sinceSeq: number,
   gateTools: readonly string[],
+  countSubagentCalls: boolean,
 ): Promise<boolean> {
   try {
     const events = await bb.sdk.threads.events.list({
       threadId,
       afterSeq: String(sinceSeq),
-      types: ["item/completed"],
+      types: ["item/completed", "turn/completed"],
     });
-    return reviewReachedAgent(events, gateTools);
+    return reviewReachedAgent(events, gateTools, countSubagentCalls);
   } catch (error) {
     bb.log.warn(
       `auto-review: could not read events to check the plan review ran in ${threadId}; leaving the plan for the user: ${

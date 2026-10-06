@@ -1,4 +1,5 @@
-import type { PluginAgentToolResult } from "@get-bb/plugin-sdk";
+import { basename } from "node:path";
+import type { PluginAgentToolContext, PluginAgentToolResult } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { effectiveConfig, readProjectConfig } from "./config.js";
 import { recordFire, type ReviewContext } from "./context.js";
@@ -49,6 +50,71 @@ async function captureArmedSeq(review: ReviewContext, threadId: string): Promise
   }
 }
 
+/** `PresentPlan`'s `execute`: the first call for a plan arms its review, the second releases it. */
+async function presentPlan(
+  review: ReviewContext,
+  planFilePath: string,
+  ctx: PluginAgentToolContext,
+): Promise<PluginAgentToolResult> {
+  const { bb } = review;
+  return withThreadLock(ctx.threadId, async () => {
+    const state = await readState(bb, ctx.threadId);
+    const project = await readProjectConfig(bb, ctx.projectId);
+    const config = effectiveConfig(review.globals, project);
+    if (!config.enabled) {
+      return PRESENT_PLAN_OFF_MESSAGE;
+    }
+    if (!SCOPE_PATH_ALLOW.test(planFilePath)) {
+      return {
+        content: [{ type: "text", text: PRESENT_PLAN_INVALID_PATH_MESSAGE }],
+        isError: true,
+      };
+    }
+    const now = Date.now();
+    if (presentPlanArmed(state, planFilePath, now)) {
+      await writeState(bb, ctx.threadId, {}, [...PRESENT_PLAN_KEYS]);
+      // A completed tool call between the two calls is the evidence the
+      // agent worked on the review; it cannot show a deliberate skip. A
+      // subagent's call counts: the review may run in one.
+      if (
+        config.autoApprovePlans &&
+        state.presentPlanArmedSeq !== undefined &&
+        (await reviewRanSince(
+          bb,
+          ctx.threadId,
+          state.presentPlanArmedSeq,
+          PRESENT_PLAN_GATE_TOOLS,
+          true,
+        ))
+      ) {
+        await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-approved");
+        bb.log.info(
+          `auto-review: auto-approved the reviewed plan ${basename(planFilePath)} in thread ${ctx.threadId}`,
+        );
+        return PRESENT_PLAN_APPROVED_MESSAGE;
+      }
+      await recordFire(review, ctx.projectId, ctx.threadId, "stood-down", "plan-reviewed");
+      return PRESENT_PLAN_REVIEWED_MESSAGE;
+    }
+    const armedSeq = await captureArmedSeq(review, ctx.threadId);
+    await writeState(
+      bb,
+      ctx.threadId,
+      {
+        presentPlanArmedAt: now,
+        presentPlanArmedPath: planFilePath,
+        ...(armedSeq === undefined ? {} : { presentPlanArmedSeq: armedSeq }),
+      },
+      armedSeq === undefined ? ["presentPlanArmedSeq"] : undefined,
+    );
+    await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-review");
+    return buildPresentPlanReviewPrompt({
+      reviewMode: config.reviewMode,
+      planFilePath,
+    });
+  });
+}
+
 export function registerPlanTools(review: ReviewContext): void {
   const { bb } = review;
   // Only threads the plan gate can serve get a plan-first tool and
@@ -57,7 +123,7 @@ export function registerPlanTools(review: ReviewContext): void {
   // follows the global switch only: a project or thread that turned
   // auto-review off still gets one of these, and its plan then goes to the
   // user unreviewed (or, on `PresentPlan`, is told review is off here — see
-  // its `execute` below).
+  // `presentPlan` above).
   //
   // Claude Code is the only provider whose plan approvals reach the NATIVE
   // gate (`gatePlan`): its ExitPlanMode routes to a real `interaction.pending`
@@ -101,60 +167,7 @@ export function registerPlanTools(review: ReviewContext): void {
     },
     parameters: z.object({ planFilePath: z.string() }),
     async execute(input, ctx): Promise<PluginAgentToolResult> {
-      return withThreadLock(ctx.threadId, async () => {
-        const state = await readState(bb, ctx.threadId);
-        const project = await readProjectConfig(bb, ctx.projectId);
-        const config = effectiveConfig(review.globals, project);
-        if (!config.enabled) {
-          return PRESENT_PLAN_OFF_MESSAGE;
-        }
-        if (!SCOPE_PATH_ALLOW.test(input.planFilePath)) {
-          return {
-            content: [{ type: "text", text: PRESENT_PLAN_INVALID_PATH_MESSAGE }],
-            isError: true,
-          };
-        }
-        const now = Date.now();
-        if (presentPlanArmed(state, input.planFilePath, now)) {
-          await writeState(bb, ctx.threadId, {}, [...PRESENT_PLAN_KEYS]);
-          // A completed tool call between the two calls is the evidence the
-          // agent worked on the review; it cannot show a deliberate skip.
-          if (
-            config.autoApprovePlans &&
-            state.presentPlanArmedSeq !== undefined &&
-            (await reviewRanSince(
-              bb,
-              ctx.threadId,
-              state.presentPlanArmedSeq,
-              PRESENT_PLAN_GATE_TOOLS,
-            ))
-          ) {
-            await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-approved");
-            bb.log.info(
-              `auto-review: auto-approved the reviewed plan ${input.planFilePath} in thread ${ctx.threadId}`,
-            );
-            return PRESENT_PLAN_APPROVED_MESSAGE;
-          }
-          await recordFire(review, ctx.projectId, ctx.threadId, "stood-down", "plan-reviewed");
-          return PRESENT_PLAN_REVIEWED_MESSAGE;
-        }
-        const armedSeq = await captureArmedSeq(review, ctx.threadId);
-        await writeState(
-          bb,
-          ctx.threadId,
-          {
-            presentPlanArmedAt: now,
-            presentPlanArmedPath: input.planFilePath,
-            ...(armedSeq === undefined ? {} : { presentPlanArmedSeq: armedSeq }),
-          },
-          armedSeq === undefined ? ["presentPlanArmedSeq"] : undefined,
-        );
-        await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-review");
-        return buildPresentPlanReviewPrompt({
-          reviewMode: config.reviewMode,
-          planFilePath: input.planFilePath,
-        });
-      });
+      return presentPlan(review, input.planFilePath, ctx);
     },
   });
 }

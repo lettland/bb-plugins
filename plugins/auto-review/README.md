@@ -21,9 +21,11 @@ not count) asking the user what to change, auto-review answers that one question
 being asked to explain a rejection they never made.
 
 A project can opt in (Tools → Auto review → Plan auto-approve, or
-`bb auto-review auto-approve on --project <id>`; off by default) to
-have a plan approved automatically once it has completed the review cycle; anything the gate
-cannot show was reviewed still goes to the user.
+`bb auto-review auto-approve on --project <id>`, which refuses to run inside a bb thread as
+a guard against accidental agent use, not a security boundary; off by default) to have a
+plan approved automatically once it has completed the review cycle; anything the gate
+cannot show was reviewed still goes to the user. The agent mentions that the approval may
+have come from auto-review rather than from the user.
 
 It ships enabled (opt-out).
 
@@ -98,7 +100,7 @@ All commands accept `--json`.
 | `bb auto-review show` | Global defaults, project override and resolved settings for the current project |
 | `bb auto-review enable [--global \| --project <id>]` | Turn it on; bare `enable` is global |
 | `bb auto-review disable [--global \| --project <id>]` | Turn it off, same scoping |
-| `bb auto-review auto-approve <on\|off> --project <id>` | Approve reviewed plans automatically for one project (off by default); `--project` is required |
+| `bb auto-review auto-approve <on\|off> --project <id>` | Approve reviewed plans automatically for one project (off by default); `--project` is required and must exist, and `on` is refused from inside a bb thread (an accident guard, not a security boundary) |
 | `bb auto-review reset <thread-id>` | Clear a wedged loop-guard latch on an idle thread; refused while the thread is running or holds a `deferred` turn (its review runs when the hold clears) |
 
 The agent-hooks plugin's `review-plan-before-exit.sh` reads `planGate` from

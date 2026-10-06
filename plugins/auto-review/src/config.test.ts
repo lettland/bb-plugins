@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import {
   effectiveConfig,
   globalDefaultsFrom,
   parseMainlines,
+  readProjectConfig,
+  setAutoApprovePlans,
+  writeProjectConfig,
   type GlobalDefaults,
 } from "./config.js";
 
@@ -79,5 +83,46 @@ describe("effectiveConfig", () => {
     expect(effectiveConfig(globals, {}).autoApprovePlans).toBe(false);
     expect(effectiveConfig(globals, { autoApprovePlans: true }).autoApprovePlans).toBe(true);
     expect(effectiveConfig(globals, { autoApprovePlans: false }).autoApprovePlans).toBe(false);
+  });
+});
+
+describe("writeProjectConfig", () => {
+  it("keeps both keys when different keys are written concurrently", async () => {
+    const host = createFakePluginHost({ pluginId: "auto-review" });
+    try {
+      const { bb } = host;
+      await Promise.all([
+        writeProjectConfig(bb, "p-1", { reviewMode: "self" }),
+        setAutoApprovePlans(bb, "p-1", true, "rpc"),
+        writeProjectConfig(bb, "p-1", { enabled: false }),
+      ]);
+      expect(await readProjectConfig(bb, "p-1")).toEqual({
+        reviewMode: "self",
+        autoApprovePlans: true,
+        enabled: false,
+      });
+    } finally {
+      await host.harness.dispose();
+    }
+  });
+
+  it("logs the value its own read saw as the before value", async () => {
+    const host = createFakePluginHost({ pluginId: "auto-review" });
+    try {
+      const { bb } = host;
+      await Promise.all([
+        setAutoApprovePlans(bb, "p-1", true, "rpc"),
+        setAutoApprovePlans(bb, "p-1", false, "cli (terminal)"),
+      ]);
+      const info = host.harness.logEntries
+        .filter((entry) => entry.level === "info")
+        .map((entry) => entry.message);
+      expect(info).toEqual([
+        "plan auto-approve for project p-1: false -> true (via rpc)",
+        "plan auto-approve for project p-1: true -> false (via cli (terminal))",
+      ]);
+    } finally {
+      await host.harness.dispose();
+    }
   });
 });

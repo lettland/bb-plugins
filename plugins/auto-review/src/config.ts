@@ -1,6 +1,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import type { ReviewMode } from "./prompt.js";
+import { createKeyedLock } from "./keyed-lock.js";
 
 export const REVIEW_MODES = ["auto", "devkit", "self"] as const;
 
@@ -148,7 +149,10 @@ export async function readProjectConfig(
   return parsed.success ? parsed.data : {};
 }
 
-export async function writeProjectConfig(
+const withProjectLock = createKeyedLock();
+
+/** The read-merge-write itself; callers hold the project's lock. */
+async function mergeProjectConfig(
   bb: BbPluginApi,
   projectId: string,
   patch: ProjectConfig,
@@ -159,18 +163,32 @@ export async function writeProjectConfig(
   return next;
 }
 
-/** The one writer of `autoApprovePlans`, so every flip is logged whichever surface made it. */
-export async function setAutoApprovePlans(
+/** Serialized per project, so concurrent writers (CLI and settings page) cannot drop each other's keys. */
+export function writeProjectConfig(
+  bb: BbPluginApi,
+  projectId: string,
+  patch: ProjectConfig,
+): Promise<ProjectConfig> {
+  return withProjectLock(projectId, () => mergeProjectConfig(bb, projectId, patch));
+}
+
+/**
+ * The one writer of `autoApprovePlans`, so every flip is logged whichever
+ * surface made it. `source` says who flipped it (`cli (thread <id>)`, `cli (terminal)`, `rpc`).
+ */
+export function setAutoApprovePlans(
   bb: BbPluginApi,
   projectId: string,
   value: boolean,
-  source: "cli" | "gui",
+  source: string,
 ): Promise<void> {
-  const before = (await readProjectConfig(bb, projectId)).autoApprovePlans ?? false;
-  await writeProjectConfig(bb, projectId, { autoApprovePlans: value });
-  bb.log.info(
-    `plan auto-approve for project ${projectId}: ${before} -> ${value} (via ${source})`,
-  );
+  return withProjectLock(projectId, async () => {
+    const before = (await readProjectConfig(bb, projectId)).autoApprovePlans ?? false;
+    await mergeProjectConfig(bb, projectId, { autoApprovePlans: value });
+    bb.log.info(
+      `plan auto-approve for project ${projectId}: ${before} -> ${value} (via ${source})`,
+    );
+  });
 }
 
 export async function readLastFire(

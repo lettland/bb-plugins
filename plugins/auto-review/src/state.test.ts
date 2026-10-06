@@ -130,7 +130,6 @@ describe("PLAN_GATE_KEYS", () => {
       "planReviewEntryId",
       "planDenied",
       "planReviewDeliveredSeq",
-      "planReviewTurnEnded",
     ]);
   });
 });

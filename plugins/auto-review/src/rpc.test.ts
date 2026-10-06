@@ -124,8 +124,8 @@ describe("auto-review rpc: logging", () => {
       const info = host.harness.logEntries
         .filter((entry) => entry.level === "info")
         .map((entry) => entry.message);
-      expect(info).toContain("plan auto-approve for project p-a: false -> true (via gui)");
-      expect(info).toContain("plan auto-approve for project p-a: true -> false (via cli)");
+      expect(info).toContain("plan auto-approve for project p-a: false -> true (via rpc)");
+      expect(info).toContain("plan auto-approve for project p-a: true -> false (via cli (terminal))");
     });
   });
 });

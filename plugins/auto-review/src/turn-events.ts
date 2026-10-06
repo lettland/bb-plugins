@@ -68,19 +68,6 @@ export async function onThreadIdle(
     // present, before handleIdle's own early returns so a question in some
     // later turn is never mistaken for a reaction to this one's deny.
     const state = await readState(bb, thread.id);
-    if (state.planReviewArmedAt !== undefined && state.planReviewDeliveredSeq !== undefined) {
-      // The review turn is over. The arm stays (see `planReviewArmedAt`), but a
-      // plan presented after this point is no longer the review's re-presentation.
-      try {
-        await writeState(bb, thread.id, { planReviewTurnEnded: true });
-      } catch (error) {
-        bb.log.warn(
-          `auto-review: could not mark the plan review turn ended in ${thread.id}; continuing: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
-    }
     if (state.planDenied !== undefined) {
       try {
         await writeState(bb, thread.id, {}, ["planDenied"]);
@@ -110,6 +97,9 @@ export async function onMessageDispatched(
       // The review is in the agent's hands; its next presentation is the
       // reviewed plan. The cursor taken here marks where auto-approve starts
       // looking for proof the agent worked on it; without one, it never will.
+      // It can land after the tool result the review was steered in behind
+      // (gatePlan holds this thread's lock while it works), which only makes
+      // the evidence stricter — never capture it earlier.
       let deliveredSeq: number | undefined;
       try {
         deliveredSeq = await captureSinceSeq(bb, entry.threadId);

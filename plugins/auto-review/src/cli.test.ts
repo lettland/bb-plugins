@@ -23,6 +23,8 @@ interface CliHostOptions {
   /** Threads the fake host knows, mapped to their project (or full fixture). */
   threads?: Record<string, ThreadFixture>;
   globals?: GlobalDefaults;
+  /** Project ids the fake host lists; defaults to the ones the auto-approve tests name. */
+  projects?: string[];
 }
 
 function createCliHost(options: CliHostOptions = {}) {
@@ -43,7 +45,11 @@ function createCliHost(options: CliHostOptions = {}) {
     return bucket;
   };
 
-  const sdk: CreateFakePluginHostOptions["sdk"] = {
+  const projectIds = options.projects ?? [PROJECT_ID, "project-2", "project-9"];
+  const sdk = {
+    projects: {
+      list: async () => projectIds.map((id) => ({ id, name: id })),
+    },
     threads: {
       get: async (args: { threadId: string }) => {
         known(args.threadId);
@@ -70,7 +76,7 @@ function createCliHost(options: CliHostOptions = {}) {
         return { ...target };
       },
     },
-  };
+  } as unknown as CreateFakePluginHostOptions["sdk"];
 
   const fake = createFakePluginHost({ pluginId: "auto-review", sdk });
   const settings = defineAutoReviewSettings(fake.bb);
@@ -281,9 +287,33 @@ describe("auto-review cli: auto-approve", () => {
 
   it("never takes the project from the invoking thread", async () => {
     await withHost({}, async (host) => {
-      const result = await host.run(["auto-approve", "on"], THREAD_ID);
-      expect(result).toMatchObject({ exitCode: 2, stderr: USAGE });
+      for (const value of ["on", "off"]) {
+        const result = await host.run(["auto-approve", value], THREAD_ID);
+        expect(result).toMatchObject({
+          exitCode: 2,
+          stderr:
+            "--project <id> is required for auto-approve (it is never inferred from the thread).\n",
+        });
+      }
       expect(await host.kv.get(`project:${PROJECT_ID}`)).toBeUndefined();
+    });
+  });
+
+  it("names the missing --project specifically, as JSON under --json", async () => {
+    await withHost({}, async (host) => {
+      const message =
+        "--project <id> is required for auto-approve (it is never inferred from the thread).";
+      expect(await host.run(["auto-approve", "on"])).toMatchObject({
+        exitCode: 2,
+        stderr: `${message}\n`,
+      });
+      expect(await host.run(["auto-approve", "on", "--project"])).toMatchObject({
+        exitCode: 2,
+        stderr: `${message}\n`,
+      });
+      const json = await host.run(["auto-approve", "off", "--json"]);
+      expect(json.exitCode).toBe(2);
+      expect(parse(json.stdout)).toEqual({ ok: false, command: "auto-approve", error: message });
     });
   });
 
@@ -294,12 +324,67 @@ describe("auto-review cli: auto-approve", () => {
         ["auto-approve", "maybe", "--project", "project-9"],
         ["auto-approve", "on", "--global"],
         ["auto-approve", "on", "--global", "--project", "project-9"],
-        ["auto-approve", "on", "--project"],
       ]) {
         const result = await host.run(argv);
         expect(result).toMatchObject({ exitCode: 2, stderr: USAGE });
       }
       expect(await host.kv.get("project:project-9")).toBeUndefined();
+    });
+  });
+
+  it("rejects an unknown project without writing anything", async () => {
+    await withHost({}, async (host) => {
+      const result = await host.run(["auto-approve", "on", "--project", "nope"]);
+      expect(result).toMatchObject({ exitCode: 2, stderr: "Project nope not found.\n" });
+      expect(await host.kv.get("project:nope")).toBeUndefined();
+
+      const json = await host.run(["auto-approve", "off", "--project", "nope", "--json"]);
+      expect(json.exitCode).toBe(2);
+      expect(parse(json.stdout)).toEqual({
+        ok: false,
+        command: "auto-approve",
+        projectId: "nope",
+        error: "Project nope not found.",
+      });
+      expect(await host.kv.get("project:nope")).toBeUndefined();
+    });
+  });
+
+  it("refuses to turn it on from inside a thread, but lets off through", async () => {
+    await withHost({}, async (host) => {
+      const refusal =
+        "Turning plan auto-approve on is only allowed from the settings page (Tools → Auto review → Plan auto-approve) or a terminal outside a bb thread.";
+      const on = await host.run(["auto-approve", "on", "--project", PROJECT_ID], THREAD_ID);
+      expect(on).toMatchObject({ exitCode: 2, stderr: `${refusal}\n` });
+      expect(await host.kv.get(`project:${PROJECT_ID}`)).toBeUndefined();
+
+      const json = await host.run(["auto-approve", "on", "--project", PROJECT_ID, "--json"], THREAD_ID);
+      expect(json.exitCode).toBe(2);
+      expect(parse(json.stdout)).toEqual({
+        ok: false,
+        command: "auto-approve",
+        projectId: PROJECT_ID,
+        error: refusal,
+      });
+
+      await host.kv.set(`project:${PROJECT_ID}`, { autoApprovePlans: true });
+      const off = await host.run(["auto-approve", "off", "--project", PROJECT_ID], THREAD_ID);
+      expect(off).toMatchObject({ exitCode: 0 });
+      expect(await host.kv.get(`project:${PROJECT_ID}`)).toEqual({ autoApprovePlans: false });
+    });
+  });
+
+  it("logs whether the change came from a thread or a terminal", async () => {
+    await withHost({}, async (host) => {
+      await host.run(["auto-approve", "on", "--project", PROJECT_ID]);
+      await host.run(["auto-approve", "off", "--project", PROJECT_ID], THREAD_ID);
+      const info = host.harness.logEntries
+        .filter((entry) => entry.level === "info")
+        .map((entry) => entry.message);
+      expect(info).toContain(`plan auto-approve for project ${PROJECT_ID}: false -> true (via cli (terminal))`);
+      expect(info).toContain(
+        `plan auto-approve for project ${PROJECT_ID}: true -> false (via cli (thread ${THREAD_ID}))`,
+      );
     });
   });
 

@@ -431,10 +431,17 @@ describe("buildPlanReviewPrompt", () => {
       /4\. Present the revised plan again \(ExitPlanMode\)\. This project auto-approves reviewed plans, so it won't wait for the user; include a short summary of what the review changed\./,
     );
     expect(text).toMatch(
-      /5\. If the review leaves a decision only the user can make \(scope, a product trade-off\), ask the user before presenting\. Otherwise, once ExitPlanMode returns approved, implement the plan\. If it is not approved, stop and wait for the user\./,
+      /5\. If the review leaves a decision only the user can make \(scope, a product trade-off\), ask the user before presenting\. Otherwise, once ExitPlanMode returns approved, mention in your reply that this project auto-approves reviewed plans, so the approval may have come from auto-review rather than from the user, then implement the plan\. If it is not approved, stop and wait for the user\./,
     );
     expect(text).not.toMatch(/Stop\. Implement only after the user explicitly approves/);
     expect(text).toMatch(/do not start implementing/);
+  });
+
+  it("does not claim certainty about who approved on the native path", () => {
+    const text = buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p/plan.md", autoApprove: true });
+    expect(text).not.toMatch(/approved the plan automatically/);
+    expect(text).not.toMatch(/the user did not/);
+    expect(text).toMatch(/may have come from auto-review rather than from the user/);
   });
 
   it("allows the review's brief files and child threads in plan mode without opening other project files", () => {
@@ -570,9 +577,17 @@ describe("buildPresentPlanReviewPrompt", () => {
 
   it("asks the agent to call PresentPlan again instead of re-entering plan mode", () => {
     const text = buildPresentPlanReviewPrompt({ reviewMode: "auto", planFilePath: "docs/plans/p.md" });
-    expect(text).toMatch(/Call PresentPlan again with the same planFilePath/);
+    expect(text).toMatch(/call PresentPlan again with the same planFilePath/);
     expect(text).toMatch(/Its result tells you whether to wait for the user or proceed\./);
     expect(text).not.toContain("EnterPlanMode");
+  });
+
+  it("asks the user about a decision only they can make before presenting again", () => {
+    const text = buildPresentPlanReviewPrompt({ reviewMode: "auto", planFilePath: "docs/plans/p.md" });
+    expect(text).toMatch(
+      /3\. If the review leaves a decision only the user can make \(scope, a product trade-off\), ask the user first, before calling PresentPlan again\./,
+    );
+    expect(text.indexOf("ask the user first")).toBeLessThan(text.indexOf("call PresentPlan again"));
   });
 
   it("follows the review mode", () => {
@@ -606,6 +621,7 @@ describe("PresentPlan reply messages", () => {
     expect(PRESENT_PLAN_APPROVED_MESSAGE.startsWith(AUTO_REVIEW_MARKER)).toBe(true);
     expect(PRESENT_PLAN_APPROVED_MESSAGE).toMatch(/approved automatically/);
     expect(PRESENT_PLAN_APPROVED_MESSAGE).toMatch(/This PresentPlan result is your approval/);
+    expect(PRESENT_PLAN_APPROVED_MESSAGE).toMatch(/say in your reply that auto-review approved the plan automatically \(the user did not\)/);
     expect(PRESENT_PLAN_APPROVED_MESSAGE).toMatch(/leave it with ExitPlanMode first/);
   });
 

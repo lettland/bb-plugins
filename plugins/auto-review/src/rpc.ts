@@ -32,7 +32,7 @@ export function registerAutoReviewRpc(ctx: ReviewContext): void {
       if (!projects.some((project) => project.id === input.projectId)) {
         throw new Error("BB project was not found");
       }
-      await setAutoApprovePlans(bb, input.projectId, input.autoApprovePlans, "gui");
+      await setAutoApprovePlans(bb, input.projectId, input.autoApprovePlans, "rpc");
       const stored = await readProjectConfig(bb, input.projectId);
       return {
         projectId: input.projectId,

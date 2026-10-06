@@ -144,9 +144,12 @@ describe("reviewReachedAgent", () => {
   function itemEvent(type: string, item: Record<string, unknown>) {
     return { type, data: { item } } as never;
   }
+  const turnCompleted = () => ({ type: "turn/completed", data: {} }) as never;
+  const read = (extra: Record<string, unknown> = {}) =>
+    itemEvent("item/completed", { type: "toolCall", tool: "Read", ...extra });
 
   it("is false with no events, or only the gate's own completed tool calls", () => {
-    expect(reviewReachedAgent([], GATE_TOOLS)).toBe(false);
+    expect(reviewReachedAgent([], GATE_TOOLS, true)).toBe(false);
     expect(
       reviewReachedAgent(
         [
@@ -154,26 +157,37 @@ describe("reviewReachedAgent", () => {
           itemEvent("item/completed", { type: "toolCall", tool: "AskUserQuestion" }),
         ],
         GATE_TOOLS,
+        true,
       ),
     ).toBe(false);
   });
 
   it("is true once a completed tool call outside the gate tools followed", () => {
-    expect(
-      reviewReachedAgent([itemEvent("item/completed", { type: "toolCall", tool: "Read" })], GATE_TOOLS),
-    ).toBe(true);
+    expect(reviewReachedAgent([read()], GATE_TOOLS, true)).toBe(true);
   });
 
   it("is false for a tool call that started but never completed", () => {
     expect(
-      reviewReachedAgent([itemEvent("item/started", { type: "toolCall", tool: "Read" })], GATE_TOOLS),
+      reviewReachedAgent([itemEvent("item/started", { type: "toolCall", tool: "Read" })], GATE_TOOLS, true),
     ).toBe(false);
   });
 
   it("ignores completed items that are not tool calls", () => {
     expect(
-      reviewReachedAgent([itemEvent("item/completed", { type: "agentMessage" })], GATE_TOOLS),
+      reviewReachedAgent([itemEvent("item/completed", { type: "agentMessage" })], GATE_TOOLS, true),
     ).toBe(false);
+  });
+
+  it("is false once any turn ended since the cursor, whatever completed", () => {
+    expect(reviewReachedAgent([read(), turnCompleted()], GATE_TOOLS, true)).toBe(false);
+    expect(reviewReachedAgent([turnCompleted(), read()], GATE_TOOLS, false)).toBe(false);
+  });
+
+  it("counts a subagent's call only when asked to", () => {
+    const subagent = read({ parentToolCallId: "toolu-parent" });
+    expect(reviewReachedAgent([subagent], GATE_TOOLS, true)).toBe(true);
+    expect(reviewReachedAgent([subagent], GATE_TOOLS, false)).toBe(false);
+    expect(reviewReachedAgent([subagent, read()], GATE_TOOLS, false)).toBe(true);
   });
 });
 

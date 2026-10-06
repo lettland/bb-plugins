@@ -67,7 +67,14 @@ export async function gatePlan(
     return;
   }
 
-  await writeState(bb, thread.id, { planReviewArmedAt: Date.now() });
+  // A new cycle starts clean: keys left by an expired earlier one (a delivery
+  // cursor, a queued id) must never leak into this review's evidence.
+  await writeState(
+    bb,
+    thread.id,
+    { planReviewArmedAt: Date.now() },
+    PLAN_GATE_KEYS.filter((key) => key !== "planReviewArmedAt"),
+  );
   let queuedMessageId: string | null = null;
   try {
     const result = await bb.sdk.threads.send({
@@ -128,11 +135,11 @@ async function markReviewDelivered(ctx: ReviewContext, threadId: string): Promis
 /**
  * The reviewed plan comes back: disarm the gate, then approve it for the user
  * only when the project opted in AND everything shows the review cycle
- * completed — the review was delivered, its turn is not over (a stale arm
- * from a review turn that never re-presented through the gate must not
- * approve a later plan), the arm is fresh, and the agent completed a tool call
- * of its own after delivery, which is when a steered message reaches the
- * model. Anything less leaves the plan with the user, exactly as with the
+ * completed — the review was delivered, the arm is fresh, and the agent
+ * completed a tool call of its own after delivery (which is when a steered
+ * message reaches the model) with no turn ending since, so a stale arm from a
+ * review turn that never re-presented through the gate cannot approve a later
+ * plan. Anything less leaves the plan with the user, exactly as with the
  * option off.
  */
 async function releaseReviewedPlan(
@@ -149,27 +156,30 @@ async function releaseReviewedPlan(
     config.autoApprovePlans &&
     approval.canApprove &&
     planReviewDeliveredSeq !== undefined &&
-    state.planReviewTurnEnded !== true &&
     !planHoldExpired(state, Date.now()) &&
-    (await reviewRanSince(bb, thread.id, planReviewDeliveredSeq, NATIVE_GATE_TOOLS))
+    (await reviewRanSince(bb, thread.id, planReviewDeliveredSeq, NATIVE_GATE_TOOLS, false))
   ) {
+    let approved = false;
     try {
       await bb.sdk.threads.interactions.resolve({
         threadId: thread.id,
         interactionId: approval.interactionId,
         resolution: { decision: "allow_once", grantedPermissions: null },
       });
-      await recordFire(ctx, thread.projectId, thread.id, "fired", "plan-approved");
-      bb.log.info(
-        `auto-review: auto-approved the reviewed plan ${approval.interactionId} in thread ${thread.id}`,
-      );
-      return;
+      approved = true;
     } catch (error) {
       bb.log.warn(
         `auto-review: could not auto-approve the reviewed plan in ${thread.id}; leaving it for the user: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
+    }
+    if (approved) {
+      await recordFire(ctx, thread.projectId, thread.id, "fired", "plan-approved");
+      bb.log.info(
+        `auto-review: auto-approved the reviewed plan ${approval.interactionId} in thread ${thread.id}`,
+      );
+      return;
     }
   }
   await recordFire(ctx, thread.projectId, thread.id, "stood-down", "plan-reviewed");

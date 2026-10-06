@@ -8,10 +8,11 @@ import {
   effectiveConfig,
   readLastFire,
   readProjectConfig,
-  setAutoApprovePlans,
   writeProjectConfig,
   type GlobalDefaults,
 } from "./config.js";
+import { setAutoApprove } from "./cli-auto-approve.js";
+import { json } from "./cli-result.js";
 import { removeDeferral } from "./deferrals.js";
 import { isBusyStatus, planGateServes } from "./gate.js";
 import {
@@ -61,10 +62,6 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
   }
   return { positionals, flags };
-}
-
-function json(value: unknown, exitCode = 0): PluginCliResult {
-  return { exitCode, stdout: `${JSON.stringify(value, null, 2)}\n` };
 }
 
 function threadError(threadId: string, wantsJson: boolean): PluginCliResult {
@@ -151,30 +148,6 @@ async function setScope(
       };
 }
 
-/**
- * Removes the human checkpoint on plans, so the project is never implied from
- * the thread or a global scope: it is always named.
- */
-async function setAutoApprove(bb: BbPluginApi, parsed: ParsedArgs): Promise<PluginCliResult> {
-  const value = parsed.positionals[0];
-  const projectId = parsed.flags.get("project");
-  if (
-    (value !== "on" && value !== "off") ||
-    typeof projectId !== "string" ||
-    parsed.flags.has("global")
-  ) {
-    return {
-      exitCode: 2,
-      stderr: "Usage: bb auto-review auto-approve <on|off> --project <id> [--json]\n",
-    };
-  }
-  const autoApprovePlans = value === "on";
-  await setAutoApprovePlans(bb, projectId, autoApprovePlans, "cli");
-  return parsed.flags.has("json")
-    ? json({ ok: true, scope: "project", projectId, autoApprovePlans })
-    : { exitCode: 0, stdout: `Plan auto-approve ${value} for project ${projectId}.\n` };
-}
-
 export function registerAutoReviewCli(
   bb: BbPluginApi,
   settings: SettingsHandle,
@@ -230,7 +203,12 @@ export function registerAutoReviewCli(
       }
 
       if (command === "auto-approve") {
-        return setAutoApprove(bb, parsed);
+        return setAutoApprove(bb, context, {
+          value: parsed.positionals[0],
+          projectId: parsed.flags.get("project"),
+          global: parsed.flags.has("global"),
+          wantsJson,
+        });
       }
 
       if (command === "skip" || command === "unskip") {

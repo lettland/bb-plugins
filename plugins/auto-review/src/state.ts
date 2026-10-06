@@ -1,5 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { createKeyedLock } from "./keyed-lock.js";
 
 export const AUTO_REVIEW_PHASES = [
   "idle",
@@ -86,13 +87,6 @@ export const threadStateSchema = z.object({
    */
   planReviewDeliveredSeq: z.number().int().nonnegative().optional(),
   /**
-   * Set by `thread.idle` once the review has been delivered and the turn
-   * ended. The arm survives idle, so one left behind by a review turn that
-   * never re-presented through the gate (the agent self-approved outside plan
-   * mode) must not auto-approve a later plan.
-   */
-  planReviewTurnEnded: z.literal(true).optional(),
-  /**
    * Set when the provider-agnostic `PresentPlan` tool armed a plan review for
    * this thread; the next `PresentPlan` call on a fresh arm FOR THE SAME PATH
    * releases it and clears this key. Mirrors `planReviewArmedAt`'s
@@ -112,26 +106,7 @@ export type ThreadState = z.infer<typeof threadStateSchema>;
 
 export const IDLE_STATE: ThreadState = { phase: "idle" };
 
-const locks = new Map<string, Promise<unknown>>();
-
-export function withThreadLock<T>(
-  threadId: string,
-  run: () => Promise<T>,
-): Promise<T> {
-  const previous = locks.get(threadId) ?? Promise.resolve();
-  const next = previous.then(run, run);
-  const settled = next.then(
-    () => undefined,
-    () => undefined,
-  );
-  locks.set(threadId, settled);
-  void settled.then(() => {
-    if (locks.get(threadId) === settled) {
-      locks.delete(threadId);
-    }
-  });
-  return next;
-}
+export const withThreadLock = createKeyedLock();
 
 export async function readState(
   bb: BbPluginApi,
@@ -182,7 +157,6 @@ export const PLAN_GATE_KEYS: readonly string[] = [
   "planReviewEntryId",
   "planDenied",
   "planReviewDeliveredSeq",
-  "planReviewTurnEnded",
 ];
 
 /** `PresentPlan`'s own keys, cleared by `bb auto-review reset` alongside `PLAN_GATE_KEYS`. */

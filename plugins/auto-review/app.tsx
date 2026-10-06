@@ -63,6 +63,17 @@ function ProjectRow(props: {
   );
 }
 
+function LoadError(props: { error: string; onRetry: () => void }) {
+  return (
+    <div role="alert" style={{ color: "var(--destructive-text)" }}>
+      <p>Could not load projects: {props.error}</p>
+      <button type="button" onClick={props.onRetry}>
+        Retry
+      </button>
+    </div>
+  );
+}
+
 function ProjectAutoApprove() {
   const rpc = useRpc<AutoReviewRpcContract>();
   const [projects, setProjects] = useState<ProjectSetting[] | null>(null);
@@ -77,10 +88,11 @@ function ProjectAutoApprove() {
       const result = await rpc.call("listProjectSettings", null);
       if (revision !== revisionRef.current) return;
       setProjects(result.projects);
+      setRowErrors({});
       setError(null);
     } catch (nextError) {
       if (revision !== revisionRef.current) return;
-      setProjects(null);
+      // Keep the last good list; only a first load has nothing to show instead.
       setError(describeError(nextError));
     }
   }, [rpc]);
@@ -111,37 +123,37 @@ function ProjectAutoApprove() {
           ) ?? null,
       );
     } catch (nextError) {
-      setRowErrors((current) => ({ ...current, [project.id]: describeError(nextError) }));
+      // Re-read first: a successful load clears row errors, so the failure
+      // is set after it or it would vanish at once.
       await load();
+      setRowErrors((current) => ({ ...current, [project.id]: describeError(nextError) }));
     } finally {
       setPending((current) => without(current, project.id));
     }
   };
 
-  if (error !== null) {
-    return (
-      <div role="alert" style={{ color: "var(--destructive-text)" }}>
-        <p>Could not load projects: {error}</p>
-        <button type="button" onClick={() => void load()}>
-          Retry
-        </button>
-      </div>
-    );
+  if (projects === null) {
+    if (error === null) return <p style={{ color: SOFT_INK }}>Loading projects…</p>;
+    return <LoadError error={error} onRetry={() => void load()} />;
   }
-  if (projects === null) return <p style={{ color: SOFT_INK }}>Loading projects…</p>;
-  if (projects.length === 0) return <p style={{ color: SOFT_INK }}>No projects.</p>;
+  if (projects.length === 0 && error === null) {
+    return <p style={{ color: SOFT_INK }}>No projects.</p>;
+  }
   return (
-    <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
-      {projects.map((project) => (
-        <ProjectRow
-          key={project.id}
-          project={project}
-          pending={pending[project.id] === true}
-          error={rowErrors[project.id]}
-          onToggle={(row, next) => void toggle(row, next)}
-        />
-      ))}
-    </ul>
+    <>
+      {error === null ? null : <LoadError error={error} onRetry={() => void load()} />}
+      <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+        {projects.map((project) => (
+          <ProjectRow
+            key={project.id}
+            project={project}
+            pending={pending[project.id] === true}
+            error={rowErrors[project.id]}
+            onToggle={(row, next) => void toggle(row, next)}
+          />
+        ))}
+      </ul>
+    </>
   );
 }
 
