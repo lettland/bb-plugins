@@ -139,8 +139,8 @@ disturbs state the other path owns.
 
 ### Auto-approve
 
-Off by default, per project only (no global setting). With
-`bb auto-review auto-approve on --project <id>`, a plan that **completed the review cycle**
+Off by default, per project only (no global setting). With the Tools → Auto review → Plan
+auto-approve switch for a project, or `bb auto-review auto-approve on --project <id>`, a plan that **completed the review cycle**
 is approved automatically instead of waiting for the user (`off` reverts it). The
 agent is told so in the review prompt: it presents the revised plan again, and once that
 returns approved it implements it, unless the review left a decision only the user can make,
@@ -171,7 +171,7 @@ toggled mid-review, the worst case is an agent waiting for an approval that alre
 (or ending its turn with a plan that was approved) — it never approves a plan the gate did
 not.
 
-**Agents must never run `auto-approve on` unless the user explicitly asks for it in chat.**
+**Agents must never turn auto-approve on, through the CLI or the plugin's RPC/HTTP endpoint, unless the user explicitly asks for it in chat.**
 It removes the human checkpoint on plans, which is why `--project` is always required (it is
 never taken from the thread).
 

@@ -8,6 +8,7 @@ import {
   effectiveConfig,
   readLastFire,
   readProjectConfig,
+  setAutoApprovePlans,
   writeProjectConfig,
   type GlobalDefaults,
 } from "./config.js";
@@ -168,7 +169,7 @@ async function setAutoApprove(bb: BbPluginApi, parsed: ParsedArgs): Promise<Plug
     };
   }
   const autoApprovePlans = value === "on";
-  await writeProjectConfig(bb, projectId, { autoApprovePlans });
+  await setAutoApprovePlans(bb, projectId, autoApprovePlans, "cli");
   return parsed.flags.has("json")
     ? json({ ok: true, scope: "project", projectId, autoApprovePlans })
     : { exitCode: 0, stdout: `Plan auto-approve ${value} for project ${projectId}.\n` };

@@ -20,7 +20,8 @@ not count) asking the user what to change, auto-review answers that one question
 (marked `[bb auto-review]`) so the queued review still reaches it instead of the user
 being asked to explain a rejection they never made.
 
-A project can opt in (`bb auto-review auto-approve on --project <id>`, off by default) to
+A project can opt in (Tools → Auto review → Plan auto-approve, or
+`bb auto-review auto-approve on --project <id>`; off by default) to
 have a plan approved automatically once it has completed the review cycle; anything the gate
 cannot show was reviewed still goes to the user.
 
@@ -83,7 +84,9 @@ subagents, or sequentially in the same thread); `self` mode and the no-devkit ca
 still review in the same thread. A full calibrated review costs about six sessions on the
 provider (five lenses plus closure).
 
-Per-project overrides are stored in the plugin's own storage.
+Per-project overrides are stored in the plugin's own storage. bb's settings page for this
+plugin (Tools → Auto review) also has a Plan auto-approve section that lists every project with its own switch for approving reviewed
+plans automatically; it writes the same storage as `bb auto-review auto-approve`.
 
 ## CLI
 

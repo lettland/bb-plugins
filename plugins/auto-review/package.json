@@ -5,7 +5,8 @@
   "description": "Review, commit, and locally merge into a personal mainline (e.g. master) the changes an agent made this turn.",
   "license": "BSD-2-Clause",
   "engines": {
-    "bb": ">=0.0"
+    "bb": ">=0.38",
+    "bbPluginSdk": ">=0.4.6"
   },
   "bb": {
     "name": "Auto review",
@@ -14,6 +15,7 @@
       "icon": "GitMerge"
     },
     "server": "./server.ts",
+    "app": "./app.tsx",
     "skills": [
       "skills"
     ]
@@ -25,6 +27,7 @@
     "access": "public"
   },
   "scripts": {
+    "build": "env -u BB_CLI bb plugin build .",
     "test": "vitest run --config vitest.config.ts",
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
     "typecheck": "tsc --noEmit"
@@ -36,6 +39,7 @@
     "@get-bb/plugin-sdk": "0.5.9",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.20.4",
+    "@types/react": "^19.3.0",
     "@vitest/coverage-v8": "^4.1.11",
     "better-sqlite3": "^13.0.3",
     "cron-parser": "^5.5.0",

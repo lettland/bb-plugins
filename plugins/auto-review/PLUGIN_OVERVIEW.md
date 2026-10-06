@@ -65,15 +65,16 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   to auto-approve and the plan completed the review cycle). Claude Code never gets
   `PresentPlan`, and no other provider gets the native gate's instructions, so the two
   paths never compete for the same plan.
-- Per project and off by default, `bb auto-review auto-approve on --project <id>` approves
-  a plan automatically once it completed the review cycle (reason `plan-approved`);
+- Per project and off by default (the Plan auto-approve section on the settings page, or
+  `bb auto-review auto-approve on --project <id>`), a plan is approved automatically once it completed the review cycle (reason `plan-approved`);
   anything the gate cannot show was reviewed still goes to the user.
 - Ships enabled (opt-out). Turn it off globally or per project with `bb auto-review`;
   there is no per-thread skip.
 
 ## Surfaces
 
-- Settings: global `enabled`, default `mergeEligibleMainlines`, default `reviewMode`.
+- Settings: global `enabled`, default `mergeEligibleMainlines`, default `reviewMode`, plus a
+  Plan auto-approve section listing each project with its own switch (Tools → Auto review).
 - Per-project overrides live in the plugin's own storage.
 - CLI: `bb auto-review status|show|enable|disable|auto-approve|reset` (all `--json`). `status`
   reports `planGate`: whether this thread is a top-level, enabled `claude-code`

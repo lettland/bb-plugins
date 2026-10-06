@@ -159,6 +159,20 @@ export async function writeProjectConfig(
   return next;
 }
 
+/** The one writer of `autoApprovePlans`, so every flip is logged whichever surface made it. */
+export async function setAutoApprovePlans(
+  bb: BbPluginApi,
+  projectId: string,
+  value: boolean,
+  source: "cli" | "gui",
+): Promise<void> {
+  const before = (await readProjectConfig(bb, projectId)).autoApprovePlans ?? false;
+  await writeProjectConfig(bb, projectId, { autoApprovePlans: value });
+  bb.log.info(
+    `plan auto-approve for project ${projectId}: ${before} -> ${value} (via ${source})`,
+  );
+}
+
 export async function readLastFire(
   bb: BbPluginApi,
   projectId: string,

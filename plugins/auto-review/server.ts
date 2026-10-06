@@ -4,6 +4,7 @@ import { createReviewContext } from "./src/context.js";
 import { registerLifecycleEvents } from "./src/lifecycle-events.js";
 import { registerPlanGateEvents } from "./src/plan-gate.js";
 import { registerPlanTools } from "./src/present-plan.js";
+import { registerAutoReviewRpc } from "./src/rpc.js";
 import { registerTurnEvents } from "./src/turn-events.js";
 
 export default async function plugin(bb: BbPluginApi) {
@@ -13,4 +14,5 @@ export default async function plugin(bb: BbPluginApi) {
   registerTurnEvents(ctx);
   registerLifecycleEvents(ctx);
   registerAutoReviewCli(bb, ctx.settings, () => ctx.globals);
+  registerAutoReviewRpc(ctx);
 }
