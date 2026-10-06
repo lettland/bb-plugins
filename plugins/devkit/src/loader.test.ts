@@ -172,7 +172,12 @@ describe("review-code content", () => {
     expect(r.content).toContain("Always emit all four sections");
     expect(r.content).toContain("`(spec)`");
     expect(r.content).toContain("`(code)`");
-    if (lens === "reviewer-compliance") expect(r.content).toContain("Frameworks considered:");
+    if (lens === "reviewer-compliance") {
+      expect(r.content).toContain("Frameworks considered:");
+      expect(r.content).toContain("unconfirmed");
+      expect(r.content).toContain("declared out of scope");
+      expect(r.content).not.toContain("applicability-gated");
+    }
   });
 
   it("names every lens from the review-code table in skill routing and generated-file exclusion", async () => {
