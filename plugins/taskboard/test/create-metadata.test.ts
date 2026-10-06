@@ -1143,6 +1143,7 @@ test('GitHub loads native metadata and reports partially applied fields', async 
           if (input.method === 'status') {
             return {
               ghOk: true,
+              ghState: 'ready',
               ghError: null,
               repos: [{ repo: 'acme/repo', projectId: 'proj_taskboard' }],
               lastSyncedAt: null
@@ -1304,6 +1305,7 @@ test('GitHub confirms the submitted assignee from native response membership', a
           if (input.method === 'status') {
             return {
               ghOk: true,
+              ghState: 'ready',
               ghError: null,
               repos: [{ repo: 'acme/repo', projectId: 'proj_taskboard' }],
               lastSyncedAt: null
@@ -1372,6 +1374,7 @@ test('GitHub paginates and deduplicates every create metadata collection', async
           if (input.method === 'status') {
             return {
               ghOk: true,
+              ghState: 'ready',
               ghError: null,
               repos: [{ repo: 'acme/repo', projectId: 'proj_taskboard' }],
               lastSyncedAt: null
@@ -1486,6 +1489,7 @@ test('GitHub queues a fresh reconciliation after an overlapping pre-create refre
           if (input.method === 'status') {
             return {
               ghOk: true,
+              ghState: 'ready',
               ghError: null,
               repos: [{ repo: 'acme/repo', projectId: 'proj_taskboard' }],
               lastSyncedAt: null
@@ -1583,6 +1587,7 @@ test('GitHub queues a post-write refresh when issue confirmation is ambiguous', 
           if (input.method === 'status') {
             return {
               ghOk: true,
+              ghState: 'ready',
               ghError: null,
               repos: [{ repo: 'acme/repo', projectId: 'proj_taskboard' }],
               lastSyncedAt: null
@@ -1649,6 +1654,7 @@ test('GitHub forced reconciliation refreshes before listing only project-scoped 
             rpcCalls.push('status');
             return {
               ghOk: true,
+              ghState: 'ready',
               ghError: null,
               repos: [
                 { repo: 'acme/repo', projectId: 'proj_taskboard' },

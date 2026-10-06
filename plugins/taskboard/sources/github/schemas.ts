@@ -42,6 +42,7 @@ export const detailOutputSchema = z
 export const githubStatusOutputSchema = z
   .object({
     ghOk: z.boolean(),
+    ghState: z.enum(['ready', 'needs_configuration', 'unavailable']),
     ghError: z.string().nullable(),
     repos: z.array(
       z.object({ repo: z.string(), projectId: z.string().nullable() }).strict()
