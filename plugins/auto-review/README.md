@@ -48,7 +48,8 @@ It ships enabled (opt-out).
 - Commits only a complete, working change. The review turn gets the full list of files the
   turn authored, checks that nothing the staged change depends on is left out, and runs the
   project's typecheck/build and tests. If the work is unfinished, broken, or could only be
-  committed in part, it leaves it uncommitted and reports what is missing. A turn that
+  committed in part, it leaves it uncommitted and reports what is missing. It commits in
+  small focused commits, one per logical change, rather than one large commit. A turn that
   changed more than 400 files is reviewed but left for the user to commit.
 - After committing, the review turn checks the thread's plan and continues genuinely
   unfinished planned work. It never invents work.

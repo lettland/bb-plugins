@@ -131,8 +131,13 @@ describe("buildReviewPrompt", () => {
     });
     expect(text).toMatch(/4\. Check that what you staged is a complete, working change/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*only if step 4 passed[^\n]*do NOT commit/u);
+    expect(text).toMatch(
+      /6\. Commit the staged changes[^\n]*one logical change[^\n]*`git commit -- <paths>`[^\n]*Never split one file across commits/u,
+    );
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*If a commit in the sequence fails, stop/u);
+    expect(text).toMatch(/7\. Now judge[^\n]*commit it as in step 6/u);
     expect(text).toMatch(/7\. Now judge[^\n]*check it is complete and working as in step 4/u);
-    expect(text).toMatch(/8\. Merge the current branch[^\n]*held back a commit in step 6/u);
+    expect(text).toMatch(/8\. Merge the current branch[^\n]*held back a commit or a commit failed in step 6/u);
   });
 
   it("says none are listed when every path was unsafe", () => {

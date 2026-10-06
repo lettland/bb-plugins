@@ -14,9 +14,10 @@ It commits only a complete, working change. The review turn is given the full li
 files the turn authored, checks that everything the change depends on is staged with it
 (or already in this turn's own commits), and runs the project's typecheck/build and tests.
 If the work is unfinished, the checks fail, or the change could only be committed in part,
-it does not commit: the changes stay uncommitted and the reply says what is missing. A turn
-that changed more than 400 files is reviewed but never auto-committed or merged, because
-that list is too long to hand over as a reliable commit boundary.
+it does not commit: the changes stay uncommitted and the reply says what is missing. It
+commits in small focused commits, one per logical change, rather than one large commit. A
+turn that changed more than 400 files is reviewed but never auto-committed or merged,
+because that list is too long to hand over as a reliable commit boundary.
 
 When it commits, the injected turn then judges — from the thread's own plan — whether the
 work is actually finished, and continues any genuinely-remaining planned work (reviewing and
