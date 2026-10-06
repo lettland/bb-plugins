@@ -17,6 +17,7 @@ import {
   PRESENT_PLAN_OFF_MESSAGE,
   PRESENT_PLAN_REVIEWED_MESSAGE,
 } from "./src/prompt.js";
+import { EVENT_PAGE_MAX } from "./src/plan.js";
 import { PLAN_DENY_ANSWER_WINDOW_MS, STALE_WINDOW_MS } from "./src/state.js";
 
 const THREAD_ID = "thread-1";
@@ -67,6 +68,8 @@ interface HostOptions {
   resolveAllowThrows?: boolean;
   /** Listing `item/completed` events fails, so no proof the review ran can be read. */
   completedEventsThrow?: boolean;
+  /** Listing `turn/completed` events fails, so no turn boundary can be read. */
+  turnEventsThrow?: boolean;
   /** Resolving a `user_answer` (only) fails — the global `resolveThrows` would also break the deny. */
   resolveUserAnswerThrows?: boolean;
   /** A real tool call lands during the deny's own resolve round-trip (races the cursor capture). */
@@ -279,7 +282,11 @@ function createHost(options: HostOptions = {}) {
           afterSeq?: string;
           types?: readonly string[];
           limit?: string;
+          order?: "asc" | "desc";
         }) => {
+          if (Number(args.limit ?? 0) > 100) {
+            throw new Error("Thread event limit cannot exceed 100");
+          }
           const after = Number(args.afterSeq ?? -1);
           const rows: unknown[] = [];
           if (args.types?.includes("system/thread/interrupted") === true) {
@@ -331,6 +338,9 @@ function createHost(options: HostOptions = {}) {
             );
           }
           if (args.types?.includes("turn/completed") === true) {
+            if (options.turnEventsThrow === true) {
+              throw new Error("events unavailable");
+            }
             rows.push(
               ...(turnEnds[args.threadId] ?? [])
                 .filter((seq) => seq > after)
@@ -345,8 +355,11 @@ function createHost(options: HostOptions = {}) {
                 })),
             );
           }
-          // Like the server: oldest first, paged — a small default page when no limit is given.
-          const sorted = (rows as Array<{ seq: number }>).sort((a, b) => a.seq - b.seq);
+          // Like the server: ordered (oldest first unless `order` is "desc"), paged — a
+          // small default page when no limit is given.
+          const sorted = (rows as Array<{ seq: number }>).sort((a, b) =>
+            args.order === "desc" ? b.seq - a.seq : a.seq - b.seq,
+          );
           return sorted.slice(0, Number(args.limit ?? EVENTS_DEFAULT_PAGE));
         },
       },
@@ -2245,12 +2258,26 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
+  it("still answers a question when the events since the deny stop one short of a page", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    await emitPlan(host);
+    for (let seq = 101; seq < 101 + EVENT_PAGE_MAX - 1; seq += 1) {
+      host.startItem({ seq, item: { type: "reasoning" } });
+    }
+
+    const { errors } = await emitQuestion(host);
+    expect(errors).toEqual([]);
+    expect(host.resolutions.at(-1)).toMatchObject({ resolution: { kind: "user_answer" } });
+    await host.harness.dispose();
+  });
+
   it("leaves a question alone when the events since the deny fill a whole page", async () => {
     const host = createHost({ sendDelivery: "queued" });
     await plugin(host.bb);
     await emitPlan(host);
     // Harmless reasoning only, but a full page may hide later tool work.
-    for (let seq = 101; seq <= 300; seq += 1) {
+    for (let seq = 101; seq < 101 + EVENT_PAGE_MAX; seq += 1) {
       host.startItem({ seq, item: { type: "reasoning" } });
     }
 
@@ -2615,10 +2642,10 @@ describe("auto-review plugin", () => {
     it("never approves when a turn ended beyond the first page of completed tool calls", async () => {
       const host = await hostWith();
       await holdAndDispatch(host);
-      for (let seq = 101; seq <= 110; seq += 1) {
+      for (let seq = 101; seq < 101 + EVENT_PAGE_MAX + 10; seq += 1) {
         host.completeItem({ seq, item: READ });
       }
-      host.completeTurn(111);
+      host.completeTurn(101 + EVENT_PAGE_MAX + 10);
       await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
       expect(host.resolutions).toEqual([DENY]);
       expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
@@ -2627,6 +2654,17 @@ describe("auto-review plugin", () => {
 
     it("leaves the plan for the user when the completed events cannot be read", async () => {
       const host = await hostWith({ completedEventsThrow: true });
+      await holdAndDispatch(host);
+      host.completeItem({ seq: 101, item: READ });
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      expect(warnings(host).some((message) => message.includes("check the plan review ran"))).toBe(true);
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+      await host.harness.dispose();
+    });
+
+    it("leaves the plan for the user when the turn boundary cannot be read", async () => {
+      const host = await hostWith({ turnEventsThrow: true });
       await holdAndDispatch(host);
       host.completeItem({ seq: 101, item: READ });
       await emitPlan(host, planInteraction("# Plan v2", "pint-2"));

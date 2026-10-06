@@ -136,15 +136,24 @@ export function reviewReachedAgent(
   );
 }
 
+/** The most events one `threads.events.list` page may request; the server rejects a larger `limit`. */
+export const EVENT_PAGE_MAX = 100;
+
 /**
  * `reviewReachedAgent` over the thread's events since a cursor. The event log
- * is paged (oldest first, with a server-chosen default page size), so one
- * mixed query could return a page of completed tool calls that ends before a
- * later `turn/completed`, and the turn boundary would go unseen. It is
- * therefore its own query, asking for the single oldest turn end: any row
- * means a turn ended, whatever the page size. The completed-item query can
- * only come up short, which fails closed. A failed read of either counts as
- * no proof: the plan then stays with the user.
+ * is paged, so one mixed query could return a page of completed tool calls that
+ * ends before a later `turn/completed`, and the turn boundary would go unseen.
+ * It is therefore its own query, asking (oldest first) for the single first
+ * turn end: any row means a turn ended, whatever the page size. The
+ * completed-item query asks for one full page, oldest first, so it can only
+ * come up short, which fails closed.
+ *
+ * The two reads run in sequence, items first. Every turn end that precedes a
+ * returned item already exists when that item is read, so the later turn read
+ * is guaranteed to see it; run the other way round (or concurrently), a turn
+ * could end between the reads and a tool call from after it would count as
+ * proof. A failed read of either counts as no proof: the plan then stays with
+ * the user.
  */
 export async function reviewRanSince(
   bb: BbPluginApi,
@@ -155,10 +164,20 @@ export async function reviewRanSince(
 ): Promise<boolean> {
   try {
     const afterSeq = String(sinceSeq);
-    const [turnEnds, events] = await Promise.all([
-      bb.sdk.threads.events.list({ threadId, afterSeq, types: ["turn/completed"], limit: "1" }),
-      bb.sdk.threads.events.list({ threadId, afterSeq, types: ["item/completed"] }),
-    ]);
+    const events = await bb.sdk.threads.events.list({
+      threadId,
+      afterSeq,
+      types: ["item/completed"],
+      order: "asc",
+      limit: String(EVENT_PAGE_MAX),
+    });
+    const turnEnds = await bb.sdk.threads.events.list({
+      threadId,
+      afterSeq,
+      types: ["turn/completed"],
+      order: "asc",
+      limit: "1",
+    });
     return reviewReachedAgent(events, gateTools, countSubagentCalls, turnEnds.length > 0);
   } catch (error) {
     bb.log.warn(
