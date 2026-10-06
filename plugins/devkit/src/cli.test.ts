@@ -161,6 +161,8 @@ describe("runDevkitCli", () => {
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("the plan document at docs/p.md");
     expect(r.stdout).toContain("do not start implementing");
+    expect(r.stdout).toContain("never any other project file");
+    expect(r.stdout).toContain("bb child threads are allowed in plan mode");
     expect(r.stdout).toContain("EnterPlanMode");
     expect(r.stdout).toContain("Implement only after the user explicitly approves.");
     const code = await runDevkitCli(["review", "code"], deps());

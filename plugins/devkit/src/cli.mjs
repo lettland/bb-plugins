@@ -20,7 +20,7 @@ const AGENT_NOTE_REVIEW =
   "[devkit review — instructions for a coding agent to run; this prints the workflow, it does not produce the review itself]";
 // A plan review ends at the user's approval, never at implementation.
 const PLAN_STOP = [
-  "Plan scope: edit only the plan document, never any other file, and do not start implementing.",
+  "Plan scope: edit only the plan document, never any other project file, and do not start implementing. The review's own brief files outside the checkout and its bb child threads are allowed in plan mode.",
   "When the plan is revised, stop and get the user's approval: if you are no longer in plan mode and your provider can re-enter it (Claude Code: EnterPlanMode), re-enter it first,",
   "then present the revised plan for approval (Claude Code: ExitPlanMode) with a short summary of what the review changed.",
   "Without a plan-approval tool, end your turn with the revised plan and wait. Implement only after the user explicitly approves.",

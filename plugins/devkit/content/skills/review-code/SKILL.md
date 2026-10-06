@@ -88,6 +88,13 @@ that lens through to the next, independently per lens.
   reports `.thread.canSpawnChild: true`. That one call also gives you `.thread.{projectId,
   providerId}` and `.execution.nextTurn.{model, reasoningLevel, permissionMode}`.
 
+  **Plan mode**: this tier is allowed in plan mode, and you must try it there. Plan mode keeps
+  the *project* read-only; the review's run dir (outside the checkout) and its child threads
+  are not the project. Writing the brief files into the run dir, and spawning, waiting on,
+  stopping, archiving and deleting the review's child threads, are part of the review and
+  change nothing in the project. A "don't run non-readonly tools" reminder is no reason to skip
+  this tier — only an actual failed or denied call is.
+
   **Permission mode**: always request `auto` — simpler, and it covers every parent mode. If the
   spawn is rejected for an unsupported mode (some providers, e.g. `acp-claude-work`, accept only
   `accept-edits`/`full` and reject `auto` with an HTTP 400), retry once with the parent's own
@@ -194,10 +201,10 @@ that lens through to the next, independently per lens.
   bb, or for a lens whose bb-thread spawn failed or was given up on above.
 
 - **In this thread**, sequentially, when neither tier above is available or both fail for a lens
-  (an error, a refusal, plan mode or a sandbox blocking it): load its calibration and stack
-  skills, read every hunk of its scope and the surrounding code a hunk depends on, then write
-  out that reviewer's own Blockers / Concerns / Advisories / Verdict before starting the next.
-  Do not merge the lenses into one pass.
+  (an actual error, a refusal, or a denied tool call — never pre-emptively, and never because
+  you are in plan mode): load its calibration and stack skills, read every hunk of its scope and
+  the surrounding code a hunk depends on, then write out that reviewer's own Blockers / Concerns
+  / Advisories / Verdict before starting the next. Do not merge the lenses into one pass.
 
 Every reviewer must emit all four sections, writing empty ones as `- None`. Whichever tier
 produced the reply, a bad one — `calibration not loaded`, missing a section, partial output, or
@@ -240,7 +247,8 @@ shell-init changes. Do not ask permission to fix. The reference's "never stage o
 a caller that says to commit (see above).
 
 For **plan** scope, "fix" means editing the plan document itself — allowed in plan mode — and
-nothing else; never start implementing. The review always ends at the user's approval:
+no other project file; never start implementing. The review's own run dir and child threads are
+not fixes and stay allowed in plan mode. The review always ends at the user's approval:
 
 1. If you are no longer in plan mode (a review turn injected into the thread can take you out of
    it) and your provider can re-enter it, re-enter it first (Claude Code: `EnterPlanMode`).

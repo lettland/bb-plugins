@@ -153,7 +153,7 @@ function planPathBlock(path: string): string {
  * document itself, nothing else.
  */
 const APPLY_PLAN_FINDINGS =
-  "Apply every valid finding directly to the plan document, whatever its severity; skip a false positive with a one-line reason. Editing the plan document is allowed in plan mode — do not edit any other file.";
+  "Apply every valid finding directly to the plan document, whatever its severity; skip a false positive with a one-line reason. Editing the plan document is allowed in plan mode — do not edit any other project file. The review itself is also allowed in plan mode: writing its brief files outside the checkout and spawning, waiting on, stopping, archiving and deleting its bb child threads do not change the project, so try them rather than skipping them; fall back only after a real failure or a denied call.";
 
 export interface BuildPlanPromptInput {
   reviewMode: ReviewMode;
