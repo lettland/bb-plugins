@@ -16,8 +16,9 @@ as this workflow, `Skill(<slug>)` as `devkit_load_skill({ slug: "<slug>" })`, an
 `Skill(skill-discovery)` as one `devkit_find_skills` query per detected keyword.
 
 **The caller wins on scope and commits.** When the workflow that sent you here narrows the scope
-(auto-review: only your own work from this turn) or tells you to stage and commit, follow it over
-anything in this skill or its references. Never push.
+(auto-review: only your own work from this turn — that excludes other parties' concurrent
+edits, not pre-existing code in the turn's files) or tells you to stage and commit, follow it
+over anything in this skill or its references. Never push.
 
 ## 1. Collect the scope
 
@@ -222,11 +223,12 @@ install.
 ## 5. Disposition
 
 Follow `devkit_load_skill({ reference: "review-finding-disposition" })`: validate each finding
-against the actual code/plan; fix every valid one (all tiers); skip false positives with a one-line
-reason; re-verify; run the closure review over the post-fix diff, through the same three tiers as §3
-and with its own tree guard — a fresh baseline taken after your fixes and before spawning the
-closure thread, never the §3 baseline, since the orchestrator's own fixes would otherwise read as
-foreign changes. The closure reviewer gets the Security diff profile. One bb child thread, else one
+against the actual code/plan; fix every valid one (all tiers); skip false positives, findings
+unrelated to a named feature, or findings outside review scope (reported), with a one-line reason;
+re-verify; run the closure review over the post-fix diff, through the same three tiers as §3 and
+with its own tree guard — a fresh baseline taken after your fixes and before spawning the closure
+thread, never the §3 baseline, since the orchestrator's own fixes would otherwise read as foreign
+changes. The closure reviewer gets the Security diff profile. One bb child thread, else one
 provider subagent, else in this thread; one brief listing each lens's calibration reference and that
 lens's stack skills, with that single reviewer loading and reporting each lens's four sections in
 turn, never merged into one pass. This brief overrides §2 item 2's "reply only `calibration not

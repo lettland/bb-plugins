@@ -256,6 +256,43 @@ describe("review-code content", () => {
     expect(normalized).toContain("Cite any secret by file:line and type, never by");
   });
 
+  it("never skips a valid finding for being pre-existing, only for an unrelated named feature", async () => {
+    const collapse = async (reference: string | undefined, slug?: string) => {
+      const r = await loadSkill(contentRoot, slug, reference);
+      expect(r.ok, reference ?? slug).toBe(true);
+      return r.ok ? r.content.replace(/\s+/g, " ") : "";
+    };
+    const disposition = await collapse("review-finding-disposition");
+    expect(disposition).toContain("**Pre-existing is not a reason to skip.**");
+    expect(disposition).toContain("The only allowed skip is **named feature + unrelated**");
+    expect(disposition).toContain("outside the files under review or the scope the caller set, or another party's in-flight edit");
+    expect(disposition).toContain("_unrelated to named feature `<name>`_");
+    expect(disposition).toContain("_outside review scope (reported)_");
+    expect(disposition).toContain("highest severity first");
+    expect(disposition).toContain("Report fixes to pre-existing code separately");
+    expect(disposition).toContain("still needs rotation");
+    expect(disposition).toContain("Only edits outside the scope the caller handed over, or ones that appear after the review started, are off-limits");
+    expect(disposition).not.toContain("you did not write");
+    expect(disposition).not.toContain("wrong, out of scope, or already handled");
+
+    expect(normalized).toContain("excludes other parties' concurrent edits, not pre-existing code in the turn's files");
+    expect(normalized).not.toContain("(auto-review: only your own work from this turn) or");
+    expect(normalized).toContain(
+      "findings unrelated to a named feature, or findings outside review scope (reported), with a one-line reason",
+    );
+
+    const compliance = await collapse("reviewer-compliance");
+    expect(compliance).not.toContain("Pre-existing gaps in code the change does not touch are not findings");
+    expect(compliance).toContain(
+      "Every finding anchors to a file under review or a plan step.** Report pre-existing gaps in those files at their true severity; disposition decides what is skipped",
+    );
+    expect(compliance).toContain("missing organizational documents are outside the diff");
+
+    const codeReviewer = await collapse(undefined, "code-reviewer");
+    expect(codeReviewer).toContain("Likely false positive");
+    expect(codeReviewer).not.toContain("or pre-existing issue");
+  });
+
   it("fingerprints tracked and untracked paths by name, not status alone", () => {
     expect(normalized).toContain("git stash create");
     expect(normalized).toContain("git ls-files -o --exclude-standard -z | xargs -0");

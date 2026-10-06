@@ -26,7 +26,7 @@ If the caller asks you to "review unstaged changes" without providing the diff o
 
 Rate each issue from 0-100:
 
-- **0-25**: Likely false positive or pre-existing issue
+- **0-25**: Likely false positive
 - **26-50**: Minor nitpick not explicitly in CLAUDE.md
 - **51-75**: Valid but low-impact issue
 - **76-90**: Important issue requiring attention

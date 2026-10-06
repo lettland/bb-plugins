@@ -51,8 +51,29 @@ finding:
    whether to fix:** do blockers first, advisories last; never skip a tier just because it is
    low.
 
-3. **Skip false positives.** If validation shows a finding is wrong, out of scope, or already
-   handled, drop it — but say so in one line. Never silently discard a finding.
+   **Pre-existing is not a reason to skip.** A valid finding is fixed whether or not the code
+   predates the change. _Pre-existing_ means the code as it stood at the review's base (`HEAD` for
+   code scope, `<base>` for `impl <base>..<head>`); the caller may name a different base, such as
+   a turn-start commit. The only allowed skip is **named feature + unrelated**:
+   - _Named feature_: the work is explicitly scoped to a feature the user named — a feature branch
+     the user named (its name contains `/`, e.g. `fix/oh-5843/drop-dead-rotations-feed`) or a
+     ticket/feature the request explicitly cites. Tool-generated branches (`bb/<slug>`,
+     `dependabot/…`, `renovate/…`), root/mainline branches, and an ordinary "add X" request do
+     not count. When in doubt, it is not a named feature: fix.
+   - _Unrelated_: judged per function or hunk, not per file — the issue is not in code the feature
+     changes, calls, or is called by, and does not affect the feature's behaviour. A nil-check bug
+     in a helper the change calls is related; a typo in an untouched sibling function is not.
+
+   Fixes land in the files under review; a related issue elsewhere is reported, not edited. The
+   whole handed-over diff is the user's to fix. Only edits outside the scope the caller handed
+   over, or ones that appear after the review started, are off-limits: report them, do not fix
+   them.
+
+3. **Skip false positives.** If validation shows a finding is wrong or already handled, drop it —
+   but say so in one line. Two more findings are skipped, never fixed: one _outside review scope_
+   (outside the files under review or the scope the caller set, or another party's in-flight edit
+   — report it, do not fix it) and one _unrelated_ to a named feature (step 2). Never silently
+   discard a finding.
 
 4. **Never ask for permission.** Do not write _"Want me to fix…?"_, _"Want me to add…?"_, or
    wait for approval. The user ran a review command to get the code fixed, not to receive a
@@ -79,9 +100,14 @@ finding:
 
 7. **Report the disposition and closure evidence.** After fixing and follow-up, print a report:
    for each **fixed** finding, its tier and `(spec)`/`(code)` tag, `file:line`, and a one-line
-   description of the change you made; for each **skipped** finding, the one-line reason — name
-   the category (_false positive_, _lateral rewrite_, or _deliberate choice_) so the user can
-   tell a deliberate skip from a missed defect. Close with the verification command(s) you ran
+   description of the change you made; for each **skipped** finding, its severity and the one-line
+   reason — name the category (_false positive_, _lateral rewrite_, _deliberate choice_,
+   _unrelated to named feature `<name>`_, or _outside review scope (reported)_) so the user can
+   tell a deliberate skip from a missed defect. List skips highest severity first so a skipped
+   Blocker is never buried, and label a skipped security finding as security. Report fixes to
+   pre-existing code separately from fixes to the change's own code. A pre-existing secret you
+   removed still needs rotation — it stays in git history — so report it by `file:line` and type
+   as needing rotation. Close with the verification command(s) you ran
    and the follow-up review verdict. If verification or closure review could not be completed,
    state the exact blocker instead of implying the review is done.
 
