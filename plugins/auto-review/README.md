@@ -32,8 +32,9 @@ It ships enabled (opt-out).
   Commits replayed by a rebase with the same patches as the turn started with do not
   count as new work; changed replayed patches still count.
 - Fixes and commits valid pre-existing issues the review finds in the files the turn touched,
-  except unrelated ones when the work is a named feature (a user-named `/` branch other than
-  `bb/…`, or a cited ticket).
+  except unrelated ones when the work is a named feature (a user-named `/` branch, not the
+  tool-generated branches such as `bb/…`, or a cited ticket). A pre-existing fix lands in the same
+  commit as the turn's other changes to that file, named in the commit message.
 - Chooses commit and merge from a branch policy keyed on the mainline name. A feature
   branch (name contains a `/`, e.g. `fix/x`, `bb/<slug>`) merges into an eligible mainline;
   a top-level branch such as `develop` is never merged; a non-eligible (protected) mainline such as

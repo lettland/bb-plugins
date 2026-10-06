@@ -11,8 +11,9 @@ checkout alike. It fires on turn end for top-level, git-branch, user coding thre
 attributes work only to that thread's own edits.
 
 Valid pre-existing issues the review finds in the files the turn touched are fixed and committed
-too, except unrelated ones when the work is a named feature (a user-named `/` branch other than
-`bb/…`, or a cited ticket).
+too, except unrelated ones when the work is a named feature (a user-named `/` branch, not the
+tool-generated branches such as `bb/…`, or a cited ticket). A pre-existing fix lands in the same
+commit as the turn's other changes to that file, named in the commit message.
 
 It commits only a complete, working change. The review turn is given the full list of
 files the turn authored, checks that everything the change depends on is staged with it
