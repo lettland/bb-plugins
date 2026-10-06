@@ -117,7 +117,7 @@ that lens through to the next, independently per lens.
   once no further spawn attempt will read it — after a successful spawn, or once the permission-mode
   retry (if any) has also failed. The tree guard below keeps its config snapshot in the run dir too.
   On every tier, not just here, at the end of the review (after §5's closure review) run
-  `rm -f <run dir>/*` then `rmdir <run dir>` — never a recursive remove. Not a heredoc: the Project
+  `rm -f "<run dir>"/*` then `rmdir "<run dir>"` — never a recursive remove. Not a heredoc: the Project
   context block inlines repo text (CLAUDE.md/AGENTS.md) that could contain a line reading exactly
   the delimiter, closing it early and running what follows as shell:
   ```sh

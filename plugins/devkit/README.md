@@ -70,11 +70,24 @@ with a leaked secret or real personal data, rather than waiting on its parent (`
 confirmation prompt an unattended agent would otherwise hang on). They're spawned with
 `--lifecycle-owner-thread`, so they're deleted along with their parent anyway.
 
-Code and impl reviews also check added or changed **public** dependencies for known CVEs: the
-orchestrator sends only their names and versions to `api.osv.dev` (Google-operated OSV) and hands
-the result to the security reviewer. Packages from private sources are skipped. Set
-`DEVKIT_CVE_LOOKUP=off` to disable the lookup, and allowlist `curl` to `api.osv.dev` to avoid a
-permission prompt in unattended runs.
+Code and impl reviews also check added or changed **public** dependencies for known CVEs, run by
+the orchestrator (never a reviewer) and handed to the security reviewer only:
+
+- **What is sent:** the names and versions of added or changed public dependencies to
+  `api.osv.dev` (Google-operated OSV), plus the request metadata any HTTPS call carries (IP address,
+  time). Packages from private sources are skipped, failing closed: Go (`GOPRIVATE` and friends,
+  non-default `GOPROXY`, `replace` targets), npm scopes with a configured private registry or auth
+  token, and PyPI packages from any non-pypi.org index or source.
+- **Requires** `curl` and `jq`; without them the lookup reports `not run`.
+- **On by default.** Opt out with `DEVKIT_CVE_LOOKUP=off` (exactly `off`), set in the environment
+  of the agent process (shell profile, or bb's machine env).
+- **Unattended runs:** the lookup's `curl` may wait on a shell-permission prompt. Prefer
+  `DEVKIT_CVE_LOOKUP=off`. A permission mode that does not prompt also applies to the reviewer child
+  threads that read untrusted diffs (on providers that reject `auto`, children inherit the parent's
+  mode), so it widens their access too. Do not add a broad `Bash(curl:*)` allow rule for the same
+  reason.
+- **Severity** is often `unknown` for Go (`GO-*`), PyPI (`PYSEC-*`), and crates (`RUSTSEC-*`)
+  records.
 
 ## Install
 

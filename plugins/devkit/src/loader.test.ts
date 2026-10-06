@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -5,6 +6,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadSkill, MAX_BODY_BYTES } from "./loader.mjs";
 
 let dataRoot: string;
+
+const hasJq = (() => {
+  try {
+    execFileSync("jq", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 beforeAll(async () => {
   dataRoot = await mkdtemp(path.join(tmpdir(), "devkit-loader-"));
@@ -231,6 +241,7 @@ describe("review-code content", () => {
     ]) {
       expect(text, title).toContain(title);
     }
+    // Every OWASP citation must carry an edition (A05:2025), never a bare A05.
     expect(text).not.toMatch(/\bA(0[1-9]|10)\b(?!:2025|:2021)/);
     expect(text).toContain("A06:2021");
     expect(text).toContain("A10:2021");
@@ -261,7 +272,10 @@ describe("review-code content", () => {
     const text = r.content.replace(/\s+/g, " ");
     expect(text).toContain("https://api.osv.dev/v1/querybatch");
     expect(text).toContain("DEVKIT_CVE_LOOKUP");
-    expect(text).toContain("private");
+    expect(text).toContain("skip all Go as `private`");
+    expect(text).toContain("--proto '=https'");
+    expect(text).toContain("--fail-early");
+    expect(text).toContain("Never read a raw response");
     expect(text).toContain("Any failure ends the lookup");
     expect(text).toContain("not run — plan review");
     const scanners = ["npm audit", "pip-audit", "cargo audit", "osv-scanner", "govulncheck"];
@@ -294,8 +308,134 @@ describe("review-code content", () => {
     for (const line of lines) expect(line, line).toMatch(grammar);
   });
 
+  it("keeps backslash escapes out of every single-quoted jq program (fish turns `\\` into `\`)", async () => {
+    const lookup = await loadSkill(contentRoot, undefined, "review-cve-lookup");
+    expect(lookup.ok).toBe(true);
+    if (!lookup.ok) return;
+    const programs = lookup.content
+      .split("\n")
+      .filter((line) => line.startsWith("jq "))
+      .flatMap((line) => [...line.matchAll(/'([^']*)'/g)].map((m) => m[1] ?? ""));
+    expect(programs.length).toBeGreaterThanOrEqual(3);
+    for (const program of programs) expect(program).not.toContain("\\\\");
+  });
+
+  it("has jq available on CI so the executable jq tests cannot be skipped there", () => {
+    if (process.env.CI) expect(hasJq).toBe(true);
+  });
+
+  it.skipIf(!hasJq)("the Step 5 jq programs list valid hits and count paged results and bad IDs", async () => {
+    const lookup = await loadSkill(contentRoot, undefined, "review-cve-lookup");
+    expect(lookup.ok).toBe(true);
+    if (!lookup.ok) return;
+    const programs = [...lookup.content.matchAll(/^jq -r '([^']+)' "<run dir>\/batch\.json"$/gm)].map(
+      (m) => m[1] ?? "",
+    );
+    expect(programs).toHaveLength(2);
+    const dir = await mkdtemp(path.join(tmpdir(), "devkit-jq-"));
+    try {
+      const file = path.join(dir, "batch.json");
+      await writeFile(
+        file,
+        JSON.stringify({
+          results: [
+            { vulns: [{ id: "GHSA-aaaa-bbbb-cccc" }] },
+            {},
+            { vulns: [{ id: "MAL-2024-1" }, { id: "bad id!" }], next_page_token: "t" },
+          ],
+        }),
+      );
+      const run = (program: string) => execFileSync("jq", ["-r", program, file], { encoding: "utf8" }).trimEnd();
+      expect(run(programs[0] ?? "")).toBe("0\tGHSA-aaaa-bbbb-cccc\n2\tMAL-2024-1");
+      expect(run(programs[1] ?? "")).toBe("1\t1");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!hasJq)("the Step 6 jq extracts every fixed version, exact names, and aligned columns", async () => {
+    const lookup = await loadSkill(contentRoot, undefined, "review-cve-lookup");
+    expect(lookup.ok).toBe(true);
+    if (!lookup.ok) return;
+    const program = /--arg fre '<fixed-version regex>' '([^']+)'/.exec(lookup.content)?.[1];
+    expect(program).toBeTruthy();
+    // Each ecosystem's own fixed-version regex, read from the reference's Step 4.
+    const npmRe = /- \*\*npm\*\*[\s\S]*?Version: `([^`]+)`/.exec(lookup.content)?.[1] ?? "";
+    const pypiRe = /- \*\*PyPI\*\*[\s\S]*?Version \(PEP 440[^`]*`([^`]+)`/.exec(lookup.content)?.[1] ?? "";
+    const goRe = /Fixed-version regex \(Step 6\): `([^`]+)`/.exec(lookup.content)?.[1] ?? "";
+    for (const re of [npmRe, pypiRe, goRe]) expect(re).not.toBe("");
+    const dir = await mkdtemp(path.join(tmpdir(), "devkit-jq-"));
+    const run = async (eco: string, name: string, fre: string, record: object): Promise<string> => {
+      const file = path.join(dir, "v.json");
+      await writeFile(file, JSON.stringify(record));
+      return execFileSync(
+        "jq",
+        ["-r", "--arg", "eco", eco, "--arg", "name", name, "--arg", "fre", fre, program ?? "", file],
+        { encoding: "utf8" },
+      ).trimEnd();
+    };
+    const affected = (eco: string, name: string, ...ranges: unknown[][]) => [
+      {
+        package: { ecosystem: eco, name },
+        ranges: ranges.map(([from, fixed]) => ({ type: "SEMVER", events: [{ introduced: from }, { fixed }] })),
+      },
+    ];
+    try {
+      const multi = { id: "GHSA-aaaa-bbbb-cccc", database_specific: { severity: "high" } };
+      expect(
+        await run("npm", "foo", npmRe, {
+          ...multi,
+          affected: affected("npm", "foo", ["0", "1.2.3"], ["2.0.0", "2.0.5"]),
+        }),
+      ).toBe("GHSA-aaaa-bbbb-cccc\tHIGH\t1.2.3,2.0.5");
+      expect(
+        await run("npm", "foo", npmRe, {
+          ...multi,
+          affected: affected("npm", "foo", ["2.0.0", "1.10.0"], ["0", "1.9.2"]),
+        }),
+      ).toBe("GHSA-aaaa-bbbb-cccc\tHIGH\t1.9.2,1.10.0");
+      expect(
+        await run("npm", "foo", npmRe, {
+          ...multi,
+          affected: affected("npm", "foo", ["0", 5], ["1.0.0", "1.2.3"]),
+        }),
+      ).toBe("GHSA-aaaa-bbbb-cccc\tHIGH\t1.2.3");
+      expect(
+        await run("npm", "foo.bar", npmRe, { ...multi, affected: affected("npm", "foo-bar", ["0", "1.2.3"]) }),
+      ).toBe("GHSA-aaaa-bbbb-cccc\tHIGH\tunknown");
+      expect(
+        await run("npm", "foo", npmRe, { ...multi, affected: affected("PyPI", "foo", ["0", "1.2.3"]) }),
+      ).toBe("GHSA-aaaa-bbbb-cccc\tHIGH\tunknown");
+      expect(
+        await run("npm", "foo", npmRe, {
+          id: "GHSA-aaaa-bbbb-cccc",
+          database_specific: { severity: "moderate" },
+          affected: affected("npm", "foo", ["0", "1.2.3"]),
+        }),
+      ).toBe("GHSA-aaaa-bbbb-cccc\tMODERATE\t1.2.3");
+      expect(
+        await run("PyPI", "foo-bar", pypiRe, {
+          id: "PYSEC-2020-1",
+          affected: affected("PyPI", "Foo_Bar", ["0", "1.0.1"]),
+        }),
+      ).toBe("PYSEC-2020-1\tunknown\t1.0.1");
+      const goRecord = { id: "GO-2024-0001", affected: affected("Go", "example.com/x", ["0", "v1.2.4"]) };
+      expect(await run("Go", "example.com/x", goRe, goRecord)).toBe("GO-2024-0001\tunknown\tv1.2.4");
+      expect(await run("Go", "example.com/x", npmRe, goRecord)).toBe("GO-2024-0001\tunknown\tunknown");
+      expect(await run("npm", "foo", npmRe, { id: "bad id!", affected: affected("npm", "foo", ["0", "1.2.3"]) })).toBe(
+        "unknown\tunknown\t1.2.3",
+      );
+      expect(await run("npm", "foo", npmRe, { id: "GHSA-a..b", affected: affected("npm", "foo", ["0", "1.2.3"]) })).toBe(
+        "unknown\tunknown\t1.2.3",
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("references the CVE lookup from review-code and carries the CVE check line in §4", () => {
     expect(normalized).toContain('devkit_load_skill({ reference: "review-cve-lookup" })');
+    expect(normalized).toContain("The block goes to the security brief only.");
     const section4 = normalized.slice(normalized.indexOf("## 4."), normalized.indexOf("## 5."));
     expect(section4).toContain("`CVE check:`");
   });
