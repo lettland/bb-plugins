@@ -14,11 +14,15 @@ plan to a file and call the `PresentPlan` tool before substantial work, even out
 mode; `PresentPlan` holds the first call back for review and releases it on the second,
 after the agent applies the review's findings to the plan file — the agent then ends its
 turn and waits for the user's own, explicit approval, since a tool result is never
-treated as that approval. If the agent's very next tool call after an ExitPlanMode hold is
-the native `AskUserQuestion` (an MCP one, such as the bb-bridge tool of the same name, does
+treated as that approval (unless the project opted in to auto-approve, below). If the
+agent's very next tool call after an ExitPlanMode hold is the native `AskUserQuestion` (an MCP one, such as the bb-bridge tool of the same name, does
 not count) asking the user what to change, auto-review answers that one question itself
 (marked `[bb auto-review]`) so the queued review still reaches it instead of the user
 being asked to explain a rejection they never made.
+
+A project can opt in (`bb auto-review auto-approve on --project <id>`, off by default) to
+have a plan approved automatically once it has completed the review cycle; anything the gate
+cannot show was reviewed still goes to the user.
 
 It ships enabled (opt-out).
 
@@ -91,6 +95,7 @@ All commands accept `--json`.
 | `bb auto-review show` | Global defaults, project override and resolved settings for the current project |
 | `bb auto-review enable [--global \| --project <id>]` | Turn it on; bare `enable` is global |
 | `bb auto-review disable [--global \| --project <id>]` | Turn it off, same scoping |
+| `bb auto-review auto-approve <on\|off> --project <id>` | Approve reviewed plans automatically for one project (off by default); `--project` is required |
 | `bb auto-review reset <thread-id>` | Clear a wedged loop-guard latch on an idle thread; refused while the thread is running or holds a `deferred` turn (its review runs when the hold clears) |
 
 The agent-hooks plugin's `review-plan-before-exit.sh` reads `planGate` from

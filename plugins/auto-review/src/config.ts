@@ -26,6 +26,7 @@ export const FIRE_REASONS = [
   "plan-reviewed",
   "plan-hold-expired",
   "plan-hold-answered",
+  "plan-approved",
   "commit-plan",
 ] as const;
 export type FireReason = (typeof FIRE_REASONS)[number];
@@ -34,6 +35,7 @@ export const projectConfigSchema = z.object({
   enabled: z.boolean().optional(),
   mergeEligibleMainlines: z.array(z.string()).optional(),
   reviewMode: z.enum(REVIEW_MODES).optional(),
+  autoApprovePlans: z.boolean().optional(),
 });
 export type ProjectConfig = z.infer<typeof projectConfigSchema>;
 
@@ -59,6 +61,8 @@ export interface EffectiveConfig {
   enabled: boolean;
   mergeEligibleMainlines: string[];
   reviewMode: ReviewMode;
+  /** Per project only, off by default: approve a plan that completed the review cycle. */
+  autoApprovePlans: boolean;
 }
 
 export function parseMainlines(csv: string): string[] {
@@ -123,6 +127,7 @@ export function effectiveConfig(
     mergeEligibleMainlines:
       project.mergeEligibleMainlines ?? globals.mergeEligibleMainlines,
     reviewMode: project.reviewMode ?? globals.reviewMode,
+    autoApprovePlans: project.autoApprovePlans ?? false,
   };
 }
 

@@ -150,6 +150,30 @@ async function setScope(
       };
 }
 
+/**
+ * Removes the human checkpoint on plans, so the project is never implied from
+ * the thread or a global scope: it is always named.
+ */
+async function setAutoApprove(bb: BbPluginApi, parsed: ParsedArgs): Promise<PluginCliResult> {
+  const value = parsed.positionals[0];
+  const projectId = parsed.flags.get("project");
+  if (
+    (value !== "on" && value !== "off") ||
+    typeof projectId !== "string" ||
+    parsed.flags.has("global")
+  ) {
+    return {
+      exitCode: 2,
+      stderr: "Usage: bb auto-review auto-approve <on|off> --project <id> [--json]\n",
+    };
+  }
+  const autoApprovePlans = value === "on";
+  await writeProjectConfig(bb, projectId, { autoApprovePlans });
+  return parsed.flags.has("json")
+    ? json({ ok: true, scope: "project", projectId, autoApprovePlans })
+    : { exitCode: 0, stdout: `Plan auto-approve ${value} for project ${projectId}.\n` };
+}
+
 export function registerAutoReviewCli(
   bb: BbPluginApi,
   settings: SettingsHandle,
@@ -180,6 +204,12 @@ export function registerAutoReviewCli(
         usage: "bb auto-review disable [--global | --project <id>] [--json]",
       },
       {
+        name: "auto-approve",
+        summary:
+          "Approve plans automatically once they completed auto-review's review, for one project (off by default)",
+        usage: "bb auto-review auto-approve <on|off> --project <id> [--json]",
+      },
+      {
         name: "reset",
         summary:
           "Clear a wedged latch for one idle thread; refused while it is running or holds a deferred turn",
@@ -196,6 +226,10 @@ export function registerAutoReviewCli(
       }
       if (command === "disable") {
         return setScope(bb, settings, context, parsed, false);
+      }
+
+      if (command === "auto-approve") {
+        return setAutoApprove(bb, parsed);
       }
 
       if (command === "skip" || command === "unskip") {
@@ -305,6 +339,7 @@ export function registerAutoReviewCli(
           enabled: config.enabled,
           reviewMode: config.reviewMode,
           mergeEligibleMainlines: config.mergeEligibleMainlines,
+          autoApprovePlans: config.autoApprovePlans,
           planGate,
           phase: state.phase,
           deferredSince: state.deferredSince ?? null,
@@ -332,6 +367,7 @@ export function registerAutoReviewCli(
             `enabled: ${config.enabled}\n` +
             `reviewMode: ${config.reviewMode}\n` +
             `mergeEligibleMainlines: ${config.mergeEligibleMainlines.join(", ")}\n` +
+            `autoApprovePlans: ${config.autoApprovePlans}\n` +
             `planGate: ${planGate}\n` +
             `phase: ${state.phase}\n` +
             deferredText +
@@ -357,6 +393,7 @@ export function registerAutoReviewCli(
             enabled: config.enabled,
             reviewMode: config.reviewMode,
             mergeEligibleMainlines: config.mergeEligibleMainlines,
+            autoApprovePlans: config.autoApprovePlans,
           },
         };
         if (wantsJson) {
@@ -368,14 +405,15 @@ export function registerAutoReviewCli(
             `project: ${projectId ?? "(none)"}\n` +
             `enabled: ${config.enabled}\n` +
             `reviewMode: ${config.reviewMode}\n` +
-            `mergeEligibleMainlines: ${config.mergeEligibleMainlines.join(", ")}\n`,
+            `mergeEligibleMainlines: ${config.mergeEligibleMainlines.join(", ")}\n` +
+            `autoApprovePlans: ${config.autoApprovePlans}\n`,
         };
       }
 
       return {
         exitCode: 2,
         stderr:
-          "Usage: bb auto-review <status|show|enable|disable|reset> [--json]\n",
+          "Usage: bb auto-review <status|show|enable|disable|auto-approve|reset> [--json]\n",
       };
     },
   });

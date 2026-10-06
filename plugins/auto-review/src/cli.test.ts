@@ -245,6 +245,94 @@ describe("auto-review cli: enable / disable", () => {
   });
 });
 
+describe("auto-review cli: auto-approve", () => {
+  const USAGE = "Usage: bb auto-review auto-approve <on|off> --project <id> [--json]\n";
+
+  it("turns plan auto-approve on and off for the named project", async () => {
+    await withHost({}, async (host) => {
+      const on = await host.run(["auto-approve", "on", "--project", "project-9"]);
+      expect(on.exitCode).toBe(0);
+      expect(on.stdout).toBe("Plan auto-approve on for project project-9.\n");
+      expect(await host.kv.get("project:project-9")).toEqual({ autoApprovePlans: true });
+
+      const off = await host.run(["auto-approve", "off", "--project=project-9", "--json"]);
+      expect(off.exitCode).toBe(0);
+      expect(parse(off.stdout)).toEqual({
+        ok: true,
+        scope: "project",
+        projectId: "project-9",
+        autoApprovePlans: false,
+      });
+      expect(await host.kv.get("project:project-9")).toEqual({ autoApprovePlans: false });
+    });
+  });
+
+  it("keeps the project's other overrides", async () => {
+    await withHost({}, async (host) => {
+      await host.kv.set("project:project-9", { enabled: false, reviewMode: "self" });
+      await host.run(["auto-approve", "on", "--project", "project-9"]);
+      expect(await host.kv.get("project:project-9")).toEqual({
+        enabled: false,
+        reviewMode: "self",
+        autoApprovePlans: true,
+      });
+    });
+  });
+
+  it("never takes the project from the invoking thread", async () => {
+    await withHost({}, async (host) => {
+      const result = await host.run(["auto-approve", "on"], THREAD_ID);
+      expect(result).toMatchObject({ exitCode: 2, stderr: USAGE });
+      expect(await host.kv.get(`project:${PROJECT_ID}`)).toBeUndefined();
+    });
+  });
+
+  it("exits 2 with the usage line for a missing or invalid value, or --global", async () => {
+    await withHost({}, async (host) => {
+      for (const argv of [
+        ["auto-approve", "--project", "project-9"],
+        ["auto-approve", "maybe", "--project", "project-9"],
+        ["auto-approve", "on", "--global"],
+        ["auto-approve", "on", "--global", "--project", "project-9"],
+        ["auto-approve", "on", "--project"],
+      ]) {
+        const result = await host.run(argv);
+        expect(result).toMatchObject({ exitCode: 2, stderr: USAGE });
+      }
+      expect(await host.kv.get("project:project-9")).toBeUndefined();
+    });
+  });
+
+  it("is reflected by status and show", async () => {
+    await withHost({}, async (host) => {
+      await host.run(["auto-approve", "on", "--project", PROJECT_ID]);
+      const status = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(status.stdout)).toMatchObject({ autoApprovePlans: true });
+      expect((await host.run(["status", THREAD_ID])).stdout).toContain("autoApprovePlans: true\n");
+
+      const show = await host.run(["show", "--project", PROJECT_ID, "--json"]);
+      expect(parse(show.stdout)).toMatchObject({
+        projectOverride: { autoApprovePlans: true },
+        effective: { autoApprovePlans: true },
+      });
+      expect((await host.run(["show", "--project", PROJECT_ID])).stdout).toContain(
+        "autoApprovePlans: true\n",
+      );
+    });
+  });
+
+  it("shows the plan-approved fire reason in status", async () => {
+    await withHost({}, async (host) => {
+      await host.kv.set(
+        `lastfire:${PROJECT_ID}:${THREAD_ID}`,
+        lastFire({ outcome: "fired", reason: "plan-approved" }),
+      );
+      const result = await host.run(["status", THREAD_ID]);
+      expect(result.stdout).toContain("lastFire: fired (plan-approved) at ");
+    });
+  });
+});
+
 describe("auto-review cli: skip / unskip (removed)", () => {
   it.each(["skip", "unskip"])("exits 2 with the removal message for %s", async (command) => {
     await withHost({}, async (host) => {
@@ -274,7 +362,7 @@ describe("auto-review cli: skip / unskip (removed)", () => {
   it("is not listed in the usage text", async () => {
     await withHost({}, async (host) => {
       const result = await host.run(["frobnicate"]);
-      expect(result.stderr).toContain("<status|show|enable|disable|reset>");
+      expect(result.stderr).toContain("<status|show|enable|disable|auto-approve|reset>");
     });
   });
 });
@@ -505,6 +593,7 @@ describe("auto-review cli: status", () => {
         "enabled: true\n" +
           "reviewMode: auto\n" +
           "mergeEligibleMainlines: master\n" +
+          "autoApprovePlans: false\n" +
           "planGate: false\n" +
           "phase: idle\n" +
           "lastFire: never\n",
@@ -531,6 +620,7 @@ describe("auto-review cli: status", () => {
           enabled: false,
           reviewMode: "self",
           mergeEligibleMainlines: ["master", "main"],
+          autoApprovePlans: false,
           planGate: false,
           phase: "idle",
           deferredSince: null,
@@ -736,7 +826,8 @@ describe("auto-review cli: show", () => {
         "project: (none)\n" +
           "enabled: true\n" +
           "reviewMode: auto\n" +
-          "mergeEligibleMainlines: master\n",
+          "mergeEligibleMainlines: master\n" +
+          "autoApprovePlans: false\n",
       );
 
       const payload = await host.run(["show", "--json"]);
@@ -744,7 +835,12 @@ describe("auto-review cli: show", () => {
         projectId: null,
         globals: { enabled: true, mergeEligibleMainlines: ["master"], reviewMode: "auto" },
         projectOverride: {},
-        effective: { enabled: true, reviewMode: "auto", mergeEligibleMainlines: ["master"] },
+        effective: {
+          enabled: true,
+          reviewMode: "auto",
+          mergeEligibleMainlines: ["master"],
+          autoApprovePlans: false,
+        },
       });
     });
   });
@@ -760,7 +856,8 @@ describe("auto-review cli: show", () => {
         "project: project-9\n" +
           "enabled: true\n" +
           "reviewMode: devkit\n" +
-          "mergeEligibleMainlines: trunk, personal\n",
+          "mergeEligibleMainlines: trunk, personal\n" +
+          "autoApprovePlans: false\n",
       );
     });
   });

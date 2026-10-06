@@ -2,11 +2,14 @@ import type { PluginAgentToolResult } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { effectiveConfig, readProjectConfig } from "./config.js";
 import { recordFire, type ReviewContext } from "./context.js";
+import { captureSinceSeq } from "./detect.js";
 import { PLAN_GATE_PROVIDER_ID } from "./gate.js";
+import { reviewRanSince } from "./plan.js";
 import {
   buildPresentPlanReviewPrompt,
   PLAN_FIRST_INSTRUCTIONS,
   PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
+  PRESENT_PLAN_APPROVED_MESSAGE,
   PRESENT_PLAN_INVALID_PATH_MESSAGE,
   PRESENT_PLAN_OFF_MESSAGE,
   PRESENT_PLAN_REVIEWED_MESSAGE,
@@ -14,6 +17,7 @@ import {
 } from "./prompt.js";
 import {
   presentPlanArmed,
+  PRESENT_PLAN_KEYS,
   readState,
   withThreadLock,
   writeState,
@@ -21,6 +25,29 @@ import {
 
 /** The provider-agnostic plan-review tool every served thread gets (see `configure` below). */
 const PRESENT_PLAN_TOOL_NAME = "PresentPlan";
+
+/** `PresentPlan`'s own tool plus the plan gate's: completing these is not work on the review. */
+const PRESENT_PLAN_GATE_TOOLS = [
+  PRESENT_PLAN_TOOL_NAME,
+  "ExitPlanMode",
+  "EnterPlanMode",
+  "AskUserQuestion",
+];
+
+/** The cursor auto-approve counts the review's tool work from; undefined means the plan is never auto-approved. */
+async function captureArmedSeq(review: ReviewContext, threadId: string): Promise<number | undefined> {
+  const { bb } = review;
+  try {
+    return await captureSinceSeq(bb, threadId);
+  } catch (error) {
+    bb.log.warn(
+      `auto-review: could not capture a timeline cursor for the plan review in ${threadId}; the plan will not be auto-approved: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return undefined;
+  }
+}
 
 export function registerPlanTools(review: ReviewContext): void {
   const { bb } = review;
@@ -89,17 +116,39 @@ export function registerPlanTools(review: ReviewContext): void {
         }
         const now = Date.now();
         if (presentPlanArmed(state, input.planFilePath, now)) {
-          await writeState(bb, ctx.threadId, {}, [
-            "presentPlanArmedAt",
-            "presentPlanArmedPath",
-          ]);
+          await writeState(bb, ctx.threadId, {}, [...PRESENT_PLAN_KEYS]);
+          // A completed tool call between the two calls is the evidence the
+          // agent worked on the review; it cannot show a deliberate skip.
+          if (
+            config.autoApprovePlans &&
+            state.presentPlanArmedSeq !== undefined &&
+            (await reviewRanSince(
+              bb,
+              ctx.threadId,
+              state.presentPlanArmedSeq,
+              PRESENT_PLAN_GATE_TOOLS,
+            ))
+          ) {
+            await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-approved");
+            bb.log.info(
+              `auto-review: auto-approved the reviewed plan ${input.planFilePath} in thread ${ctx.threadId}`,
+            );
+            return PRESENT_PLAN_APPROVED_MESSAGE;
+          }
           await recordFire(review, ctx.projectId, ctx.threadId, "stood-down", "plan-reviewed");
           return PRESENT_PLAN_REVIEWED_MESSAGE;
         }
-        await writeState(bb, ctx.threadId, {
-          presentPlanArmedAt: now,
-          presentPlanArmedPath: input.planFilePath,
-        });
+        const armedSeq = await captureArmedSeq(review, ctx.threadId);
+        await writeState(
+          bb,
+          ctx.threadId,
+          {
+            presentPlanArmedAt: now,
+            presentPlanArmedPath: input.planFilePath,
+            ...(armedSeq === undefined ? {} : { presentPlanArmedSeq: armedSeq }),
+          },
+          armedSeq === undefined ? ["presentPlanArmedSeq"] : undefined,
+        );
         await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-review");
         return buildPresentPlanReviewPrompt({
           reviewMode: config.reviewMode,

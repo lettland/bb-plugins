@@ -129,13 +129,19 @@ describe("PLAN_GATE_KEYS", () => {
       "planReviewArmedAt",
       "planReviewEntryId",
       "planDenied",
+      "planReviewDeliveredSeq",
+      "planReviewTurnEnded",
     ]);
   });
 });
 
 describe("PRESENT_PLAN_KEYS", () => {
   it("is PresentPlan's own keys, kept separate from the native gate's", () => {
-    expect(PRESENT_PLAN_KEYS).toEqual(["presentPlanArmedAt", "presentPlanArmedPath"]);
+    expect(PRESENT_PLAN_KEYS).toEqual([
+      "presentPlanArmedAt",
+      "presentPlanArmedPath",
+      "presentPlanArmedSeq",
+    ]);
   });
 });
 

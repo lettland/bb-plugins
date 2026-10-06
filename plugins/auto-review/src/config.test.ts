@@ -64,6 +64,7 @@ describe("effectiveConfig", () => {
       enabled: true,
       mergeEligibleMainlines: ["master"],
       reviewMode: "auto",
+      autoApprovePlans: false,
     });
   });
 
@@ -72,5 +73,11 @@ describe("effectiveConfig", () => {
     expect(config.enabled).toBe(false);
     expect(config.mergeEligibleMainlines).toEqual(["master"]);
     expect(config.reviewMode).toBe("auto");
+  });
+
+  it("keeps plan auto-approve off unless the project turns it on", () => {
+    expect(effectiveConfig(globals, {}).autoApprovePlans).toBe(false);
+    expect(effectiveConfig(globals, { autoApprovePlans: true }).autoApprovePlans).toBe(true);
+    expect(effectiveConfig(globals, { autoApprovePlans: false }).autoApprovePlans).toBe(false);
   });
 });

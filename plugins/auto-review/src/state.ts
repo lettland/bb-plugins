@@ -79,6 +79,20 @@ export const threadStateSchema = z.object({
    */
   planDenied: z.object({ at: z.number(), sinceSeq: z.number().int().nonnegative() }).optional(),
   /**
+   * The timeline cursor at the moment the plan review actually reached the
+   * agent (dispatched from the queue, or sent straight into the turn).
+   * Auto-approve counts the agent's tool work after it as proof the review
+   * ran.
+   */
+  planReviewDeliveredSeq: z.number().int().nonnegative().optional(),
+  /**
+   * Set by `thread.idle` once the review has been delivered and the turn
+   * ended. The arm survives idle, so one left behind by a review turn that
+   * never re-presented through the gate (the agent self-approved outside plan
+   * mode) must not auto-approve a later plan.
+   */
+  planReviewTurnEnded: z.literal(true).optional(),
+  /**
    * Set when the provider-agnostic `PresentPlan` tool armed a plan review for
    * this thread; the next `PresentPlan` call on a fresh arm FOR THE SAME PATH
    * releases it and clears this key. Mirrors `planReviewArmedAt`'s
@@ -91,6 +105,8 @@ export const threadStateSchema = z.object({
   presentPlanArmedAt: z.number().optional(),
   /** The path armed above; a call with a different path never releases it. */
   presentPlanArmedPath: z.string().optional(),
+  /** The timeline cursor when `PresentPlan` armed; auto-approve looks for review work after it. */
+  presentPlanArmedSeq: z.number().int().nonnegative().optional(),
 });
 export type ThreadState = z.infer<typeof threadStateSchema>;
 
@@ -165,12 +181,15 @@ export const PLAN_GATE_KEYS: readonly string[] = [
   "planReviewArmedAt",
   "planReviewEntryId",
   "planDenied",
+  "planReviewDeliveredSeq",
+  "planReviewTurnEnded",
 ];
 
 /** `PresentPlan`'s own keys, cleared by `bb auto-review reset` alongside `PLAN_GATE_KEYS`. */
 export const PRESENT_PLAN_KEYS: readonly string[] = [
   "presentPlanArmedAt",
   "presentPlanArmedPath",
+  "presentPlanArmedSeq",
 ];
 
 /** How long a `user_question` can still count as the agent's reaction to a plan deny. */

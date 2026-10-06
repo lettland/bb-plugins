@@ -3,6 +3,7 @@ import { effectiveConfig, readProjectConfig } from "./config.js";
 import {
   queuedRowExists,
   recordFire,
+  type EffectiveConfig,
   type GateThreadLike,
   type ReviewContext,
 } from "./context.js";
@@ -12,6 +13,7 @@ import {
   isImmediateReactionToDeny,
   planApprovalOf,
   planGateAction,
+  reviewRanSince,
   userQuestionOf,
   type PendingUserQuestion,
   type PlanApproval,
@@ -26,6 +28,9 @@ import {
   writeState,
   type ThreadState,
 } from "./state.js";
+
+/** The plan gate's own tools: completing one of these is not the agent working on the review. */
+const NATIVE_GATE_TOOLS = ["ExitPlanMode", "EnterPlanMode", "AskUserQuestion"];
 
 /**
  * Hold a plan's first presentation for review. The review turn is queued
@@ -54,12 +59,11 @@ export async function gatePlan(
 
   const action = planGateAction(state, Date.now());
   if (action === "release") {
-    await writeState(bb, thread.id, {}, [...PLAN_GATE_KEYS]);
-    await recordFire(ctx, thread.projectId, thread.id, "stood-down", "plan-reviewed");
+    await releaseReviewedPlan(ctx, thread, state, approval, config);
     return;
   }
   if (action === "hold") {
-    await holdOrReleasePlan(ctx, thread, state, approval);
+    await holdOrReleasePlan(ctx, thread, state, approval, config);
     return;
   }
 
@@ -75,6 +79,7 @@ export async function gatePlan(
           text: buildPlanReviewPrompt({
             reviewMode: config.reviewMode,
             planFilePath: approval.planFilePath,
+            autoApprove: config.autoApprovePlans,
           }),
           mentions: [],
         },
@@ -83,6 +88,10 @@ export async function gatePlan(
     if (result.delivery === "queued") {
       queuedMessageId = result.queuedMessage.id;
       await writeState(bb, thread.id, { planReviewEntryId: queuedMessageId });
+    } else if (result.delivery === "sent") {
+      // Straight into the turn, so there is no dispatch event: the cursor
+      // right after the send is where the review's delivery starts.
+      await markReviewDelivered(ctx, thread.id);
     }
   } catch (error) {
     // Nothing was queued, so leave the plan with the user untouched.
@@ -100,6 +109,72 @@ export async function gatePlan(
   }
 }
 
+/** Records where the plan review reached the agent; failing to means the plan is never auto-approved. */
+async function markReviewDelivered(ctx: ReviewContext, threadId: string): Promise<void> {
+  const { bb } = ctx;
+  try {
+    await writeState(bb, threadId, {
+      planReviewDeliveredSeq: await captureSinceSeq(bb, threadId),
+    });
+  } catch (error) {
+    bb.log.warn(
+      `auto-review: could not record where the plan review was delivered in ${threadId}; the plan will not be auto-approved: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
+/**
+ * The reviewed plan comes back: disarm the gate, then approve it for the user
+ * only when the project opted in AND everything shows the review cycle
+ * completed — the review was delivered, its turn is not over (a stale arm
+ * from a review turn that never re-presented through the gate must not
+ * approve a later plan), the arm is fresh, and the agent completed a tool call
+ * of its own after delivery, which is when a steered message reaches the
+ * model. Anything less leaves the plan with the user, exactly as with the
+ * option off.
+ */
+async function releaseReviewedPlan(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  state: ThreadState,
+  approval: PlanApproval,
+  config: EffectiveConfig,
+): Promise<void> {
+  const { bb } = ctx;
+  await writeState(bb, thread.id, {}, [...PLAN_GATE_KEYS]);
+  const { planReviewDeliveredSeq } = state;
+  if (
+    config.autoApprovePlans &&
+    approval.canApprove &&
+    planReviewDeliveredSeq !== undefined &&
+    state.planReviewTurnEnded !== true &&
+    !planHoldExpired(state, Date.now()) &&
+    (await reviewRanSince(bb, thread.id, planReviewDeliveredSeq, NATIVE_GATE_TOOLS))
+  ) {
+    try {
+      await bb.sdk.threads.interactions.resolve({
+        threadId: thread.id,
+        interactionId: approval.interactionId,
+        resolution: { decision: "allow_once", grantedPermissions: null },
+      });
+      await recordFire(ctx, thread.projectId, thread.id, "fired", "plan-approved");
+      bb.log.info(
+        `auto-review: auto-approved the reviewed plan ${approval.interactionId} in thread ${thread.id}`,
+      );
+      return;
+    } catch (error) {
+      bb.log.warn(
+        `auto-review: could not auto-approve the reviewed plan in ${thread.id}; leaving it for the user: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+  await recordFire(ctx, thread.projectId, thread.id, "stood-down", "plan-reviewed");
+}
+
 /**
  * A plan re-presented while its review is recorded as queued. Hold it only
  * while the review really is still in the queue and has not been there past
@@ -112,6 +187,7 @@ async function holdOrReleasePlan(
   thread: GateThreadLike,
   state: ThreadState,
   approval: PlanApproval,
+  config: EffectiveConfig,
 ): Promise<void> {
   const { bb } = ctx;
   const entryId = state.planReviewEntryId ?? null;
@@ -128,15 +204,14 @@ async function holdOrReleasePlan(
     // this release hands to the user.
     await withdrawQueuedReview(ctx, thread.id, entryId);
   }
-  // Not queued any more means the review was dispatched and this is the
-  // reviewed plan, whose dispatch event never reached us.
+  if (!queued) {
+    // Not queued any more means the review was dispatched and this is the
+    // reviewed plan, whose dispatch event never reached us.
+    await releaseReviewedPlan(ctx, thread, state, approval, config);
+    return;
+  }
   await writeState(bb, thread.id, {}, [...PLAN_GATE_KEYS]);
-  await recordFire(ctx, 
-    thread.projectId,
-    thread.id,
-    "stood-down",
-    queued ? "plan-hold-expired" : "plan-reviewed",
-  );
+  await recordFire(ctx, thread.projectId, thread.id, "stood-down", "plan-hold-expired");
 }
 
 async function withdrawQueuedReview(

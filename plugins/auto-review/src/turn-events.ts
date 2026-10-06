@@ -68,6 +68,19 @@ export async function onThreadIdle(
     // present, before handleIdle's own early returns so a question in some
     // later turn is never mistaken for a reaction to this one's deny.
     const state = await readState(bb, thread.id);
+    if (state.planReviewArmedAt !== undefined && state.planReviewDeliveredSeq !== undefined) {
+      // The review turn is over. The arm stays (see `planReviewArmedAt`), but a
+      // plan presented after this point is no longer the review's re-presentation.
+      try {
+        await writeState(bb, thread.id, { planReviewTurnEnded: true });
+      } catch (error) {
+        bb.log.warn(
+          `auto-review: could not mark the plan review turn ended in ${thread.id}; continuing: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
     if (state.planDenied !== undefined) {
       try {
         await writeState(bb, thread.id, {}, ["planDenied"]);
@@ -95,8 +108,24 @@ export async function onMessageDispatched(
     const state = await readState(bb, entry.threadId);
     if (state.planReviewEntryId === entry.id) {
       // The review is in the agent's hands; its next presentation is the
-      // reviewed plan.
-      await writeState(bb, entry.threadId, {}, ["planReviewEntryId"]);
+      // reviewed plan. The cursor taken here marks where auto-approve starts
+      // looking for proof the agent worked on it; without one, it never will.
+      let deliveredSeq: number | undefined;
+      try {
+        deliveredSeq = await captureSinceSeq(bb, entry.threadId);
+      } catch (error) {
+        bb.log.warn(
+          `auto-review: could not capture a timeline cursor for the dispatched plan review in ${entry.threadId}; the plan will not be auto-approved: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      await writeState(
+        bb,
+        entry.threadId,
+        deliveredSeq === undefined ? {} : { planReviewDeliveredSeq: deliveredSeq },
+        ["planReviewEntryId"],
+      );
       return;
     }
     if (

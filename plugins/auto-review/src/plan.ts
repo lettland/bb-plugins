@@ -13,6 +13,8 @@ export interface PlanApproval {
   interactionId: string;
   plan: string;
   planFilePath: string | null;
+  /** Whether the provider lets the plan be approved (`allow_once`), not only denied. */
+  canApprove: boolean;
 }
 
 /**
@@ -33,6 +35,7 @@ export function planApprovalOf(interaction: PendingInteraction): PlanApproval | 
     interactionId: interaction.id,
     plan: payload.subject.plan,
     planFilePath: payload.subject.planFilePath,
+    canApprove: payload.availableDecisions.includes("allow_once"),
   };
 }
 
@@ -93,6 +96,52 @@ export function isImmediateReactionToDeny(events: readonly ThreadEventRow[]): bo
       (item.type === "toolCall" && item.tool === "AskUserQuestion" && item.server === undefined)
     );
   });
+}
+
+/**
+ * Whether the plan review reached the agent: at least one completed tool call
+ * that is not one of the plan gate's own tools. A steered message only reaches
+ * the model after a tool result that returns after its delivery, so a
+ * completed non-gate tool call past the delivery cursor means the agent has
+ * had the review in front of it. The inverse idea of `isImmediateReactionToDeny`.
+ */
+export function reviewReachedAgent(
+  events: readonly ThreadEventRow[],
+  gateTools: readonly string[],
+): boolean {
+  return events.some(
+    (event) =>
+      event.type === "item/completed" &&
+      event.data.item.type === "toolCall" &&
+      !gateTools.includes(event.data.item.tool),
+  );
+}
+
+/**
+ * `reviewReachedAgent` over the thread's events since a cursor. A failed read
+ * counts as no proof: the plan then stays with the user.
+ */
+export async function reviewRanSince(
+  bb: BbPluginApi,
+  threadId: string,
+  sinceSeq: number,
+  gateTools: readonly string[],
+): Promise<boolean> {
+  try {
+    const events = await bb.sdk.threads.events.list({
+      threadId,
+      afterSeq: String(sinceSeq),
+      types: ["item/completed"],
+    });
+    return reviewReachedAgent(events, gateTools);
+  } catch (error) {
+    bb.log.warn(
+      `auto-review: could not read events to check the plan review ran in ${threadId}; leaving the plan for the user: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return false;
+  }
 }
 
 export type PlanGateAction = "review" | "hold" | "release";

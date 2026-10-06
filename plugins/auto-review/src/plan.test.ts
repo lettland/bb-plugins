@@ -3,6 +3,7 @@ import {
   isImmediateReactionToDeny,
   planApprovalOf,
   planGateAction,
+  reviewReachedAgent,
   userQuestionOf,
 } from "./plan.js";
 import { STALE_WINDOW_MS } from "./state.js";
@@ -27,7 +28,23 @@ describe("planApprovalOf", () => {
       interactionId: "pint-1",
       plan: "# Plan",
       planFilePath: "/p.md",
+      canApprove: true,
     });
+  });
+
+  it("reports whether the provider offers allow_once", () => {
+    expect(
+      planApprovalOf(
+        approval({
+          payload: {
+            kind: "approval",
+            availableDecisions: ["deny"],
+            reason: null,
+            subject: { kind: "plan", itemId: "i", plan: "# Plan", planFilePath: "/p.md" },
+          },
+        }),
+      )?.canApprove,
+    ).toBe(false);
   });
 
   it("ignores settled, non-plan, and undeniable approvals", () => {
@@ -119,6 +136,44 @@ describe("isImmediateReactionToDeny", () => {
       isImmediateReactionToDeny([itemStarted({ type: "toolCall", tool: "Bash" })]),
     ).toBe(false);
     expect(isImmediateReactionToDeny([itemStarted({ type: "userMessage" })])).toBe(false);
+  });
+});
+
+describe("reviewReachedAgent", () => {
+  const GATE_TOOLS = ["ExitPlanMode", "EnterPlanMode", "AskUserQuestion"];
+  function itemEvent(type: string, item: Record<string, unknown>) {
+    return { type, data: { item } } as never;
+  }
+
+  it("is false with no events, or only the gate's own completed tool calls", () => {
+    expect(reviewReachedAgent([], GATE_TOOLS)).toBe(false);
+    expect(
+      reviewReachedAgent(
+        [
+          itemEvent("item/completed", { type: "toolCall", tool: "ExitPlanMode" }),
+          itemEvent("item/completed", { type: "toolCall", tool: "AskUserQuestion" }),
+        ],
+        GATE_TOOLS,
+      ),
+    ).toBe(false);
+  });
+
+  it("is true once a completed tool call outside the gate tools followed", () => {
+    expect(
+      reviewReachedAgent([itemEvent("item/completed", { type: "toolCall", tool: "Read" })], GATE_TOOLS),
+    ).toBe(true);
+  });
+
+  it("is false for a tool call that started but never completed", () => {
+    expect(
+      reviewReachedAgent([itemEvent("item/started", { type: "toolCall", tool: "Read" })], GATE_TOOLS),
+    ).toBe(false);
+  });
+
+  it("ignores completed items that are not tool calls", () => {
+    expect(
+      reviewReachedAgent([itemEvent("item/completed", { type: "agentMessage" })], GATE_TOOLS),
+    ).toBe(false);
   });
 });
 

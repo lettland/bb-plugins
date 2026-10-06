@@ -12,6 +12,7 @@ import {
   PLAN_FIRST_INSTRUCTIONS,
   PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
   PLAN_HOLD_ANSWER,
+  PRESENT_PLAN_APPROVED_MESSAGE,
   PRESENT_PLAN_INVALID_PATH_MESSAGE,
   PRESENT_PLAN_OFF_MESSAGE,
   PRESENT_PLAN_REVIEWED_MESSAGE,
@@ -60,6 +61,10 @@ interface HostOptions {
   authoringThreads?: string[];
   getThrowsFor?: string[];
   resolveThrows?: boolean;
+  /** Resolving an `allow_once` (only) fails — the global `resolveThrows` would also break the deny. */
+  resolveAllowThrows?: boolean;
+  /** Listing `item/completed` events fails, so no proof the review ran can be read. */
+  completedEventsThrow?: boolean;
   /** Resolving a `user_answer` (only) fails — the global `resolveThrows` would also break the deny. */
   resolveUserAnswerThrows?: boolean;
   /** A real tool call lands during the deny's own resolve round-trip (races the cursor capture). */
@@ -187,6 +192,7 @@ function createHost(options: HostOptions = {}) {
   let queuedRows = options.queuedRows ?? [];
   let interrupts: Record<string, InterruptEvent[]> = {};
   let itemEvents: Record<string, ItemStartedEvent[]> = {};
+  let completedEvents: Record<string, ItemStartedEvent[]> = {};
 
   const sdk: CreateFakePluginHostOptions["sdk"] = {
     plugins: {
@@ -292,6 +298,24 @@ function createHost(options: HostOptions = {}) {
                 })),
             );
           }
+          if (args.types?.includes("item/completed") === true) {
+            if (options.completedEventsThrow === true) {
+              throw new Error("events unavailable");
+            }
+            rows.push(
+              ...(completedEvents[args.threadId] ?? [])
+                .filter((event) => event.seq > after)
+                .map((event) => ({
+                  id: `ev-${args.threadId}-done-${event.seq}`,
+                  scope: { kind: "thread" },
+                  threadId: args.threadId,
+                  seq: event.seq,
+                  createdAt: 1_000,
+                  type: "item/completed",
+                  data: { item: event.item, providerThreadId: "pt-1" },
+                })),
+            );
+          }
           return rows;
         },
       },
@@ -337,6 +361,9 @@ function createHost(options: HostOptions = {}) {
             throw new Error("interaction already settled");
           }
           const resolution = args.resolution as { kind?: string; decision?: string } | null;
+          if (options.resolveAllowThrows === true && resolution?.decision === "allow_once") {
+            throw new Error("interaction already settled");
+          }
           if (options.resolveUserAnswerThrows === true && resolution?.kind === "user_answer") {
             throw new Error("answer already settled");
           }
@@ -449,6 +476,13 @@ function createHost(options: HostOptions = {}) {
       itemEvents = {
         ...itemEvents,
         [threadId]: [...(itemEvents[threadId] ?? []), event],
+      };
+    },
+    /** Record an `item/completed` event on a thread (default: the thread itself). */
+    completeItem: (event: ItemStartedEvent, threadId: string = THREAD_ID) => {
+      completedEvents = {
+        ...completedEvents,
+        [threadId]: [...(completedEvents[threadId] ?? []), event],
       };
     },
     setQueuedRows: (next: QueuedRow[]) => {
@@ -2441,6 +2475,238 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
+  describe("plan auto-approve (native gate)", () => {
+    const READ = { type: "toolCall", tool: "Read" };
+    const APPROVE = {
+      threadId: THREAD_ID,
+      interactionId: "pint-2",
+      resolution: { decision: "allow_once", grantedPermissions: null },
+    };
+    const DENY = {
+      threadId: THREAD_ID,
+      interactionId: "pint-1",
+      resolution: { decision: "deny" },
+    };
+
+    async function hostWith(options: HostOptions = {}, autoApprove = true) {
+      const host = createHost({ sendDelivery: "queued", ...options });
+      await plugin(host.bb);
+      if (autoApprove) {
+        await host.harness.runCli(["auto-approve", "on", "--project", "project-1"]);
+      }
+      return host;
+    }
+
+    /** Hold the first plan and dispatch its review, as core does once the deny settles. */
+    async function holdAndDispatch(host: Host) {
+      await emitPlan(host);
+      await host.harness.behavior.emitThreadEvent("message.dispatched", { entry: queueEntry() });
+    }
+
+    it("holds the first presentation and tells the agent the project auto-approves", async () => {
+      const host = await hostWith();
+      await emitPlan(host);
+      expect(host.resolutions).toEqual([DENY]);
+      expect(promptText(host)).toMatch(/This project auto-approves reviewed plans/);
+      await host.harness.dispose();
+    });
+
+    it("approves the reviewed plan once the agent worked on the review", async () => {
+      const host = await hostWith();
+      await holdAndDispatch(host);
+      expect(host.metadata.planReviewDeliveredSeq).toBe(100);
+      host.completeItem({ seq: 101, item: READ });
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY, APPROVE]);
+      expect(host.metadata.planReviewArmedAt).toBeUndefined();
+      expect(host.metadata.planReviewDeliveredSeq).toBeUndefined();
+      expect(host.metadata.planReviewTurnEnded).toBeUndefined();
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "fired", reason: "plan-approved" });
+      expect(
+        host.harness.logEntries.some(
+          (entry) => entry.level === "info" && entry.message.includes("auto-approved the reviewed plan pint-2"),
+        ),
+      ).toBe(true);
+      await host.harness.dispose();
+    });
+
+    it("leaves the reviewed plan with the user when auto-approve is off", async () => {
+      const host = await hostWith({}, false);
+      await holdAndDispatch(host);
+      host.completeItem({ seq: 101, item: READ });
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      expect(promptText(host)).not.toMatch(/auto-approves/);
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+      await host.harness.dispose();
+    });
+
+    it("leaves a plan re-presented right after dispatch, with no completed tool call, for the user", async () => {
+      const host = await hostWith();
+      await holdAndDispatch(host);
+      // Only the gate's own tools completed: the agent never worked on the review.
+      host.completeItem({ seq: 101, item: { type: "toolCall", tool: "ExitPlanMode" } });
+      host.completeItem({ seq: 102, item: { type: "toolCall", tool: "EnterPlanMode" } });
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+      await host.harness.dispose();
+    });
+
+    it("counts only tool calls completed after the delivery cursor", async () => {
+      const host = await hostWith();
+      host.completeItem({ seq: 90, item: READ });
+      await holdAndDispatch(host);
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      await host.harness.dispose();
+    });
+
+    it("leaves the plan for the user when the completed events cannot be read", async () => {
+      const host = await hostWith({ completedEventsThrow: true });
+      await holdAndDispatch(host);
+      host.completeItem({ seq: 101, item: READ });
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      expect(warnings(host).some((message) => message.includes("check the plan review ran"))).toBe(true);
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+      await host.harness.dispose();
+    });
+
+    it("approves a review delivered straight into the turn only with evidence", async () => {
+      const withEvidence = await hostWith({ sendDelivery: "sent" });
+      await emitPlan(withEvidence);
+      expect(withEvidence.metadata.planReviewEntryId).toBeUndefined();
+      expect(withEvidence.metadata.planReviewDeliveredSeq).toBe(100);
+      withEvidence.completeItem({ seq: 101, item: READ });
+      await emitPlan(withEvidence, planInteraction("# Plan v2", "pint-2"));
+      expect(withEvidence.resolutions).toEqual([DENY, APPROVE]);
+      await withEvidence.harness.dispose();
+
+      const withoutEvidence = await hostWith({ sendDelivery: "sent" });
+      await emitPlan(withoutEvidence);
+      await emitPlan(withoutEvidence, planInteraction("# Plan v2", "pint-2"));
+      expect(withoutEvidence.resolutions).toEqual([DENY]);
+      expect(await lastFireOf(withoutEvidence)).toMatchObject({ reason: "plan-reviewed" });
+      await withoutEvidence.harness.dispose();
+    });
+
+    it("never approves a later plan on an arm left behind by a review turn that ended", async () => {
+      const host = await hostWith();
+      await holdAndDispatch(host);
+      host.completeItem({ seq: 101, item: READ });
+      // The review turn ended without a gated re-presentation (the agent
+      // self-approved ExitPlanMode outside plan mode); the arm stays.
+      await emitIdle(host);
+      expect(typeof host.metadata.planReviewArmedAt).toBe("number");
+      expect(host.metadata.planReviewTurnEnded).toBe(true);
+
+      await emitPlan(host, planInteraction("# A later plan", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      expect(host.metadata.planReviewArmedAt).toBeUndefined();
+      expect(host.metadata.planReviewTurnEnded).toBeUndefined();
+
+      // The gate is armed afresh for the plan after that.
+      await emitPlan(host, planInteraction("# The next plan", "pint-3"));
+      expect(host.sends).toHaveLength(2);
+      expect(host.resolutions.map((r) => r.interactionId)).toEqual(["pint-1", "pint-3"]);
+      await host.harness.dispose();
+    });
+
+    it("does not mark the turn ended before the review was delivered", async () => {
+      const host = await hostWith();
+      await emitPlan(host);
+      await emitIdle(host);
+      expect(host.metadata.planReviewTurnEnded).toBeUndefined();
+      await host.harness.dispose();
+    });
+
+    it("never approves a plan held past the stale window", async () => {
+      const host = await hostWith({ queuedRows: [{ id: "qm-1" }] });
+      await emitPlan(host);
+      host.completeItem({ seq: 101, item: READ });
+      host.metadata.planReviewDeliveredSeq = 100;
+      host.metadata.planReviewArmedAt = Date.now() - STALE_WINDOW_MS - 1_000;
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      expect(host.deletedQueued).toEqual(["qm-1"]);
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-hold-expired" });
+      await host.harness.dispose();
+    });
+
+    it("never approves from an expired arm whose review already left the queue", async () => {
+      const host = await hostWith({ queuedRows: [{ id: "qm-1" }] });
+      await emitPlan(host);
+      host.completeItem({ seq: 101, item: READ });
+      host.metadata.planReviewDeliveredSeq = 100;
+      host.metadata.planReviewArmedAt = Date.now() - STALE_WINDOW_MS - 1_000;
+      host.setQueuedRows([]);
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+      await host.harness.dispose();
+    });
+
+    it("never approves when the dispatch event was missed, since nothing marks the delivery", async () => {
+      const host = await hostWith({ queuedRows: [{ id: "qm-1" }] });
+      await emitPlan(host);
+      host.completeItem({ seq: 101, item: READ });
+      host.setQueuedRows([]);
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      await host.harness.dispose();
+    });
+
+    it("approves from the not-queued branch once the delivery is recorded and fresh", async () => {
+      const host = await hostWith({ queuedRows: [{ id: "qm-1" }] });
+      await emitPlan(host);
+      host.completeItem({ seq: 101, item: READ });
+      host.metadata.planReviewDeliveredSeq = 100;
+      host.setQueuedRows([]);
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY, APPROVE]);
+      await host.harness.dispose();
+    });
+
+    it("leaves the plan for the user when the provider offers no allow_once", async () => {
+      const host = await hostWith();
+      const denyOnly = (id: string) => {
+        const interaction = planInteraction("# Plan", id);
+        interaction.payload.availableDecisions = ["deny"];
+        return interaction;
+      };
+      await emitPlan(host, denyOnly("pint-1"));
+      await host.harness.behavior.emitThreadEvent("message.dispatched", { entry: queueEntry() });
+      host.completeItem({ seq: 101, item: READ });
+      await emitPlan(host, denyOnly("pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+      await host.harness.dispose();
+    });
+
+    it("falls back to leaving the plan for the user when the approval cannot be resolved", async () => {
+      const host = await hostWith({ resolveAllowThrows: true });
+      await holdAndDispatch(host);
+      host.completeItem({ seq: 101, item: READ });
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      expect(warnings(host).some((message) => message.includes("could not auto-approve"))).toBe(true);
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+      expect(host.metadata.planReviewArmedAt).toBeUndefined();
+      await host.harness.dispose();
+    });
+
+    it("only auto-approves in the project that opted in", async () => {
+      const host = await hostWith({}, false);
+      await host.harness.runCli(["auto-approve", "on", "--project", "project-2"]);
+      await holdAndDispatch(host);
+      host.completeItem({ seq: 101, item: READ });
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      await host.harness.dispose();
+    });
+  });
+
   describe("PresentPlan", () => {
     const ctx = { threadId: THREAD_ID, projectId: "project-1" };
 
@@ -2516,6 +2782,72 @@ describe("auto-review plugin", () => {
       expect(host.metadata.presentPlanArmedAt).toBeUndefined();
       expect(host.metadata.presentPlanArmedPath).toBeUndefined();
       await host.harness.dispose();
+    });
+
+    describe("auto-approve", () => {
+      const path = { planFilePath: "docs/plans/p.md" };
+
+      async function armed(autoApprove = true) {
+        const host = createHost();
+        await plugin(host.bb);
+        if (autoApprove) {
+          await host.harness.runCli(["auto-approve", "on", "--project", "project-1"]);
+        }
+        await host.harness.callAgentTool("PresentPlan", path, ctx);
+        return host;
+      }
+
+      it("stores the timeline cursor on the first call", async () => {
+        const host = await armed();
+        expect(host.metadata.presentPlanArmedSeq).toBe(100);
+        await host.harness.dispose();
+      });
+
+      it("keeps back-to-back calls with no work in between with the user", async () => {
+        const host = await armed();
+        const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
+        expect(result).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+        await host.harness.dispose();
+      });
+
+      it("ignores the gate's own tools completing in between", async () => {
+        const host = await armed();
+        host.completeItem({ seq: 101, item: { type: "toolCall", tool: "PresentPlan" } });
+        host.completeItem({ seq: 102, item: { type: "toolCall", tool: "AskUserQuestion" } });
+        const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
+        expect(result).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+        await host.harness.dispose();
+      });
+
+      it("approves automatically once a tool call completed in between", async () => {
+        const host = await armed();
+        host.completeItem({ seq: 101, item: { type: "toolCall", tool: "Read" } });
+        const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
+        expect(result).toBe(PRESENT_PLAN_APPROVED_MESSAGE);
+        expect(host.metadata.presentPlanArmedAt).toBeUndefined();
+        expect(host.metadata.presentPlanArmedSeq).toBeUndefined();
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "fired", reason: "plan-approved" });
+        await host.harness.dispose();
+      });
+
+      it("never approves a call with no stored cursor", async () => {
+        const host = await armed();
+        host.completeItem({ seq: 101, item: { type: "toolCall", tool: "Read" } });
+        delete host.metadata.presentPlanArmedSeq;
+        const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
+        expect(result).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+        await host.harness.dispose();
+      });
+
+      it("is unchanged when the project does not auto-approve", async () => {
+        const host = await armed(false);
+        host.completeItem({ seq: 101, item: { type: "toolCall", tool: "Read" } });
+        const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
+        expect(result).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+        await host.harness.dispose();
+      });
     });
 
     it("tells the agent review is off, without touching state, when auto-review is disabled", async () => {

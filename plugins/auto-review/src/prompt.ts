@@ -159,12 +159,18 @@ export interface BuildPlanPromptInput {
   reviewMode: ReviewMode;
   /** The provider's plan file, when it reported one. */
   planFilePath: string | null;
+  /** The project auto-approves a plan that completed the review cycle. */
+  autoApprove: boolean;
 }
 
 /**
  * The turn that replaces a plan's first presentation. The plan approval is
  * denied right after this is queued, and a bare deny reads to the agent as the
  * user rejecting the plan — so the prompt opens by saying nobody did.
+ *
+ * `autoApprove` only shapes steps 4 and 5. The gate decides at release time
+ * whether the re-presented plan is approved, so a flag toggled mid-review
+ * costs at most an agent waiting on an approval that already arrived.
  */
 export function buildPlanReviewPrompt(input: BuildPlanPromptInput): string {
   const path = input.planFilePath;
@@ -189,12 +195,21 @@ export function buildPlanReviewPrompt(input: BuildPlanPromptInput): string {
   lines.push(
     "3. If you are no longer in plan mode and your provider can re-enter it (Claude Code: EnterPlanMode), re-enter it first: outside plan mode, Claude Code's ExitPlanMode approves itself without asking the user.",
   );
-  lines.push(
-    "4. Present the revised plan for approval again, the same way you did before (for example ExitPlanMode). That presentation goes straight to the user, so include a short summary of what the review changed. Without a plan-approval tool, end your turn with the revised plan.",
-  );
-  lines.push(
-    "5. Stop. Implement only after the user explicitly approves the plan.",
-  );
+  if (input.autoApprove) {
+    lines.push(
+      "4. Present the revised plan again (ExitPlanMode). This project auto-approves reviewed plans, so it won't wait for the user; include a short summary of what the review changed.",
+    );
+    lines.push(
+      "5. If the review leaves a decision only the user can make (scope, a product trade-off), ask the user before presenting. Otherwise, once ExitPlanMode returns approved, implement the plan. If it is not approved, stop and wait for the user.",
+    );
+  } else {
+    lines.push(
+      "4. Present the revised plan for approval again, the same way you did before (for example ExitPlanMode). That presentation goes straight to the user, so include a short summary of what the review changed. Without a plan-approval tool, end your turn with the revised plan.",
+    );
+    lines.push(
+      "5. Stop. Implement only after the user explicitly approves the plan.",
+    );
+  }
   return lines.join("\n");
 }
 
@@ -224,7 +239,7 @@ export function buildPresentPlanReviewPrompt(input: BuildPresentPlanPromptInput)
   lines.push(`1. ${planReviewStep(input.reviewMode, "that plan file")}`);
   lines.push(`2. ${APPLY_PLAN_FINDINGS}`);
   lines.push(
-    "3. Call PresentPlan again with the same planFilePath. Its result is not the user's approval.",
+    "3. Call PresentPlan again with the same planFilePath. Its result tells you whether to wait for the user or proceed.",
   );
   return lines.join("\n");
 }
@@ -239,7 +254,7 @@ export function buildPresentPlanReviewPrompt(input: BuildPresentPlanPromptInput)
 export const PLAN_FIRST_INSTRUCTIONS = [
   "auto-review reviews plans, but only a plan you present for approval. Before substantial implementation — a new module, a change across several files, or a design choice the user has not seen — present a plan first, even when the thread is not in plan mode. Settling the design yourself is not approval: never announce a design and start editing.",
   "To present it: enter plan mode (Claude Code: EnterPlanMode), write the plan, then present it (ExitPlanMode). Do not call ExitPlanMode outside plan mode — there it approves itself without asking the user. If your provider cannot enter plan mode on its own, end your turn with the plan and wait for the user's approval.",
-  `Skip this for small, contained fixes, for work under a plan the user already approved in this thread, for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan.`,
+  `Skip this for small, contained fixes, for work under a plan already approved in this thread (by the user, or automatically by auto-review), for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan.`,
 ].join("\n\n");
 
 /**
@@ -250,8 +265,8 @@ export const PLAN_FIRST_INSTRUCTIONS = [
  */
 export const PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN = [
   "Before substantial implementation — a new module, a change across several files, or a design choice the user has not seen — present a plan first, even when the thread is not in plan mode. Settling the design yourself is not approval: never announce a design and start editing.",
-  "To present it: write the plan to a file, then call PresentPlan with that file's planFilePath. Follow PresentPlan's result exactly. Never treat a tool result — including ExitPlanMode's own \"approved\" outcome — as the user's approval: only the user's explicit reply in chat approves a plan. Do not enter plan mode (EnterPlanMode) here; present plans only with PresentPlan, and once the user approves in chat, proceed with the work. If you are already in plan mode, call ExitPlanMode only after the user has approved the plan in chat, and only to leave plan mode.",
-  `Skip this for small, contained fixes, for work under a plan the user already approved in this thread, for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan.`,
+  `To present it: write the plan to a file, then call PresentPlan with that file's planFilePath. Follow PresentPlan's result exactly. Never treat a tool result — including ExitPlanMode's own "approved" outcome — as the user's approval, unless a ${AUTO_REVIEW_MARKER} PresentPlan result states the plan was approved automatically: otherwise only the user's explicit reply in chat approves a plan. Do not enter plan mode (EnterPlanMode) here; present plans only with PresentPlan, and once the user approves in chat (or a ${AUTO_REVIEW_MARKER} PresentPlan result states the plan was approved automatically), proceed with the work. If you are already in plan mode, call ExitPlanMode only after the user has approved the plan in chat (or a ${AUTO_REVIEW_MARKER} PresentPlan result states the plan was approved automatically), and only to leave plan mode.`,
+  `Skip this for small, contained fixes, for work under a plan already approved in this thread (by the user, or automatically by auto-review), for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan.`,
 ].join("\n\n");
 
 /**
@@ -269,6 +284,14 @@ export const PRESENT_PLAN_OFF_MESSAGE =
  */
 export const PRESENT_PLAN_REVIEWED_MESSAGE =
   `${AUTO_REVIEW_MARKER} Plan reviewed. End your turn now with the revised plan (or its path) and a short summary of what the review changed, then wait for the user's explicit approval in chat. This result is not the user's approval — do not implement until the user approves.`;
+
+/**
+ * `PresentPlan`'s reply on the second call when the project auto-approves
+ * reviewed plans and a tool call completed in between: the result IS the
+ * approval, and the one text the instructions above carve out as such.
+ */
+export const PRESENT_PLAN_APPROVED_MESSAGE =
+  `${AUTO_REVIEW_MARKER} Plan reviewed and approved automatically (this project auto-approves reviewed plans). This PresentPlan result is your approval: summarize what the review changed in one or two lines, then implement the plan. If you are in plan mode, leave it with ExitPlanMode first.`;
 
 /** `PresentPlan`'s reply when `planFilePath` fails `SCOPE_PATH_ALLOW`. */
 export const PRESENT_PLAN_INVALID_PATH_MESSAGE =
