@@ -32,6 +32,9 @@ import {
 /** The plan gate's own tools: completing one of these is not the agent working on the review. */
 const NATIVE_GATE_TOOLS = ["ExitPlanMode", "EnterPlanMode", "AskUserQuestion"];
 
+/** Page size of the plan-hold reaction check; a page this full is treated as incomplete. */
+const PLAN_HOLD_EVENT_LIMIT = "200";
+
 /**
  * Hold a plan's first presentation for review. The review turn is queued
  * BEFORE the approval is denied: a thread awaiting an interaction cannot take
@@ -342,6 +345,7 @@ export async function answerPlanHoldQuestion(
       threadId: thread.id,
       afterSeq: String(sinceSeq),
       types: ["item/started"],
+      limit: PLAN_HOLD_EVENT_LIMIT,
     });
   } catch (error) {
     bb.log.warn(
@@ -351,7 +355,9 @@ export async function answerPlanHoldQuestion(
     );
     return;
   }
-  if (!isImmediateReactionToDeny(events)) {
+  // `isImmediateReactionToDeny` needs every event since the deny, and the log
+  // is paged: a full page may hide later tool work, so it fails closed too.
+  if (events.length >= Number(PLAN_HOLD_EVENT_LIMIT) || !isImmediateReactionToDeny(events)) {
     // Real tool work happened since the deny, so this question is not
     // necessarily about the held plan — leave it with the user.
     return;

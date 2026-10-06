@@ -109,6 +109,10 @@ export function isImmediateReactionToDeny(events: readonly ThreadEventRow[]): bo
  * review's turn is over and a plan presented now is not its re-presentation.
  * The inverse idea of `isImmediateReactionToDeny`.
  *
+ * `turnEnded` is the caller's answer to "did any `turn/completed` follow the
+ * cursor?", read from a query of its own (see `reviewRanSince`): it cannot be
+ * derived from `events`, a page of completed items that may stop short of it.
+ *
  * A call with `parentToolCallId` is a subagent's; `countSubagentCalls` says
  * whether that is evidence. The native gate needs the agent's own call (the
  * steered review reaches the main model after its own tool result), while
@@ -118,8 +122,9 @@ export function reviewReachedAgent(
   events: readonly ThreadEventRow[],
   gateTools: readonly string[],
   countSubagentCalls: boolean,
+  turnEnded: boolean,
 ): boolean {
-  if (events.some((event) => event.type === "turn/completed")) {
+  if (turnEnded) {
     return false;
   }
   return events.some(
@@ -132,8 +137,14 @@ export function reviewReachedAgent(
 }
 
 /**
- * `reviewReachedAgent` over the thread's events since a cursor. A failed read
- * counts as no proof: the plan then stays with the user.
+ * `reviewReachedAgent` over the thread's events since a cursor. The event log
+ * is paged (oldest first, with a server-chosen default page size), so one
+ * mixed query could return a page of completed tool calls that ends before a
+ * later `turn/completed`, and the turn boundary would go unseen. It is
+ * therefore its own query, asking for the single oldest turn end: any row
+ * means a turn ended, whatever the page size. The completed-item query can
+ * only come up short, which fails closed. A failed read of either counts as
+ * no proof: the plan then stays with the user.
  */
 export async function reviewRanSince(
   bb: BbPluginApi,
@@ -143,12 +154,12 @@ export async function reviewRanSince(
   countSubagentCalls: boolean,
 ): Promise<boolean> {
   try {
-    const events = await bb.sdk.threads.events.list({
-      threadId,
-      afterSeq: String(sinceSeq),
-      types: ["item/completed", "turn/completed"],
-    });
-    return reviewReachedAgent(events, gateTools, countSubagentCalls);
+    const afterSeq = String(sinceSeq);
+    const [turnEnds, events] = await Promise.all([
+      bb.sdk.threads.events.list({ threadId, afterSeq, types: ["turn/completed"], limit: "1" }),
+      bb.sdk.threads.events.list({ threadId, afterSeq, types: ["item/completed"] }),
+    ]);
+    return reviewReachedAgent(events, gateTools, countSubagentCalls, turnEnds.length > 0);
   } catch (error) {
     bb.log.warn(
       `auto-review: could not read events to check the plan review ran in ${threadId}; leaving the plan for the user: ${

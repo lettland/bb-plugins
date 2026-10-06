@@ -23,6 +23,8 @@ const THREAD_ID = "thread-1";
 const SIBLING_ID = "thread-2";
 const ENV_ID = "env-1";
 const PLUGIN_ID = "auto-review";
+/** Page size the fake host's event log applies when a query passes no `limit`. */
+const EVENTS_DEFAULT_PAGE = 3;
 
 /** Threads named `codex-…` run on Codex; every other thread runs on Claude Code. */
 function providerOf(threadId: string): string {
@@ -272,7 +274,12 @@ function createHost(options: HostOptions = {}) {
         };
       },
       events: {
-        list: async (args: { threadId: string; afterSeq?: string; types?: readonly string[] }) => {
+        list: async (args: {
+          threadId: string;
+          afterSeq?: string;
+          types?: readonly string[];
+          limit?: string;
+        }) => {
           const after = Number(args.afterSeq ?? -1);
           const rows: unknown[] = [];
           if (args.types?.includes("system/thread/interrupted") === true) {
@@ -338,7 +345,9 @@ function createHost(options: HostOptions = {}) {
                 })),
             );
           }
-          return rows;
+          // Like the server: oldest first, paged — a small default page when no limit is given.
+          const sorted = (rows as Array<{ seq: number }>).sort((a, b) => a.seq - b.seq);
+          return sorted.slice(0, Number(args.limit ?? EVENTS_DEFAULT_PAGE));
         },
       },
       list: async (args?: { parentThreadId?: string }) => {
@@ -2236,6 +2245,22 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
+  it("leaves a question alone when the events since the deny fill a whole page", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    await emitPlan(host);
+    // Harmless reasoning only, but a full page may hide later tool work.
+    for (let seq = 101; seq <= 300; seq += 1) {
+      host.startItem({ seq, item: { type: "reasoning" } });
+    }
+
+    const { errors } = await emitQuestion(host);
+    expect(errors).toEqual([]);
+    expect(host.resolutions.at(-1)).toMatchObject({ resolution: { decision: "deny" } });
+    expect(host.metadata.planDenied).toBeUndefined();
+    await host.harness.dispose();
+  });
+
   it("leaves a question alone once agent text closed the turn the steer rides in on", async () => {
     const host = createHost({ sendDelivery: "queued" });
     await plugin(host.bb);
@@ -2584,6 +2609,19 @@ describe("auto-review plugin", () => {
       await holdAndDispatch(host);
       await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
       expect(host.resolutions).toEqual([DENY]);
+      await host.harness.dispose();
+    });
+
+    it("never approves when a turn ended beyond the first page of completed tool calls", async () => {
+      const host = await hostWith();
+      await holdAndDispatch(host);
+      for (let seq = 101; seq <= 110; seq += 1) {
+        host.completeItem({ seq, item: READ });
+      }
+      host.completeTurn(111);
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
       await host.harness.dispose();
     });
 
@@ -2947,6 +2985,18 @@ describe("auto-review plugin", () => {
         const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
         expect(result).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
         expect(host.metadata.presentPlanArmedAt).toBeUndefined();
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+        await host.harness.dispose();
+      });
+
+      it("never approves when a turn ended beyond the first page of completed tool calls", async () => {
+        const host = await armed();
+        for (let seq = 101; seq <= 110; seq += 1) {
+          host.completeItem({ seq, item: { type: "toolCall", tool: "Read" } });
+        }
+        host.completeTurn(111);
+        const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
+        expect(result).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
         expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
         await host.harness.dispose();
       });
