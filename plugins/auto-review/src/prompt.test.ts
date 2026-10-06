@@ -132,12 +132,30 @@ describe("buildReviewPrompt", () => {
     expect(text).toMatch(/4\. Check that what you staged is a complete, working change/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*only if step 4 passed[^\n]*do NOT commit/u);
     expect(text).toMatch(
-      /6\. Commit the staged changes[^\n]*one logical change[^\n]*`git commit -- <paths>`[^\n]*Never split one file across commits/u,
+      /6\. Commit the staged changes[^\n]*one logical change[^\n]*Never split one file across commits/u,
     );
-    expect(text).toMatch(/6\. Commit the staged changes[^\n]*If a commit in the sequence fails, stop/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*If a commit still fails, or a re-check finds edits you did not make, stop/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*never a directory or glob/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*keep both sides of a rename in the same group/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*never bypass hooks with `--no-verify`/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*skip step 7/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*plain `git commit`, which records exactly what is staged/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*never pass paths to `git commit`/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*`git restore --staged -- <file> …`/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*re-check its staged diff as in steps 3 and 5/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*pass step 4's dependency check on its own/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*A hook that reports a secret is a step 5 STOP/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*never add allowlist markers/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*unstage only your own files outside the first group/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*`git diff --cached --name-status` lists only your files/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*someone else staged it, so do not commit/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*`git diff --name-only -- <file> …` is empty/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*`git show --name-status --format= HEAD` lists exactly that group/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*noting that they need staging again/u);
+    expect(text).not.toMatch(/`git commit -- </u);
     expect(text).toMatch(/7\. Now judge[^\n]*commit it as in step 6/u);
     expect(text).toMatch(/7\. Now judge[^\n]*check it is complete and working as in step 4/u);
-    expect(text).toMatch(/8\. Merge the current branch[^\n]*held back a commit or a commit failed in step 6/u);
+    expect(text).toMatch(/8\. Merge the current branch[^\n]*held back a commit or a commit failed in step 6 or 7/u);
   });
 
   it("says none are listed when every path was unsafe", () => {
