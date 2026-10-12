@@ -12,8 +12,9 @@ This is a **routing procedure, not a static skill catalog** — the live slug se
 
 Build the set of language/stack **keywords** present in what's under review. The tables below
 are common mappings, not the full list: for any other language, framework, or tooling you
-recognize in the changed paths or manifests (for example `.php` / `composer.json`, a
-`Dockerfile`, `.github/workflows/*.yml`, shell scripts), use its name as the keyword.
+recognize in the changed paths, or in manifests under the fallback rule below (for example
+`.php` / `composer.json`, a `Dockerfile`, `.github/workflows/*.yml`), use its name as the
+keyword. For shell scripts, use the dialect (`bash`, `fish`), not just `shell`.
 
 Primary signal — changed file extensions (review-code / review-impl) or files named in the
 plan (review-plan):
@@ -50,7 +51,8 @@ If no keyword is found → **skip skill routing**; dispatch every reviewer with
 
 Invoke `Skill(skill-discovery)` once. For each detected keyword (and the framework names you
 found), read that keyword's row to collect the current candidate slugs. Never invent a slug —
-only use ones that appear in the skill-discovery output.
+only use ones that appear in the skill-discovery output. A keyword with no discovery hits
+contributes nothing.
 
 One exemption: `security` for `reviewer-security` is a **fixed slug**. It bypasses discovery, so
 it is exempt from "Never invent a slug" and applies even when no keyword was found.
@@ -59,20 +61,24 @@ it is exempt from "Never invent a slug" and applies even when no keyword was fou
 
 From the candidates, pick a tailored subset for each reviewer by slug family:
 
-| Reviewer              | Picks                                                                                                                                                                                                                                                                        |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `reviewer-senior-dev` | language idioms: `<lang>-essentials` (+ `go-concurrency` for Go). Frontend/React: `react` + the UI-framework skill present in the change (`frontend-tailwind`, `frontend-shadcn-ui`, `frontend-ant-design`, …).                                                              |
-| `reviewer-senior-qa`  | the stack's testing skill if a candidate exists (`python-testing`, `rust-testing`, `ts-vitest`); otherwise `testing-strategy`.                                                                                                                                               |
-| `reviewer-security`   | `security`, unconditional — including `/review-plan` and the no-keyword case. (Its inline vuln guidance covers common stacks; `security` adds OWASP/SAST depth.)                                                                                                   |
-| `reviewer-end-user`   | **only** when a UI or public API surface changed. Frontend/React → `ux-essentials` + `ux-wcag-a11y`. HTTP API (candidates include `rest-essentials`, `python-fastapi`, `python-django`, `go-chi`, `graphql-essentials`) → `rest-essentials`. Pure internal backend → `none`. |
-| `reviewer-compliance` | `security` when auth, logging, or data handling changed; otherwise `none`.                                                                                                                                                                                                   |
+| Reviewer              | Picks                                                                                                                                                                                                                                                                                                             |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reviewer-senior-dev` | language idioms: `<lang>-essentials` (+ `go-concurrency` for Go). Frontend/React: `react` + the UI-framework skill present in the change (`frontend-tailwind`, `frontend-shadcn-ui`, `frontend-ant-design`, …). Infra, CI, or tooling stacks: the matching skill (`infra-docker-images`, `ci-github-actions`, …). |
+| `reviewer-senior-qa`  | the stack's testing skill if a candidate exists (`python-testing`, `rust-testing`, `ts-vitest`); otherwise `testing-strategy`.                                                                                                                                                                                    |
+| `reviewer-security`   | `security`, unconditional — including `/review-plan` and the no-keyword case. (Its inline vuln guidance covers common stacks; `security` adds OWASP/SAST depth.)                                                                                                                                                  |
+| `reviewer-end-user`   | **only** when a UI or public API surface changed. Frontend/React → `ux-essentials` + `ux-wcag-a11y`. HTTP API (candidates include `rest-essentials`, `python-fastapi`, `python-django`, `go-chi`, `graphql-essentials`) → `rest-essentials`. Pure internal backend → `none`.                                      |
+| `reviewer-compliance` | `security` when auth, logging, or data handling changed; otherwise `none`.                                                                                                                                                                                                                                        |
 
 Rules:
 
 - **Cap ≤2 slugs per reviewer.** If more qualify, keep the most general (essentials /
-  strategy) over the most specific.
+  strategy) over the most specific, and an infra, CI, or tooling skill over a second skill for
+  the same language.
 - **Multi-language change** → union the per-reviewer picks across languages, then re-apply
   the ≤2 cap.
+- Use a stack-specific candidate only when it covers the detected stack or dialect:
+  `tooling-shell-fish` is for fish, not bash or POSIX sh. Generic picks such as
+  `testing-strategy` are unaffected.
 - A reviewer with no qualifying skill gets `none`.
 
 ## Step 4 — Pass to reviewers
