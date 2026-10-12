@@ -100,6 +100,11 @@ export function parseScopes(file: string): Scope[] {
         );
       }
       claudeConfigDir = path.resolve(expandHome(dir));
+      if (isWithin(claudeConfigDir, homedir())) {
+        throw new Error(
+          `${file}: scope "${name}" "claudeConfigDir" must not be your home directory or one of its parents`,
+        );
+      }
     }
     const patternSources = (e.skills as string[]).map((s) => s.trim());
     scopes.push({

@@ -68,6 +68,22 @@ describe("parseScopes", () => {
     ).toThrow(/scope "work" "claudeConfigDir"/);
   });
 
+  it.each([["~/"], ["/"], [homedir()], ["~/."], [path.dirname(homedir())]])(
+    "rejects %s as claudeConfigDir (home or a parent of it)",
+    (value) => {
+      expect(() =>
+        parseScopes(scopesFile([{ ...base, claudeConfigDir: value }])),
+      ).toThrow(/must not be your home directory or one of its parents/);
+    },
+  );
+
+  it("accepts a sibling-named dir inside home", () => {
+    const [scope] = parseScopes(
+      scopesFile([{ ...base, claudeConfigDir: "~/.claude-x" }]),
+    );
+    expect(scope.claudeConfigDir).toBe(path.join(homedir(), ".claude-x"));
+  });
+
   it("still requires skills", () => {
     expect(() =>
       parseScopes(

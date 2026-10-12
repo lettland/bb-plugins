@@ -9,5 +9,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["server.ts", "scopes.ts", "scopes.test.ts", "vitest.config.ts"]
+  "include": ["server.ts", "scopes.ts", "profile.ts", "scopes.test.ts", "profile.test.ts", "vitest.config.ts"]
 }

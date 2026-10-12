@@ -2,164 +2,28 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type {
-  BbPluginApi,
-  ExperimentalPluginProviderEnvContext,
-  ExperimentalPluginProviderEnvEntry,
-} from "@get-bb/plugin-sdk";
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
-  configDirFor,
+  checkClaudeProfile,
+  claudeProfileLines,
+  isDirectory,
+  PROJECT_LOOKUP_TIMEOUT_MS,
+  resolveClaudeEnv,
+  unpinThread,
+  warnMissingConfigDirs,
+  withTimeout,
+  type ClaudeProfileDeps,
+  type ProjectSource,
+} from "./profile";
+import {
   loadScopes,
   normalizeDir,
   selectSkills,
-  type ConfigDirChoice,
   type Scope,
   type SkillInfo,
 } from "./scopes";
 
-interface ProjectSource {
-  path: string;
-  hostId: string | null;
-}
-
-/** What a thread was started with; fixed at its first resolution. */
-interface ConfigDirPin {
-  dir: string | null;
-  scope: string | null;
-}
-
-/** What the Claude profile logic needs from the plugin. */
-interface ClaudeProfileDeps {
-  scopes: Scope[];
-  log: BbPluginApi["log"];
-  kv: BbPluginApi["storage"]["kv"];
-  /** A project's checkout sources; refreshes the cache once (time-capped) when it is unknown. */
-  sourcesFor(projectId: string): Promise<ProjectSource[] | undefined>;
-}
-
 const PROJECT_REFRESH_MS = 60_000;
-const PROJECT_LOOKUP_TIMEOUT_MS = 3_000;
-const CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR";
-
-function pinKey(threadId: string): string {
-  return `claude-config-dir:${threadId}`;
-}
-
-function pinEntries(pin: ConfigDirPin): ExperimentalPluginProviderEnvEntry[] {
-  if (!pin.dir) return [];
-  return [
-    {
-      name: CONFIG_DIR_ENV,
-      value: pin.dir,
-      reason: `dir-skills scope "${pin.scope}"`,
-    },
-  ];
-}
-
-async function withTimeout(task: Promise<void>, ms: number): Promise<void> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, ms);
-  });
-  try {
-    await Promise.race([task, timeout]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function resolveClaudeEnv(
-  deps: ClaudeProfileDeps,
-  ctx: ExperimentalPluginProviderEnvContext,
-): Promise<ExperimentalPluginProviderEnvEntry[]> {
-  const { log, kv } = deps;
-  const key = pinKey(ctx.threadId);
-  const pinned = await kv.get<ConfigDirPin>(key);
-  if (pinned) {
-    log.debug(
-      `env thread=${ctx.threadId} project=${ctx.projectId} pinned -> ${pinned.dir ?? "default profile"}`,
-    );
-    return pinEntries(pinned);
-  }
-  const sources = await deps.sourcesFor(ctx.projectId);
-  if (!sources) {
-    log.warn(
-      `project ${ctx.projectId} not resolved; thread ${ctx.threadId} starts with default profile`,
-    );
-    return [];
-  }
-  const local = sources
-    .filter((source) => source.hostId === ctx.hostId)
-    .map((source) => source.path);
-  const choice = configDirFor(deps.scopes, local);
-  if (choice.conflict.length > 0) {
-    log.warn(
-      `project ${ctx.projectId} matches scopes with different claudeConfigDir: ${[choice.scope, ...choice.conflict].join(", ")}; using "${choice.scope}"`,
-    );
-  }
-  let pin: ConfigDirPin = { dir: choice.dir, scope: choice.scope };
-  if (pin.dir && !existsSync(pin.dir)) {
-    log.warn(
-      `scope "${pin.scope}" claudeConfigDir ${pin.dir} does not exist; thread ${ctx.threadId} starts with default profile`,
-    );
-    pin = { dir: null, scope: null };
-  }
-  await kv.set(key, pin);
-  log.debug(
-    `env thread=${ctx.threadId} project=${ctx.projectId} host=${ctx.hostId} -> ${pin.dir ?? "default profile"}`,
-  );
-  return pinEntries(pin);
-}
-
-/** The profile a project's checkouts select, and the one the current thread was pinned to. */
-async function checkClaudeProfile(
-  deps: ClaudeProfileDeps,
-  projectId: string | null,
-  threadId: string | undefined,
-): Promise<{ profile: ConfigDirChoice | null; pinned: ConfigDirPin | null }> {
-  const sources = projectId ? await deps.sourcesFor(projectId) : undefined;
-  const profile = projectId
-    ? configDirFor(
-        deps.scopes,
-        (sources ?? []).map((s) => s.path),
-      )
-    : null;
-  const pinned = threadId
-    ? ((await deps.kv.get<ConfigDirPin>(pinKey(threadId))) ?? null)
-    : null;
-  return { profile, pinned };
-}
-
-function claudeProfileLines(
-  profile: ConfigDirChoice | null,
-  pinned: ConfigDirPin | null,
-  threadId: string | undefined,
-): string[] {
-  const lines: string[] = [];
-  if (!profile) lines.push("Claude profile: needs --project");
-  else {
-    lines.push(
-      `Claude profile (by project checkout): ${profile.dir ? `${profile.dir}  (scope ${profile.scope})` : "none"}`,
-    );
-    if (profile.conflict.length > 0)
-      lines.push(`  conflicts with scope(s): ${profile.conflict.join(", ")}`);
-  }
-  if (threadId)
-    lines.push(
-      `Claude profile pinned for thread ${threadId}: ${pinned ? (pinned.dir ?? "none (default profile)") : "not pinned yet"}`,
-    );
-  return lines;
-}
-
-function warnMissingConfigDirs(scopes: Scope[], log: BbPluginApi["log"]): void {
-  for (const scope of scopes) {
-    if (scope.claudeConfigDir && !existsSync(scope.claudeConfigDir)) {
-      log.warn(
-        `scope "${scope.name}" claudeConfigDir ${scope.claudeConfigDir} does not exist; threads there start with the default profile`,
-      );
-    }
-  }
-}
 
 function projectSources(
   sources: ReadonlyArray<{ path?: string | null; hostId?: string | null }> | undefined,
@@ -170,22 +34,6 @@ function projectSources(
       found.push({ path: source.path, hostId: source.hostId ?? null });
   }
   return found;
-}
-
-/** Recovery: forget a thread's pinned profile so its next turn resolves afresh. */
-async function unpinThread(
-  kv: BbPluginApi["storage"]["kv"],
-  threadId: string | undefined,
-): Promise<{ exitCode: number; stdout?: string; stderr?: string }> {
-  if (!threadId)
-    return { exitCode: 2, stderr: "unpin: give a thread id\n" };
-  const pinned = await kv.get<ConfigDirPin>(pinKey(threadId));
-  if (!pinned) return { exitCode: 0, stdout: `thread ${threadId}: no pin\n` };
-  await kv.delete(pinKey(threadId));
-  return {
-    exitCode: 0,
-    stdout: `thread ${threadId}: removed pin (${pinned.dir ? `${pinned.dir}, scope ${pinned.scope}` : "default profile"})\n`,
-  };
 }
 
 function pluginRoot(): string {
@@ -308,6 +156,7 @@ export default async function plugin(bb: BbPluginApi) {
     scopes,
     log: bb.log,
     kv: bb.storage.kv,
+    isDir: isDirectory,
     async sourcesFor(projectId) {
       if (!projectPaths.has(projectId))
         await withTimeout(refreshProjects(), PROJECT_LOOKUP_TIMEOUT_MS);
@@ -319,9 +168,6 @@ export default async function plugin(bb: BbPluginApi) {
     bb.providers.experimental_contributeEnv("claude-code", (ctx) =>
       resolveClaudeEnv(profileDeps, ctx),
     );
-    bb.events.on("thread.deleted", async ({ thread }) => {
-      await bb.storage.kv.delete(pinKey(thread.id));
-    });
   } else {
     bb.log.warn(
       "bb.providers.experimental_contributeEnv unavailable; claudeConfigDir is not applied",
@@ -358,7 +204,7 @@ export default async function plugin(bb: BbPluginApi) {
       {
         name: "unpin",
         summary: "Forget a thread's pinned Claude profile",
-        usage: "bb dir-skills unpin <thread-id>",
+        usage: "bb dir-skills unpin [<thread-id>]",
       },
     ],
     async run(argv, ctx) {
@@ -427,7 +273,7 @@ export default async function plugin(bb: BbPluginApi) {
           scopes,
           candidatesFor(target, projectId),
         );
-        const { profile, pinned } = await checkClaudeProfile(
+        const { decision, pinned } = await checkClaudeProfile(
           profileDeps,
           projectId,
           ctx.threadId,
@@ -436,7 +282,12 @@ export default async function plugin(bb: BbPluginApi) {
           path: normalizeDir(target),
           projectId,
           skills: selected,
-          claudeProfile: profile,
+          claudeProfile: decision && {
+            status: decision.status,
+            dir: decision.pin.dir,
+            scope: decision.pin.scope,
+            conflict: decision.conflict,
+          },
           ...(ctx.threadId ? { threadId: ctx.threadId, pinned } : {}),
         };
         if (json)
@@ -450,13 +301,13 @@ export default async function plugin(bb: BbPluginApi) {
             ? "skills: none"
             : `skills:\n${selected.map((s) => `  ${s}`).join("\n")}`,
         ];
-        lines.push(...claudeProfileLines(profile, pinned, ctx.threadId));
+        lines.push(...claudeProfileLines(decision, pinned, ctx.threadId));
         return { exitCode: 0, stdout: lines.join("\n") + "\n" };
       }
-      if (command === "unpin") return unpinThread(profileDeps.kv, args[1]);
+      if (command === "unpin") return unpinThread(profileDeps.kv, args[1], ctx.threadId);
       return {
         exitCode: 2,
-        stderr: `unknown command "${command}"; try: bb dir-skills status | check [<path>] | unpin <thread-id>\n`,
+        stderr: `unknown command "${command}"; try: bb dir-skills status | check [<path>] | unpin [<thread-id>]\n`,
       };
     },
   });

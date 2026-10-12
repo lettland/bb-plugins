@@ -72,8 +72,9 @@ absolute path or one starting with `~/`):
 
 Claude Code threads whose project lives under that scope start with
 `CLAUDE_CONFIG_DIR` set to it, so they get that profile's plugins, subagents and
-hooks natively while other projects keep the default profile. `skills` is still
-required.
+hooks natively while other projects keep the default profile. "Default
+profile" here means the personal Claude login, the profile at `~/.claude`.
+`skills` is still required.
 
 - The profile replaces the default one entirely for those threads: its
   settings, permissions, hooks, MCP servers, plugins, memory and `CLAUDE.md`.
@@ -83,23 +84,43 @@ required.
   on. A project with a checkout under the scope gets the profile for all of its
   threads; an environment path under the scope alone gives the scope's skills
   but not the profile.
-- A thread's profile is fixed at its first resolution after the plugin loads,
-  and kept for its lifetime, so editing scopes or reloading the plugin never
-  moves a running conversation to another profile. Threads in a scope's
-  projects that never resolved before get the scope's profile on their next
-  turn. To make a thread resolve afresh (for example after fixing a scope), run
-  `bb dir-skills unpin <thread-id>`; it deletes the thread's pin and prints what
-  it removed.
-- If the directory does not exist, the thread starts with the default profile
-  and the plugin logs a warning; it never lets Claude create a fresh,
-  logged-out profile there. If a project matches several scopes with different
-  directories, the first scope by name wins and a warning is logged.
+- Local host only. The directory is expanded and checked on the machine that
+  runs the bb server, and bb does not tell a plugin which host that is, so the
+  plugin cannot refuse other hosts: a thread running on a remote host would
+  receive the same path, which does not exist there. Use `claudeConfigDir` only
+  for projects whose threads run on the bb server's own machine.
+- A thread's profile is fixed at its first resolution and kept for its
+  lifetime, across plugin reloads, so editing scopes or reloading the plugin
+  never moves a conversation to another profile. This includes the first
+  resolution of a thread that already ran under a different profile: when a
+  project already has Claude Code threads under another profile, each of those
+  threads switches to the scope's profile on its next turn, and its earlier
+  session stays in the old directory, so the turn may start without it.
+- To make a thread resolve afresh (for example after fixing a scope), run
+  `bb dir-skills unpin [<thread-id>]` (default: the current thread). It deletes
+  the thread's pin and prints what it removed. The thread's earlier Claude
+  session stays in its previous profile; the next turn may start without it. A
+  project that cannot be resolved (lookup failed or took over 3 seconds) pins
+  the thread to the default profile; unpin it to try again. Pins are kept when a
+  thread is deleted.
+- If the directory is not a directory (missing, or a file), a new thread
+  starts with the default profile and is pinned to it; the plugin logs a
+  warning and `check` shows the reason. It never lets Claude create a fresh,
+  logged-out profile there. If a pinned directory later disappears, the thread
+  still gets that directory (it fails closed and never falls back to the
+  personal login), the plugin logs a warning, and the pin is kept. If a project
+  matches several scopes with different directories, the first scope by name
+  wins and a warning is logged. `claudeConfigDir` may not be your home
+  directory or one of its parents.
+- A forked thread gets its own id and resolves on its own; the same project
+  gives the same profile.
 - A `CLAUDE_CODE_OAUTH_TOKEN` passed by bb takes priority over the profile's
   own login. Without one, bb threads use the profile's login and refresh it
   alongside any standalone `claude` session using the same directory.
 - `bb dir-skills status` shows each scope's `claudeConfigDir`; `bb dir-skills
-  check --project <project-id>` shows which profile that project would get, and
-  inside a thread also the profile the thread was pinned to.
+  check --project <project-id>` shows which profile that project's checkouts
+  select (all hosts; "unknown project" if bb cannot resolve it), and inside a
+  thread also the profile the thread was pinned to.
 
 ## Adding a work skill
 

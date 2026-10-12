@@ -7,6 +7,7 @@
   "files": [
     "server.ts",
     "scopes.ts",
+    "profile.ts",
     "skills",
     "scopes.json",
     "README.md"
