@@ -67,7 +67,7 @@ Walk each changed file against the OWASP Top 10:2025 categories below; a categor
 - **A09:2025 Security Logging and Alerting Failures:** Auth events, authorization denials, admin actions, or data exports not logged, or logged with no way to alert on them; log the event and actor ID, never raw PII or tokens (see the secrets bullet)
 - **A10:2025 Mishandling of Exceptional Conditions:** Fail-open on error (catch then allow), swallowed auth/validation errors, unchecked error returns on security calls, unbounded resource use on error paths
 
-Identify the stacks the diff touches yourself. The checks below are examples for common stacks, not the full list; for any other language or platform, apply its equivalent risks.
+Identify the stacks the diff touches yourself: languages, frameworks, CI, containers, and agent code. The checks below cover common ones and apply whenever the diff touches them; they are not the full list, so for any other stack apply its equivalent risks.
 
 - **Go-specific:** Use of `unsafe` package, race conditions in concurrent code (shared state without synchronization), string formatting for SQL queries instead of parameterized queries
 - **Python-specific:** Unsafe deserialization of untrusted data, `eval`/`exec` usage, YAML loading without safe loader
