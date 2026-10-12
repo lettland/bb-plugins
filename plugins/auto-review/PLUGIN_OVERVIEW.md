@@ -19,8 +19,15 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   checkout changed through its own tools during the turn is left to that thread; files
   already dirty and left untouched are never claimed; untracked files appearing under
   harness state dirs (`.claude/`, `.codex/`, `.bb/` — edit backups, logs) are harness
-  output, not the turn's work. A sibling's shell edit, or a human's edit, made in the same
-  checkout during the turn cannot be told apart and is claimed.
+  output, not the turn's work. A commit a sibling thread made with git from its shell
+  during the turn (`commit`, `merge`, `revert` or `pull`) is left to that thread, and its
+  own auto-review covers it: the commit's time must fall in that command's run, nothing of
+  this thread's family (itself, its bb children and owned threads) may have been running
+  then, and the commit may touch none of the files that family edited with tools; any
+  doubt keeps the commit with this thread. A sibling's uncommitted shell edit, or a
+  human's edit, made in the same checkout during the turn cannot be told apart and is
+  claimed, and this thread's own shell edits (no tool row) swept into a sibling's
+  `git add -A` commit are left to the sibling.
 - Chooses commit / merge from a branch policy keyed on the mainline name: a feature
   branch (name contains a `/`; a top-level branch such as `develop` is never merged)
   merges into a personal mainline (e.g. `master`) whether the thread runs in a

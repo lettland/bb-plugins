@@ -48,13 +48,26 @@ export interface DispatchInput {
   turn: TurnChanges;
 }
 
+function turnStartHeadIf(condition: boolean, state: ThreadState): string | null {
+  return condition ? (state.turnStart?.tree?.headSha ?? null) : null;
+}
+
 /**
  * The turn-start head to diff the turn's commits from, or null when the turn
  * made none. A pathless merge from a pull is already dropped from `commits`; a
  * commit whose paths could not be read still sets the range.
  */
 export function committedSinceHead(turn: TurnChanges, state: ThreadState): string | null {
-  return turn.commits.length > 0 ? (state.turnStart?.tree?.headSha ?? null) : null;
+  return turnStartHeadIf(turn.commits.length > 0, state);
+}
+
+/**
+ * The turn-start head the secret scan runs from: set by any commit made during
+ * the turn, this thread's or another's. A head that moved with no such commit
+ * (a pull, a rebase, a branch switch) leaves it null.
+ */
+export function commitScanHead(turn: TurnChanges, state: ThreadState): string | null {
+  return turnStartHeadIf(turn.commits.length > 0 || turn.foreignCommits.length > 0, state);
 }
 
 async function sendReview(
@@ -126,6 +139,8 @@ export async function dispatchReview(
       reviewMode: config.reviewMode,
       scope: renderScope(scope),
       committedSince: committedSinceHead(turn, state),
+      commitScanFrom: commitScanHead(turn, state),
+      foreignCommits: turn.foreignCommits.map(({ sha }) => sha),
       aislopScan: await aislopScanAvailable(ctx.bb),
     });
     await sendReview(ctx, thread, prompt, extra);

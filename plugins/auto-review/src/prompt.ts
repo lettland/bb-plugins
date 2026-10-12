@@ -42,6 +42,13 @@ export interface BuildPromptInput {
    * Anything not shaped like a commit sha is ignored.
    */
   committedSince?: string | null;
+  /**
+   * The head the secret scan starts from: set when the turn made any commit,
+   * this thread's or another's. Defaults to `committedSince`.
+   */
+  commitScanFrom?: string | null;
+  /** Commits another thread made during the turn; they are not this thread's to review. */
+  foreignCommits?: readonly string[];
   /** Whether the aislop plugin's `bb aislop scan` is available to run. */
   aislopScan?: boolean;
 }
@@ -311,10 +318,39 @@ export const PLAN_HOLD_ANSWER =
   "instructions — they arrive as the next message if you don't have them yet. Do not ask the " +
   "user what to change. If your question was about something else, ask it again.";
 
+/** The sha when it is shaped like a commit, else null. */
+function allowedSha(sha: string | null | undefined): string | null {
+  return sha !== null && sha !== undefined && COMMIT_SHA_ALLOW.test(sha) ? sha : null;
+}
+
+/**
+ * Commits another thread made during the turn. Only their shas are named, and
+ * only ones shaped like a commit.
+ */
+function foreignCommitNote(foreign: readonly string[], committedSince: string | null): string {
+  const inRange =
+    committedSince === null
+      ? ""
+      : ` They may appear in the range after ${committedSince}; they are still not this thread's.`;
+  return `Another thread in this checkout made ${foreign.length === 1 ? "this commit" : "these commits"} during this turn: ${foreign.join(", ")}. ${foreign.length === 1 ? "It is" : "They are"} not part of your work: do not review, report, stage, or complete ${foreign.length === 1 ? "it" : "them"}.${inRange}`;
+}
+
+/** Step 5's scan of the turn's commits; empty when the turn made none. */
+function commitScan(scanSince: string | null, hasForeign: boolean): string {
+  if (scanSince === null) {
+    return "";
+  }
+  if (!hasForeign) {
+    return ` Scan this turn's commits too (\`git diff ${scanSince}..HEAD\`); a secret found there is already committed, so STOP and report it — do not rewrite history to remove it.`;
+  }
+  return ` Scan this turn's commits too, yours and the other thread's (\`git diff ${scanSince}..HEAD\`); a secret found in one of your commits is already committed, so STOP and report it — do not rewrite history to remove it. A secret found only in the other thread's commit is not yours: report it by file:line and type, never by value, but do not STOP and do not let it hold back your own commit.`;
+}
+
 export function buildReviewPrompt(input: BuildPromptInput): string {
   const { decision, reviewMode, scope } = input;
-  const since = input.committedSince ?? null;
-  const committedSince = since !== null && COMMIT_SHA_ALLOW.test(since) ? since : null;
+  const committedSince = allowedSha(input.committedSince);
+  const scanSince = allowedSha(input.commitScanFrom ?? input.committedSince);
+  const foreign = (input.foreignCommits ?? []).filter((sha) => COMMIT_SHA_ALLOW.test(sha));
   const lines: string[] = [];
   lines.push(
     `${AUTO_REVIEW_MARKER} You changed files during your last turn. Review them, apply fixes, and record the result. Follow these steps in order.`,
@@ -324,6 +360,10 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
     lines.push(
       `Part of this turn's work is already committed (the commits after ${committedSince}). Do not amend, squash, reset, or otherwise rewrite those commits: record the review's fixes as new changes. If the review calls for no fixes, there is nothing to stage or commit.`,
     );
+    lines.push("");
+  }
+  if (foreign.length > 0) {
+    lines.push(foreignCommitNote(foreign, committedSince));
     lines.push("");
   }
 
@@ -356,16 +396,15 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
   lines.push(
     "3. Stage ONLY the files you yourself edited this turn — those in the list above — using an explicit pathspec (`git add -- <path> …`). Never use `git add -A`, `git add -a`, or `git add .`. Do not stage, revert, checkout, stash, or clean any other modified or untracked file — it was already there and is not yours to touch. Before staging each file, confirm its current contents are the changes you made this turn; if a file also contains edits you did not make (a concurrent human or sibling edit), skip it and report it rather than committing someone else's work.",
   );
-  const committedScan =
-    committedSince === null
-      ? ""
-      : ` Scan this turn's commits too (\`git diff ${committedSince}..HEAD\`); a secret found there is already committed, so STOP and report it — do not rewrite history to remove it.`;
+  const committedScan = commitScan(scanSince, foreign.length > 0);
   const changedFiles =
     committedSince === null
       ? "`git diff --cached --name-only`"
       : `\`git diff --cached --name-only\` together with this turn's commits (\`git diff --name-only ${committedSince}..HEAD\`)`;
+  const otherThreadFiles =
+    foreign.length > 0 ? " Leave out the files of the other thread's commits named above." : "";
   lines.push(
-    `4. Check that what you staged is a complete, working change, not a fragment of one. Compare ${changedFiles} with the list above and with what the change needs: a definition, export, type, schema, event contract, migration, or test that the staged code depends on must be staged with it. Then run the project's relevant checks (typecheck or build, and the tests covering these files) and fix what fails.`,
+    `4. Check that what you staged is a complete, working change, not a fragment of one. Compare ${changedFiles} with the list above and with what the change needs: a definition, export, type, schema, event contract, migration, or test that the staged code depends on must be staged with it.${otherThreadFiles} Then run the project's relevant checks (typecheck or build, and the tests covering these files) and fix what fails.`,
   );
   lines.push(
     `5. Scan the staged changes for secrets, credentials, or build artifacts before committing. Watch for: ${SECRET_PATTERNS.join("; ")}. If you find any, STOP: unstage, do not commit, and report what you found. Do not commit past a secret.${committedScan}`,

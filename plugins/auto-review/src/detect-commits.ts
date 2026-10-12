@@ -176,13 +176,14 @@ function authoredDuringTurn(
   });
 }
 
-/**
- * The commits of `commits` this turn authored. After a fast forward from the
- * turn-start head, those authored at or after `startedAt`; commits pulled in
- * from upstream predate the turn. Otherwise, those whose patch is not one that
- * was already there at turn start, so a rebase replay is not claimed.
- */
-export async function novelCommits(
+/** A commit made during the turn, with the time git recorded for it; null when that is unknown. */
+export interface TurnCommit {
+  sha: string;
+  authoredAt: number | null;
+}
+
+/** The shas of `commits` this turn authored; see `novelCommits`. */
+async function novelShas(
   bb: BbPluginApi,
   environmentId: string,
   before: TreeSnapshot,
@@ -243,6 +244,25 @@ export async function novelCommits(
 }
 
 /**
+ * The commits of `commits` this turn authored. After a fast forward from the
+ * turn-start head, those authored at or after `startedAt`; commits pulled in
+ * from upstream predate the turn. Otherwise, those whose patch is not one that
+ * was already there at turn start, so a rebase replay is not claimed.
+ */
+export async function novelCommits(
+  bb: BbPluginApi,
+  environmentId: string,
+  before: TreeSnapshot,
+  commits: readonly TurnCommit[],
+  startedAt?: number,
+): Promise<TurnCommit[]> {
+  const novel = new Set(
+    await novelShas(bb, environmentId, before, commits.map(({ sha }) => sha), startedAt),
+  );
+  return commits.filter(({ sha }) => novel.has(sha));
+}
+
+/**
  * Commits made during the turn: the head moved off `before.headSha`. On a
  * branch ahead of its base they are the commits ahead that were not ahead at
  * turn start. On the mainline itself there is no base to be ahead of, so the
@@ -254,11 +274,11 @@ export async function turnCommits(
   environmentId: string,
   before: TreeSnapshot,
   workspace: AvailableWorkspace,
-): Promise<string[]> {
+): Promise<TurnCommit[]> {
   if (headShaOf(workspace) === before.headSha) {
     return [];
   }
-  let commits: readonly { sha: string }[] = [];
+  let commits: readonly { sha: string; authoredAt?: number }[] = [];
   if (workspace.mergeBase !== null) {
     const known = new Set(before.commits);
     commits = workspace.mergeBase.commits.filter((commit) => !known.has(commit.sha));
@@ -274,5 +294,8 @@ export async function turnCommits(
       commits = [];
     }
   }
-  return commits.slice(0, MAX_NEW_COMMITS).map((commit) => commit.sha);
+  return commits.slice(0, MAX_NEW_COMMITS).map((commit) => ({
+    sha: commit.sha,
+    authoredAt: typeof commit.authoredAt === "number" ? commit.authoredAt : null,
+  }));
 }

@@ -60,36 +60,49 @@ export const AUTHORSHIP_SEGMENT_LIMIT = 100;
 /** Bounds the walk back through a very long turn: 50 pages of 100 segments. */
 export const AUTHORSHIP_MAX_PAGES = 50;
 
-export function authoredPathsFromRows(
+type FileChangeRow = Extract<TimelineRow, { kind: "work"; workKind: "file-change" }>;
+
+/** Collects both sides of a move for every `file-change` row the filter keeps. */
+function addChangedPaths(
   rows: readonly TimelineRow[],
-  sinceSeq: number,
-): string[] {
-  const paths = new Set<string>();
+  keep: (row: FileChangeRow) => boolean,
+  paths: Set<string>,
+): void {
   for (const row of walkRows(rows)) {
-    if (
-      row.kind === "work" &&
-      row.workKind === "file-change" &&
-      row.sourceSeqStart > sinceSeq
-    ) {
+    if (row.kind === "work" && row.workKind === "file-change" && keep(row)) {
       paths.add(row.change.path);
       if (row.change.movePath !== null) {
         paths.add(row.change.movePath);
       }
     }
   }
+}
+
+export function authoredPathsFromRows(
+  rows: readonly TimelineRow[],
+  sinceSeq: number,
+): string[] {
+  const paths = new Set<string>();
+  addChangedPaths(rows, (row) => row.sourceSeqStart > sinceSeq, paths);
   return [...paths];
+}
+
+interface PagedRows {
+  rows: TimelineRow[];
+  /** Paging stopped at the page cap while older rows could still matter. */
+  truncated: boolean;
 }
 
 /**
  * Pages back from the latest segment until the page boundary falls at or before
  * the turn-start cursor, so a long turn is not truncated to its last segments.
  */
-export async function authoredPaths(
+export async function turnTimeline(
   bb: BbPluginApi,
   threadId: string,
   sinceSeq: number,
-): Promise<string[]> {
-  const rows = await recentTimelineRows(bb, threadId, (timeline) => {
+): Promise<PagedRows> {
+  return recentTimelineRows(bb, threadId, (timeline) => {
     const { olderRowsSourceSeqEnd } = timeline.timelinePage;
     return (
       olderRowsSourceSeqEnd === undefined ||
@@ -97,7 +110,14 @@ export async function authoredPaths(
       olderRowsSourceSeqEnd > sinceSeq
     );
   });
-  return authoredPathsFromRows(rows, sinceSeq);
+}
+
+export async function authoredPaths(
+  bb: BbPluginApi,
+  threadId: string,
+  sinceSeq: number,
+): Promise<string[]> {
+  return authoredPathsFromRows((await turnTimeline(bb, threadId, sinceSeq)).rows, sinceSeq);
 }
 
 /**
@@ -108,7 +128,7 @@ async function recentTimelineRows(
   bb: BbPluginApi,
   threadId: string,
   olderMayMatter: (timeline: TimelineResult) => boolean,
-): Promise<TimelineRow[]> {
+): Promise<PagedRows> {
   const rows: TimelineRow[] = [];
   let before: { anchorId: string; anchorSeq: number } | null = null;
   for (let page = 0; page < AUTHORSHIP_MAX_PAGES; page += 1) {
@@ -126,11 +146,11 @@ async function recentTimelineRows(
     rows.push(...timeline.rows);
     const { hasOlderRows, olderCursor } = timeline.timelinePage;
     if (!hasOlderRows || olderCursor === null || !olderMayMatter(timeline)) {
-      break;
+      return { rows, truncated: false };
     }
     before = olderCursor;
   }
-  return rows;
+  return { rows, truncated: true };
 }
 
 /** This thread plus every thread it spawned or owns, transitively. */
@@ -166,17 +186,195 @@ function oldestCreatedAt(rows: readonly TimelineRow[]): number | null {
   return oldest;
 }
 
+/** Whether a page can still hold rows from the turn: its oldest row is inside it, or no row carries a time. */
+function pageInTurn(startedAt: number): (timeline: TimelineResult) => boolean {
+  return (timeline) => {
+    const oldest = oldestCreatedAt(timeline.rows);
+    return oldest === null || oldest >= startedAt;
+  };
+}
+
+type WorkRow = Extract<TimelineRow, { kind: "work" }>;
+
+export interface TimeWindow {
+  start: number;
+  end: number;
+}
+
+export interface SiblingWindow extends TimeWindow {
+  threadId: string;
+}
+
+/** Git truncates `authoredAt` to whole seconds, so a window is widened by one on both sides. */
+const WINDOW_SLACK_MS = 1_000;
+/** Only this much of a command is scanned, so the cost stays linear in what a row carries. */
+const HISTORY_GIT_SCAN_LIMIT = 8_192;
+const HISTORY_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set(["commit", "merge", "revert", "pull"]);
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
+
+/** Whether a time falls inside a window. */
+export function withinWindow(window: TimeWindow, time: number): boolean {
+  return time >= window.start && time <= window.end;
+}
+
 /**
- * Paths another thread in the same checkout changed through its own tools
- * since `startedAt`. A thread that has been idle and untouched since before
- * the turn began cannot have, so its timeline is not read.
+ * One piece of shell text: a quoted string (an unterminated one runs to the
+ * end), an escaped character, a separator (`;`, `&&`, `|`, a newline), blanks, or
+ * a run of plain characters.
+ */
+const SHELL_PIECE = /'[^']*(?:'|$)|"(?:\\[\s\S]|[^"\\])*(?:"|$)|\\[\s\S]|&&|[;|\n]|[^\S\n]+|[^\s;|&'"\\]+|&/gu;
+
+/** A word piece without its quotes or escaping backslash. */
+function pieceText(piece: string): string {
+  const quote = piece.charAt(0);
+  if (quote !== "'" && quote !== '"') {
+    return piece.replace(/^\\/u, "");
+  }
+  return piece.slice(1, piece.length > 1 && piece.endsWith(quote) ? -1 : undefined);
+}
+
+/** Splits shell text into simple commands of unquoted words, at separators outside quotes. */
+function simpleCommands(text: string): string[][] {
+  const commands: string[][] = [];
+  let words: string[] = [];
+  let word: string | null = null;
+  const endWord = () => {
+    if (word !== null) {
+      words.push(word);
+      word = null;
+    }
+  };
+  const endCommand = () => {
+    endWord();
+    if (words.length > 0) {
+      commands.push(words);
+      words = [];
+    }
+  };
+  for (const [piece] of text.slice(0, HISTORY_GIT_SCAN_LIMIT).matchAll(SHELL_PIECE)) {
+    if (/^(?:[;|\n]|&&)$/u.test(piece)) {
+      endCommand();
+    } else if (/^\s/u.test(piece)) {
+      endWord();
+    } else if (piece !== "\\\n") {
+      word = (word ?? "") + pieceText(piece);
+    }
+  }
+  endCommand();
+  return commands;
+}
+
+function writesHistory(words: readonly string[]): boolean {
+  let at = 0;
+  while (ENV_ASSIGNMENT.test(words[at] ?? "")) {
+    at += 1;
+  }
+  if (words[at] !== "git") {
+    return false;
+  }
+  at += 1;
+  while ((words[at] ?? "").startsWith("-")) {
+    at += words[at] === "-C" || words[at] === "-c" ? 2 : 1;
+  }
+  return HISTORY_GIT_SUBCOMMANDS.has(words[at] ?? "");
+}
+
+/**
+ * Whether shell text runs `git commit`, `merge`, `revert` or `pull`. Strict on
+ * purpose: it decides that a commit was another thread's. `rebase`,
+ * `cherry-pick` and `am` keep the original author date, so they cannot be
+ * matched to a commit by time.
+ */
+export function isHistoryWritingGit(text: string): boolean {
+  return simpleCommands(text).some(writesHistory);
+}
+
+/** The shell text of a row that ran one: `command` rows carry it in `command`, search and file-read rows in a nullable `cmd`. */
+function shellText(row: WorkRow): string | null {
+  switch (row.workKind) {
+    case "command":
+      return row.command;
+    case "search":
+    case "file-read":
+      return row.cmd;
+    default:
+      return null;
+  }
+}
+
+function runsHistoryGit(row: WorkRow): boolean {
+  const text = shellText(row);
+  return text !== null && isHistoryWritingGit(text);
+}
+
+/**
+ * When a row could have been running, or null when it never ran or no end is
+ * known. A pending row runs until `pendingUntil`, which is null to skip it.
+ */
+function rowWindow(row: WorkRow, pendingUntil: number | null): TimeWindow | null {
+  if ("approvalStatus" in row && row.approvalStatus !== null) {
+    return null;
+  }
+  let end: number | null = null;
+  if (row.status === "pending") {
+    end = pendingUntil;
+  } else if ("completedAt" in row) {
+    end = row.completedAt;
+  }
+  return end === null
+    ? null
+    : { start: row.startedAt - WINDOW_SLACK_MS, end: end + WINDOW_SLACK_MS };
+}
+
+/** The windows of the wanted rows that overlap the turn, which began at `startedAt`. */
+function overlappingWindows(
+  rows: readonly TimelineRow[],
+  startedAt: number,
+  pendingUntil: number | null,
+  wanted: (row: WorkRow) => boolean,
+): TimeWindow[] {
+  const windows: TimeWindow[] = [];
+  for (const row of walkRows(rows)) {
+    if (row.kind !== "work" || !wanted(row)) {
+      continue;
+    }
+    const window = rowWindow(row, pendingUntil);
+    if (window !== null && window.end >= startedAt) {
+      windows.push(window);
+    }
+  }
+  return windows;
+}
+
+/** Every window this thread's own work rows overlapped the turn; a delegation row adds none, its child rows do. */
+export function ownWindows(rows: readonly TimelineRow[], startedAt: number): TimeWindow[] {
+  return overlappingWindows(
+    rows,
+    startedAt,
+    Date.now(),
+    (row) => row.workKind !== "delegation",
+  );
+}
+
+export interface SiblingEvidence {
+  /** Paths siblings changed through their own tools. */
+  paths: Set<string>;
+  /** When a sibling ran git that writes history. */
+  commitWindows: SiblingWindow[];
+}
+
+/**
+ * What other threads in the same checkout did since `startedAt`: the paths
+ * they changed through their own tools, and when they ran git that writes
+ * history. A thread that has been idle and untouched since before the turn
+ * began cannot have done either, so its timeline is not read.
  */
 export async function siblingAuthoredPaths(
   bb: BbPluginApi,
   entries: readonly ThreadListEntry[],
   selfThreadId: string,
   startedAt: number,
-): Promise<Set<string>> {
+): Promise<SiblingEvidence> {
   const own = ownThreadIds(entries, selfThreadId);
   const siblings = entries.filter(
     (entry) =>
@@ -184,30 +382,62 @@ export async function siblingAuthoredPaths(
       entry.deletedAt === null &&
       (entry.status !== "idle" || entry.updatedAt >= startedAt),
   );
+  const now = Date.now();
   const paths = new Set<string>();
+  const commitWindows: SiblingWindow[] = [];
   for (const sibling of siblings) {
     let rows: TimelineRow[];
     try {
-      rows = await recentTimelineRows(bb, sibling.id, (timeline) => {
-        const oldest = oldestCreatedAt(timeline.rows);
-        return oldest === null || oldest >= startedAt;
-      });
+      ({ rows } = await recentTimelineRows(bb, sibling.id, pageInTurn(startedAt)));
     } catch {
       // Gone since it was listed; it has nothing left to review.
       continue;
     }
-    for (const row of walkRows(rows)) {
-      if (
-        row.kind === "work" &&
-        row.workKind === "file-change" &&
-        row.createdAt >= startedAt
-      ) {
-        paths.add(row.change.path);
-        if (row.change.movePath !== null) {
-          paths.add(row.change.movePath);
-        }
-      }
+    addChangedPaths(rows, (row) => row.createdAt >= startedAt, paths);
+    // A pending row of an idle thread is left over from a crash or a restart.
+    const pendingUntil = sibling.status === "idle" ? null : now;
+    for (const window of overlappingWindows(rows, startedAt, pendingUntil, runsHistoryGit)) {
+      commitWindows.push({ threadId: sibling.id, ...window });
     }
   }
-  return paths;
+  return { paths, commitWindows };
+}
+
+export interface KinEvidence {
+  /** Paths this thread's bb children and owned threads changed through their own tools. */
+  paths: Set<string>;
+  windows: TimeWindow[];
+  /** False when a thread could not be read in full; nothing it did can be ruled out. */
+  complete: boolean;
+}
+
+/**
+ * What this thread's bb children and owned threads, transitively, did since
+ * `startedAt`. Deleted ones are read too: their work is this thread's.
+ */
+export async function kinEvidence(
+  bb: BbPluginApi,
+  entries: readonly ThreadListEntry[],
+  selfThreadId: string,
+  startedAt: number,
+): Promise<KinEvidence> {
+  const own = ownThreadIds(entries, selfThreadId);
+  const kin = entries.filter(
+    (entry) =>
+      entry.id !== selfThreadId &&
+      own.has(entry.id) &&
+      (entry.status !== "idle" || entry.updatedAt >= startedAt),
+  );
+  const evidence: KinEvidence = { paths: new Set(), windows: [], complete: true };
+  for (const thread of kin) {
+    try {
+      const { rows, truncated } = await recentTimelineRows(bb, thread.id, pageInTurn(startedAt));
+      evidence.complete &&= !truncated;
+      addChangedPaths(rows, (row) => row.createdAt >= startedAt, evidence.paths);
+      evidence.windows.push(...ownWindows(rows, startedAt));
+    } catch {
+      evidence.complete = false;
+    }
+  }
+  return evidence;
 }

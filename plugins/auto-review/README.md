@@ -38,6 +38,13 @@ It ships enabled (opt-out).
   and harness state under `.claude/`, `.codex/` and `.bb/` are not claimed.
   Commits replayed by a rebase with the same patches as the turn started with do not
   count as new work; changed replayed patches still count.
+  A commit a sibling thread made with git from its shell during the turn (`commit`,
+  `merge`, `revert` or `pull`) is left to that thread, and its own auto-review covers it. It
+  is only left to the sibling when nothing of this thread's own family was running at
+  the commit's time and the commit touches none of the files this thread or its children
+  edited with tools; any doubt keeps the commit with this thread. Known gaps: a sibling's
+  uncommitted shell edits are still credited to this turn, and this thread's own shell
+  edits (no tool row) swept into a sibling's `git add -A` commit are left to the sibling.
 - Fixes and commits valid pre-existing issues the review finds in the files the turn touched,
   except unrelated ones when the work is a named feature (a user-named `/` branch, not the
   tool-generated branches such as `bb/…`, or a cited ticket). A pre-existing fix lands in the same

@@ -17,6 +17,7 @@ import {
   turnChangedPaths,
   type AvailableWorkspace,
 } from "./detect.js";
+import { isHistoryWritingGit } from "./detect-timeline.js";
 
 type Rows = Parameters<typeof authoredPathsFromRows>[0];
 
@@ -355,7 +356,7 @@ describe("treeChangedPaths and siblingAuthoredPaths", () => {
         },
       },
     } as never;
-    expect([...(await siblingAuthoredPaths(bb, entries, "self", 1_000))]).toEqual([]);
+    expect([...(await siblingAuthoredPaths(bb, entries, "self", 1_000)).paths]).toEqual([]);
   });
 
   it("treats this thread's subagents and owned helpers as its own, not siblings", async () => {
@@ -391,7 +392,7 @@ describe("treeChangedPaths and siblingAuthoredPaths", () => {
       entry("quiet", { updatedAt: 500 }),
     ] as never;
     const foreign = await siblingAuthoredPaths(bb, entries, "self", startedAt);
-    expect([...foreign]).toEqual(["sib.ts"]);
+    expect([...foreign.paths]).toEqual(["sib.ts"]);
     expect(timelineCalls).toEqual(["sib"]);
   });
 });
@@ -407,6 +408,7 @@ describe("workspace capture edge cases", () => {
 
   function fakeBb(env: Env) {
     const warnings: string[] = [];
+    const infos: string[] = [];
     const diffFileCalls: string[] = [];
     const diffFilesCalls: string[] = [];
     const timelineCalls: Array<Record<string, unknown>> = [];
@@ -414,6 +416,9 @@ describe("workspace capture edge cases", () => {
       log: {
         warn: (message: string) => {
           warnings.push(message);
+        },
+        info: (message: string) => {
+          infos.push(message);
         },
       },
       sdk: {
@@ -451,7 +456,7 @@ describe("workspace capture edge cases", () => {
         },
       },
     } as never;
-    return { bb, warnings, diffFileCalls, diffFilesCalls, timelineCalls };
+    return { bb, warnings, infos, diffFileCalls, diffFilesCalls, timelineCalls };
   }
 
   function ws(over: Record<string, unknown> = {}): AvailableWorkspace {
@@ -648,7 +653,13 @@ describe("workspace capture edge cases", () => {
           mergeBase: { files: [], commits: [{ sha: "replay" }] },
         }),
       );
-      expect(changed).toEqual({ paths: [], commits: [], committedPaths: [] });
+      expect(changed).toEqual({
+        paths: [],
+        commits: [],
+        committedPaths: [],
+        commitChanges: [],
+        uncommittedPaths: [],
+      });
     });
 
     it("attributes a replay whose patch changed while resolving a conflict", async () => {
@@ -680,6 +691,8 @@ describe("workspace capture edge cases", () => {
         paths: ["src/a.ts"],
         commits: ["replay"],
         committedPaths: ["src/a.ts"],
+        commitChanges: [{ sha: "replay", paths: ["src/a.ts"], authoredAt: null }],
+        uncommittedPaths: [],
       });
     });
 
@@ -738,7 +751,7 @@ describe("workspace capture edge cases", () => {
         checkout: { kind: "branch", headSha: "own" },
         mergeBase: {
           files: [],
-          commits: [{ sha: "own" }, { sha: "pulled" }, { sha: "unlisted" }],
+          commits: [{ sha: "own", authoredAt: 2_000 }, { sha: "pulled" }, { sha: "unlisted" }],
         },
       });
       // The ancestry lookup carries authoredAt, but has no entry for "unlisted".
@@ -768,6 +781,11 @@ describe("workspace capture edge cases", () => {
           paths: ["own.ts", "unlisted.ts"],
           commits: ["own", "unlisted"],
           committedPaths: ["own.ts", "unlisted.ts"],
+          commitChanges: [
+            { sha: "own", paths: ["own.ts"], authoredAt: 2_000 },
+            { sha: "unlisted", paths: ["unlisted.ts"], authoredAt: null },
+          ],
+          uncommittedPaths: [],
         });
       });
 
@@ -842,7 +860,13 @@ describe("workspace capture edge cases", () => {
       );
       expect(statusCalls).toEqual([{ environmentId: "env", mergeBaseBranch: "h0" }]);
       expect(diffFilesCalls).toEqual(["h1"]);
-      expect(changed).toEqual({ paths: ["h1.ts"], commits: ["h1"], committedPaths: ["h1.ts"] });
+      expect(changed).toEqual({
+        paths: ["h1.ts"],
+        commits: ["h1"],
+        committedPaths: ["h1.ts"],
+        commitChanges: [{ sha: "h1", paths: ["h1.ts"], authoredAt: null }],
+        uncommittedPaths: [],
+      });
     });
 
     it("tolerates a moved mainline head whose turn-start head cannot be compared", async () => {
@@ -917,7 +941,7 @@ describe("workspace capture edge cases", () => {
         "self",
         startedAt,
       );
-      expect([...paths].sort()).toEqual(["from.ts", "to.ts"]);
+      expect([...paths.paths].sort()).toEqual(["from.ts", "to.ts"]);
     });
 
     it("pages back only while the oldest row on the page is inside the turn", async () => {
@@ -949,7 +973,7 @@ describe("workspace capture edge cases", () => {
       // Page 2 reaches before the turn, so paging stops there; its in-turn row still counts.
       expect(timelineCalls).toHaveLength(3);
       expect(timelineCalls[1]).toMatchObject({ beforeAnchorId: "a0", beforeAnchorSeq: "50" });
-      expect([...paths].sort()).toEqual(["p0.ts", "p1.ts", "p2b.ts"]);
+      expect([...paths.paths].sort()).toEqual(["p0.ts", "p1.ts", "p2b.ts"]);
     });
 
     it("keeps paging through pages that carry no timestamps", async () => {
@@ -973,7 +997,7 @@ describe("workspace capture edge cases", () => {
         startedAt,
       );
       expect(timelineCalls).toHaveLength(2);
-      expect([...paths]).toEqual(["later.ts"]);
+      expect([...paths.paths]).toEqual(["later.ts"]);
     });
 
     it("never reads a deleted sibling", async () => {
@@ -1010,7 +1034,7 @@ describe("workspace capture edge cases", () => {
         workspace: ws({ workingTree: { files: [tracked("shell.ts")] } }),
         threadEntries: [],
       });
-      expect(paths).toEqual({ paths: ["own.ts"], commits: [], committedPaths: [] });
+      expect(paths).toEqual({ paths: ["own.ts"], commits: [], committedPaths: [], foreignCommits: [] });
       expect(diffFileCalls).toEqual([]);
     });
 
@@ -1075,6 +1099,7 @@ describe("workspace capture edge cases", () => {
         paths: ["own.ts", "shell.ts"],
         commits: ["c1"],
         committedPaths: ["own.ts", "shell.ts"],
+        foreignCommits: [],
       });
     });
 
@@ -1092,6 +1117,398 @@ describe("workspace capture edge cases", () => {
       expect(paths.paths).toEqual(["shell.ts"]);
       expect(timelineCalls.map((call) => call.threadId)).toEqual(["self"]);
     });
+  });
+  describe("commits made by a sibling thread's git", () => {
+    const startedAt = 10_000;
+    const LEAK = "leak-token-7c41";
+    const entry = (id: string, extra: Record<string, unknown> = {}) => ({
+      id,
+      parentThreadId: null,
+      lifecycleOwnerThreadId: null,
+      deletedAt: null,
+      status: "idle",
+      updatedAt: 50_000,
+      ...extra,
+    });
+    const self = entry("thr_self");
+    const sibling = entry("thr_sibling", { status: "active" });
+    const child = entry("thr_child", { parentThreadId: "thr_self" });
+    const command = (text: string, over: Record<string, unknown> = {}) => ({
+      kind: "work",
+      workKind: "command",
+      status: "completed",
+      approvalStatus: null,
+      createdAt: 20_000,
+      startedAt: 20_000,
+      completedAt: 21_000,
+      command: text,
+      ...over,
+    });
+    // A search row carries the shell text in `cmd` and has no approvalStatus.
+    const search = (cmd: string | null, over: Record<string, unknown> = {}) => ({
+      kind: "work",
+      workKind: "search",
+      mode: "search",
+      status: "completed",
+      createdAt: 20_000,
+      startedAt: 20_000,
+      completedAt: 21_000,
+      cmd,
+      ...over,
+    });
+    const edit = (path: string) => ({
+      kind: "work",
+      workKind: "file-change",
+      status: "completed",
+      approvalStatus: null,
+      sourceSeqStart: 10,
+      createdAt: 15_000,
+      startedAt: 15_000,
+      change: { path, movePath: null },
+    });
+    const commit = (sha: string, paths: string[] | null, authoredAt: number | null = 20_500) => ({
+      sha,
+      paths,
+      authoredAt,
+    });
+    const gitCommit = `cd /w && git add -- src/a.ts src/b.ts && git commit -q -m "${LEAK}"; git log --oneline | grep ${LEAK}`;
+    const page = (rows: unknown[]) => ({
+      rows,
+      maxSeq: 0,
+      timelinePage: { hasOlderRows: false, olderCursor: null },
+    });
+
+    async function attribute(options: {
+      timelines?: Record<string, unknown[] | Error>;
+      entries?: unknown[];
+      commits?: ReturnType<typeof commit>[];
+      uncommitted?: string[];
+      timeline?: (args: Record<string, unknown>) => Promise<unknown>;
+    }) {
+      const commits = options.commits ?? [];
+      const { bb, warnings, infos, timelineCalls } = fakeBb({
+        status: async () => ({
+          outcome: "available",
+          workspace: ws({
+            mergeBase: {
+              files: [],
+              commits: commits.map(({ sha, authoredAt }) =>
+                authoredAt === null ? { sha } : { sha, authoredAt },
+              ),
+            },
+          }),
+        }),
+        diffFiles: async ({ sha }) => {
+          const paths = commits.find((candidate) => candidate.sha === sha)?.paths;
+          if (paths === null || paths === undefined) {
+            throw new Error("unreadable");
+          }
+          return { outcome: "available", files: paths.map((path) => ({ path, previousPath: null })) };
+        },
+        timeline:
+          options.timeline ??
+          (async ({ threadId }) => {
+            const rows = options.timelines?.[String(threadId)];
+            if (rows instanceof Error) {
+              throw rows;
+            }
+            return page(rows ?? []);
+          }),
+      });
+      const result = await turnChangedPaths(bb, {
+        threadId: "thr_self",
+        environmentId: "env",
+        turnStart: { sinceSeq: 5, startedAt, tree: { headSha: "h0", files: {}, commits: [] } },
+        workspace: ws({
+          checkout: { kind: "branch", headSha: "head" },
+          mergeBase: null,
+          workingTree: { files: (options.uncommitted ?? []).map((path) => tracked(path)) },
+        }),
+        threadEntries: (options.entries ?? [self, sibling]) as never,
+      });
+      return { result, warnings, infos, timelineCalls };
+    }
+
+    const siblingRuns = (row: unknown) => ({ thr_sibling: [row] });
+    const foreign = (sha: string) => ({ sha, threadId: "thr_sibling" });
+
+    it("leaves two commits to the sibling whose search row ran git, without logging its command", async () => {
+      const { result, warnings, infos } = await attribute({
+        timelines: siblingRuns(search(gitCommit)),
+        commits: [commit("c1", ["src/a.ts"], 20_000), commit("c2", ["src/b.ts"], 20_800)],
+      });
+      // No path is left, so the evaluation stands down with `no-authorship`.
+      expect(result).toEqual({
+        paths: [],
+        commits: [],
+        committedPaths: [],
+        foreignCommits: [foreign("c1"), foreign("c2")],
+      });
+      expect(infos).toEqual([
+        "auto-review: commit c1 was made by thread thr_sibling during the turn; left to that thread",
+        "auto-review: commit c2 was made by thread thr_sibling during the turn; left to that thread",
+      ]);
+      expect(JSON.stringify([result, warnings, infos])).not.toContain(LEAK);
+    });
+
+    it("leaves a commit to the sibling whose command row ran git", async () => {
+      const { result } = await attribute({
+        timelines: siblingRuns(command(gitCommit)),
+        commits: [commit("c1", ["src/a.ts"])],
+      });
+      expect(result.foreignCommits).toEqual([foreign("c1")]);
+      expect(result.commits).toEqual([]);
+    });
+
+    it("keeps a commit a bb child of this thread made while a sibling's window overlaps", async () => {
+      const { result } = await attribute({
+        entries: [self, child, sibling],
+        timelines: {
+          thr_sibling: [command(gitCommit)],
+          thr_child: [command("git commit -m x")],
+        },
+        commits: [commit("c1", ["src/a.ts"])],
+      });
+      expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+    });
+
+    it("keeps a commit made while one of this thread's own rows ran, whatever it was", async () => {
+      const { result } = await attribute({
+        timelines: { thr_self: [command("npm version patch")], thr_sibling: [command(gitCommit)] },
+        commits: [commit("c1", ["src/a.ts"])],
+      });
+      expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+    });
+
+    it("keeps an own commit whose truncated author date precedes its own row by up to 999 ms", async () => {
+      const { result } = await attribute({
+        timelines: {
+          thr_self: [command("git commit -m x", { startedAt: 20_000, completedAt: 20_100 })],
+          thr_sibling: [command(gitCommit, { startedAt: 18_000, completedAt: 22_000 })],
+        },
+        commits: [commit("c1", ["src/a.ts"], 19_001)],
+      });
+      expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+    });
+
+    it("keeps a sibling's sweep of a path this thread edited, and reviews it", async () => {
+      const { result } = await attribute({
+        timelines: { thr_self: [edit("src/own.ts")], thr_sibling: [command(gitCommit)] },
+        commits: [commit("c1", ["src/own.ts", "src/a.ts"])],
+      });
+      expect(result).toEqual({
+        paths: ["src/own.ts", "src/a.ts"],
+        commits: ["c1"],
+        committedPaths: ["src/own.ts", "src/a.ts"],
+        foreignCommits: [],
+      });
+    });
+
+    it("keeps a sibling's sweep of a path this thread's child edited", async () => {
+      const { result } = await attribute({
+        entries: [self, child, sibling],
+        timelines: { thr_child: [edit("src/child.ts")], thr_sibling: [command(gitCommit)] },
+        commits: [commit("c1", ["src/child.ts"])],
+      });
+      expect(result).toMatchObject({
+        paths: ["src/child.ts"],
+        commits: ["c1"],
+        committedPaths: ["src/child.ts"],
+        foreignCommits: [],
+      });
+    });
+
+    it("splits own and foreign commits and keeps a path still changed uncommitted", async () => {
+      const { result, infos } = await attribute({
+        timelines: { thr_self: [edit("src/own.ts")], thr_sibling: [command(gitCommit)] },
+        commits: [commit("mine", ["src/own.ts"], 30_000), commit("theirs", ["src/a.ts", "src/b.ts"])],
+        uncommitted: ["src/b.ts"],
+      });
+      expect(result).toEqual({
+        paths: ["src/own.ts", "src/b.ts"],
+        commits: ["mine"],
+        committedPaths: ["src/own.ts"],
+        foreignCommits: [foreign("theirs")],
+      });
+      expect(infos).toHaveLength(1);
+    });
+
+    it("reports a foreign-only turn with the thread's own uncommitted edits", async () => {
+      const { result } = await attribute({
+        timelines: { thr_self: [edit("src/own.ts")], thr_sibling: [command(gitCommit)] },
+        commits: [commit("theirs", ["src/a.ts"])],
+        uncommitted: ["src/own.ts"],
+      });
+      expect(result).toEqual({
+        paths: ["src/own.ts"],
+        commits: [],
+        committedPaths: [],
+        foreignCommits: [foreign("theirs")],
+      });
+    });
+
+    describe("window edges", () => {
+      const siblingRow = (over: Record<string, unknown>) =>
+        siblingRuns(command(gitCommit, { startedAt: 20_000, completedAt: 21_000, ...over }));
+
+      it("lets git's whole-second truncation reach 999 ms before the row, and not 1001", async () => {
+        const { result } = await attribute({
+          timelines: siblingRow({}),
+          commits: [commit("inside", ["src/a.ts"], 19_001), commit("outside", ["src/b.ts"], 18_999)],
+        });
+        expect(result.foreignCommits).toEqual([foreign("inside")]);
+        expect(result.commits).toEqual(["outside"]);
+      });
+
+      it("counts a pending row of a running sibling up to now", async () => {
+        const { result } = await attribute({
+          timelines: siblingRow({ status: "pending", completedAt: null }),
+          commits: [commit("c1", ["src/a.ts"], 25_000)],
+        });
+        expect(result.foreignCommits).toEqual([foreign("c1")]);
+      });
+
+      it("skips an interrupted row that has no end", async () => {
+        const { result } = await attribute({
+          timelines: siblingRow({ status: "interrupted", completedAt: null }),
+          commits: [commit("c1", ["src/a.ts"], 25_000)],
+        });
+        expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+      });
+
+      it("skips a pending row left on a sibling that is idle", async () => {
+        const { result } = await attribute({
+          entries: [self, entry("thr_sibling", { updatedAt: 50_000 })],
+          timelines: siblingRow({ status: "pending", completedAt: null }),
+          commits: [commit("c1", ["src/a.ts"], 25_000)],
+        });
+        expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+      });
+
+      it.each(["denied", "waiting_for_approval"])("skips a command row that was %s", async (approvalStatus) => {
+        const { result } = await attribute({
+          timelines: siblingRow({ approvalStatus }),
+          commits: [commit("c1", ["src/a.ts"])],
+        });
+        expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+      });
+
+      it("counts a sibling row created before the turn that is still running", async () => {
+        const { result } = await attribute({
+          timelines: siblingRow({ createdAt: 5_000, startedAt: 5_000, status: "pending", completedAt: null }),
+          commits: [commit("c1", ["src/a.ts"], 25_000)],
+        });
+        expect(result.foreignCommits).toEqual([foreign("c1")]);
+      });
+    });
+
+    describe("fails safe", () => {
+      const siblingGit = siblingRuns(command(gitCommit));
+
+      it("keeps a foreign candidate whose paths could not be read", async () => {
+        const { result } = await attribute({ timelines: siblingGit, commits: [commit("c1", null)] });
+        expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+      });
+
+      it("keeps a commit with no author date", async () => {
+        const { result } = await attribute({
+          timelines: siblingGit,
+          commits: [commit("c1", ["src/a.ts"], null)],
+        });
+        expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+      });
+
+      it("keeps every commit when paging this thread's timeline hits the page cap", async () => {
+        const { result, timelineCalls } = await attribute({
+          commits: [commit("c1", ["src/a.ts"])],
+          timeline: async ({ threadId }) =>
+            threadId === "thr_self"
+              ? {
+                  rows: [],
+                  maxSeq: 0,
+                  timelinePage: {
+                    hasOlderRows: true,
+                    olderCursor: { anchorId: "a", anchorSeq: 50 },
+                    olderRowsSourceSeqEnd: 100,
+                  },
+                }
+              : page([command(gitCommit)]),
+        });
+        expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+        expect(timelineCalls.filter((call) => call.threadId === "thr_self")).toHaveLength(50);
+      });
+
+      it("keeps every commit when a deleted child's timeline cannot be read", async () => {
+        const { result } = await attribute({
+          entries: [self, entry("thr_child", { parentThreadId: "thr_self", deletedAt: 30_000 }), sibling],
+          timelines: { ...siblingGit, thr_child: new Error("thread not found") },
+          commits: [commit("c1", ["src/a.ts"])],
+        });
+        expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+      });
+
+      it("reads no other timeline of this family when no commit lies in a sibling window", async () => {
+        const { timelineCalls } = await attribute({
+          entries: [self, child, sibling],
+          timelines: siblingGit,
+          commits: [commit("c1", ["src/a.ts"], 40_000)],
+        });
+        expect(timelineCalls.map((call) => call.threadId)).toEqual(["thr_self", "thr_sibling"]);
+      });
+
+      it("treats a sibling that cannot be read as having made no commit", async () => {
+        const { result } = await attribute({
+          timelines: { thr_sibling: new Error("thread not found") },
+          commits: [commit("c1", ["src/a.ts"])],
+        });
+        expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+      });
+    });
+  });
+});
+
+describe("isHistoryWritingGit", () => {
+  it.each([
+    "git commit -m x",
+    "git commit",
+    "git merge topic",
+    "git revert HEAD",
+    "git pull --ff-only",
+    "git -C x commit -m y",
+    "git -c user.name=a commit -m y",
+    "git --no-pager -P commit",
+    "git --git-dir=.git --work-tree=. commit",
+    "GIT_AUTHOR_NAME=a FOO=b git commit -m x",
+    "cd /w && git add -- a b && git commit -q -m x; git log | grep x",
+    "git status || git commit -m x",
+    "git diff | cat\ngit commit -m x",
+    "git add a \\\n  && git commit -m x",
+    "git status  \n  git commit -m x",
+    "git commit\\\n  -m x",
+    `${"x".repeat(8_000)} ; git commit`,
+  ])("detects %j", (text) => {
+    expect(isHistoryWritingGit(text)).toBe(true);
+  });
+
+  it.each([
+    "git merge-base main HEAD",
+    "git log --grep=merge",
+    "git diff -- src/merge.ts",
+    "ls .git/rebase-merge",
+    'echo "git pull"',
+    'echo "done; git commit"',
+    "echo 'a && git commit'",
+    'echo "unterminated; git commit',
+    "echo a\\; git commit",
+    "pnpm commit-lint",
+    "git rebase main",
+    "git cherry-pick abc",
+    "git commit-tree HEAD^{tree}",
+    "grep -r 'git commit' docs",
+    `${"x".repeat(8_192)} && git commit`,
+    "",
+  ])("ignores %j", (text) => {
+    expect(isHistoryWritingGit(text)).toBe(false);
   });
 });
 

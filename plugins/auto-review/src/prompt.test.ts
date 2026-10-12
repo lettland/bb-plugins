@@ -302,6 +302,54 @@ describe("buildReviewPrompt", () => {
     );
   });
 
+  describe("commits another thread made during the turn", () => {
+    const build = (over: Partial<Parameters<typeof buildReviewPrompt>[0]> = {}) =>
+      buildReviewPrompt({
+        decision: { commit: true, merge: false },
+        reviewMode: "auto",
+        scope: baseScope,
+        foreignCommits: ["abcdef1", "1234567"],
+        ...over,
+      });
+
+    it("names them as another thread's and leaves their files out of the completeness check", () => {
+      const text = build();
+      expect(text).toContain(
+        "Another thread in this checkout made these commits during this turn: abcdef1, 1234567. They are not part of your work: do not review, report, stage, or complete them.",
+      );
+      expect(text).toMatch(/4\. Check[^\n]*Leave out the files of the other thread's commits named above\./u);
+      expect(text).not.toContain("Do not amend");
+    });
+
+    it("says they may appear in the committed range without being this thread's", () => {
+      const text = build({ committedSince: "0123abcd", commitScanFrom: "0123abcd" });
+      expect(text).toContain("They may appear in the range after 0123abcd; they are still not this thread's.");
+      expect(text).toContain("Do not amend");
+    });
+
+    it("scans both threads' commits but only stops on a secret in this thread's own", () => {
+      const text = build({ commitScanFrom: "0123abcd" });
+      expect(text).toMatch(
+        /5\. Scan the staged changes[^\n]*yours and the other thread's \(`git diff 0123abcd\.\.HEAD`\); a secret found in one of your commits is already committed, so STOP[^\n]*A secret found only in the other thread's commit is not yours: report it by file:line and type, never by value, but do not STOP/u,
+      );
+      expect(text).not.toContain("(`git diff 0123abcd`)");
+    });
+
+    it("leaves the scan alone when the turn committed nothing", () => {
+      const text = build({ foreignCommits: [], commitScanFrom: null });
+      expect(text).not.toContain("Another thread in this checkout made");
+      expect(text).not.toContain("Scan this turn's commits");
+      expect(text).not.toContain("Leave out the files");
+    });
+
+    it("names only values shaped like a commit sha", () => {
+      const text = build({ foreignCommits: ["abcdef1", "main; echo pwned", "HEAD~1"] });
+      expect(text).toContain("made this commit during this turn: abcdef1. It is not part of your work");
+      expect(text).not.toContain("pwned");
+      expect(text).not.toContain("HEAD~1");
+    });
+  });
+
   it("limits the review to the turn's own files, never concurrent work in the range", () => {
     for (const reviewMode of ["auto", "devkit", "self"] as const) {
       for (const committedSince of ["0123abcd", null]) {
