@@ -58,7 +58,8 @@ describe("a turn that made only another thread's commits", () => {
       foreignCommits: turn.foreignCommits.map(({ sha }) => sha),
     });
     expect(text).toContain("made this commit during this turn: abcdef1.");
-    expect(text).toContain("yours and the other thread's (`git diff 0123abcd..HEAD`)");
+    expect(text).toContain("Scan the commits the other thread made this turn too (`git diff 0123abcd..HEAD`)");
+    expect(text).not.toContain("yours and the other thread's");
     expect(text).not.toContain("thr_sibling");
     expect(text).not.toContain("Do not amend");
   });

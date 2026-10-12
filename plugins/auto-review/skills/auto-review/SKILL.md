@@ -313,7 +313,8 @@ thread, so the turn's review and commit are never dropped by it.
   A rebase that replays existing commits with unchanged patches does not count as
   new work; a changed replayed patch does. Commits another thread made (with git from its
   shell, `commit`, `merge`, `revert` or `pull`, while nothing of this thread's family was
-  running) don't count either, so HEAD can move and the turn still stands down.
+  running, and touching none of the files the family edited with tools) don't count either,
+  so HEAD can move and the turn still stands down.
   A turn without a turn-start tree snapshot (e.g. one that started before the plugin was
   updated) is judged by tool edits alone.
 - `empty-scope` — the files it changed are no longer uncommitted, ahead, or in a commit the

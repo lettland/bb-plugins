@@ -129,6 +129,7 @@ interface ForeignInput {
   bb: BbPluginApi;
   input: TurnChangeInput;
   startedAt: number;
+  now: number;
   ownRows: Awaited<ReturnType<typeof turnTimeline>>;
   ownPaths: ReadonlySet<string>;
   commits: readonly CommitChange[];
@@ -142,7 +143,7 @@ interface ForeignInput {
  * with this thread — a missed review costs more than an extra one.
  */
 async function foreignCommitsOf(foreign: ForeignInput): Promise<ForeignCommit[]> {
-  const { bb, input, startedAt, ownRows, ownPaths, commits, sibling } = foreign;
+  const { bb, input, startedAt, now, ownRows, ownPaths, commits, sibling } = foreign;
   const candidates = commits.flatMap((commit) => {
     const { authoredAt } = commit;
     const window =
@@ -154,11 +155,11 @@ async function foreignCommitsOf(foreign: ForeignInput): Promise<ForeignCommit[]>
   if (candidates.length === 0 || ownRows.truncated) {
     return [];
   }
-  const kin = await kinEvidence(bb, input.threadEntries, input.threadId, startedAt);
+  const kin = await kinEvidence(bb, input.threadEntries, input.threadId, startedAt, now);
   if (!kin.complete) {
     return [];
   }
-  const windows = [...ownWindows(ownRows.rows, startedAt), ...kin.windows];
+  const windows = [...ownWindows(ownRows.rows, startedAt, now), ...kin.windows];
   const familyPaths = new Set([...ownPaths, ...kin.paths]);
   return candidates.flatMap(({ commit: { sha, paths, authoredAt }, threadId }) =>
     paths !== null &&
@@ -208,6 +209,7 @@ export async function turnChangedPaths(
           bb,
           input,
           startedAt,
+          now: Date.now(),
           ownRows,
           ownPaths: ownSet,
           commits: tree.commitChanges,

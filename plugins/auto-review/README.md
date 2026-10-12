@@ -40,11 +40,19 @@ It ships enabled (opt-out).
   count as new work; changed replayed patches still count.
   A commit a sibling thread made with git from its shell during the turn (`commit`,
   `merge`, `revert` or `pull`) is left to that thread, and its own auto-review covers it. It
-  is only left to the sibling when nothing of this thread's own family was running at
-  the commit's time and the commit touches none of the files this thread or its children
-  edited with tools; any doubt keeps the commit with this thread. Known gaps: a sibling's
-  uncommitted shell edits are still credited to this turn, and this thread's own shell
-  edits (no tool row) swept into a sibling's `git add -A` commit are left to the sibling.
+  is only left to the sibling when nothing of this thread's own family (this thread, its
+  bb children and owned threads) was running at the commit's time and the commit touches
+  none of the files that family edited with tools; any doubt keeps the commit with this
+  thread. Known gaps:
+  - a sibling's uncommitted shell edits are still credited to this turn
+  - this thread's own shell edits (no tool row) swept into a sibling's `git add -A` commit
+    are left to the sibling
+  - a sibling's `rebase`, `cherry-pick` and `am` commits keep their author date, so they are
+    still credited to this turn
+  - an amend or `-C` reuse of a sibling's commit keeps the sibling's author date and can be
+    left to the sibling
+  - a commit left to a sibling is reviewed and secret-scanned only by that sibling's own
+    auto-review; if that one stands down (for example user-stopped), nothing reviews it
 - Fixes and commits valid pre-existing issues the review finds in the files the turn touched,
   except unrelated ones when the work is a named feature (a user-named `/` branch, not the
   tool-generated branches such as `bb/…`, or a cited ticket). A pre-existing fix lands in the same

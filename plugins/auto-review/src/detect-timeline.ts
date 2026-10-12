@@ -1,5 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
+import { isHistoryWritingGit } from "./detect-shell.js";
 import type {
   ThreadListEntry,
   TimelineResult,
@@ -207,86 +208,10 @@ export interface SiblingWindow extends TimeWindow {
 
 /** Git truncates `authoredAt` to whole seconds, so a window is widened by one on both sides. */
 const WINDOW_SLACK_MS = 1_000;
-/** Only this much of a command is scanned, so the cost stays linear in what a row carries. */
-const HISTORY_GIT_SCAN_LIMIT = 8_192;
-const HISTORY_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set(["commit", "merge", "revert", "pull"]);
-const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
 
 /** Whether a time falls inside a window. */
 export function withinWindow(window: TimeWindow, time: number): boolean {
   return time >= window.start && time <= window.end;
-}
-
-/**
- * One piece of shell text: a quoted string (an unterminated one runs to the
- * end), an escaped character, a separator (`;`, `&&`, `|`, a newline), blanks, or
- * a run of plain characters.
- */
-const SHELL_PIECE = /'[^']*(?:'|$)|"(?:\\[\s\S]|[^"\\])*(?:"|$)|\\[\s\S]|&&|[;|\n]|[^\S\n]+|[^\s;|&'"\\]+|&/gu;
-
-/** A word piece without its quotes or escaping backslash. */
-function pieceText(piece: string): string {
-  const quote = piece.charAt(0);
-  if (quote !== "'" && quote !== '"') {
-    return piece.replace(/^\\/u, "");
-  }
-  return piece.slice(1, piece.length > 1 && piece.endsWith(quote) ? -1 : undefined);
-}
-
-/** Splits shell text into simple commands of unquoted words, at separators outside quotes. */
-function simpleCommands(text: string): string[][] {
-  const commands: string[][] = [];
-  let words: string[] = [];
-  let word: string | null = null;
-  const endWord = () => {
-    if (word !== null) {
-      words.push(word);
-      word = null;
-    }
-  };
-  const endCommand = () => {
-    endWord();
-    if (words.length > 0) {
-      commands.push(words);
-      words = [];
-    }
-  };
-  for (const [piece] of text.slice(0, HISTORY_GIT_SCAN_LIMIT).matchAll(SHELL_PIECE)) {
-    if (/^(?:[;|\n]|&&)$/u.test(piece)) {
-      endCommand();
-    } else if (/^\s/u.test(piece)) {
-      endWord();
-    } else if (piece !== "\\\n") {
-      word = (word ?? "") + pieceText(piece);
-    }
-  }
-  endCommand();
-  return commands;
-}
-
-function writesHistory(words: readonly string[]): boolean {
-  let at = 0;
-  while (ENV_ASSIGNMENT.test(words[at] ?? "")) {
-    at += 1;
-  }
-  if (words[at] !== "git") {
-    return false;
-  }
-  at += 1;
-  while ((words[at] ?? "").startsWith("-")) {
-    at += words[at] === "-C" || words[at] === "-c" ? 2 : 1;
-  }
-  return HISTORY_GIT_SUBCOMMANDS.has(words[at] ?? "");
-}
-
-/**
- * Whether shell text runs `git commit`, `merge`, `revert` or `pull`. Strict on
- * purpose: it decides that a commit was another thread's. `rebase`,
- * `cherry-pick` and `am` keep the original author date, so they cannot be
- * matched to a commit by time.
- */
-export function isHistoryWritingGit(text: string): boolean {
-  return simpleCommands(text).some(writesHistory);
 }
 
 /** The shell text of a row that ran one: `command` rows carry it in `command`, search and file-read rows in a nullable `cmd`. */
@@ -307,19 +232,24 @@ function runsHistoryGit(row: WorkRow): boolean {
   return text !== null && isHistoryWritingGit(text);
 }
 
-/**
- * When a row could have been running, or null when it never ran or no end is
- * known. A pending row runs until `pendingUntil`, which is null to skip it.
- */
-function rowWindow(row: WorkRow, pendingUntil: number | null): TimeWindow | null {
+/** Until when a row with no recorded end is taken to be running; null skips it. */
+interface OpenRowEnds {
+  /** A pending row. */
+  pending: number | null;
+  /** A finished row whose end was not recorded. */
+  unended: number | null;
+}
+
+/** When a row could have been running, or null when it never ran or no end is known. */
+function rowWindow(row: WorkRow, open: OpenRowEnds): TimeWindow | null {
   if ("approvalStatus" in row && row.approvalStatus !== null) {
     return null;
   }
   let end: number | null = null;
   if (row.status === "pending") {
-    end = pendingUntil;
+    end = open.pending;
   } else if ("completedAt" in row) {
-    end = row.completedAt;
+    end = row.completedAt ?? open.unended;
   }
   return end === null
     ? null
@@ -330,7 +260,7 @@ function rowWindow(row: WorkRow, pendingUntil: number | null): TimeWindow | null
 function overlappingWindows(
   rows: readonly TimelineRow[],
   startedAt: number,
-  pendingUntil: number | null,
+  open: OpenRowEnds,
   wanted: (row: WorkRow) => boolean,
 ): TimeWindow[] {
   const windows: TimeWindow[] = [];
@@ -338,7 +268,7 @@ function overlappingWindows(
     if (row.kind !== "work" || !wanted(row)) {
       continue;
     }
-    const window = rowWindow(row, pendingUntil);
+    const window = rowWindow(row, open);
     if (window !== null && window.end >= startedAt) {
       windows.push(window);
     }
@@ -346,14 +276,16 @@ function overlappingWindows(
   return windows;
 }
 
-/** Every window this thread's own work rows overlapped the turn; a delegation row adds none, its child rows do. */
-export function ownWindows(rows: readonly TimelineRow[], startedAt: number): TimeWindow[] {
-  return overlappingWindows(
-    rows,
-    startedAt,
-    Date.now(),
-    (row) => row.workKind !== "delegation",
-  );
+/**
+ * Every window this thread's own work rows of any kind overlapped the turn. A
+ * row that never recorded an end is taken to be running until `now`.
+ */
+export function ownWindows(
+  rows: readonly TimelineRow[],
+  startedAt: number,
+  now: number,
+): TimeWindow[] {
+  return overlappingWindows(rows, startedAt, { pending: now, unended: now }, () => true);
 }
 
 export interface SiblingEvidence {
@@ -395,8 +327,8 @@ export async function siblingAuthoredPaths(
     }
     addChangedPaths(rows, (row) => row.createdAt >= startedAt, paths);
     // A pending row of an idle thread is left over from a crash or a restart.
-    const pendingUntil = sibling.status === "idle" ? null : now;
-    for (const window of overlappingWindows(rows, startedAt, pendingUntil, runsHistoryGit)) {
+    const open = { pending: sibling.status === "idle" ? null : now, unended: null };
+    for (const window of overlappingWindows(rows, startedAt, open, runsHistoryGit)) {
       commitWindows.push({ threadId: sibling.id, ...window });
     }
   }
@@ -420,6 +352,7 @@ export async function kinEvidence(
   entries: readonly ThreadListEntry[],
   selfThreadId: string,
   startedAt: number,
+  now: number,
 ): Promise<KinEvidence> {
   const own = ownThreadIds(entries, selfThreadId);
   const kin = entries.filter(
@@ -434,7 +367,7 @@ export async function kinEvidence(
       const { rows, truncated } = await recentTimelineRows(bb, thread.id, pageInTurn(startedAt));
       evidence.complete &&= !truncated;
       addChangedPaths(rows, (row) => row.createdAt >= startedAt, evidence.paths);
-      evidence.windows.push(...ownWindows(rows, startedAt));
+      evidence.windows.push(...ownWindows(rows, startedAt, now));
     } catch {
       evidence.complete = false;
     }

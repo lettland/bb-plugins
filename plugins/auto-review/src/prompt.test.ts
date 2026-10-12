@@ -312,13 +312,16 @@ describe("buildReviewPrompt", () => {
         ...over,
       });
 
-    it("names them as another thread's and leaves their files out of the completeness check", () => {
+    it("names them as another thread's, guards them from a rewrite, and leaves their files out of step 4", () => {
       const text = build();
       expect(text).toContain(
-        "Another thread in this checkout made these commits during this turn: abcdef1, 1234567. They are not part of your work: do not review, report, stage, or complete them.",
+        "Another thread in this checkout made these commits during this turn: abcdef1, 1234567. They are not part of your work: do not review, stage, complete, amend, or otherwise rewrite them; only a secret in them is reported (step 5).",
       );
-      expect(text).toMatch(/4\. Check[^\n]*Leave out the files of the other thread's commits named above\./u);
-      expect(text).not.toContain("Do not amend");
+      expect(text).not.toContain("do not review, report");
+      expect(text).toMatch(
+        /4\. Check[^\n]*Leave out the files of the other thread's commits named above \(list them with `git show --name-only --format= <sha>`\)\./u,
+      );
+      expect(text).not.toContain("Do not amend, squash");
     });
 
     it("says they may appear in the committed range without being this thread's", () => {
@@ -328,11 +331,27 @@ describe("buildReviewPrompt", () => {
     });
 
     it("scans both threads' commits but only stops on a secret in this thread's own", () => {
+      const text = build({ committedSince: "0123abcd", commitScanFrom: "0123abcd" });
+      expect(text).toMatch(
+        /5\. Scan the staged changes[^\n]*yours and the other thread's \(`git diff 0123abcd\.\.HEAD`\); a secret found in one of your commits is already committed, so STOP[^\n]*A secret found only in the other thread's commit is not yours: report it by file:line and type, never by value[^\n]*Do not STOP for it: still commit your own work/u,
+      );
+    });
+
+    it("words a foreign-only scan without claiming commits of this thread's own", () => {
       const text = build({ commitScanFrom: "0123abcd" });
       expect(text).toMatch(
-        /5\. Scan the staged changes[^\n]*yours and the other thread's \(`git diff 0123abcd\.\.HEAD`\); a secret found in one of your commits is already committed, so STOP[^\n]*A secret found only in the other thread's commit is not yours: report it by file:line and type, never by value, but do not STOP/u,
+        /5\. Scan the staged changes[^\n]*Scan the commits the other thread made this turn too \(`git diff 0123abcd\.\.HEAD`\); a secret found there is not yours: report it by file:line and type, never by value[^\n]*Do not STOP for it: still commit your own work\./u,
       );
-      expect(text).not.toContain("(`git diff 0123abcd`)");
+      expect(text).not.toContain("yours and the other thread's");
+      expect(text).not.toContain("one of your commits");
+    });
+
+    it("skips the merge on a secret in the other thread's commit only when the prompt merges", () => {
+      const merging = build({ decision: { commit: true, merge: true }, commitScanFrom: "0123abcd" });
+      expect(merging).toContain("still commit your own work and skip the merge in step 8, saying so in your reply.");
+      expect(merging).toMatch(/\n8\. Merge/u);
+      const committing = build({ commitScanFrom: "0123abcd" });
+      expect(committing).not.toContain("skip the merge");
     });
 
     it("leaves the scan alone when the turn committed nothing", () => {

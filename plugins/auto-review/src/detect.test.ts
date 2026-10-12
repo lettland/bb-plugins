@@ -17,7 +17,7 @@ import {
   turnChangedPaths,
   type AvailableWorkspace,
 } from "./detect.js";
-import { isHistoryWritingGit } from "./detect-timeline.js";
+import { isHistoryWritingGit } from "./detect-shell.js";
 
 type Rows = Parameters<typeof authoredPathsFromRows>[0];
 
@@ -1399,6 +1399,85 @@ describe("workspace capture edge cases", () => {
           commits: [commit("c1", ["src/a.ts"], 25_000)],
         });
         expect(result.foreignCommits).toEqual([foreign("c1")]);
+      });
+    });
+
+    describe("nested and open rows", () => {
+      const delegation = (childRows: unknown[], over: Record<string, unknown> = {}) => ({
+        kind: "work",
+        workKind: "delegation",
+        status: "completed",
+        approvalStatus: null,
+        createdAt: 5_000,
+        startedAt: 5_000,
+        completedAt: 6_000,
+        childRows,
+        ...over,
+      });
+      const siblingGit = command(gitCommit);
+
+      it("keeps a commit covered only by the child row of this thread's own delegation", async () => {
+        const { result } = await attribute({
+          timelines: { thr_self: [delegation([command("git commit -m x")])], thr_sibling: [siblingGit] },
+          commits: [commit("c1", ["src/a.ts"])],
+        });
+        expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+      });
+
+      it("keeps a commit covered only by the span of this thread's own delegation", async () => {
+        const { result } = await attribute({
+          timelines: {
+            thr_self: [delegation([], { startedAt: 19_500, completedAt: 21_500 })],
+            thr_sibling: [siblingGit],
+          },
+          commits: [commit("c1", ["src/a.ts"])],
+        });
+        expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+      });
+
+      it("keeps a commit while an own row of any kind finished without recording an end", async () => {
+        const { result } = await attribute({
+          timelines: {
+            thr_self: [command("npm test", { startedAt: 5_000, completedAt: null })],
+            thr_sibling: [siblingGit],
+          },
+          commits: [commit("c1", ["src/a.ts"])],
+        });
+        expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+      });
+
+      it("keeps a commit while a child's row finished without recording an end", async () => {
+        const { result } = await attribute({
+          entries: [self, child, sibling],
+          timelines: {
+            thr_child: [command("npm test", { startedAt: 5_000, completedAt: null })],
+            thr_sibling: [siblingGit],
+          },
+          commits: [commit("c1", ["src/a.ts"])],
+        });
+        expect(result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
+      });
+
+      it("still leaves a commit to a sibling whose git command is nested under its delegation", async () => {
+        const { result } = await attribute({
+          timelines: { thr_sibling: [delegation([siblingGit])] },
+          commits: [commit("c1", ["src/a.ts"])],
+        });
+        expect(result.foreignCommits).toEqual([foreign("c1")]);
+      });
+
+      it("reads a sibling's file-read row for git, but not one with no command", async () => {
+        const fileRead = (cmd: string | null) => ({ ...search(cmd), workKind: "file-read" });
+        const git = await attribute({
+          timelines: siblingRuns(fileRead(gitCommit)),
+          commits: [commit("c1", ["src/a.ts"])],
+        });
+        expect(git.result.foreignCommits).toEqual([foreign("c1")]);
+        const none = await attribute({
+          timelines: siblingRuns(search(null)),
+          commits: [commit("c1", ["src/a.ts"])],
+        });
+        expect(none.result).toMatchObject({ commits: ["c1"], foreignCommits: [] });
       });
     });
 
