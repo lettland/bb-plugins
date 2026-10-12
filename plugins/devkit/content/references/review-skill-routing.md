@@ -10,7 +10,10 @@ This is a **routing procedure, not a static skill catalog** — the live slug se
 
 ## Step 1 — Detect the stack
 
-Build the set of language/stack **keywords** present in what's under review.
+Build the set of language/stack **keywords** present in what's under review. The tables below
+are common mappings, not the full list: for any other language, framework, or tooling you
+recognize in the changed paths or manifests (for example `.php` / `composer.json`, a
+`Dockerfile`, `.github/workflows/*.yml`, shell scripts), use its name as the keyword.
 
 Primary signal — changed file extensions (review-code / review-impl) or files named in the
 plan (review-plan):
@@ -60,7 +63,7 @@ From the candidates, pick a tailored subset for each reviewer by slug family:
 | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `reviewer-senior-dev` | language idioms: `<lang>-essentials` (+ `go-concurrency` for Go). Frontend/React: `react` + the UI-framework skill present in the change (`frontend-tailwind`, `frontend-shadcn-ui`, `frontend-ant-design`, …).                                                              |
 | `reviewer-senior-qa`  | the stack's testing skill if a candidate exists (`python-testing`, `rust-testing`, `ts-vitest`); otherwise `testing-strategy`.                                                                                                                                               |
-| `reviewer-security`   | `security`, unconditional — including `/review-plan` and the no-keyword case. (Its inline vuln guidance already covers stack specifics; `security` adds OWASP/SAST depth.)                                                                                                   |
+| `reviewer-security`   | `security`, unconditional — including `/review-plan` and the no-keyword case. (Its inline vuln guidance covers common stacks; `security` adds OWASP/SAST depth.)                                                                                                   |
 | `reviewer-end-user`   | **only** when a UI or public API surface changed. Frontend/React → `ux-essentials` + `ux-wcag-a11y`. HTTP API (candidates include `rest-essentials`, `python-fastapi`, `python-django`, `go-chi`, `graphql-essentials`) → `rest-essentials`. Pure internal backend → `none`. |
 | `reviewer-compliance` | `security` when auth, logging, or data handling changed; otherwise `none`.                                                                                                                                                                                                   |
 
