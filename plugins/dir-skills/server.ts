@@ -1,121 +1,200 @@
-import {
-  existsSync,
-  readdirSync,
-  readFileSync,
-  realpathSync,
-  statSync,
-} from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import type {
+  BbPluginApi,
+  ExperimentalPluginProviderEnvContext,
+  ExperimentalPluginProviderEnvEntry,
+} from "@get-bb/plugin-sdk";
+import {
+  configDirFor,
+  loadScopes,
+  normalizeDir,
+  selectSkills,
+  type ConfigDirChoice,
+  type Scope,
+  type SkillInfo,
+} from "./scopes";
 
-interface Scope {
-  name: string;
-  paths: string[];
-  patterns: RegExp[];
-  patternSources: string[];
+interface ProjectSource {
+  path: string;
+  hostId: string | null;
 }
 
-interface SkillInfo {
-  name: string;
-  dir: string;
-  scopes: string[];
+/** What a thread was started with; fixed at its first resolution. */
+interface ConfigDirPin {
+  dir: string | null;
+  scope: string | null;
+}
+
+/** What the Claude profile logic needs from the plugin. */
+interface ClaudeProfileDeps {
+  scopes: Scope[];
+  log: BbPluginApi["log"];
+  kv: BbPluginApi["storage"]["kv"];
+  /** A project's checkout sources; refreshes the cache once (time-capped) when it is unknown. */
+  sourcesFor(projectId: string): Promise<ProjectSource[] | undefined>;
 }
 
 const PROJECT_REFRESH_MS = 60_000;
+const PROJECT_LOOKUP_TIMEOUT_MS = 3_000;
+const CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR";
+
+function pinKey(threadId: string): string {
+  return `claude-config-dir:${threadId}`;
+}
+
+function pinEntries(pin: ConfigDirPin): ExperimentalPluginProviderEnvEntry[] {
+  if (!pin.dir) return [];
+  return [
+    {
+      name: CONFIG_DIR_ENV,
+      value: pin.dir,
+      reason: `dir-skills scope "${pin.scope}"`,
+    },
+  ];
+}
+
+async function withTimeout(task: Promise<void>, ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  try {
+    await Promise.race([task, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolveClaudeEnv(
+  deps: ClaudeProfileDeps,
+  ctx: ExperimentalPluginProviderEnvContext,
+): Promise<ExperimentalPluginProviderEnvEntry[]> {
+  const { log, kv } = deps;
+  const key = pinKey(ctx.threadId);
+  const pinned = await kv.get<ConfigDirPin>(key);
+  if (pinned) {
+    log.debug(
+      `env thread=${ctx.threadId} project=${ctx.projectId} pinned -> ${pinned.dir ?? "default profile"}`,
+    );
+    return pinEntries(pinned);
+  }
+  const sources = await deps.sourcesFor(ctx.projectId);
+  if (!sources) {
+    log.warn(
+      `project ${ctx.projectId} not resolved; thread ${ctx.threadId} starts with default profile`,
+    );
+    return [];
+  }
+  const local = sources
+    .filter((source) => source.hostId === ctx.hostId)
+    .map((source) => source.path);
+  const choice = configDirFor(deps.scopes, local);
+  if (choice.conflict.length > 0) {
+    log.warn(
+      `project ${ctx.projectId} matches scopes with different claudeConfigDir: ${[choice.scope, ...choice.conflict].join(", ")}; using "${choice.scope}"`,
+    );
+  }
+  let pin: ConfigDirPin = { dir: choice.dir, scope: choice.scope };
+  if (pin.dir && !existsSync(pin.dir)) {
+    log.warn(
+      `scope "${pin.scope}" claudeConfigDir ${pin.dir} does not exist; thread ${ctx.threadId} starts with default profile`,
+    );
+    pin = { dir: null, scope: null };
+  }
+  await kv.set(key, pin);
+  log.debug(
+    `env thread=${ctx.threadId} project=${ctx.projectId} host=${ctx.hostId} -> ${pin.dir ?? "default profile"}`,
+  );
+  return pinEntries(pin);
+}
+
+/** The profile a project's checkouts select, and the one the current thread was pinned to. */
+async function checkClaudeProfile(
+  deps: ClaudeProfileDeps,
+  projectId: string | null,
+  threadId: string | undefined,
+): Promise<{ profile: ConfigDirChoice | null; pinned: ConfigDirPin | null }> {
+  const sources = projectId ? await deps.sourcesFor(projectId) : undefined;
+  const profile = projectId
+    ? configDirFor(
+        deps.scopes,
+        (sources ?? []).map((s) => s.path),
+      )
+    : null;
+  const pinned = threadId
+    ? ((await deps.kv.get<ConfigDirPin>(pinKey(threadId))) ?? null)
+    : null;
+  return { profile, pinned };
+}
+
+function claudeProfileLines(
+  profile: ConfigDirChoice | null,
+  pinned: ConfigDirPin | null,
+  threadId: string | undefined,
+): string[] {
+  const lines: string[] = [];
+  if (!profile) lines.push("Claude profile: needs --project");
+  else {
+    lines.push(
+      `Claude profile (by project checkout): ${profile.dir ? `${profile.dir}  (scope ${profile.scope})` : "none"}`,
+    );
+    if (profile.conflict.length > 0)
+      lines.push(`  conflicts with scope(s): ${profile.conflict.join(", ")}`);
+  }
+  if (threadId)
+    lines.push(
+      `Claude profile pinned for thread ${threadId}: ${pinned ? (pinned.dir ?? "none (default profile)") : "not pinned yet"}`,
+    );
+  return lines;
+}
+
+function warnMissingConfigDirs(scopes: Scope[], log: BbPluginApi["log"]): void {
+  for (const scope of scopes) {
+    if (scope.claudeConfigDir && !existsSync(scope.claudeConfigDir)) {
+      log.warn(
+        `scope "${scope.name}" claudeConfigDir ${scope.claudeConfigDir} does not exist; threads there start with the default profile`,
+      );
+    }
+  }
+}
+
+function projectSources(
+  sources: ReadonlyArray<{ path?: string | null; hostId?: string | null }> | undefined,
+): ProjectSource[] {
+  const found: ProjectSource[] = [];
+  for (const source of sources ?? []) {
+    if (typeof source.path === "string" && source.path !== "")
+      found.push({ path: source.path, hostId: source.hostId ?? null });
+  }
+  return found;
+}
+
+/** Recovery: forget a thread's pinned profile so its next turn resolves afresh. */
+async function unpinThread(
+  kv: BbPluginApi["storage"]["kv"],
+  threadId: string | undefined,
+): Promise<{ exitCode: number; stdout?: string; stderr?: string }> {
+  if (!threadId)
+    return { exitCode: 2, stderr: "unpin: give a thread id\n" };
+  const pinned = await kv.get<ConfigDirPin>(pinKey(threadId));
+  if (!pinned) return { exitCode: 0, stdout: `thread ${threadId}: no pin\n` };
+  await kv.delete(pinKey(threadId));
+  return {
+    exitCode: 0,
+    stdout: `thread ${threadId}: removed pin (${pinned.dir ? `${pinned.dir}, scope ${pinned.scope}` : "default profile"})\n`,
+  };
+}
 
 function pluginRoot(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
   return path.basename(here) === "dist" ? path.dirname(here) : here;
 }
 
-function expandHome(p: string): string {
-  if (p === "~") return homedir();
-  if (p.startsWith("~/")) return path.join(homedir(), p.slice(2));
-  return p;
-}
-
-function normalizeDir(p: string): string {
-  const absolute = path.resolve(expandHome(p));
-  try {
-    return realpathSync(absolute);
-  } catch {
-    return absolute;
-  }
-}
-
-function isWithin(root: string, candidate: string): boolean {
-  const rel = path.relative(root, candidate);
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-}
-
-function globToRegExp(glob: string): RegExp {
-  const escaped = glob
-    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*/g, ".*");
-  return new RegExp(`^${escaped}$`);
-}
-
 function userScopesFile(): string {
   return path.join(homedir(), ".bb", "dir-skills", "scopes.json");
-}
-
-function parseScopes(file: string): Scope[] {
-  const raw = JSON.parse(readFileSync(file, "utf8")) as unknown;
-  if (
-    !raw ||
-    typeof raw !== "object" ||
-    !Array.isArray((raw as { scopes?: unknown }).scopes)
-  ) {
-    throw new Error(`${file}: expected { "scopes": [...] }`);
-  }
-  const scopes: Scope[] = [];
-  const entries = (raw as { scopes: unknown[] }).scopes;
-  entries.forEach((entry, index) => {
-    const e = entry as { name?: unknown; paths?: unknown; skills?: unknown };
-    const name =
-      typeof e.name === "string" && e.name.trim() !== ""
-        ? e.name.trim()
-        : `scope-${index + 1}`;
-    if (
-      !Array.isArray(e.paths) ||
-      e.paths.length === 0 ||
-      !e.paths.every((p) => typeof p === "string" && p.trim() !== "")
-    ) {
-      throw new Error(
-        `${file}: scope "${name}" needs a non-empty "paths" array of strings`,
-      );
-    }
-    if (
-      !Array.isArray(e.skills) ||
-      e.skills.length === 0 ||
-      !e.skills.every((s) => typeof s === "string" && s.trim() !== "")
-    ) {
-      throw new Error(
-        `${file}: scope "${name}" needs a non-empty "skills" array of name patterns`,
-      );
-    }
-    const patternSources = (e.skills as string[]).map((s) => s.trim());
-    scopes.push({
-      name,
-      paths: (e.paths as string[]).map(normalizeDir),
-      patterns: patternSources.map(globToRegExp),
-      patternSources,
-    });
-  });
-  return scopes;
-}
-
-/** Shipped neutral scopes.json plus the private per-user file; a user scope replaces a shipped one of the same name. */
-function loadScopes(root: string): Scope[] {
-  const merged = new Map<string, Scope>();
-  for (const scope of parseScopes(path.join(root, "scopes.json")))
-    merged.set(scope.name, scope);
-  const userFile = userScopesFile();
-  if (existsSync(userFile))
-    for (const scope of parseScopes(userFile)) merged.set(scope.name, scope);
-  return [...merged.values()];
 }
 
 function frontmatterName(skillFile: string): string | null {
@@ -156,31 +235,9 @@ function loadSkills(root: string, scopes: Scope[]): SkillInfo[] {
   return skills;
 }
 
-function selectSkills(
-  skills: SkillInfo[],
-  scopes: Scope[],
-  candidatePaths: string[],
-): string[] {
-  const dirs = candidatePaths.map(normalizeDir);
-  const active = new Set(
-    scopes
-      .filter((scope) =>
-        scope.paths.some((root) => dirs.some((dir) => isWithin(root, dir))),
-      )
-      .map((s) => s.name),
-  );
-  return skills
-    .filter(
-      (skill) =>
-        skill.scopes.length === 0 ||
-        skill.scopes.some((name) => active.has(name)),
-    )
-    .map((skill) => skill.name);
-}
-
 export default async function plugin(bb: BbPluginApi) {
   const root = pluginRoot();
-  const scopes = loadScopes(root);
+  const scopes = loadScopes(root, userScopesFile());
   const skills = loadSkills(root, scopes);
   bb.log.info(
     `loaded ${skills.length} skill(s), ${scopes.length} scope(s): ` +
@@ -194,22 +251,18 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  const projectPaths = new Map<string, string[]>();
+  warnMissingConfigDirs(scopes, bb.log);
+
+  const projectPaths = new Map<string, ProjectSource[]>();
   async function refreshProjects(): Promise<void> {
     try {
       const projects = await bb.sdk.projects.list({ includePersonal: true });
-      const next = new Map<string, string[]>();
+      const next = new Map<string, ProjectSource[]>();
       for (const project of projects) {
-        const sources = (project.sources ?? []) as Array<{
-          path?: string | null;
-        }>;
-        const paths = sources
-          .map((source) => source.path)
-          .filter((p): p is string => typeof p === "string" && p !== "");
-        next.set(project.id, paths);
+        next.set(project.id, projectSources(project.sources));
       }
       projectPaths.clear();
-      for (const [id, paths] of next) projectPaths.set(id, paths);
+      for (const [id, found] of next) projectPaths.set(id, found);
     } catch (error) {
       bb.log.warn(
         `project list refresh failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -246,8 +299,33 @@ export default async function plugin(bb: BbPluginApi) {
   ): string[] {
     const out: string[] = [];
     if (environmentPath) out.push(environmentPath);
-    if (projectId) out.push(...(projectPaths.get(projectId) ?? []));
+    if (projectId)
+      out.push(...(projectPaths.get(projectId) ?? []).map((s) => s.path));
     return out;
+  }
+
+  const profileDeps: ClaudeProfileDeps = {
+    scopes,
+    log: bb.log,
+    kv: bb.storage.kv,
+    async sourcesFor(projectId) {
+      if (!projectPaths.has(projectId))
+        await withTimeout(refreshProjects(), PROJECT_LOOKUP_TIMEOUT_MS);
+      return projectPaths.get(projectId);
+    },
+  };
+
+  if (typeof bb.providers?.experimental_contributeEnv === "function") {
+    bb.providers.experimental_contributeEnv("claude-code", (ctx) =>
+      resolveClaudeEnv(profileDeps, ctx),
+    );
+    bb.events.on("thread.deleted", async ({ thread }) => {
+      await bb.storage.kv.delete(pinKey(thread.id));
+    });
+  } else {
+    bb.log.warn(
+      "bb.providers.experimental_contributeEnv unavailable; claudeConfigDir is not applied",
+    );
   }
 
   bb.agents.configure((context) => {
@@ -277,6 +355,11 @@ export default async function plugin(bb: BbPluginApi) {
         summary: "Show the skills a thread rooted at a path would receive",
         usage: "bb dir-skills check [<path>] [--project <project-id>] [--json]",
       },
+      {
+        name: "unpin",
+        summary: "Forget a thread's pinned Claude profile",
+        usage: "bb dir-skills unpin <thread-id>",
+      },
     ],
     async run(argv, ctx) {
       const json = argv.includes("--json");
@@ -291,6 +374,7 @@ export default async function plugin(bb: BbPluginApi) {
             name: s.name,
             paths: s.paths,
             skills: s.patternSources,
+            claudeConfigDir: s.claudeConfigDir,
           })),
           skills: skills.map((s) => ({ name: s.name, scopes: s.scopes })),
         };
@@ -307,7 +391,10 @@ export default async function plugin(bb: BbPluginApi) {
         ];
         for (const s of scopes)
           lines.push(
-            `  ${s.name}: ${s.paths.join(", ")}  ->  ${s.patternSources.join(", ")}`,
+            `  ${s.name}: ${s.paths.join(", ")}  ->  ${s.patternSources.join(", ")}` +
+              (s.claudeConfigDir
+                ? `  [claude profile: ${s.claudeConfigDir}]`
+                : ""),
           );
         lines.push("", "skills:");
         for (const s of skills)
@@ -340,28 +427,36 @@ export default async function plugin(bb: BbPluginApi) {
           scopes,
           candidatesFor(target, projectId),
         );
+        const { profile, pinned } = await checkClaudeProfile(
+          profileDeps,
+          projectId,
+          ctx.threadId,
+        );
         const payload = {
           path: normalizeDir(target),
           projectId,
           skills: selected,
+          claudeProfile: profile,
+          ...(ctx.threadId ? { threadId: ctx.threadId, pinned } : {}),
         };
         if (json)
           return {
             exitCode: 0,
             stdout: JSON.stringify(payload, null, 2) + "\n",
           };
-        return {
-          exitCode: 0,
-          stdout:
-            `path: ${payload.path}${projectId ? `  (project ${projectId})` : ""}\n` +
-            (selected.length === 0
-              ? "skills: none\n"
-              : `skills:\n${selected.map((s) => `  ${s}`).join("\n")}\n`),
-        };
+        const lines = [
+          `path: ${payload.path}${projectId ? `  (project ${projectId})` : ""}`,
+          selected.length === 0
+            ? "skills: none"
+            : `skills:\n${selected.map((s) => `  ${s}`).join("\n")}`,
+        ];
+        lines.push(...claudeProfileLines(profile, pinned, ctx.threadId));
+        return { exitCode: 0, stdout: lines.join("\n") + "\n" };
       }
+      if (command === "unpin") return unpinThread(profileDeps.kv, args[1]);
       return {
         exitCode: 2,
-        stderr: `unknown command "${command}"; try: bb dir-skills status | check [<path>]\n`,
+        stderr: `unknown command "${command}"; try: bb dir-skills status | check [<path>] | unpin <thread-id>\n`,
       };
     },
   });

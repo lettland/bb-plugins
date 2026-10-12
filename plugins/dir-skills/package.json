@@ -6,13 +6,14 @@
   "type": "module",
   "files": [
     "server.ts",
+    "scopes.ts",
     "skills",
     "scopes.json",
     "README.md"
   ],
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && vitest run --config vitest.config.ts",
     "build": "bb plugin build"
   },
   "engines": {
@@ -21,7 +22,7 @@
   },
   "bb": {
     "name": "Directory skills",
-    "description": "Skills scoped to a directory tree: a skill listed in scopes.json is injected only into threads whose workspace (or project checkout) is under that directory. Works for every provider.",
+    "description": "Skills scoped to a directory tree: a skill listed in scopes.json is injected only into threads whose workspace (or project checkout) is under that directory. A scope can also switch Claude Code threads to its own Claude profile. Skills work for every provider.",
     "branding": {
       "icon": "FolderTree"
     },
@@ -33,6 +34,7 @@
   "devDependencies": {
     "@get-bb/plugin-sdk": "0.5.9",
     "@types/node": "^22.20.4",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
   }
 }
