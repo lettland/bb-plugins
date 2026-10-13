@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { definePluginApp, useRpc } from "@get-bb/plugin-sdk/app";
-import type { AutoReviewRpcContract, ProjectSetting } from "./src/rpc-contract.js";
+import type { RefObject } from "react";
+import {
+  definePluginApp,
+  useRealtime,
+  useRealtimeConnectionState,
+  useRpc,
+} from "@get-bb/plugin-sdk/app";
+import type { PluginThreadHeaderActionProps } from "@get-bb/plugin-sdk/app";
+import type { AutoReviewRpcContract, ProjectSetting, ThreadReview } from "./src/rpc-contract.js";
 
 const SOFT_INK = "color-mix(in oklch, var(--ink) 68%, var(--canvas))";
 
@@ -157,6 +164,281 @@ function ProjectAutoApprove() {
   );
 }
 
+type ReviewStatus = Exclude<ThreadReview["status"], "none">;
+
+const STATUS_LABELS: Record<ReviewStatus, string> = {
+  pending: "Review pending",
+  committed: "Committed",
+  merged: "Merged",
+  uncommitted: "Left uncommitted",
+  blocked: "Blocked",
+  "no-changes": "No changes",
+  "not-reported": "Review not reported",
+  stopped: "Review stopped",
+  unavailable: "Review unavailable",
+};
+
+const DESTRUCTIVE_STATUSES: ReadonlySet<ReviewStatus> = new Set([
+  "blocked",
+  "not-reported",
+  "unavailable",
+]);
+
+// The plugin itself records these; every other outcome is the review agent's claim.
+const PLUGIN_RECORDED_STATUSES: ReadonlySet<ReviewStatus> = new Set([
+  "pending",
+  "not-reported",
+  "stopped",
+  "unavailable",
+]);
+
+// Any other status can sit beside an incident from a previous review.
+const INCIDENT_IS_CURRENT: ReadonlySet<ReviewStatus> = new Set(["not-reported", "unavailable"]);
+
+function statusColor(status: ReviewStatus): string {
+  if (DESTRUCTIVE_STATUSES.has(status)) return "var(--destructive-text)";
+  return status === "committed" || status === "merged" ? "var(--ink)" : SOFT_INK;
+}
+
+// Mirrors `threadReviewChannel` in src/state.ts, which app code can't import
+// without pulling in the server's dependencies.
+function reviewChannel(threadId: string): string {
+  return `auto-review:thread:${threadId}`;
+}
+
+function relativeTime(at: number, now: number): string {
+  const seconds = Math.max(0, Math.round((now - at) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function useThreadReview(threadId: string): ThreadReview | null {
+  const rpc = useRpc<AutoReviewRpcContract>();
+  const connection = useRealtimeConnectionState();
+  const [review, setReview] = useState<ThreadReview | null>(null);
+  const revisionRef = useRef(0);
+  const previousConnectionRef = useRef(connection);
+
+  const load = useCallback(async () => {
+    const revision = ++revisionRef.current;
+    try {
+      const result = await rpc.call("threadReview", { threadId });
+      if (revision === revisionRef.current) setReview(result);
+    } catch {
+      // A badge that can't load is simply absent; nothing here is worth a toast.
+      if (revision === revisionRef.current) setReview(null);
+    }
+  }, [rpc, threadId]);
+
+  useEffect(() => {
+    setReview(null);
+    void load();
+    return () => {
+      revisionRef.current++;
+    };
+  }, [load]);
+
+  useRealtime(reviewChannel(threadId), () => void load());
+
+  useEffect(() => {
+    // Publishes missed while disconnected aren't replayed, so re-read on reconnect.
+    const previous = previousConnectionRef.current;
+    previousConnectionRef.current = connection;
+    if (connection === "connected" && previous !== "connected") void load();
+  }, [connection, load]);
+
+  return review;
+}
+
+function useDismiss(
+  open: boolean,
+  rootRef: RefObject<HTMLElement | null>,
+  buttonRef: RefObject<HTMLElement | null>,
+  onClose: () => void,
+) {
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && rootRef.current?.contains(event.target)) return;
+      onClose();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      onClose();
+      buttonRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, rootRef, buttonRef, onClose]);
+}
+
+function openSuffixOf(openCount: number): string {
+  return openCount > 0 ? ` · ${openCount} open` : "";
+}
+
+function ReviewPopover(props: {
+  id: string;
+  top: number;
+  threadId: string;
+  status: ReviewStatus;
+  review: ThreadReview;
+}) {
+  const { id, top, threadId, status, review } = props;
+  const { at, openCount, reRaisedCount, lastIncident } = review;
+  return (
+    <div
+      id={id}
+      role="dialog"
+      aria-label="Auto-review details"
+      style={{
+        position: "fixed",
+        top: top + 4,
+        right: 8,
+        zIndex: 50,
+        width: 280,
+        maxWidth: "calc(100vw - 16px)",
+        padding: 12,
+        borderRadius: 8,
+        border: "1px solid color-mix(in oklch, var(--ink) 11%, var(--canvas))",
+        background: "var(--canvas)",
+        color: "var(--ink)",
+        fontSize: 12,
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        overflowWrap: "anywhere",
+      }}
+    >
+      <div style={{ fontWeight: 500, color: statusColor(status) }}>
+        {STATUS_LABELS[status]}
+        {openSuffixOf(openCount)}
+      </div>
+      {at === null ? null : <div style={{ color: SOFT_INK }}>{new Date(at).toLocaleString()}</div>}
+      {PLUGIN_RECORDED_STATUSES.has(status) ? null : (
+        <div style={{ color: SOFT_INK }}>
+          Reported by the review agent, not verified against git.
+        </div>
+      )}
+      {lastIncident === null ? null : (
+        <div>
+          {INCIDENT_IS_CURRENT.has(status) ? "Incident" : "Earlier incident"} (
+          {new Date(lastIncident.at).toLocaleString()}): {lastIncident.kind}:{" "}
+          {lastIncident.detail}
+        </div>
+      )}
+      {reRaisedCount > 0 ? <div>{reRaisedCount} re-raised</div> : null}
+      <div style={{ color: SOFT_INK }}>Details: bb auto-review findings {threadId}</div>
+    </div>
+  );
+}
+
+function ReviewBadge(props: PluginThreadHeaderActionProps) {
+  const { threadId, isCompactViewport } = props;
+  const review = useThreadReview(threadId);
+  const [open, setOpen] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  const [popoverTop, setPopoverTop] = useState(0);
+  const rootRef = useRef<HTMLSpanElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const popoverId = useId();
+  const close = useCallback(() => setOpen(false), []);
+
+  useEffect(() => setOpen(false), [threadId]);
+
+  useEffect(() => {
+    if (isCompactViewport) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [isCompactViewport]);
+
+  useDismiss(open, rootRef, buttonRef, close);
+
+  if (review === null || review.status === "none") return null;
+
+  const { status, at, openCount } = review;
+  const label = STATUS_LABELS[status];
+  const color = statusColor(status);
+  const ariaLabel = `Auto-review (agent-reported): ${label}${
+    openCount > 0 ? `, ${openCount} open` : ""
+  }`;
+  const showTime = !isCompactViewport && at !== null;
+
+  const toggle = () => {
+    if (!open) {
+      // Fixed positioning lets the popover escape the header row's clipping.
+      setPopoverTop(buttonRef.current?.getBoundingClientRect().bottom ?? 0);
+      setNow(Date.now());
+    }
+    setOpen(!open);
+  };
+
+  return (
+    <span ref={rootRef} style={{ display: "inline-flex", alignItems: "center" }}>
+      <button
+        ref={buttonRef}
+        type="button"
+        aria-label={ariaLabel}
+        aria-expanded={open}
+        aria-controls={open ? popoverId : undefined}
+        onClick={toggle}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          height: 28,
+          minWidth: 28,
+          justifyContent: "center",
+          padding: isCompactViewport ? 0 : "0 8px",
+          border: "none",
+          borderRadius: 6,
+          background: "transparent",
+          color,
+          fontSize: 12,
+          whiteSpace: "nowrap",
+          cursor: "pointer",
+        }}
+      >
+        <span
+          aria-hidden="true"
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: "50%",
+            background: color,
+            flexShrink: 0,
+          }}
+        />
+        {isCompactViewport ? null : (
+          <span>
+            {label}
+            {openSuffixOf(openCount)}
+            {showTime ? (
+              <span style={{ color: SOFT_INK }}>{` · ${relativeTime(at, now)}`}</span>
+            ) : null}
+          </span>
+        )}
+      </button>
+      {open ? (
+        <ReviewPopover
+          id={popoverId}
+          top={popoverTop}
+          threadId={threadId}
+          status={status}
+          review={review}
+        />
+      ) : null}
+    </span>
+  );
+}
+
 export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "project-auto-approve",
@@ -164,5 +446,10 @@ export default definePluginApp((app) => {
     description:
       "Off by default. When on for a project, a plan auto-review has reviewed is approved for you: the agent starts implementing without waiting for your approval.",
     component: ProjectAutoApprove,
+  });
+  app.slots.experimental_threadHeaderAction({
+    id: "review-status",
+    title: "Auto-review",
+    component: ReviewBadge,
   });
 });
