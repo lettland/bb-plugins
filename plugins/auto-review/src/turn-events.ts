@@ -25,6 +25,7 @@ export async function onThreadActive(
   await withThreadLock(thread.id, async () => {
     const state = await readState(bb, thread.id);
     if (
+      state.phase !== "awaiting-review" &&
       (state.phase === "deferred" || state.turnDecided !== true) &&
       state.turnStart !== undefined
     ) {
@@ -32,7 +33,9 @@ export async function onThreadActive(
       // folded into this turn, or its idle is still to be handled), is owed
       // a review. Keep its (earlier) cursor so the eventual review covers
       // that turn's work as well as this one's, instead of starting the
-      // authorship window over and losing it.
+      // authorship window over and losing it. Not while a review is in
+      // flight: the turn that starts then is a wake-up or the user's own,
+      // and `handleIdle` reads its cursor to tell which, so it gets its own.
       return;
     }
     const startedAt = Date.now();

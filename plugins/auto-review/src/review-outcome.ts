@@ -26,7 +26,7 @@ const NOT_REPORTED_HINTS = {
     "The thread failed or was archived during the review, before it called ReportReview; its commit and merge may still have happened.",
 } as const;
 
-async function userStoppedReview(
+export async function userStoppedReview(
   bb: BbPluginApi,
   threadId: string,
   state: ThreadState,

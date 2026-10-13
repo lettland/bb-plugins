@@ -18,7 +18,11 @@ import {
   PRESENT_PLAN_REVIEWED_MESSAGE,
 } from "./src/prompt.js";
 import { EVENT_PAGE_MAX } from "./src/plan.js";
-import { PLAN_DENY_ANSWER_WINDOW_MS, STALE_WINDOW_MS } from "./src/state.js";
+import {
+  PLAN_DENY_ANSWER_WINDOW_MS,
+  REVIEW_CONTINUATION_CAP_MS,
+  STALE_WINDOW_MS,
+} from "./src/state.js";
 
 const THREAD_ID = "thread-1";
 const SIBLING_ID = "thread-2";
@@ -49,6 +53,7 @@ interface QueuedRow {
   origin?: string | null;
   failureReason?: string | null;
   sendAt?: number | null;
+  senderThreadId?: string | null;
 }
 
 interface HostOptions {
@@ -74,6 +79,8 @@ interface HostOptions {
   completedEventsThrow?: boolean;
   /** Listing `turn/completed` events fails, so no turn boundary can be read. */
   turnEventsThrow?: boolean;
+  /** Listing `client/turn/requested` events fails, so no user turn can be read. */
+  turnRequestsThrow?: boolean;
   /** Resolving a `user_answer` (only) fails — the global `resolveThrows` would also break the deny. */
   resolveUserAnswerThrows?: boolean;
   /** A real tool call lands during the deny's own resolve round-trip (races the cursor capture). */
@@ -99,6 +106,12 @@ interface HostOptions {
 interface InterruptEvent {
   seq: number;
   reason: "manual-stop" | "host-daemon-restarted" | "provider-turn-idle";
+}
+
+interface TurnRequest {
+  seq: number;
+  initiator: "user" | "agent" | "system";
+  text: string;
 }
 
 interface ItemStartedEvent {
@@ -205,6 +218,7 @@ function createHost(options: HostOptions = {}) {
   let itemEvents: Record<string, ItemStartedEvent[]> = {};
   let completedEvents: Record<string, ItemStartedEvent[]> = {};
   let turnEnds: Record<string, number[]> = {};
+  let turnRequests: Record<string, TurnRequest[]> = {};
 
   const sdk = {
     projects: {
@@ -349,6 +363,27 @@ function createHost(options: HostOptions = {}) {
                 })),
             );
           }
+          if (args.types?.includes("client/turn/requested") === true) {
+            if (options.turnRequestsThrow === true) {
+              throw new Error("requests unavailable");
+            }
+            rows.push(
+              ...(turnRequests[args.threadId] ?? [])
+                .filter((request) => request.seq > after)
+                .map((request) => ({
+                  id: `ev-${args.threadId}-req-${request.seq}`,
+                  scope: { kind: "thread" },
+                  threadId: args.threadId,
+                  seq: request.seq,
+                  createdAt: 1_000,
+                  type: "client/turn/requested",
+                  data: {
+                    initiator: request.initiator,
+                    input: [{ type: "text", text: request.text, mentions: [] }],
+                  },
+                })),
+            );
+          }
           if (args.types?.includes("turn/completed") === true) {
             if (options.turnEventsThrow === true) {
               throw new Error("events unavailable");
@@ -405,7 +440,7 @@ function createHost(options: HostOptions = {}) {
           : { ok: true, delivery: "sent" };
       },
       queuedMessages: {
-        list: async () => queuedRows,
+        list: async () => queuedRows.map((row) => ({ senderThreadId: null, ...row })),
         delete: async (args: { queuedMessageId: string }) => {
           if (options.deleteQueuedThrows === true) {
             throw new Error("already dispatched");
@@ -547,6 +582,10 @@ function createHost(options: HostOptions = {}) {
     /** Record a `turn/completed` event: the turn really ended (steering a message in emits none). */
     completeTurn: (seq: number, threadId: string = THREAD_ID) => {
       turnEnds = { ...turnEnds, [threadId]: [...(turnEnds[threadId] ?? []), seq] };
+    },
+    /** Record a `client/turn/requested` event: a turn someone asked the thread to start. */
+    requestTurn: (request: TurnRequest, threadId: string = THREAD_ID) => {
+      turnRequests = { ...turnRequests, [threadId]: [...(turnRequests[threadId] ?? []), request] };
     },
     setQueuedRows: (next: QueuedRow[]) => {
       queuedRows = next;
@@ -1413,6 +1452,36 @@ describe("auto-review plugin", () => {
       { id: THREAD_ID, status: "idle" },
       { id: "child-1", status: "active", parentThreadId: THREAD_ID },
     ];
+    const idleChild: EnvThread[] = [
+      { id: THREAD_ID, status: "idle" },
+      { id: "child-1", status: "idle", parentThreadId: THREAD_ID },
+    ];
+
+    /** A queued wake-up as core files it: not the user's, due now, from no thread. */
+    function wakeRow(extra: Partial<QueuedRow> = {}): QueuedRow {
+      return {
+        id: "wake-1",
+        initiator: "system",
+        origin: null,
+        failureReason: null,
+        sendAt: null,
+        senderThreadId: null,
+        ...extra,
+      };
+    }
+
+    /** A delivered review whose cursor sits at the host's turn-start seq. */
+    async function delivered(host: Host, dispatchedAt = Date.now()) {
+      await startReview(host, THREAD_ID, dispatchedAt);
+      Object.assign(host.metadata, { reviewDeliveredAt: dispatchedAt, reviewDeliveredSeq: 100 });
+    }
+
+    async function lastReportOutcome(host: Host): Promise<string | undefined> {
+      const saved = (await host.bb.storage.kv.get(`findings:${THREAD_ID}`)) as {
+        lastReport?: { outcome: string };
+      } | null;
+      return saved?.lastReport?.outcome;
+    }
 
     it("stays in flight while a spawned child is running", async () => {
       const host = createHost({ envThreads: runningChild });
@@ -1450,7 +1519,7 @@ describe("auto-review plugin", () => {
 
     it("stays in flight behind a queued wake-up, and ends once it is gone", async () => {
       const host = createHost({
-        queuedRows: [{ id: "wake-1", initiator: "system", origin: null, failureReason: null }],
+        queuedRows: [wakeRow()],
       });
       await plugin(host.bb);
       await startReview(host, THREAD_ID);
@@ -1503,6 +1572,233 @@ describe("auto-review plugin", () => {
       await emitIdle(host);
       expect(host.metadata.phase).toBe("awaiting-review");
       await host.harness.dispose();
+    });
+
+    it("ends as stopped, with no hold, when the user stopped the review", async () => {
+      const host = createHost({ envThreads: runningChild });
+      await plugin(host.bb);
+      await delivered(host);
+      host.interrupt({ seq: 150, reason: "manual-stop" });
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("idle");
+      expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeFalsy();
+      expect(await lastReportOutcome(host)).toBe("stopped");
+      expect(host.sends).toHaveLength(0);
+      await host.harness.dispose();
+    });
+
+    it("ends the review on a user's own turn during the hold, and reviews that turn once the child finishes", async () => {
+      const host = createHost({ envThreads: runningChild });
+      await plugin(host.bb);
+      await delivered(host);
+      host.requestTurn({ seq: 120, initiator: "user", text: "also do the thing" });
+      host.setMaxSeq(130);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeFalsy();
+      expect(host.metadata.phase).toBe("deferred");
+      expect(host.metadata.heldBy).toEqual(["child-1"]);
+      expect(host.metadata.reviewDeliveredAt).toBeUndefined();
+      expect(await lastReportOutcome(host)).toBe("not-reported");
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "children-active" });
+      expect(host.sends).toHaveLength(0);
+
+      host.setEnvThreads(idleChild);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      await host.harness.dispose();
+    });
+
+    it("reviews a user's turn that ends after the cap, with no child left", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await delivered(host, Date.now() - REVIEW_CONTINUATION_CAP_MS - 60_000);
+      host.requestTurn({ seq: 120, initiator: "user", text: "one more change" });
+      host.setMaxSeq(130);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      expect(Number(host.metadata.dispatchedAt)).toBeGreaterThan(
+        Date.now() - REVIEW_CONTINUATION_CAP_MS,
+      );
+      await host.harness.dispose();
+    });
+
+    it("starts clean when a user's request was queued behind the review turn, and reviews only that turn", async () => {
+      const host = createHost({ authoredRows: [], workingTreeFiles: [] });
+      await plugin(host.bb);
+      await delivered(host);
+      await emitActive(host);
+      // The review's own fix, and the user's message already logged at its idle.
+      host.setWorkingTree([{ path: "src/fix.ts" }]);
+      host.requestTurn({ seq: 120, initiator: "user", text: "also do the thing" });
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("idle");
+      expect(host.metadata.turnStart).toBeUndefined();
+      expect(host.metadata.reviewDeliveredAt).toBeUndefined();
+      expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeFalsy();
+      expect(host.sends).toHaveLength(0);
+
+      host.setMaxSeq(130);
+      await emitActive(host);
+      expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 130 });
+      host.setWorkingTree([{ path: "src/fix.ts" }, { path: "src/user.ts" }]);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/user.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("counts a user message steered into a wake-up turn as part of the review", async () => {
+      const host = createHost({ envThreads: runningChild, authoredRows: [], workingTreeFiles: [] });
+      await plugin(host.bb);
+      await delivered(host);
+      await emitActive(host);
+      host.setWorkingTree([{ path: "src/fix.ts" }]);
+      host.requestTurn({ seq: 110, initiator: "user", text: "steered in" });
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("idle");
+      expect(host.metadata.turnStart).toBeUndefined();
+      expect(host.metadata.heldBy).toBeUndefined();
+      expect(await host.bb.storage.kv.list("deferral:")).toEqual([]);
+      expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeFalsy();
+      expect(host.sends).toHaveLength(0);
+      await host.harness.dispose();
+    });
+
+    it("warns and falls through to the hold when the user's turn requests cannot be read", async () => {
+      const host = createHost({ envThreads: runningChild, turnRequestsThrow: true });
+      await plugin(host.bb);
+      await delivered(host);
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      expect(
+        host.harness.logEntries.some(
+          (entry) =>
+            entry.level === "warn" && entry.message.includes("could not read whether the user started a turn"),
+        ),
+      ).toBe(true);
+      await host.harness.dispose();
+    });
+
+    it("does not hold for another plugin's queued message", async () => {
+      const host = createHost({
+        queuedRows: [wakeRow({ initiator: "agent", origin: "plugin", senderThreadId: null })],
+      });
+      await plugin(host.bb);
+      await startReview(host, THREAD_ID);
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("idle");
+      await host.harness.dispose();
+    });
+
+    it("takes a fresh cursor for a turn that starts while the review is in flight", async () => {
+      const host = createHost({ envThreads: runningChild });
+      await plugin(host.bb);
+      await delivered(host);
+      host.setMaxSeq(300);
+      await emitActive(host);
+      expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 300 });
+      expect(host.metadata.turnDecided).toBeUndefined();
+      await host.harness.dispose();
+    });
+
+    it("does not count a turn auto-review itself requested as the user's", async () => {
+      const host = createHost({ envThreads: runningChild });
+      await plugin(host.bb);
+      await delivered(host);
+      host.requestTurn({
+        seq: 120,
+        initiator: "user",
+        text: `${AUTO_REVIEW_MARKER} review the changes`,
+      });
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      expect(host.sends).toHaveLength(0);
+      await host.harness.dispose();
+    });
+
+    it("does not count a wake-up requested by the system or an agent as the user's turn", async () => {
+      const host = createHost({ envThreads: runningChild });
+      await plugin(host.bb);
+      await delivered(host);
+      host.requestTurn({ seq: 120, initiator: "system", text: "child-1 finished" });
+      host.requestTurn({ seq: 130, initiator: "agent", text: "tell: go on" });
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      await host.harness.dispose();
+    });
+
+    it("does not hold for a wake-up scheduled for later", async () => {
+      const host = createHost({
+        queuedRows: [wakeRow({ sendAt: Date.now() + 60 * 60 * 1_000 })],
+      });
+      await plugin(host.bb);
+      await startReview(host, THREAD_ID);
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("idle");
+      await host.harness.dispose();
+    });
+
+    it("does not hold for a message from an unrelated thread", async () => {
+      const host = createHost({
+        envThreads: idleChild,
+        queuedRows: [wakeRow({ initiator: "agent", senderThreadId: "stranger" })],
+      });
+      await plugin(host.bb);
+      await startReview(host, THREAD_ID);
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("idle");
+      await host.harness.dispose();
+    });
+
+    it("holds for a due wake-up from a spawned descendant", async () => {
+      const host = createHost({
+        envThreads: [
+          ...idleChild,
+          { id: "grandchild", status: "idle", parentThreadId: "child-1" },
+        ],
+        queuedRows: [wakeRow({ initiator: "agent", senderThreadId: "grandchild" })],
+      });
+      await plugin(host.bb);
+      await startReview(host, THREAD_ID);
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      await host.harness.dispose();
+    });
+
+    it("does not hold an undated latch", async () => {
+      const host = createHost({ envThreads: runningChild });
+      await plugin(host.bb);
+      await startReview(host, THREAD_ID);
+      delete host.metadata.dispatchedAt;
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("idle");
+      await host.harness.dispose();
+    });
+
+    it("defers a sibling behind a review held 45 minutes after delivery, but not one held past the cap", async () => {
+      const held = async (age: number) => {
+        const host = createHost();
+        await plugin(host.bb);
+        await startReview(host, SIBLING_ID, Date.now() - age - 60_000);
+        Object.assign(host.metadataFor(SIBLING_ID), { reviewDeliveredAt: Date.now() - age });
+        await emitActive(host);
+        await emitIdle(host);
+        return host;
+      };
+      const recent = await held(45 * 60 * 1_000);
+      expect(recent.sends).toHaveLength(0);
+      expect(recent.metadata.phase).toBe("deferred");
+      await recent.harness.dispose();
+
+      const old = await held(REVIEW_CONTINUATION_CAP_MS + 60_000);
+      expect(old.sends).toHaveLength(1);
+      expect(old.metadata.phase).toBe("awaiting-review");
+      await old.harness.dispose();
     });
 
     it("ends the review when the children lookup fails", async () => {
@@ -1930,10 +2226,10 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
-  it("does not defer behind a stale review latch on a thread that went idle", async () => {
+  it("does not defer behind a review latch past the continuation cap on a thread that went idle", async () => {
     const host = createHost();
     await plugin(host.bb);
-    await startReview(host, SIBLING_ID, Date.now() - STALE_WINDOW_MS - 1_000);
+    await startReview(host, SIBLING_ID, Date.now() - REVIEW_CONTINUATION_CAP_MS - 1_000);
     await emitActive(host);
     await emitIdle(host);
     expect(host.sends).toHaveLength(1);

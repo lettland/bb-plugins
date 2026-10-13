@@ -317,11 +317,15 @@ skips any file carrying edits it did not make, and the merge step itself refuses
 while the tree holds changes this turn did not make.
 
 A review turn that hands its lens reviews or fixes to child threads stays in flight, not
-ended, until none of its children is running and no non-user wake-up message is queued
-(or until 2 hours after the review was delivered, so a hung child cannot hold it forever):
-bb's wake-up turns that apply those fixes are the review's own continuation and are not
-reviewed again. Known gap: a user message answered while the review is still waiting on its
-children is folded into that review and not reviewed separately.
+ended, while one of them is running or a due wake-up from one is queued, until the first idle
+2 hours after the review was delivered: bb's wake-up turns that apply those fixes are the
+review's own continuation and are not reviewed again. A user stop ends the review. A turn of
+the user's own during the hold ends it and is reviewed normally, once the children finish; a
+message of theirs steered into the review's or a wake-up turn is part of that review. Another
+plugin's queued message neither extends the hold nor ends it.
+Other reviews on the provider wait behind the hold, up to that cap. Residual race: if a
+child goes idle before bb queues its wake-up, the hold ends one idle early and that wake-up
+turn's fixes get one more review.
 
 What auto-review also limits is how many reviews run at once **per provider**, because
 reviews on one provider share that provider's usage limits: a Claude Code review here and a
@@ -340,8 +344,9 @@ wake-up idle, or the sweep, re-evaluates it; otherwise an unrelated same-provide
 could beat bb's wake-up and review the child's work too early. If a release event is
 missed, a background sweep every 5 minutes retries any parked turn that is no longer
 blocked — a provider review that has ended, or every held child that has ended (idle,
-errored, archived or deleted). A review latch older than 30 minutes on a thread that is no
-longer running counts as a lost idle, not a review, so it never blocks.
+errored, archived or deleted). A queued review (`pending-dispatch`) older than 30 minutes on
+a thread that is no longer running counts as a lost idle, not a review, so it never blocks. A
+delivered review (`awaiting-review`) counts for up to 2 hours after delivery.
 
 `bb auto-review status` shows a parked turn as phase `deferred`, with how long it has
 waited and what will release it — the blocking review, or the children still holding it

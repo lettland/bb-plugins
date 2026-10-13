@@ -1,6 +1,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
   isStale,
+  REVIEW_CONTINUATION_CAP_MS,
   REVIEW_IN_FLIGHT_PHASES,
   type ThreadState,
 } from "./state.js";
@@ -80,6 +81,11 @@ export interface HeldReview {
  * idle, not a review, so it does not count — one missed event must not park
  * every other turn on the provider for good. A latch with no dispatch time on
  * an idle thread cannot be dated at all, so it is treated the same way.
+ *
+ * A queued dispatch is dated from `dispatchedAt` against the stale window. A
+ * delivered review (`awaiting-review`) may be held while its children carry it
+ * on, so it counts until `REVIEW_CONTINUATION_CAP_MS` after delivery, the cap
+ * on that hold: a sibling must not commit under fix turns still running.
  */
 export function reviewInFlight(review: HeldReview, now: number): boolean {
   if (!REVIEW_IN_FLIGHT_PHASES.includes(review.state.phase)) {
@@ -87,6 +93,10 @@ export function reviewInFlight(review: HeldReview, now: number): boolean {
   }
   if (review.busy) {
     return true;
+  }
+  if (review.state.phase === "awaiting-review") {
+    const since = review.state.reviewDeliveredAt ?? review.state.dispatchedAt;
+    return since !== undefined && now - since <= REVIEW_CONTINUATION_CAP_MS;
   }
   return review.state.dispatchedAt !== undefined && !isStale(review.state, now);
 }

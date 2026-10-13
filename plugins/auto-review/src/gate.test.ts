@@ -7,7 +7,11 @@ import {
   selfIsWorktree,
   type HeldReview,
 } from "./gate.js";
-import { STALE_WINDOW_MS, type AutoReviewPhase } from "./state.js";
+import {
+  REVIEW_CONTINUATION_CAP_MS,
+  STALE_WINDOW_MS,
+  type AutoReviewPhase,
+} from "./state.js";
 
 const okThread = {
   parentThreadId: null,
@@ -53,7 +57,7 @@ const NOW = STALE_WINDOW_MS * 10;
 
 function held(
   phase: AutoReviewPhase,
-  options: { busy?: boolean; dispatchedAt?: number } = {},
+  options: { busy?: boolean; dispatchedAt?: number; reviewDeliveredAt?: number } = {},
 ): HeldReview {
   return {
     busy: options.busy ?? false,
@@ -62,6 +66,9 @@ function held(
       ...(options.dispatchedAt === undefined
         ? {}
         : { dispatchedAt: options.dispatchedAt }),
+      ...(options.reviewDeliveredAt === undefined
+        ? {}
+        : { reviewDeliveredAt: options.reviewDeliveredAt }),
     },
   };
 }
@@ -122,15 +129,32 @@ describe("reviewInFlight", () => {
     expect(reviewInFlight(held("awaiting-review"), NOW)).toBe(false);
   });
 
-  it("ignores a stale latch on a thread that is no longer busy", () => {
+  it("ignores a stale queued review on a thread that is no longer busy", () => {
     expect(
       reviewInFlight(
-        held("awaiting-review", {
+        held("pending-dispatch", {
           dispatchedAt: NOW - STALE_WINDOW_MS - 1,
         }),
         NOW,
       ),
     ).toBe(false);
+  });
+
+  it("counts a delivered review on an idle thread until the continuation cap", () => {
+    const delivered = (age: number) =>
+      held("awaiting-review", {
+        dispatchedAt: NOW - age - 60_000,
+        reviewDeliveredAt: NOW - age,
+      });
+    expect(reviewInFlight(delivered(45 * 60 * 1_000), NOW)).toBe(true);
+    expect(reviewInFlight(delivered(REVIEW_CONTINUATION_CAP_MS), NOW)).toBe(true);
+    expect(reviewInFlight(delivered(REVIEW_CONTINUATION_CAP_MS + 1), NOW)).toBe(false);
+  });
+
+  it("dates a delivered review from its dispatch when it has no delivery time", () => {
+    expect(
+      reviewInFlight(held("awaiting-review", { dispatchedAt: NOW - 45 * 60 * 1_000 }), NOW),
+    ).toBe(true);
   });
 });
 

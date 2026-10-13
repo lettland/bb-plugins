@@ -43,6 +43,32 @@ async function spawnedDescendants(
   return descendants;
 }
 
+function isRunning(entry: ThreadListEntry): boolean {
+  return (
+    entry.archivedAt === null &&
+    entry.deletedAt === null &&
+    entry.status !== "idle" &&
+    entry.status !== "error"
+  );
+}
+
+/** Every spawned descendant of a thread, and the ones still running, from one walk. */
+export interface SpawnedDescendantIds {
+  all: Set<string>;
+  running: string[];
+}
+
+export async function spawnedDescendantIds(
+  bb: BbPluginApi,
+  threadId: string,
+): Promise<SpawnedDescendantIds> {
+  const descendants = await spawnedDescendants(bb, threadId);
+  return {
+    all: new Set(descendants.map((entry) => entry.id)),
+    running: descendants.filter(isRunning).map((entry) => entry.id),
+  };
+}
+
 /**
  * Spawned children (and grandchildren) still running. bb wakes this thread
  * when one of them ends, so a turn that finds any of these should park
@@ -53,14 +79,5 @@ export async function runningChildIds(
   bb: BbPluginApi,
   threadId: string,
 ): Promise<string[]> {
-  const descendants = await spawnedDescendants(bb, threadId);
-  return descendants
-    .filter(
-      (entry) =>
-        entry.archivedAt === null &&
-        entry.deletedAt === null &&
-        entry.status !== "idle" &&
-        entry.status !== "error",
-    )
-    .map((entry) => entry.id);
+  return (await spawnedDescendantIds(bb, threadId)).running;
 }

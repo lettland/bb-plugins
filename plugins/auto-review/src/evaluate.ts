@@ -28,13 +28,21 @@ import {
 } from "./detect.js";
 import { dispatchReview } from "./dispatch.js";
 import { isBusyStatus, selfIsWorktree } from "./gate.js";
-import { deliveredPatch, recordUnfinishedReview } from "./review-outcome.js";
+import {
+  reviewContinuationPending,
+  userTurnSinceDelivery,
+} from "./review-continuation.js";
+import {
+  deliveredPatch,
+  recordUnfinishedReview,
+  userStoppedReview,
+} from "./review-outcome.js";
 import { removeReview } from "./reviews.js";
 import {
   isStale,
+  LATCH_KEYS,
   readState,
   resetToIdlePatch,
-  REVIEW_CONTINUATION_CAP_MS,
   REVIEW_IN_FLIGHT_PHASES,
   writeState,
   type ThreadState,
@@ -293,37 +301,6 @@ export async function evaluate(
   });
 }
 
-/**
- * Whether the review is still being carried on by its children: one running,
- * or a wake-up (any non-user message) queued behind the review turn. Past the
- * cap it never holds, so a hung child cannot keep the latch forever. A failed
- * lookup warns and answers no — the latch must never stick on an error.
- */
-async function reviewContinuationPending(
-  ctx: ReviewContext,
-  state: ThreadState,
-  threadId: string,
-): Promise<boolean> {
-  const since = state.reviewDeliveredAt ?? state.dispatchedAt;
-  if (since !== undefined && Date.now() - since > REVIEW_CONTINUATION_CAP_MS) {
-    return false;
-  }
-  try {
-    if ((await runningChildIds(ctx.bb, threadId)).length > 0) {
-      return true;
-    }
-    const rows = await ctx.bb.sdk.threads.queuedMessages.list({ threadId });
-    return rows.some((row) => row.failureReason === null && row.initiator !== "user");
-  } catch (error) {
-    ctx.bb.log.warn(
-      `auto-review: could not check what ${threadId}'s review is waiting on; ending it: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return false;
-  }
-}
-
 export async function handleIdle(ctx: ReviewContext, thread: GateThreadLike): Promise<void> {
   const { bb } = ctx;
   const state = await readState(bb, thread.id);
@@ -331,8 +308,36 @@ export async function handleIdle(ctx: ReviewContext, thread: GateThreadLike): Pr
     // A review that handed its lens reviews or fixes to child threads ends
     // its own turn while they run. Each child's wake-up turn is the review's
     // continuation, so it stays in flight until none are running or queued —
-    // otherwise the turns that apply its fixes would be reviewed again, round after round.
-    if (await reviewContinuationPending(ctx, state, thread.id)) {
+    // otherwise the turns that apply its fixes would be reviewed again, round
+    // after round. The user's own say ends it first: a stop, or a turn of theirs.
+    const stopped = await userStoppedReview(bb, thread.id, state);
+    const userRequestSeq = stopped ? null : await userTurnSinceDelivery(bb, thread.id, state);
+    if (userRequestSeq !== null) {
+      await recordUnfinishedReview(bb, thread.id, state, "idle");
+      await removeReview(bb, thread.id);
+      if (state.turnStart !== undefined && state.turnStart.sinceSeq >= userRequestSeq) {
+        // The cursor `onThreadActive` took for the user's turn stays, so the
+        // normal path reviews it, parked behind any child still running.
+        await writeState(
+          bb,
+          thread.id,
+          { phase: "idle" },
+          LATCH_KEYS.filter((key) => key !== "turnStart"),
+        );
+        await evaluate(ctx, thread);
+        return;
+      }
+      // The cursor is the review's or a wake-up turn's, older than the user's
+      // request: the user's turn is queued behind this idle, or was steered
+      // into the running turn. Evaluating from that cursor would review the
+      // review's own fixes again. Start clean: that turn takes a fresh cursor
+      // in `onThreadActive`, and its own idle reviews it. A steered message's
+      // edits inside the review or wake-up turn count as part of the review.
+      const { set, remove } = resetToIdlePatch();
+      await writeState(bb, thread.id, set, remove);
+      return;
+    }
+    if (!stopped && (await reviewContinuationPending(ctx, state, thread.id))) {
       return;
     }
     await recordUnfinishedReview(bb, thread.id, state, "idle");

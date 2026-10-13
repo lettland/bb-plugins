@@ -4,11 +4,12 @@ export {
   authoredPaths,
   authoredPathsFromRows,
   captureSinceSeq,
+  firstUserTurnSince,
   siblingAuthoredPaths,
   stoppedByUser,
   tryCaptureSinceSeq,
 } from "./detect-timeline.js";
-export { runningChildIds } from "./detect-children.js";
+export { runningChildIds, spawnedDescendantIds } from "./detect-children.js";
 export {
   captureTree,
   fingerprintsMatch,

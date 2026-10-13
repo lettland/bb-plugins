@@ -1,6 +1,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
 import { isHistoryWritingGit } from "./detect-shell.js";
+import { AUTO_REVIEW_MARKER } from "./prompt.js";
 import type {
   ThreadListEntry,
   TimelineResult,
@@ -57,6 +58,37 @@ export async function stoppedByUser(
       event.type === "system/thread/interrupted" &&
       event.data.reason === "manual-stop",
   );
+}
+
+/**
+ * The seq of the first turn request the user made after the cursor, or null
+ * when there is none. Turns auto-review sent itself carry the user's initiator
+ * too, so a request whose text opens with the auto-review marker does not count.
+ */
+export async function firstUserTurnSince(
+  bb: BbPluginApi,
+  threadId: string,
+  sinceSeq: number,
+): Promise<number | null> {
+  const events = await bb.sdk.threads.events.list({
+    threadId,
+    afterSeq: String(sinceSeq),
+    types: ["client/turn/requested"],
+  });
+  let first: number | null = null;
+  for (const event of events) {
+    if (
+      event.type === "client/turn/requested" &&
+      event.data.initiator === "user" &&
+      !event.data.input.some(
+        (part) => part.type === "text" && part.text.startsWith(AUTO_REVIEW_MARKER),
+      ) &&
+      (first === null || event.seq < first)
+    ) {
+      first = event.seq;
+    }
+  }
+  return first;
 }
 
 function nestedRows(row: TimelineRow): readonly TimelineRow[] {
