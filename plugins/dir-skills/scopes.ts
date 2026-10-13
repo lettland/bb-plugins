@@ -23,14 +23,14 @@ export interface ConfigDirChoice {
   conflict: string[];
 }
 
-export function expandHome(p: string): string {
-  if (p === "~") return homedir();
-  if (p.startsWith("~/")) return path.join(homedir(), p.slice(2));
+export function expandHome(p: string, home: string = homedir()): string {
+  if (p === "~") return home;
+  if (p.startsWith("~/")) return path.join(home, p.slice(2));
   return p;
 }
 
-export function normalizeDir(p: string): string {
-  const absolute = path.resolve(expandHome(p));
+export function normalizeDir(p: string, home: string = homedir()): string {
+  const absolute = path.resolve(expandHome(p, home));
   try {
     return realpathSync(absolute);
   } catch {
@@ -50,7 +50,7 @@ export function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${escaped}$`);
 }
 
-export function parseScopes(file: string): Scope[] {
+export function parseScopes(file: string, home: string = homedir()): Scope[] {
   const raw = JSON.parse(readFileSync(file, "utf8")) as unknown;
   if (
     !raw ||
@@ -99,8 +99,8 @@ export function parseScopes(file: string): Scope[] {
           `${file}: scope "${name}" "claudeConfigDir" must be an absolute path or start with "~/"`,
         );
       }
-      claudeConfigDir = path.resolve(expandHome(dir));
-      if (isWithin(claudeConfigDir, homedir())) {
+      claudeConfigDir = path.resolve(expandHome(dir, home));
+      if (isWithin(claudeConfigDir, home)) {
         throw new Error(
           `${file}: scope "${name}" "claudeConfigDir" must not be your home directory or one of its parents`,
         );
@@ -109,7 +109,7 @@ export function parseScopes(file: string): Scope[] {
     const patternSources = (e.skills as string[]).map((s) => s.trim());
     scopes.push({
       name,
-      paths: (e.paths as string[]).map(normalizeDir),
+      paths: (e.paths as string[]).map((p) => normalizeDir(p, home)),
       patterns: patternSources.map(globToRegExp),
       patternSources,
       claudeConfigDir,
@@ -119,12 +119,16 @@ export function parseScopes(file: string): Scope[] {
 }
 
 /** Shipped neutral scopes.json plus the private per-user file; a user scope replaces a shipped one of the same name. */
-export function loadScopes(root: string, userFile: string): Scope[] {
+export function loadScopes(
+  root: string,
+  userFile: string,
+  home: string = homedir(),
+): Scope[] {
   const merged = new Map<string, Scope>();
-  for (const scope of parseScopes(path.join(root, "scopes.json")))
+  for (const scope of parseScopes(path.join(root, "scopes.json"), home))
     merged.set(scope.name, scope);
   if (existsSync(userFile))
-    for (const scope of parseScopes(userFile)) merged.set(scope.name, scope);
+    for (const scope of parseScopes(userFile, home)) merged.set(scope.name, scope);
   return [...merged.values()];
 }
 
@@ -133,7 +137,7 @@ export function activeScopes(
   scopes: Scope[],
   candidatePaths: string[],
 ): Scope[] {
-  const dirs = candidatePaths.map(normalizeDir);
+  const dirs = candidatePaths.map((p) => normalizeDir(p));
   return scopes.filter((scope) =>
     scope.paths.some((root) => dirs.some((dir) => isWithin(root, dir))),
   );

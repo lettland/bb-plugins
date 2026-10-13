@@ -22,6 +22,14 @@ import {
   type Scope,
   type SkillInfo,
 } from "./scopes";
+import {
+  autoSetup,
+  autoSetupLine,
+  SETUP_RECORD_KEY,
+  setupCommand,
+  type SetupDeps,
+  type SetupRecord,
+} from "./setup";
 
 const PROJECT_REFRESH_MS = 60_000;
 
@@ -85,21 +93,39 @@ function loadSkills(root: string, scopes: Scope[]): SkillInfo[] {
 
 export default async function plugin(bb: BbPluginApi) {
   const root = pluginRoot();
-  const scopes = loadScopes(root, userScopesFile());
-  const skills = loadSkills(root, scopes);
-  bb.log.info(
-    `loaded ${skills.length} skill(s), ${scopes.length} scope(s): ` +
-      scopes.map((s) => `${s.name} -> ${s.paths.join(", ")}`).join("; "),
-  );
-  for (const scope of scopes) {
-    if (!skills.some((skill) => skill.scopes.includes(scope.name))) {
-      bb.log.warn(
-        `scope "${scope.name}" matches no skill under skills/ (patterns: ${scope.patternSources.join(", ")})`,
-      );
+  const state: { scopes: Scope[]; skills: SkillInfo[] } = {
+    scopes: [],
+    skills: [],
+  };
+  function loadState(): void {
+    state.scopes = loadScopes(root, userScopesFile());
+    state.skills = loadSkills(root, state.scopes);
+    bb.log.info(
+      `loaded ${state.skills.length} skill(s), ${state.scopes.length} scope(s): ` +
+        state.scopes.map((s) => `${s.name} -> ${s.paths.join(", ")}`).join("; "),
+    );
+    for (const scope of state.scopes) {
+      if (!state.skills.some((skill) => skill.scopes.includes(scope.name))) {
+        bb.log.warn(
+          `scope "${scope.name}" matches no skill under skills/ (patterns: ${scope.patternSources.join(", ")})`,
+        );
+      }
     }
+    warnMissingConfigDirs(state.scopes, bb.log);
   }
+  loadState();
 
-  warnMissingConfigDirs(scopes, bb.log);
+  const setupDeps: SetupDeps = {
+    home: homedir(),
+    userFile: userScopesFile(),
+    sdk: bb.sdk,
+    kv: bb.storage.kv,
+    log: bb.log,
+    reload: loadState,
+  };
+  if (typeof bb.onInstall === "function") {
+    bb.onInstall(() => autoSetup(setupDeps));
+  }
 
   const projectPaths = new Map<string, ProjectSource[]>();
   async function refreshProjects(): Promise<void> {
@@ -153,7 +179,9 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   const profileDeps: ClaudeProfileDeps = {
-    scopes,
+    get scopes() {
+      return state.scopes;
+    },
     log: bb.log,
     kv: bb.storage.kv,
     isDir: isDirectory,
@@ -179,7 +207,7 @@ export default async function plugin(bb: BbPluginApi) {
       context.environment.path,
       context.project.id,
     );
-    const selected = selectSkills(skills, scopes, candidates);
+    const selected = selectSkills(state.skills, state.scopes, candidates);
     bb.log.debug(
       `configure thread=${context.thread.id} provider=${context.provider.id} env=${context.environment.path ?? "null"} ` +
         `project=${context.project.id} -> [${selected.join(", ")}]`,
@@ -202,6 +230,11 @@ export default async function plugin(bb: BbPluginApi) {
         usage: "bb dir-skills check [<path>] [--project <project-id>] [--json]",
       },
       {
+        name: "setup",
+        summary: "Create scopes.json from detected work settings when it is missing",
+        usage: "bb dir-skills setup [--dry-run] [--json]",
+      },
+      {
         name: "unpin",
         summary: "Forget a thread's pinned Claude profile",
         usage: "bb dir-skills unpin [<thread-id>]",
@@ -216,13 +249,14 @@ export default async function plugin(bb: BbPluginApi) {
           root,
           userScopesFile: userScopesFile(),
           userScopesLoaded: existsSync(userScopesFile()),
-          scopes: scopes.map((s) => ({
+          autoSetup: (await bb.storage.kv.get<SetupRecord>(SETUP_RECORD_KEY)) ?? null,
+          scopes: state.scopes.map((s) => ({
             name: s.name,
             paths: s.paths,
             skills: s.patternSources,
             claudeConfigDir: s.claudeConfigDir,
           })),
-          skills: skills.map((s) => ({ name: s.name, scopes: s.scopes })),
+          skills: state.skills.map((s) => ({ name: s.name, scopes: s.scopes })),
         };
         if (json)
           return {
@@ -235,7 +269,7 @@ export default async function plugin(bb: BbPluginApi) {
           "",
           "scopes:",
         ];
-        for (const s of scopes)
+        for (const s of state.scopes)
           lines.push(
             `  ${s.name}: ${s.paths.join(", ")}  ->  ${s.patternSources.join(", ")}` +
               (s.claudeConfigDir
@@ -243,10 +277,12 @@ export default async function plugin(bb: BbPluginApi) {
                 : ""),
           );
         lines.push("", "skills:");
-        for (const s of skills)
+        for (const s of state.skills)
           lines.push(
             `  ${s.name}  [${s.scopes.length === 0 ? "global" : s.scopes.join(", ")}]`,
           );
+        const auto = autoSetupLine(payload.autoSetup ?? undefined);
+        if (auto) lines.push("", auto);
         return { exitCode: 0, stdout: lines.join("\n") + "\n" };
       }
       if (command === "check") {
@@ -269,8 +305,8 @@ export default async function plugin(bb: BbPluginApi) {
         const projectId =
           projectFlag ?? (rest[0] ? null : (ctx.projectId ?? null));
         const selected = selectSkills(
-          skills,
-          scopes,
+          state.skills,
+          state.scopes,
           candidatesFor(target, projectId),
         );
         const { decision, pinned } = await checkClaudeProfile(
@@ -304,10 +340,11 @@ export default async function plugin(bb: BbPluginApi) {
         lines.push(...claudeProfileLines(decision, pinned, ctx.threadId));
         return { exitCode: 0, stdout: lines.join("\n") + "\n" };
       }
+      if (command === "setup") return setupCommand(setupDeps, args.slice(1), json);
       if (command === "unpin") return unpinThread(profileDeps.kv, args[1], ctx.threadId);
       return {
         exitCode: 2,
-        stderr: `unknown command "${command}"; try: bb dir-skills status | check [<path>] | unpin [<thread-id>]\n`,
+        stderr: `unknown command "${command}"; try: bb dir-skills status | check [<path>] | setup [--dry-run] | unpin [<thread-id>]\n`,
       };
     },
   });

@@ -1,6 +1,6 @@
 {
   "name": "@lettland/bb-plugin-dir-skills",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "Inject bb skills into a thread only when its workspace lives under a configured directory, for every provider.",
   "license": "BSD-2-Clause",
   "type": "module",
@@ -8,6 +8,8 @@
     "server.ts",
     "scopes.ts",
     "profile.ts",
+    "detect.ts",
+    "setup.ts",
     "skills",
     "scopes.json",
     "README.md"
@@ -19,7 +21,7 @@
   },
   "engines": {
     "bb": ">=0.41",
-    "bbPluginSdk": ">=0.4.34"
+    "bbPluginSdk": ">=0.5.15"
   },
   "bb": {
     "name": "Directory skills",
@@ -33,8 +35,11 @@
     ]
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.5.9",
+    "@get-bb/plugin-sdk": "0.6.39",
     "@types/node": "^22.20.4",
+    "better-sqlite3": "^13.0.3",
+    "cron-parser": "^5.10.2",
+    "hono": "^4.13.13",
     "typescript": "^5.9.3",
     "vitest": "^4.1.11"
   }

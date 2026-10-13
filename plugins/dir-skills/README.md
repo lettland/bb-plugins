@@ -122,6 +122,103 @@ profile" here means the personal Claude login, the profile at `~/.claude`.
   select (all hosts; "unknown project" if bb cannot resolve it), and inside a
   thread also the profile the thread was pinned to.
 
+## Automatic setup
+
+When the plugin is installed and `~/.bb/dir-skills/scopes.json` does not exist,
+it writes that file for you, with a `work` scope that points the bundled
+`work-*` skills at your work tree and sets `claudeConfigDir` to your work Claude
+profile. `bb dir-skills setup` runs the same logic on demand. Setup reads only
+the sources listed below and guesses nothing: if any step is unsure, it writes
+nothing and says why.
+
+Detection, in order:
+
+1. **Profile.** The `customAgents` setting of the `provider-acp` and
+   `bb--provider-acp-next` plugins is a JSON array of ACP agents. Setup reads
+   only each agent's `env.CLAUDE_CONFIG_DIR` (an absolute path or one starting
+   with `~/`), resolves symlinks, and keeps directories that exist. The default
+   profile (`~/.claude`) and your home directory or its parents never count.
+   Exactly one distinct directory must remain, for example `~/.claude-acme`.
+   Other settings of those plugins, including other agents' environment
+   variables, are never read.
+2. **Work remotes.** The profile's `settings.json` lists marketplaces under
+   `extraKnownMarketplaces`. Only `git` marketplaces count. Each URL becomes a
+   lowercase `host/first-path-segment` key, for example
+   `git.example.com/acme`, whether it is written as `https://`,
+   `ssh://git@host:port/`, or `git@host:group/...`; userinfo, port, and a
+   trailing `.git` are dropped. Keys on GitHub, GitLab.com, Bitbucket Cloud and
+   Codeberg are ignored, and so is any key the default profile's
+   `settings.json` also lists. At least one key must remain.
+3. **Projects.** Bb projects whose remote has one of those keys, and that have a
+   checkout on this machine, are the work projects.
+4. **Directory.** All matched checkouts must share one parent directory (for
+   example `~/src/acme`), and that parent must not be your home directory or one
+   of its parents. Every entry in the parent that does not start with a dot must
+   be a git checkout whose `origin` remote has a work key. Setup reads each
+   `.git/config` itself and does not run git; a `.git` file (a linked worktree)
+   counts as not work.
+
+The written scope looks like this, with paths in `~/` form when they are under
+your home directory:
+
+```json
+{
+  "scopes": [
+    {
+      "name": "work",
+      "paths": ["~/src/acme"],
+      "skills": ["work-*"],
+      "claudeConfigDir": "~/.claude-acme"
+    }
+  ]
+}
+```
+
+Limits:
+
+- Only ACP `customAgents` are read. A work profile configured anywhere else is
+  not found.
+- Only a self-hosted `git` marketplace counts. Work hosted on GitHub or GitLab
+  cloud always skips, because those keys are indistinguishable from public
+  projects.
+- An ssh config alias host (`git@work-alias:group/...`) does not match the real
+  host, so such remotes never match. Write the file by hand.
+- Nested layouts, where the work checkouts sit in more than one directory,
+  skip.
+- A directory scope covers every repository under the work tree, so repos you
+  add there later get the scope's skills and profile too. This is why the
+  parent must contain nothing but work checkouts.
+- All paths are checked on the machine that runs the bb server.
+
+Skip reasons: `exists` (the file is already there; setup only creates a missing
+file and never refreshes it), `no-profile`, `ambiguous-profiles` (more than one
+distinct `CLAUDE_CONFIG_DIR`; write the file by hand or remove the extra one),
+`no-self-hosted-marketplace`, `no-project-match`, `no-common-parent`, and
+`parent-has-non-work-entries`.
+
+```
+bb dir-skills setup [--dry-run] [--json]
+```
+
+- Without flags it creates the file when detection succeeds and reloads the
+  scopes, so new threads use them without `bb plugin reload`. The file is
+  created without overwriting anything that appears in the meantime.
+- `--dry-run` always runs detection and writes nothing. It prints the scope it
+  would write and the key each matched project produced, plus `would skip:
+  exists` if the file is already there.
+- `--json` prints `{ outcome, reason?, candidate?, matches, profileSource?,
+  affectedThreads }`, where `outcome` is `wrote`, `skipped`, or `dry-run`.
+- Exit code 0 for a write or a dry run, 2 for any skip.
+- The output shows detected paths and normalized `host/group` keys only. Raw
+  remote URLs, and anything that could hold credentials, are never printed or
+  logged.
+
+A thread that already started is pinned to the default profile for good (see
+above). After a write, setup lists those threads whose project the new scope
+covers; run `bb dir-skills unpin <thread-id>` for each to move it to the work
+profile on its next turn. `bb dir-skills status` shows `auto-setup: wrote` or
+`auto-setup: skipped (<reason>)` for the last install or non-dry run.
+
 ## Adding a work skill
 
 1. Create `skills/work-<topic>/SKILL.md` with `name: work-<topic>` and a
