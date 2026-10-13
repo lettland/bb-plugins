@@ -268,6 +268,11 @@ function useDismiss(
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      // Escape belongs to whatever else has focus (a composer, another popover).
+      const focused = document.activeElement;
+      if (focused !== document.body && !(focused instanceof Node && rootRef.current?.contains(focused))) {
+        return;
+      }
       onClose();
       buttonRef.current?.focus();
     };
@@ -284,26 +289,30 @@ function openSuffixOf(openCount: number): string {
   return openCount > 0 ? ` · ${openCount} open` : "";
 }
 
+const POPOVER_WIDTH = 280;
+const POPOVER_MARGIN = 8;
+
 function ReviewPopover(props: {
   id: string;
   top: number;
+  right: number;
   threadId: string;
   status: ReviewStatus;
   review: ThreadReview;
 }) {
-  const { id, top, threadId, status, review } = props;
+  const { id, top, right, threadId, status, review } = props;
   const { at, openCount, reRaisedCount, lastIncident } = review;
   return (
     <div
       id={id}
-      role="dialog"
+      role="region"
       aria-label="Auto-review details"
       style={{
         position: "fixed",
         top: top + 4,
-        right: 8,
+        right,
         zIndex: 50,
-        width: 280,
+        width: POPOVER_WIDTH,
         maxWidth: "calc(100vw - 16px)",
         padding: 12,
         borderRadius: 8,
@@ -345,7 +354,7 @@ function ReviewBadge(props: PluginThreadHeaderActionProps) {
   const review = useThreadReview(threadId);
   const [open, setOpen] = useState(false);
   const [now, setNow] = useState(() => Date.now());
-  const [popoverTop, setPopoverTop] = useState(0);
+  const [popoverAnchor, setPopoverAnchor] = useState({ top: 0, right: 8 });
   const rootRef = useRef<HTMLSpanElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const popoverId = useId();
@@ -366,15 +375,25 @@ function ReviewBadge(props: PluginThreadHeaderActionProps) {
   const { status, at, openCount } = review;
   const label = STATUS_LABELS[status];
   const color = statusColor(status);
-  const ariaLabel = `Auto-review (agent-reported): ${label}${
-    openCount > 0 ? `, ${openCount} open` : ""
-  }`;
-  const showTime = !isCompactViewport && at !== null;
+  const source = PLUGIN_RECORDED_STATUSES.has(status) ? "" : " (agent-reported)";
+  const ariaLabel = `Auto-review${source}: ${label}${openCount > 0 ? `, ${openCount} open` : ""}`;
+  // The time of a pending review is the previous one's, so it is not shown.
+  const showTime = !isCompactViewport && status !== "pending" && at !== null;
 
   const toggle = () => {
     if (!open) {
-      // Fixed positioning lets the popover escape the header row's clipping.
-      setPopoverTop(buttonRef.current?.getBoundingClientRect().bottom ?? 0);
+      // Fixed positioning lets the popover escape the header row's clipping;
+      // its right edge follows the badge so it opens beside it in split
+      // layouts, clamped so a badge in a narrow left pane does not push it off-screen.
+      const rect = buttonRef.current?.getBoundingClientRect();
+      const fromBadge = window.innerWidth - (rect?.right ?? window.innerWidth - POPOVER_MARGIN);
+      setPopoverAnchor({
+        top: rect?.bottom ?? 0,
+        right: Math.max(
+          POPOVER_MARGIN,
+          Math.min(fromBadge, window.innerWidth - POPOVER_WIDTH - POPOVER_MARGIN),
+        ),
+      });
       setNow(Date.now());
     }
     setOpen(!open);
@@ -429,7 +448,8 @@ function ReviewBadge(props: PluginThreadHeaderActionProps) {
       {open ? (
         <ReviewPopover
           id={popoverId}
-          top={popoverTop}
+          top={popoverAnchor.top}
+          right={popoverAnchor.right}
           threadId={threadId}
           status={status}
           review={review}

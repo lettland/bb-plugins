@@ -1,14 +1,8 @@
 import type { BbPluginApi, PluginCliContext, PluginCliResult } from "@get-bb/plugin-sdk";
 import { commandError, json } from "./cli-result.js";
-import {
-  MAX_PROMPT_FINDINGS,
-  openFindingsForPrompt,
-  readFindings,
-  summarizeReview,
-  writeFindings,
-  type FindingChain,
-  type FindingsStore,
-} from "./findings.js";
+import { MAX_PROMPT_FINDINGS, type FindingChain, type FindingsStore } from "./findings-schema.js";
+import { readFindings, writeFindings } from "./findings-store.js";
+import { omittedOpenCount, summarizeReview } from "./findings.js";
 import { REVIEW_IN_FLIGHT_PHASES, withThreadLock, type AutoReviewPhase } from "./state.js";
 
 const FINDINGS_USAGE = "Usage: bb auto-review findings [thread-id] [--json] [--clear]";
@@ -79,7 +73,9 @@ export async function reviewStatusView(
   const result =
     review.status === "none"
       ? "none"
-      : `${review.status}${review.at === null ? "" : ` at ${new Date(review.at).toISOString()}`} (${review.openCount} open, ${review.reRaisedCount} re-raised)`;
+      : `${review.status}${review.at === null ? "" : ` at ${new Date(review.at).toISOString()}`} (${review.openCount} open${
+          review.omittedFromPrompt > 0 ? ` — ${review.omittedFromPrompt} not listed in the next review's prompt` : ""
+        }, ${review.reRaisedCount} re-raised)`;
   const incident =
     review.lastIncident === null
       ? ""
@@ -93,6 +89,7 @@ export async function reviewStatusView(
       },
       openFindings: review.openCount,
       reRaisedFindings: review.reRaisedCount,
+      omittedFromPrompt: review.omittedFromPrompt,
       lastIncident: review.lastIncident,
     },
     text: `reviewResult: ${result}\n${incident}`,
@@ -141,12 +138,13 @@ export async function showFindings(
       await writeFindings(bb, threadId, { ...store, chains: {} });
       return Object.keys(store.chains).length;
     });
+    bb.log.info(`findings for thread ${threadId}: cleared ${cleared} chain(s) (via terminal)`);
     return wantsJson
       ? json({ ok: true, command: "findings", threadId, cleared })
       : { exitCode: 0, stdout: `Cleared ${cleared} finding(s) for ${threadId}.\n` };
   }
   const store = await readFindings(bb, threadId);
-  const { omitted } = openFindingsForPrompt(store, Date.now());
+  const omitted = omittedOpenCount(store);
   if (wantsJson) {
     return json({
       threadId,

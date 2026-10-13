@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createFakePluginHost, type CreateFakePluginHostOptions } from "@get-bb/plugin-sdk/testing";
 import { showFindings } from "./cli-findings.js";
-import { emptyStore, findingsKey, type FindingsStore } from "./findings.js";
+import { emptyStore, type FindingsStore } from "./findings-schema.js";
+import { findingsKey } from "./findings-store.js";
 
 const store: FindingsStore = {
   ...emptyStore(),

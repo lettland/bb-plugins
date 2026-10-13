@@ -1,181 +1,28 @@
-import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { z } from "zod";
-import { SCOPE_PATH_ALLOW, type PromptFinding } from "./prompt.js";
-import { publishThreadReview } from "./state.js";
 import { stripControl } from "./text.js";
+import {
+  FALSE_POSITIVE_PROMPT_WINDOW_MS,
+  FINDING_SEVERITIES,
+  MAX_CHAINS,
+  MAX_INCIDENTS,
+  MAX_PROMPT_FINDINGS,
+  type FindingChain,
+  type FindingCounts,
+  type FindingSeverity,
+  type FindingsStore,
+  type Incident,
+  type PluginOutcome,
+  type ReportedFinding,
+  type ReviewOutcome,
+  type ReviewReport,
+} from "./findings-schema.js";
+import type { PromptFinding } from "./prompt-findings.js";
 
 /**
- * What each auto-review found, kept per thread so the next review starts from
- * it instead of rediscovering (and re-dismissing) the same issues.
- *
- * A finding is a *chain*: one key the review agent reuses for the same issue
- * across reviews, with the history that decides whether a report is a repeat.
- * Everything here is data the agent reported, never verified against git, and
- * every free-text field is cleaned at the schema so the CLI, the RPC and the
- * badge only ever see plain text.
+ * The pure half of the per-thread findings: how a report folds into the
+ * chains, what the next review's prompt lists, and the badge's summary. The
+ * schemas live in `findings-schema.ts`, the KV reads and writes in
+ * `findings-store.ts`.
  */
-
-export const FINDING_SEVERITIES = ["blocker", "high", "medium", "low"] as const;
-export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
-
-export const FINDING_STATUSES = ["open", "fixed", "false-positive"] as const;
-export type FindingStatus = (typeof FINDING_STATUSES)[number];
-
-/** What the review agent can report about the review as a whole. */
-export const AGENT_OUTCOMES = ["committed", "merged", "uncommitted", "blocked", "no-changes"] as const;
-export type AgentOutcome = (typeof AGENT_OUTCOMES)[number];
-
-/**
- * The plugin's own outcomes, for reviews that ended without a report: it ran
- * but never reported, the user stopped it, or it could not be sent at all. They
- * exist so such a review never looks like a pass.
- */
-export const PLUGIN_OUTCOMES = ["not-reported", "stopped", "unavailable"] as const;
-export type PluginOutcome = (typeof PLUGIN_OUTCOMES)[number];
-
-export const REVIEW_OUTCOMES = [...AGENT_OUTCOMES, ...PLUGIN_OUTCOMES] as const;
-export type ReviewOutcome = (typeof REVIEW_OUTCOMES)[number];
-
-/** How many chains one thread keeps, and how many incidents. */
-export const MAX_CHAINS = 100;
-export const MAX_INCIDENTS = 20;
-/** A dismissed false positive stays in the next prompt this long, so its key gets reused. */
-export const FALSE_POSITIVE_PROMPT_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
-/** The most findings the next review's prompt lists; the rest are only counted. */
-export const MAX_PROMPT_FINDINGS = 15;
-
-/** Free text from the agent: length-capped on the way in, control characters stripped on the way out. */
-function cleanText(max: number) {
-  return z.string().max(max).transform(stripControl);
-}
-
-const findingKeySchema = z.string().regex(/^[a-z0-9][a-z0-9._:/-]{0,79}$/u);
-
-/** One finding as the review agent reports it (the `ReportReview` tool's input). */
-export const reportedFindingSchema = z
-  .object({
-    key: findingKeySchema,
-    title: cleanText(200).pipe(z.string().min(1)),
-    file: z.string().max(300).regex(SCOPE_PATH_ALLOW),
-    line: z.number().int().positive().optional(),
-    severity: z.enum(FINDING_SEVERITIES),
-    status: z.enum(FINDING_STATUSES),
-    reason: cleanText(300).optional(),
-  })
-  .refine(
-    (finding) =>
-      finding.status !== "false-positive" || (finding.reason?.trim() ?? "").length > 0,
-    { message: "A false-positive finding needs a reason.", path: ["reason"] },
-  );
-export type ReportedFinding = z.output<typeof reportedFindingSchema>;
-
-/** The `ReportReview` tool's whole input. */
-export const reviewReportSchema = z.object({
-  outcome: z.enum(AGENT_OUTCOMES),
-  summary: cleanText(500),
-  findings: z.array(reportedFindingSchema).max(50).default([]),
-});
-export type ReviewReport = z.output<typeof reviewReportSchema>;
-
-const chainStateSchema = z.object({
-  title: z.string(),
-  file: z.string(),
-  line: z.number().optional(),
-  severity: z.enum(FINDING_SEVERITIES),
-  status: z.enum(FINDING_STATUSES),
-  reason: z.string().optional(),
-  dismissReason: z.string().optional(),
-  lastSeenAt: z.number(),
-  raisedCount: z.number().int().nonnegative(),
-  dismissCount: z.number().int().nonnegative(),
-  reRaised: z.boolean(),
-  lastReviewId: z.number(),
-});
-
-export const findingChainSchema = chainStateSchema.extend({
-  key: z.string(),
-  firstSeenAt: z.number(),
-  /** Set while the chain was born in the review `lastReviewId` names, so a later report in that review can drop it. */
-  createdByReviewId: z.number().optional(),
-  /** The chain as it stood before the review `lastReviewId` names first touched it. */
-  before: chainStateSchema.optional(),
-});
-export type FindingChain = z.infer<typeof findingChainSchema>;
-
-const countsSchema = z.object({
-  open: z.number().int().nonnegative(),
-  fixed: z.number().int().nonnegative(),
-  falsePositive: z.number().int().nonnegative(),
-});
-export type FindingCounts = z.infer<typeof countsSchema>;
-
-export const reviewRecordSchema = z.object({
-  /** `reviewDeliveredAt` of the review this describes (`dispatchedAt` or the time for one that never reached the agent). */
-  reviewId: z.number(),
-  at: z.number(),
-  outcome: z.enum(REVIEW_OUTCOMES),
-  summary: z.string(),
-  counts: countsSchema,
-});
-export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
-
-export const incidentSchema = z.object({
-  at: z.number(),
-  kind: z.enum(["send-failed", "not-reported"]),
-  detail: z.string(),
-});
-export type Incident = z.infer<typeof incidentSchema>;
-
-export const findingsStoreSchema = z.object({
-  chains: z.record(z.string(), findingChainSchema).default({}),
-  lastReport: reviewRecordSchema.optional(),
-  incidents: z.array(incidentSchema).default([]),
-});
-export type FindingsStore = z.infer<typeof findingsStoreSchema>;
-
-export function emptyStore(): FindingsStore {
-  return { chains: {}, incidents: [] };
-}
-
-const KEY_PREFIX = "findings:";
-
-export function findingsKey(threadId: string): string {
-  return `${KEY_PREFIX}${threadId}`;
-}
-
-/** The store, or an empty one when none exists or the stored value cannot be parsed (logged, like `readState`). */
-export async function readFindings(bb: BbPluginApi, threadId: string): Promise<FindingsStore> {
-  const raw = await bb.storage.kv.get<unknown>(findingsKey(threadId));
-  if (raw === null || raw === undefined) {
-    return emptyStore();
-  }
-  const parsed = findingsStoreSchema.safeParse(raw);
-  if (parsed.success) {
-    return parsed.data;
-  }
-  bb.log.warn(`auto-review: discarding unparseable findings for ${threadId}; starting empty`);
-  return emptyStore();
-}
-
-/** Persists the store and tells the badge. Callers hold the thread's lock. */
-export async function writeFindings(
-  bb: BbPluginApi,
-  threadId: string,
-  store: FindingsStore,
-): Promise<void> {
-  await bb.storage.kv.set(findingsKey(threadId), store);
-  publishThreadReview(bb, threadId);
-}
-
-export async function deleteFindings(bb: BbPluginApi, threadId: string): Promise<void> {
-  await bb.storage.kv.delete(findingsKey(threadId));
-}
-
-/** Thread ids that have a findings key, for the orphan sweep. */
-export async function listFindingThreadIds(bb: BbPluginApi): Promise<string[]> {
-  const keys = await bb.storage.kv.list(KEY_PREFIX);
-  return keys.map((key) => key.slice(KEY_PREFIX.length));
-}
 
 function normalizeReason(reason: string | undefined): string {
   return (reason ?? "").trim().toLowerCase();
@@ -315,7 +162,10 @@ function applyFinding(
     next.dismissReason = finding.reason;
     next.reRaised = false;
   } else {
+    // A fix is a real resolution: a later dismissal is a new judgement, not a
+    // repeat of the one before the fix.
     next.reRaised = false;
+    next.dismissReason = undefined;
   }
   return { chain: next };
 }
@@ -378,15 +228,19 @@ export function mergeReport(
   const byKey = new Map(report.findings.map((finding) => [finding.key, finding]));
   let chains = revertReview(store.chains, reviewId);
   const ignored: IgnoredFinding[] = [];
+  // Counted from what was applied: a duplicate key or an ignored re-dismissal
+  // changed nothing, so the review did not find it.
+  const applied: ReportedFinding[] = [];
   for (const finding of byKey.values()) {
-    const applied = applyFinding(chains[finding.key], finding, reviewId, now);
-    if ("ignored" in applied) {
-      ignored.push(applied.ignored);
+    const result = applyFinding(chains[finding.key], finding, reviewId, now);
+    if ("ignored" in result) {
+      ignored.push(result.ignored);
     } else {
-      chains = { ...chains, [finding.key]: applied.chain };
+      chains = { ...chains, [finding.key]: result.chain };
+      applied.push(finding);
     }
   }
-  const counts = countFindings(report.findings);
+  const counts = countFindings(applied);
   return {
     store: {
       chains: evict(chains, new Set(byKey.keys())),
@@ -399,7 +253,7 @@ export function mergeReport(
 }
 
 /** The outcome of a review the plugin ended without a report. */
-interface UnreportedOutcome {
+export interface UnreportedOutcome {
   reviewId: number;
   outcome: PluginOutcome;
   summary: string;
@@ -430,22 +284,6 @@ export function withUnreportedOutcome(
     },
     incidents,
   };
-}
-
-/**
- * Records a review that ended without a report. A report the agent did make
- * for the same review is never overwritten. Callers hold the thread's lock.
- */
-export async function recordUnreported(
-  bb: BbPluginApi,
-  threadId: string,
-  entry: UnreportedOutcome,
-): Promise<void> {
-  const store = await readFindings(bb, threadId);
-  if (reviewRecorded(store, entry.reviewId)) {
-    return;
-  }
-  await writeFindings(bb, threadId, withUnreportedOutcome(store, entry, Date.now()));
 }
 
 /** Whether the agent has reported (or the plugin has recorded) the review with this id. */
@@ -510,33 +348,34 @@ export function reviewStatusOf(store: FindingsStore, inFlight: boolean): ReviewS
 
 interface ReviewSummary {
   status: ReviewStatus;
+  /** When the last review ended; null while one is pending, so the old review's time is not shown against it. */
   at: number | null;
   openCount: number;
   reRaisedCount: number;
+  /** Open findings the next review's prompt cannot list (see `MAX_PROMPT_FINDINGS`). */
+  omittedFromPrompt: number;
   lastIncident: Incident | null;
+}
+
+/**
+ * How many open chains the next review's prompt cannot list. Open chains sort
+ * ahead of dismissed ones, so the cap only ever cuts open chains once they
+ * alone exceed it; recent false positives in the omitted count would make
+ * "3 open — 8 not listed" possible.
+ */
+export function omittedOpenCount(store: FindingsStore): number {
+  return Math.max(0, openChains(store).length - MAX_PROMPT_FINDINGS);
 }
 
 export function summarizeReview(store: FindingsStore, inFlight: boolean): ReviewSummary {
   const open = openChains(store);
+  const status = reviewStatusOf(store, inFlight);
   return {
-    status: reviewStatusOf(store, inFlight),
-    at: store.lastReport?.at ?? null,
+    status,
+    at: status === "pending" ? null : (store.lastReport?.at ?? null),
     openCount: open.length,
     reRaisedCount: open.filter((chain) => chain.reRaised).length,
+    omittedFromPrompt: omittedOpenCount(store),
     lastIncident: store.incidents.at(-1) ?? null,
   };
-}
-
-/** Whether `error` is the host saying a thread does not exist, as opposed to a transient failure. */
-export function isThreadNotFound(error: unknown): boolean {
-  if (error === null || typeof error !== "object") {
-    return false;
-  }
-  const { message, code, status } = error as { message?: unknown; code?: unknown; status?: unknown };
-  return (
-    status === 404 ||
-    code === "not_found" ||
-    code === "thread_not_found" ||
-    (typeof message === "string" && /\bnot found\b/iu.test(message))
-  );
 }

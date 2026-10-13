@@ -63,8 +63,10 @@ interface HostOptions {
   envThreads?: EnvThread[];
   authoringThreads?: string[];
   getThrowsFor?: string[];
-  /** Threads whose `get` fails the way a missing thread does. */
+  /** Threads whose `get` fails the way a missing thread does (`code: "thread_not_found"`, from the HTTP API's 404). */
   notFoundFor?: string[];
+  /** Threads whose `get` fails with a "not found" message that is not a 404 (a version-skewed host, a missing binary). */
+  unrelatedNotFoundFor?: string[];
   resolveThrows?: boolean;
   /** Resolving an `allow_once` (only) fails — the global `resolveThrows` would also break the deny. */
   resolveAllowThrows?: boolean;
@@ -240,7 +242,10 @@ function createHost(options: HostOptions = {}) {
           throw new Error(`thread ${args.threadId} is gone`);
         }
         if (options.notFoundFor?.includes(args.threadId) === true) {
-          throw new Error(`thread ${args.threadId} not found`);
+          throw Object.assign(new Error(`thread ${args.threadId} not found`), { code: "thread_not_found" });
+        }
+        if (options.unrelatedNotFoundFor?.includes(args.threadId) === true) {
+          throw new Error("method not found: threads.get");
         }
         const listed = envThreads.find((entry) => entry.id === args.threadId);
         return {
@@ -3587,8 +3592,59 @@ describe("auto-review plugin: review reports", () => {
       const saved = await store(host);
       expect(saved?.lastReport).toMatchObject({ outcome: "not-reported" });
       expect(saved?.incidents).toHaveLength(2);
+      // The restart hint is for a session that lacks the tool, not for a thread that was archived.
+      expect(saved?.incidents[0]?.detail).toContain("restart it");
+      expect(saved?.incidents[1]?.detail).toContain("failed or was archived");
+      expect(saved?.incidents[1]?.detail).not.toContain("restart");
       expect(host.metadata.phase).toBe("idle");
       await host.harness.dispose();
+    });
+
+    it("records stopped on reset of a review still queued behind the thread's own turn", async () => {
+      const host = await reviewing({ sendDelivery: "queued", queuedRows: [{ id: "qm-1" }] });
+      expect(host.metadata.phase).toBe("pending-dispatch");
+      const dispatchedAt = host.metadata.dispatchedAt;
+      expect((await host.harness.runCli(["reset", THREAD_ID])).exitCode).toBe(0);
+      const saved = await store(host);
+      expect(saved?.lastReport).toMatchObject({ outcome: "stopped", reviewId: dispatchedAt });
+      expect(saved?.incidents).toEqual([]);
+      expect(host.metadata.phase).toBe("idle");
+      await host.harness.dispose();
+    });
+
+    it("still resets the latch when recording the outcome fails", async () => {
+      const failing = async (host: Host) => {
+        const set = host.bb.storage.kv.set.bind(host.bb.storage.kv);
+        host.bb.storage.kv.set = async (key: string, value: unknown) => {
+          if (key.startsWith("findings:")) {
+            throw new Error("kv write failed");
+          }
+          return set(key, value);
+        };
+      };
+      const idle = await reviewing();
+      await failing(idle);
+      await emitIdle(idle);
+      expect(idle.metadata.phase).toBe("idle");
+      expect(await store(idle)).toBeNull();
+      expect(
+        idle.harness.logEntries.some(
+          (entry) => entry.level === "warn" && entry.message.includes("could not record how the review"),
+        ),
+      ).toBe(true);
+
+      const archived = await reviewing();
+      await failing(archived);
+      await archived.harness.behavior.emitThreadEvent("thread.archived", { thread: thread() } as never);
+      expect(archived.metadata.phase).toBe("idle");
+
+      const reset = await reviewing();
+      await failing(reset);
+      expect((await reset.harness.runCli(["reset", THREAD_ID])).exitCode).toBe(0);
+      expect(reset.metadata.phase).toBe("idle");
+      await idle.harness.dispose();
+      await archived.harness.dispose();
+      await reset.harness.dispose();
     });
 
     it("records stopped on bb auto-review reset and rejects a report after it", async () => {
@@ -3651,10 +3707,14 @@ describe("auto-review plugin: review reports", () => {
       await host.harness.dispose();
     });
 
-    it("sweeps findings whose thread is definitely gone, and keeps them on a transient error", async () => {
-      const host = createHost({ notFoundFor: ["ghost"], getThrowsFor: ["flaky"] });
+    it("sweeps findings whose thread is definitely gone, and keeps them on a transient or unrelated error", async () => {
+      const host = createHost({
+        notFoundFor: ["ghost"],
+        getThrowsFor: ["flaky"],
+        unrelatedNotFoundFor: ["skewed"],
+      });
       await plugin(host.bb);
-      for (const id of ["ghost", "flaky", SIBLING_ID, "soft-deleted"]) {
+      for (const id of ["ghost", "flaky", "skewed", SIBLING_ID, "soft-deleted"]) {
         await host.bb.storage.kv.set(`findings:${id}`, seed);
       }
       host.setEnvThreads([
@@ -3665,9 +3725,31 @@ describe("auto-review plugin: review reports", () => {
       await host.harness.runSchedule("sweep-deferrals");
       expect((await host.bb.storage.kv.list("findings:")).sort()).toEqual([
         "findings:flaky",
+        "findings:skewed",
         `findings:${SIBLING_ID}`,
       ]);
       expect(host.harness.logEntries.some((entry) => entry.level === "warn" && entry.message.includes("keeping its findings"))).toBe(true);
+      await host.harness.dispose();
+    });
+
+    it("still sweeps orphan findings when the deferral sweep throws", async () => {
+      const host = createHost({ notFoundFor: ["ghost"] });
+      await plugin(host.bb);
+      await host.bb.storage.kv.set("findings:ghost", seed);
+      const list = host.bb.storage.kv.list.bind(host.bb.storage.kv);
+      host.bb.storage.kv.list = async (prefix?: string) => {
+        if (prefix === "deferral:") {
+          throw new Error("kv unavailable");
+        }
+        return list(prefix);
+      };
+      await host.harness.runSchedule("sweep-deferrals");
+      expect(await host.bb.storage.kv.list("findings:")).toEqual([]);
+      expect(
+        host.harness.logEntries.some(
+          (entry) => entry.level === "warn" && entry.message.includes("the deferrals sweep failed"),
+        ),
+      ).toBe(true);
       await host.harness.dispose();
     });
   });

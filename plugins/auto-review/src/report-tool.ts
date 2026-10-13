@@ -1,6 +1,8 @@
 import type { PluginAgentToolContext, PluginAgentToolResult } from "@get-bb/plugin-sdk";
 import { queuedRowExists, type ReviewContext } from "./context.js";
-import { mergeReport, readFindings, reviewReportSchema, writeFindings, type ReviewReport } from "./findings.js";
+import { reviewReportSchema, type ReviewReport } from "./findings-schema.js";
+import { readFindings, writeFindings } from "./findings-store.js";
+import { mergeReport } from "./findings.js";
 import { AUTO_REVIEW_MARKER } from "./prompt.js";
 import { deliveredPatch } from "./review-outcome.js";
 import { readState, withThreadLock, writeState } from "./state.js";
@@ -71,7 +73,7 @@ export function registerReportTool(review: ReviewContext): void {
   review.bb.agents.registerTool({
     name: REPORT_REVIEW_TOOL_NAME,
     description:
-      `Only call this when an ${AUTO_REVIEW_MARKER} prompt asks you to. Describe secrets by location and type, never by value.`,
+      `Only call this when an ${AUTO_REVIEW_MARKER} prompt asks you to. A finding's key is lowercase [a-z0-9._:/-] (for example src-foo-ts:null-check) and its file a repo-relative path without spaces (the nearest file for a finding that is not about one). Describe secrets by location and type, never by value.`,
     presentation: {
       label: { pending: "Reporting review", completed: "Reported review" },
     },

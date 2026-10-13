@@ -5,6 +5,7 @@ import {
   type CreateFakePluginHostOptions,
 } from "@get-bb/plugin-sdk/testing";
 import { registerAutoReviewCli } from "./cli.js";
+import { MAX_PROMPT_FINDINGS } from "./findings-schema.js";
 import { withThreadLock } from "./state.js";
 import {
   defineAutoReviewSettings,
@@ -510,6 +511,29 @@ describe("auto-review cli: reset", () => {
     });
   });
 
+  it("records a review still queued behind the thread's turn as stopped, so the badge leaves the old outcome", async () => {
+    await withHost({}, async (host) => {
+      await host.kv.set(`findings:${THREAD_ID}`, {
+        chains: {},
+        lastReport: { reviewId: 1, at: 1, outcome: "merged", summary: "old", counts: { open: 0, fixed: 0, falsePositive: 0 } },
+        incidents: [],
+      });
+      Object.assign(host.metadataFor(THREAD_ID), {
+        phase: "pending-dispatch",
+        dispatchedAt: 7,
+        pendingEntryId: "qm-1",
+      });
+      await host.run(["reset", THREAD_ID]);
+      expect(host.metadataFor(THREAD_ID)).toEqual({ phase: "idle" });
+      const stored = (await host.kv.get(`findings:${THREAD_ID}`)) as {
+        lastReport: { reviewId: number; outcome: string };
+        incidents: unknown[];
+      };
+      expect(stored.lastReport).toMatchObject({ reviewId: 7, outcome: "stopped" });
+      expect(stored.incidents).toEqual([]);
+    });
+  });
+
   it("records nothing when the reset thread was not mid-review", async () => {
     await withHost({}, async (host) => {
       Object.assign(host.metadataFor(THREAD_ID), { phase: "idle" });
@@ -760,6 +784,7 @@ describe("auto-review cli: status", () => {
           reviewResult: { status: "none", at: null, summary: null },
           openFindings: 0,
           reRaisedFindings: 0,
+          omittedFromPrompt: 0,
           lastIncident: null,
         });
       },
@@ -1125,6 +1150,18 @@ describe("auto-review cli: findings", () => {
       });
     });
 
+    it("logs what it cleared", async () => {
+      await withHost({}, async (host) => {
+        await host.kv.set(`findings:${THREAD_ID}`, store);
+        await host.run(["findings", THREAD_ID, "--clear"]);
+        expect(
+          host.harness.logEntries
+            .filter((entry) => entry.level === "info")
+            .map((entry) => entry.message),
+        ).toContain(`findings for thread ${THREAD_ID}: cleared 3 chain(s) (via terminal)`);
+      });
+    });
+
     it("does not swallow the thread id that follows it", async () => {
       await withHost({}, async (host) => {
         await host.kv.set(`findings:${THREAD_ID}`, store);
@@ -1190,9 +1227,44 @@ describe("auto-review cli: status — review result", () => {
     await withHost({}, async (host) => {
       await host.kv.set(`findings:${THREAD_ID}`, { chains: {}, lastReport: report, incidents: [] });
       host.metadataFor(THREAD_ID).phase = phase;
-      expect((await host.run(["status"], THREAD_ID)).stdout).toContain("reviewResult: pending at ");
+      // The last report's time belongs to the previous review, so none is shown.
+      expect((await host.run(["status"], THREAD_ID)).stdout).toContain("reviewResult: pending (0 open, 0 re-raised)\n");
       expect(parse(((await host.run(["status", "--json"], THREAD_ID)).stdout))).toMatchObject({
-        reviewResult: { status: "pending" },
+        reviewResult: { status: "pending", at: null },
+      });
+    });
+  });
+
+  it("does not count recent false positives as open findings left out of the prompt", async () => {
+    await withHost({}, async (host) => {
+      const chains = Object.fromEntries([
+        ...["a", "b", "c"].map((key) => [key, open(key, false)]),
+        ...Array.from({ length: MAX_PROMPT_FINDINGS + 5 }, (_, index) => [
+          `fp${index}`,
+          { ...open(`fp${index}`, false), status: "false-positive", lastSeenAt: Date.now() },
+        ]),
+      ]);
+      await host.kv.set(`findings:${THREAD_ID}`, { chains, lastReport: report, incidents: [] });
+      const text = (await host.run(["status"], THREAD_ID)).stdout ?? "";
+      expect(text).toContain("(3 open, 0 re-raised)\n");
+      expect(text).not.toContain("not listed");
+      expect(parse((await host.run(["findings", "--json"], THREAD_ID)).stdout)).toMatchObject({ omittedFromPrompt: 0 });
+      expect((await host.run(["findings"], THREAD_ID)).stdout).not.toContain("not listed");
+    });
+  });
+
+  it("says how many open findings the next review's prompt cannot list", async () => {
+    await withHost({}, async (host) => {
+      const chains = Object.fromEntries(
+        Array.from({ length: MAX_PROMPT_FINDINGS + 2 }, (_, index) => [`k${index}`, open(`k${index}`, false)]),
+      );
+      await host.kv.set(`findings:${THREAD_ID}`, { chains, lastReport: report, incidents: [] });
+      expect((await host.run(["status"], THREAD_ID)).stdout).toContain(
+        `reviewResult: merged at 2026-01-02T03:04:05.000Z (${MAX_PROMPT_FINDINGS + 2} open — 2 not listed in the next review's prompt, 0 re-raised)\n`,
+      );
+      expect(parse(((await host.run(["status", "--json"], THREAD_ID)).stdout))).toMatchObject({
+        openFindings: MAX_PROMPT_FINDINGS + 2,
+        omittedFromPrompt: 2,
       });
     });
   });

@@ -13,8 +13,8 @@ import {
   PRESENT_PLAN_OFF_MESSAGE,
   PRESENT_PLAN_REVIEWED_MESSAGE,
   renderScope,
-  type PromptFinding,
 } from "./prompt.js";
+import type { PromptFinding } from "./prompt-findings.js";
 
 describe("renderScope", () => {
   it("keeps allow-listed paths and counts odd ones", () => {
@@ -487,6 +487,9 @@ describe("buildReviewPrompt", () => {
       const last = steps.at(-1) ?? "";
       expect(last).toMatch(/^\d+\. Before your final reply, call the ReportReview tool once/u);
       expect(last).toContain("mcp__bb-bridge__ReportReview");
+      expect(last).toContain("lowercase letters, digits and `. _ : / -`");
+      expect(last).toContain("src-foo-ts:null-check");
+      expect(last).toContain("repo-relative path without spaces");
       expect(last).toContain("ToolSearch");
       expect(last).toContain("never by value");
       expect(last).toContain("the last report wins");
@@ -544,6 +547,15 @@ describe("buildReviewPrompt", () => {
       expect(text.indexOf("auto-review-findings")).toBeLessThan(text.indexOf("\n1. "));
       expect(text).toContain("use a listed key for the same issue");
       expect(text).toContain("needs a new reason");
+    });
+
+    it("has the agent leave out open findings outside the turn's files, not re-report them", () => {
+      const text = buildReviewPrompt({ decision, reviewMode: "auto", scope: baseScope, priorFindings: [prior()] });
+      expect(text).toContain("Leave out an `open` finding outside this turn's files");
+      expect(text).toContain("stays as it is");
+      expect(text).not.toContain("was not re-checked");
+      // A finding the review itself turns up outside the files is still reported.
+      expect(text).toContain("`open`, with a reason when it is outside the files above");
     });
 
     it("sanitizes every field and re-checks the file path", () => {

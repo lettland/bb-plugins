@@ -1,6 +1,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { stoppedByUser, tryCaptureSinceSeq } from "./detect.js";
-import { readFindings, recordUnreported, reviewRecorded } from "./findings.js";
+import { readFindings, recordUnreported } from "./findings-store.js";
+import { reviewRecorded } from "./findings.js";
 import type { ThreadState } from "./state.js";
 
 /**
@@ -18,8 +19,12 @@ export async function deliveredPatch(
   return reviewDeliveredSeq === undefined ? { reviewDeliveredAt } : { reviewDeliveredAt, reviewDeliveredSeq };
 }
 
-const NOT_REPORTED_HINT =
-  "The review turn ended without a ReportReview call; its commit and merge may still have happened. If this session started before the plugin update, restart it so it gets the tool.";
+const NOT_REPORTED_HINTS = {
+  idle:
+    "The review turn ended without a ReportReview call; its commit and merge may still have happened. If this session started before the plugin update, restart it so it gets the tool.",
+  gone:
+    "The thread failed or was archived during the review, before it called ReportReview; its commit and merge may still have happened.",
+} as const;
 
 async function userStoppedReview(
   bb: BbPluginApi,
@@ -43,13 +48,18 @@ async function userStoppedReview(
 }
 
 /**
- * Records how a delivered review ended when its agent never reported: `stopped`
- * when the user (or a reset) ended it, `not-reported` — with an incident —
- * when it simply ended. Nothing is recorded when the report did arrive.
- * Callers hold the thread's lock and reset the latch afterwards.
+ * Records how a review that never reported ended: `stopped` when the user (or
+ * a reset) ended it, `not-reported` — with an incident — when it simply ended.
+ * Nothing is recorded when the report did arrive. A reset (`stopped`) also
+ * records a review still queued behind the thread's own turn, which has no
+ * delivery time yet. Callers hold the thread's lock and reset the latch
+ * afterwards.
  *
  * `cause` is how the caller knows the review ended: `idle` still has to tell a
  * stop from silence, the others already know.
+ *
+ * Best-effort: the caller's reset must happen whatever this does, or a KV
+ * failure would leave the thread latched and the provider blocked.
  */
 export async function recordUnfinishedReview(
   bb: BbPluginApi,
@@ -57,6 +67,31 @@ export async function recordUnfinishedReview(
   state: ThreadState,
   cause: "idle" | "stopped" | "gone",
 ): Promise<void> {
+  try {
+    await recordUnfinished(bb, threadId, state, cause);
+  } catch (error) {
+    bb.log.warn(
+      `auto-review: could not record how the review in ${threadId} ended: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
+async function recordUnfinished(
+  bb: BbPluginApi,
+  threadId: string,
+  state: ThreadState,
+  cause: "idle" | "stopped" | "gone",
+): Promise<void> {
+  if (state.phase === "pending-dispatch" && cause === "stopped") {
+    await recordUnreported(bb, threadId, {
+      reviewId: state.dispatchedAt ?? Date.now(),
+      outcome: "stopped",
+      summary: "The queued review was stopped before it ran.",
+    });
+    return;
+  }
   if (state.phase !== "awaiting-review") {
     return;
   }
@@ -75,7 +110,7 @@ export async function recordUnfinishedReview(
           reviewId,
           outcome: "not-reported",
           summary: "The review ended without reporting.",
-          incident: { kind: "not-reported", detail: NOT_REPORTED_HINT },
+          incident: { kind: "not-reported", detail: NOT_REPORTED_HINTS[cause === "gone" ? "gone" : "idle"] },
         },
   );
 }

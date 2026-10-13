@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createFakePluginHost, type CreateFakePluginHostOptions } from "@get-bb/plugin-sdk/testing";
 import { registerAutoReviewCli } from "./cli.js";
 import { createReviewContext } from "./context.js";
+import { MAX_PROMPT_FINDINGS } from "./findings-schema.js";
 import { registerAutoReviewRpc } from "./rpc.js";
 
 const PROJECTS = [
@@ -176,6 +177,7 @@ describe("auto-review rpc: threadReview", () => {
         at: null,
         openCount: 0,
         reRaisedCount: 0,
+        omittedFromPrompt: 0,
         lastIncident: null,
       });
     });
@@ -196,7 +198,38 @@ describe("auto-review rpc: threadReview", () => {
         at: 5_000,
         openCount: 2,
         reRaisedCount: 1,
+        omittedFromPrompt: 0,
         lastIncident: { at: 2, kind: "not-reported", detail: "newest" },
+      });
+    });
+  });
+
+  it("says how many open findings the next review's prompt cannot list", async () => {
+    await withThreads(async (host) => {
+      const chains = Object.fromEntries(
+        Array.from({ length: MAX_PROMPT_FINDINGS + 2 }, (_, index) => [`k${index}`, chain(`k${index}`, "open")]),
+      );
+      await host.bb.storage.kv.set("findings:thr_1", { chains, lastReport: report, incidents: [] });
+      expect(await host.harness.callRpc("threadReview", { threadId: "thr_1" })).toMatchObject({
+        openCount: MAX_PROMPT_FINDINGS + 2,
+        omittedFromPrompt: 2,
+      });
+    });
+  });
+
+  it("does not count recent false positives as open findings left out of the prompt", async () => {
+    await withThreads(async (host) => {
+      const chains = Object.fromEntries([
+        ...["a", "b", "c"].map((key) => [key, chain(key, "open")]),
+        ...Array.from({ length: MAX_PROMPT_FINDINGS + 5 }, (_, index) => [
+          `fp${index}`,
+          { ...chain(`fp${index}`, "false-positive"), lastSeenAt: Date.now() },
+        ]),
+      ]);
+      await host.bb.storage.kv.set("findings:thr_1", { chains, lastReport: report, incidents: [] });
+      expect(await host.harness.callRpc("threadReview", { threadId: "thr_1" })).toMatchObject({
+        openCount: 3,
+        omittedFromPrompt: 0,
       });
     });
   });
@@ -207,7 +240,7 @@ describe("auto-review rpc: threadReview", () => {
       metadata.phase = phase;
       expect(await host.harness.callRpc("threadReview", { threadId: "thr_1" })).toMatchObject({
         status: "pending",
-        at: 5_000,
+        at: null,
       });
     });
   });

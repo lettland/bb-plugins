@@ -1,6 +1,7 @@
 import { effectiveConfig, readProjectConfig, setAutoApprovePlans } from "./config.js";
 import type { ReviewContext } from "./context.js";
-import { readFindings, summarizeReview } from "./findings.js";
+import { readFindings } from "./findings-store.js";
+import { summarizeReview } from "./findings.js";
 import { autoReviewRpcContract } from "./rpc-contract.js";
 import { readState, REVIEW_IN_FLIGHT_PHASES } from "./state.js";
 

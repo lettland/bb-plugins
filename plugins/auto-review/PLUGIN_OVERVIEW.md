@@ -90,6 +90,8 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   `not-reported`, one the user stopped or cancelled as `stopped`, one that could not be sent as
   `unavailable` — none of these ever reads as a pass. A session started before the plugin
   update does not have the tool until restarted, so its reviews show "Review not reported".
+  Recording an outcome is best-effort and never blocks the latch reset; the orphan sweep deletes
+  a thread's findings only on a deleted thread or a structured `thread_not_found` / 404.
 - Ships enabled (opt-out). Turn it off globally or per project with `bb auto-review`;
   there is no per-thread skip.
 
@@ -99,7 +101,8 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   Plan auto-approve section listing each project with its own switch (Tools → Auto review).
 - Per-project overrides live in the plugin's own storage.
 - CLI: `bb auto-review status|show|enable|disable|auto-approve|findings|reset` (all `--json`). `status`
-  adds the last review's outcome and open-finding counts (`reviewResult`); `findings [thread-id]
+  adds the last review's outcome and open-finding counts, including how many the next prompt
+  cannot list (`reviewResult`, `omittedFromPrompt`); `findings [thread-id]
   [--clear]` lists a thread's finding chains and incidents (`--clear` is terminal-only and needs
   an explicit thread id). The `threadReview` RPC and the realtime channel `auto-review:thread:<id>`
   serve the same state to the UI. `status`

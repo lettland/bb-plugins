@@ -197,22 +197,32 @@ and type, never by value.
 
 - `outcome`: `committed`, `merged`, `uncommitted`, `blocked` or `no-changes`; `summary`; and
   `findings[]` (`key`, `title`, `file`, `line?`, `severity` `blocker|high|medium|low`, `status`
-  `open|fixed|false-positive`, `reason?`, required for a false positive).
+  `open|fixed|false-positive`, `reason?`, required for a false positive). A `key` is lowercase
+  `[a-z0-9._:/-]` (for example `src-foo-ts:null-check`); `file` is a repo-relative path without
+  spaces (the nearest file for a finding that is not about one).
 - Findings persist per thread as **chains** under their `key` (up to 100 per thread; settled
   chains are evicted first). The next review is told the open chains and recently dismissed
-  false positives (up to 15) and should reuse their keys. A chain keeps its maximum severity; it
+  false positives (up to 15) and should reuse their keys; an open chain outside the files of
+  the turn is left out of the report, which leaves it unchanged. A chain keeps its maximum severity; it
   is **re-raised** when it is reported open after it was fixed or dismissed, until a later
   report marks it fixed or dismisses it with a new reason. Dismissing a chain as a false
   positive a second time needs a different reason: the same one is ignored for that finding
-  only, and the report's outcome is kept.
+  only, and the report's outcome is kept. A fix clears the remembered reason, so a dismissal
+  after a fix is a new judgement. The counts in the report's acknowledgement are of the findings
+  that were applied: a repeated key counts once and an ignored re-dismissal not at all.
 - Outcomes are agent-reported and never verified against git. The plugin records its own
   outcomes too: `not-reported` (the review ran but never called the tool; the commit may still
   have happened), `stopped` (the user stopped it, or its queued review was cancelled or reset),
   and `unavailable` (it could not be sent). `not-reported` and `unavailable` also leave an
   incident (the last 20 are kept). A session that started before the plugin update does not have
-  the tool until it is restarted, so it shows `not-reported`.
+  the tool until it is restarted, so it shows `not-reported` (its incident says to restart); a
+  thread that failed or was archived mid-review shows `not-reported` with an incident saying so.
+  Recording an outcome is best-effort: a storage failure is logged and never keeps a thread
+  latched.
 - Findings are deleted when the thread is deleted (archive and failure keep them); an orphan
-  sweep (every 5 minutes) removes the findings of a thread that no longer exists.
+  sweep (every 5 minutes, after the deferral sweep, and not skipped when that one fails) removes
+  the findings of a thread that no longer exists — only when the host reports it deleted or
+  answers with a structured `thread_not_found` error or 404; any other failure keeps them.
 
 ## CLI
 
@@ -220,8 +230,9 @@ All commands accept `--json`.
 
 - `bb auto-review status` — effective state and last-fire outcome for the current thread
   (enabled, reviewMode, `autoApprovePlans`, `planGate`, loop-guard phase, last-fire reason
-  and time, and `reviewResult`: the last review's outcome — `pending` while one is in flight —
-  with its time, the open and re-raised finding counts and the last incident).
+  and time, and `reviewResult`: the last review's outcome and its time, or `pending` (with no
+  time) while a review is in flight; the open and re-raised finding counts; `omittedFromPrompt`,
+  how many open findings do not fit the next review's prompt; and the last incident).
   `planGate` is true only for a top-level, visible, environment-bound `claude-code` thread
   with auto-review enabled — the one case where auto-review's own native
   plan gate (see *Plan review* above) owns this thread's plan review instead of another
@@ -242,7 +253,8 @@ All commands accept `--json`.
   (high/blocker chains dismissed more than once are flagged), the last report and the
   incidents. When there are more open chains than the next review's prompt lists, the count
   says so. `--clear` drops the chains only (the last report and incidents stay); it is refused
-  inside a bb thread and needs an explicit thread id. `reset` leaves findings alone.
+  inside a bb thread, needs an explicit thread id and is logged. `reset` leaves findings alone
+  apart from recording the review it cut off (a delivered or still-queued one) as `stopped`.
 - `bb auto-review reset <thread-id>` — clear a wedged loop-guard latch for an idle thread
   whose review never completed. It refuses (exit 2) while the thread is running, since
   resetting mid-turn would drop that turn's review. Use this if `status` shows a non-`idle`

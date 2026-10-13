@@ -5,7 +5,7 @@ import {
   type CreateFakePluginHostOptions,
 } from "@get-bb/plugin-sdk/testing";
 import { createReviewContext, type ReviewContext } from "./context.js";
-import { readFindings } from "./findings.js";
+import { readFindings } from "./findings-store.js";
 import { registerPlanTools } from "./present-plan.js";
 import { REPORT_REVIEW_TOOL_NAME, reportReview } from "./report-tool.js";
 

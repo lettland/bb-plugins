@@ -120,7 +120,7 @@ All commands accept `--json`.
 
 | Command | What it does |
 |---|---|
-| `bb auto-review status` | Effective state (including `planGate`, whether this thread's plan review is served here by the native ExitPlanMode gate), last-fire outcome, and the last review's reported outcome with open/re-raised finding counts (`reviewResult`) for the current thread |
+| `bb auto-review status` | Effective state (including `planGate`, whether this thread's plan review is served here by the native ExitPlanMode gate), last-fire outcome, and the last review's reported outcome with open/re-raised finding counts (`reviewResult`, plus `omittedFromPrompt`: open findings the next review's prompt cannot list) for the current thread |
 | `bb auto-review show` | Global defaults, project override and resolved settings for the current project |
 | `bb auto-review enable [--global \| --project <id>]` | Turn it on; bare `enable` is global |
 | `bb auto-review disable [--global \| --project <id>]` | Turn it off, same scoping |

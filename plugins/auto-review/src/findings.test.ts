@@ -1,26 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import {
   emptyStore,
-  findingsKey,
   FALSE_POSITIVE_PROMPT_WINDOW_MS,
-  isThreadNotFound,
   MAX_CHAINS,
   MAX_INCIDENTS,
   MAX_PROMPT_FINDINGS,
-  mergeReport,
-  openFindingsForPrompt,
-  readFindings,
-  recordUnreported,
   reportedFindingSchema,
   reviewReportSchema,
-  summarizeReview,
-  withUnreportedOutcome,
-  writeFindings,
   type FindingsStore,
   type ReportedFinding,
   type ReviewReport,
-} from "./findings.js";
+} from "./findings-schema.js";
+import { mergeReport, openFindingsForPrompt, summarizeReview, withUnreportedOutcome } from "./findings.js";
 
 const T0 = 1_000_000;
 
@@ -98,6 +89,27 @@ describe("mergeReport: chain creation", () => {
     expect(raised.chains["null-deref"]?.severity).toBe("blocker");
   });
 
+  it("counts what was applied: a repeated key once, an ignored re-dismissal not at all", () => {
+    const duplicated = mergeReport(
+      emptyStore(),
+      report([finding({ key: "a" }), finding({ key: "a", status: "fixed" }), finding({ key: "b" })]),
+      1,
+      T0,
+    );
+    expect(duplicated.counts).toEqual({ open: 1, fixed: 1, falsePositive: 0 });
+
+    const before = run(report([finding({ status: "false-positive", reason: "dead code" })]));
+    const repeated = mergeReport(
+      before,
+      report([finding({ status: "false-positive", reason: "Dead code" }), finding({ key: "other" })]),
+      2,
+      T0 + 60_000,
+    );
+    expect(repeated.ignored).toHaveLength(1);
+    expect(repeated.counts).toEqual({ open: 1, fixed: 0, falsePositive: 0 });
+    expect(repeated.store.lastReport?.counts).toEqual(repeated.counts);
+  });
+
   it("takes the later entry when one report repeats a key", () => {
     const store = run(report([finding({ title: "first" }), finding({ title: "second" })]));
     expect(store.chains["null-deref"]).toMatchObject({ title: "second", raisedCount: 1 });
@@ -165,6 +177,51 @@ describe("mergeReport: re-raise", () => {
     })();
     expect(ignored.map((entry) => entry.key)).toEqual(["null-deref"]);
     expect(store.chains["null-deref"]).toMatchObject({ status: "open", reRaised: true, dismissCount: 1 });
+  });
+});
+
+describe("mergeReport: dismissal after a resolution", () => {
+  const reason = "Guarded upstream";
+
+  it("accepts a dismissal with the old reason once the chain was fixed and re-raised", () => {
+    const before = run(
+      report([finding({ status: "false-positive", reason })]),
+      report([finding({ status: "fixed" })]),
+      report([finding()]),
+    );
+    expect(before.chains["null-deref"]).toMatchObject({ status: "open", reRaised: true });
+    const { store, ignored } = mergeReport(
+      before,
+      report([finding({ status: "false-positive", reason })]),
+      4,
+      T0 + 180_000,
+    );
+    expect(ignored).toEqual([]);
+    expect(store.chains["null-deref"]).toMatchObject({
+      status: "false-positive",
+      dismissCount: 2,
+      dismissReason: reason,
+    });
+  });
+
+  it("still ignores the old reason when the chain went false-positive, open, false-positive", () => {
+    const before = run(report([finding({ status: "false-positive", reason })]), report([finding()]));
+    const { store, ignored } = mergeReport(
+      before,
+      report([finding({ status: "false-positive", reason })]),
+      3,
+      T0 + 120_000,
+    );
+    expect(ignored.map((entry) => entry.key)).toEqual(["null-deref"]);
+    expect(store.chains["null-deref"]).toMatchObject({ status: "open", dismissCount: 1 });
+  });
+
+  it("restores the dismissal reason when a later report of the review undoes the fix", () => {
+    const dismissed = run(report([finding({ status: "false-positive", reason })]));
+    const fixed = mergeReport(dismissed, report([finding({ status: "fixed" })]), 2, T0 + 60_000).store;
+    expect(fixed.chains["null-deref"]?.dismissReason).toBeUndefined();
+    const replaced = mergeReport(fixed, report([]), 2, T0 + 90_000).store;
+    expect(replaced.chains["null-deref"]).toMatchObject({ status: "false-positive", dismissReason: reason });
   });
 });
 
@@ -495,6 +552,7 @@ describe("summarizeReview", () => {
       at: null,
       openCount: 0,
       reRaisedCount: 0,
+      omittedFromPrompt: 0,
       lastIncident: null,
     });
     const store = run(report([finding(), finding({ key: "b", status: "fixed" })]), report([finding({ key: "b" })]));
@@ -505,63 +563,25 @@ describe("summarizeReview", () => {
       reRaisedCount: 1,
     });
   });
-});
 
-describe("isThreadNotFound", () => {
-  it("is true only for a definite not-found", () => {
-    expect(isThreadNotFound(new Error("thread thr_1 not found"))).toBe(true);
-    expect(isThreadNotFound({ status: 404 })).toBe(true);
-    expect(isThreadNotFound({ code: "not_found" })).toBe(true);
-    expect(isThreadNotFound(new Error("connection reset"))).toBe(false);
-    expect(isThreadNotFound(new Error("timeout"))).toBe(false);
-    expect(isThreadNotFound(null)).toBe(false);
-  });
-});
-
-describe("findings store", () => {
-  async function withHost(body: (host: ReturnType<typeof createFakePluginHost>) => Promise<void>) {
-    const host = createFakePluginHost({ pluginId: "auto-review" });
-    try {
-      await body(host);
-    } finally {
-      await host.harness.dispose();
-    }
-  }
-
-  it("reads an empty store when none exists", async () => {
-    await withHost(async (host) => {
-      expect(await readFindings(host.bb, "thr_1")).toEqual(emptyStore());
-    });
+  it("has no time while a review is pending, so the previous review's time is not shown", () => {
+    const store = run(report([finding()]));
+    expect(summarizeReview(store, false).at).toBe(T0);
+    expect(summarizeReview(store, true)).toMatchObject({ status: "pending", at: null, openCount: 1 });
   });
 
-  it("round-trips, and publishes to the thread's channel on every write", async () => {
-    await withHost(async (host) => {
-      const store = run(report([finding()]));
-      await writeFindings(host.bb, "thr_1", store);
-      expect(await readFindings(host.bb, "thr_1")).toEqual(store);
-      expect(host.harness.realtimeSignals.map((signal) => signal.channel)).toEqual([
-        "auto-review:thread:thr_1",
-      ]);
-    });
+  it("counts the open findings the next prompt cannot list", () => {
+    const findings = Array.from({ length: MAX_PROMPT_FINDINGS + 3 }, (_, index) => finding({ key: `k${index}` }));
+    expect(summarizeReview(run(report(findings)), false).omittedFromPrompt).toBe(3);
   });
 
-  it("resets an unparseable store with a warning", async () => {
-    await withHost(async (host) => {
-      await host.bb.storage.kv.set(findingsKey("thr_1"), { chains: "nope" });
-      expect(await readFindings(host.bb, "thr_1")).toEqual(emptyStore());
-      expect(host.harness.logEntries.some((entry) => entry.level === "warn")).toBe(true);
-    });
-  });
-
-  it("does not overwrite a report already recorded for the same review", async () => {
-    await withHost(async (host) => {
-      await writeFindings(host.bb, "thr_1", run(report([finding()], { outcome: "merged" })));
-      await recordUnreported(host.bb, "thr_1", { reviewId: 1, outcome: "not-reported", summary: "s" });
-      expect((await readFindings(host.bb, "thr_1")).lastReport?.outcome).toBe("merged");
-      await recordUnreported(host.bb, "thr_1", { reviewId: 2, outcome: "stopped", summary: "s" });
-      const after = await readFindings(host.bb, "thr_1");
-      expect(after.lastReport).toMatchObject({ reviewId: 2, outcome: "stopped" });
-      expect(Object.keys(after.chains)).toEqual(["null-deref"]);
-    });
+  it("does not count recent false positives, which only ever fill what the open ones leave", () => {
+    const open = [finding({ key: "o1" }), finding({ key: "o2" }), finding({ key: "o3" })];
+    const dismissed = Array.from({ length: MAX_PROMPT_FINDINGS + 5 }, (_, index) =>
+      finding({ key: `fp${index}`, status: "false-positive", reason: "guarded" }),
+    );
+    const store = run(report([...open, ...dismissed]));
+    expect(openFindingsForPrompt(store, T0).omitted).toBeGreaterThan(0);
+    expect(summarizeReview(store, false)).toMatchObject({ openCount: 3, omittedFromPrompt: 0 });
   });
 });

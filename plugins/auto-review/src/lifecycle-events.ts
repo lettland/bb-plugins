@@ -1,6 +1,6 @@
 import type { ReviewContext } from "./context.js";
 import { removeDeferral } from "./deferrals.js";
-import { deleteFindings } from "./findings.js";
+import { deleteFindings } from "./findings-store.js";
 import { recordUnfinishedReview } from "./review-outcome.js";
 import { releaseDeferred, sweepDeferrals, sweepOrphanFindings } from "./release.js";
 import { removeReview } from "./reviews.js";
@@ -53,8 +53,19 @@ async function onThreadGone(
 export function registerLifecycleEvents(ctx: ReviewContext): void {
   const { bb } = ctx;
   bb.background.schedule("sweep-deferrals", "*/5 * * * *", async () => {
-    await sweepDeferrals(ctx);
-    await sweepOrphanFindings(ctx);
+    // Independent backstops: one failing must not skip the other.
+    for (const [name, sweep] of [
+      ["deferrals", sweepDeferrals],
+      ["orphan findings", sweepOrphanFindings],
+    ] as const) {
+      try {
+        await sweep(ctx);
+      } catch (error) {
+        bb.log.warn(
+          `auto-review: the ${name} sweep failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
   });
 
   // A failed, archived or deleted thread may have been the review a turn was
