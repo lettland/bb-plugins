@@ -447,7 +447,7 @@ describe("auto-review cli: skip / unskip (removed)", () => {
   it("is not listed in the usage text", async () => {
     await withHost({}, async (host) => {
       const result = await host.run(["frobnicate"]);
-      expect(result.stderr).toContain("<status|show|enable|disable|auto-approve|reset>");
+      expect(result.stderr).toContain("<status|show|enable|disable|auto-approve|findings|reset>");
     });
   });
 });
@@ -470,6 +470,51 @@ describe("auto-review cli: reset", () => {
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe(`reset ${THREAD_ID} (cleared awaiting-review latch).\n`);
       expect(host.metadataFor(THREAD_ID)).toEqual({ phase: "idle", unrelated: "kept" });
+    });
+  });
+
+  it("records a review it cuts off as stopped, leaves the findings alone and clears the delivery keys", async () => {
+    await withHost({}, async (host) => {
+      const chains = {
+        a: {
+          key: "a",
+          title: "t",
+          file: "a.ts",
+          severity: "low",
+          status: "open",
+          firstSeenAt: 1,
+          lastSeenAt: 1,
+          raisedCount: 1,
+          dismissCount: 0,
+          reRaised: false,
+          lastReviewId: 1,
+        },
+      };
+      await host.kv.set(`findings:${THREAD_ID}`, { chains, incidents: [] });
+      Object.assign(host.metadataFor(THREAD_ID), {
+        phase: "awaiting-review",
+        dispatchedAt: 1,
+        reviewDeliveredAt: 5,
+        reviewDeliveredSeq: 9,
+      });
+      await host.run(["reset", THREAD_ID]);
+      expect(host.metadataFor(THREAD_ID)).toEqual({ phase: "idle" });
+      const stored = (await host.kv.get(`findings:${THREAD_ID}`)) as {
+        chains: unknown;
+        lastReport: { reviewId: number; outcome: string };
+        incidents: unknown[];
+      };
+      expect(stored.lastReport).toMatchObject({ reviewId: 5, outcome: "stopped" });
+      expect(stored.chains).toEqual(chains);
+      expect(stored.incidents).toEqual([]);
+    });
+  });
+
+  it("records nothing when the reset thread was not mid-review", async () => {
+    await withHost({}, async (host) => {
+      Object.assign(host.metadataFor(THREAD_ID), { phase: "idle" });
+      await host.run(["reset", THREAD_ID]);
+      expect(await host.kv.list("findings:")).toEqual([]);
     });
   });
 
@@ -681,7 +726,8 @@ describe("auto-review cli: status", () => {
           "autoApprovePlans: false\n" +
           "planGate: false\n" +
           "phase: idle\n" +
-          "lastFire: never\n",
+          "lastFire: never\n" +
+          "reviewResult: none\n",
       );
     });
   });
@@ -711,6 +757,10 @@ describe("auto-review cli: status", () => {
           deferredSince: null,
           heldBy: null,
           lastFire: null,
+          reviewResult: { status: "none", at: null, summary: null },
+          openFindings: 0,
+          reRaisedFindings: 0,
+          lastIncident: null,
         });
       },
     );
@@ -955,6 +1005,194 @@ describe("auto-review cli: show", () => {
         projectId: PROJECT_ID,
         projectOverride: { enabled: false },
         effective: { enabled: false },
+      });
+    });
+  });
+});
+
+describe("auto-review cli: findings", () => {
+  const chain = (key: string, overrides: Record<string, unknown> = {}) => ({
+    key,
+    title: `title of ${key}`,
+    file: "src/a.ts",
+    line: 4,
+    severity: "medium",
+    status: "open",
+    firstSeenAt: 1,
+    lastSeenAt: 2,
+    raisedCount: 1,
+    dismissCount: 0,
+    reRaised: false,
+    lastReviewId: 1,
+    ...overrides,
+  });
+  const store = {
+    chains: {
+      calm: chain("calm", { status: "fixed" }),
+      risky: chain("risky", { severity: "high", status: "false-positive", dismissCount: 2, reason: "r" }),
+      back: chain("back", { reRaised: true }),
+    },
+    lastReport: {
+      reviewId: 1,
+      at: Date.UTC(2026, 0, 2),
+      outcome: "committed",
+      summary: "all done",
+      counts: { open: 1, fixed: 1, falsePositive: 1 },
+    },
+    incidents: [{ at: Date.UTC(2026, 0, 3), kind: "not-reported", detail: "no report" }],
+  };
+
+  it("lists the chains open first, flags re-raised and repeatedly dismissed ones, and shows incidents", async () => {
+    await withHost({}, async (host) => {
+      await host.kv.set(`findings:${THREAD_ID}`, store);
+      const result = await host.run(["findings"], THREAD_ID);
+      expect(result.exitCode).toBe(0);
+      const text = result.stdout ?? "";
+      expect(text).toContain("lastReport: committed at 2026-01-02T00:00:00.000Z — all done");
+      expect(text).toContain("open: 1");
+      expect(text.indexOf("back [medium] open")).toBeLessThan(text.indexOf("calm [medium] fixed"));
+      expect(text).toContain("re-raised");
+      expect(text).toContain("dismissed 2x — worth a second look");
+      expect(text).toContain("not-reported: no report");
+    });
+  });
+
+  it("prints the store as JSON for an explicit thread id", async () => {
+    await withHost({}, async (host) => {
+      await host.kv.set(`findings:${OTHER_ID}`, store);
+      const result = await host.run(["findings", OTHER_ID, "--json"]);
+      expect(parse<{ chains: Array<{ key: string }>; lastReport: { outcome: string } }>(result.stdout)).toMatchObject({
+        threadId: OTHER_ID,
+        lastReport: { outcome: "committed" },
+        omittedFromPrompt: 0,
+      });
+      expect(parse<{ chains: Array<{ key: string }> }>(result.stdout).chains.map((c) => c.key)).toEqual([
+        "back",
+        "calm",
+        "risky",
+      ]);
+    });
+  });
+
+  it("says when open chains are past what the next review lists", async () => {
+    await withHost({}, async (host) => {
+      const chains = Object.fromEntries(
+        Array.from({ length: 17 }, (_, index) => [`k${index}`, chain(`k${index}`)]),
+      );
+      await host.kv.set(`findings:${THREAD_ID}`, { chains, incidents: [] });
+      const result = await host.run(["findings"], THREAD_ID);
+      expect(result.stdout).toContain("open: 17 (the next review lists the first 15; 2 more are not listed)");
+    });
+  });
+
+  it("needs a thread id outside a thread, and rejects an unknown one", async () => {
+    await withHost({}, async (host) => {
+      expect((await host.run(["findings"])).exitCode).toBe(2);
+      const missing = await host.run(["findings", "ghost"]);
+      expect(missing.exitCode).toBe(1);
+      expect(missing.stderr).toBe("Thread ghost not found or unavailable.\n");
+    });
+  });
+
+  describe("--clear", () => {
+    it("is refused inside a bb thread, even with an explicit id, and drops nothing", async () => {
+      await withHost({}, async (host) => {
+        await host.kv.set(`findings:${THREAD_ID}`, store);
+        const result = await host.run(["findings", THREAD_ID, "--clear"], THREAD_ID);
+        expect(result.exitCode).toBe(2);
+        expect(result.stderr).toContain("only allowed from a terminal outside a bb thread");
+        expect(await host.kv.get(`findings:${THREAD_ID}`)).toEqual(store);
+      });
+    });
+
+    it("needs an explicit thread id", async () => {
+      await withHost({}, async (host) => {
+        await host.kv.set(`findings:${THREAD_ID}`, store);
+        const result = await host.run(["findings", "--clear"]);
+        expect(result.exitCode).toBe(2);
+        expect(result.stderr).toContain("needs an explicit thread id");
+        expect(await host.kv.get(`findings:${THREAD_ID}`)).toEqual(store);
+      });
+    });
+
+    it("drops the chains and keeps the last report and incidents", async () => {
+      await withHost({}, async (host) => {
+        await host.kv.set(`findings:${THREAD_ID}`, store);
+        const result = await host.run(["findings", THREAD_ID, "--clear"]);
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toBe(`Cleared 3 finding(s) for ${THREAD_ID}.\n`);
+        expect(await host.kv.get(`findings:${THREAD_ID}`)).toEqual({ ...store, chains: {} });
+      });
+    });
+
+    it("does not swallow the thread id that follows it", async () => {
+      await withHost({}, async (host) => {
+        await host.kv.set(`findings:${THREAD_ID}`, store);
+        const result = await host.run(["findings", "--clear", THREAD_ID, "--json"]);
+        expect(parse(result.stdout)).toMatchObject({ ok: true, cleared: 3, threadId: THREAD_ID });
+      });
+    });
+  });
+});
+
+describe("auto-review cli: status — review result", () => {
+  const report = {
+    reviewId: 1,
+    at: Date.UTC(2026, 0, 2, 3, 4, 5),
+    outcome: "merged",
+    summary: "shipped",
+    counts: { open: 0, fixed: 0, falsePositive: 0 },
+  };
+  const open = (key: string, reRaised: boolean) => ({
+    key,
+    title: key,
+    file: "a.ts",
+    severity: "low",
+    status: "open",
+    firstSeenAt: 1,
+    lastSeenAt: 1,
+    raisedCount: 1,
+    dismissCount: 0,
+    reRaised,
+    lastReviewId: 1,
+  });
+
+  it("prints the outcome, its time, the open counts and the last incident", async () => {
+    await withHost({}, async (host) => {
+      await host.kv.set(`findings:${THREAD_ID}`, {
+        chains: { a: open("a", true), b: open("b", false) },
+        lastReport: report,
+        incidents: [{ at: Date.UTC(2026, 0, 3), kind: "send-failed", detail: "boom" }],
+      });
+      const text = (await host.run(["status"], THREAD_ID)).stdout ?? "";
+      expect(text).toContain("reviewResult: merged at 2026-01-02T03:04:05.000Z (2 open, 1 re-raised)\n");
+      expect(text).toContain("lastIncident: send-failed at 2026-01-03T00:00:00.000Z: boom\n");
+    });
+  });
+
+  it("adds the same to --json", async () => {
+    await withHost({}, async (host) => {
+      await host.kv.set(`findings:${THREAD_ID}`, {
+        chains: { a: open("a", true) },
+        lastReport: report,
+        incidents: [{ at: 7, kind: "not-reported", detail: "x" }],
+      });
+      expect(parse(((await host.run(["status", "--json"], THREAD_ID)).stdout))).toMatchObject({
+        reviewResult: { status: "merged", at: report.at, summary: "shipped" },
+        openFindings: 1,
+        reRaisedFindings: 1,
+        lastIncident: { at: 7, kind: "not-reported", detail: "x" },
+      });
+    });
+  });
+
+  it.each(["pending-dispatch", "awaiting-review"])("reports pending while the phase is %s", async (phase) => {
+    await withHost({}, async (host) => {
+      await host.kv.set(`findings:${THREAD_ID}`, { chains: {}, lastReport: report, incidents: [] });
+      host.metadataFor(THREAD_ID).phase = phase;
+      expect((await host.run(["status"], THREAD_ID)).stdout).toContain("reviewResult: pending at ");
+      expect(parse(((await host.run(["status", "--json"], THREAD_ID)).stdout))).toMatchObject({
+        reviewResult: { status: "pending" },
       });
     });
   });

@@ -28,6 +28,7 @@ import {
 } from "./detect.js";
 import { dispatchReview } from "./dispatch.js";
 import { isBusyStatus, selfIsWorktree } from "./gate.js";
+import { deliveredPatch, recordUnfinishedReview } from "./review-outcome.js";
 import { removeReview } from "./reviews.js";
 import {
   isStale,
@@ -295,6 +296,7 @@ export async function handleIdle(ctx: ReviewContext, thread: GateThreadLike): Pr
   const { bb } = ctx;
   const state = await readState(bb, thread.id);
   if (state.phase === "awaiting-review") {
+    await recordUnfinishedReview(bb, thread.id, state, "idle");
     const { set, remove } = resetToIdlePatch();
     await writeState(bb, thread.id, set, remove);
     await removeReview(bb, thread.id);
@@ -309,9 +311,13 @@ export async function handleIdle(ctx: ReviewContext, thread: GateThreadLike): Pr
         await writeState(bb, thread.id, { dispatchedAt: Date.now() });
         return;
       }
-      await writeState(bb, thread.id, { phase: "awaiting-review" }, [
-        "pendingEntryId",
-      ]);
+      // The row is gone, so core dispatched it and the review reached the agent.
+      await writeState(
+        bb,
+        thread.id,
+        { phase: "awaiting-review", ...(await deliveredPatch(bb, thread.id)) },
+        ["pendingEntryId"],
+      );
     }
     return;
   }

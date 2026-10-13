@@ -6,6 +6,7 @@ export {
   captureSinceSeq,
   siblingAuthoredPaths,
   stoppedByUser,
+  tryCaptureSinceSeq,
 } from "./detect-timeline.js";
 export { runningChildIds } from "./detect-children.js";
 export {

@@ -19,6 +19,8 @@ import {
 function fakeBb(raw: unknown) {
   const warnings: string[] = [];
   const updates: unknown[] = [];
+  const published: Array<{ channel: string; payload: unknown }> = [];
+  let publishThrows = false;
   const bb = {
     sdk: {
       threads: {
@@ -34,8 +36,16 @@ function fakeBb(raw: unknown) {
         warnings.push(message);
       },
     },
+    realtime: {
+      publish: (channel: string, payload: unknown) => {
+        if (publishThrows) {
+          throw new Error("realtime down");
+        }
+        published.push({ channel, payload });
+      },
+    },
   } as unknown as BbPluginApi;
-  return { bb, warnings, updates };
+  return { bb, warnings, updates, published, breakPublish: () => (publishThrows = true) };
 }
 
 describe("threadStateSchema", () => {
@@ -100,6 +110,8 @@ describe("resetToIdlePatch", () => {
       "deferredSince",
       "turnDecided",
       "heldBy",
+      "reviewDeliveredAt",
+      "reviewDeliveredSeq",
     ]);
   });
 });
@@ -275,5 +287,27 @@ describe("writeState", () => {
     const { bb, updates } = fakeBb({});
     await writeState(bb, "t", {}, ["skip"]);
     expect(updates).toEqual([{ threadId: "t", set: {}, remove: ["skip"] }]);
+  });
+
+  it("publishes to the thread's realtime channel when the phase is written", async () => {
+    const { bb, published } = fakeBb({});
+    await writeState(bb, "t", { phase: "idle" }, ["turnStart"]);
+    expect(published).toEqual([{ channel: "auto-review:thread:t", payload: {} }]);
+  });
+
+  it("does not publish for a write that leaves the phase alone", async () => {
+    const { bb, published } = fakeBb({});
+    await writeState(bb, "t", { turnDecided: true });
+    await writeState(bb, "t", {}, ["turnStart"]);
+    expect(published).toEqual([]);
+  });
+
+  it("logs and swallows a failed publish instead of failing the write", async () => {
+    const { bb, warnings, updates, breakPublish } = fakeBb({});
+    breakPublish();
+    await expect(writeState(bb, "t", { phase: "awaiting-review" })).resolves.toBeUndefined();
+    expect(updates).toHaveLength(1);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("could not publish the review update for t");
   });
 });

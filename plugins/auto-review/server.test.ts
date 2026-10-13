@@ -63,6 +63,8 @@ interface HostOptions {
   envThreads?: EnvThread[];
   authoringThreads?: string[];
   getThrowsFor?: string[];
+  /** Threads whose `get` fails the way a missing thread does. */
+  notFoundFor?: string[];
   resolveThrows?: boolean;
   /** Resolving an `allow_once` (only) fails — the global `resolveThrows` would also break the deny. */
   resolveAllowThrows?: boolean;
@@ -236,6 +238,9 @@ function createHost(options: HostOptions = {}) {
       get: async (args: { threadId: string }) => {
         if (options.getThrowsFor?.includes(args.threadId) === true) {
           throw new Error(`thread ${args.threadId} is gone`);
+        }
+        if (options.notFoundFor?.includes(args.threadId) === true) {
+          throw new Error(`thread ${args.threadId} not found`);
         }
         const listed = envThreads.find((entry) => entry.id === args.threadId);
         return {
@@ -2525,7 +2530,7 @@ describe("auto-review plugin", () => {
     // Claude Code's ExitPlanMode routes to the native gate — no PresentPlan
     // tool there, or one plan could be reviewed by both paths.
     const claudeCode = await resolve(null, null, "claude-code");
-    expect(claudeCode.tools).toEqual([]);
+    expect(claudeCode.tools.map((tool) => tool.name)).toEqual(["ReportReview"]);
     expect(claudeCode.skills).toEqual(["auto-review"]);
     expect(claudeCode.instructions).toBe(PLAN_FIRST_INSTRUCTIONS);
 
@@ -2533,12 +2538,13 @@ describe("auto-review plugin", () => {
     // they get PresentPlan plus its own instructions instead.
     for (const providerId of ["acp-claude-work", "codex"]) {
       const resolved = await resolve(null, null, providerId);
-      expect(resolved.tools.map((tool) => tool.name)).toEqual(["PresentPlan"]);
+      expect(resolved.tools.map((tool) => tool.name).sort()).toEqual(["PresentPlan", "ReportReview"]);
       expect(resolved.skills).toEqual(["auto-review"]);
       expect(resolved.instructions).toBe(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN);
     }
     // The plan gate never serves these, so they keep the skill but get no
     // tool or instruction.
+    // A child or plugin-spawned thread gets neither tool.
     for (const [parentThreadId, pluginId] of [["parent-1", null], [null, "side-chat"]] as const) {
       const resolved = await resolve(parentThreadId, pluginId);
       expect(resolved.tools).toEqual([]);
@@ -2547,9 +2553,15 @@ describe("auto-review plugin", () => {
     }
 
     await host.harness.setSettings({ enabled: false });
-    const disabled = await resolve(null, null, "acp-claude-work");
-    expect(disabled.tools).toEqual([]);
-    expect(disabled.instructions).toBeNull();
+    // With the global switch off no plan-first tool or instruction is offered,
+    // but a project can still enable review, so ReportReview stays.
+    for (const providerId of ["acp-claude-work", "claude-code"]) {
+      const disabled = await resolve(null, null, providerId);
+      expect(disabled.tools.map((tool) => tool.name)).toEqual(["ReportReview"]);
+      expect(disabled.instructions).toBeNull();
+    }
+    const disabledChild = await resolve("parent-1", null);
+    expect(disabledChild.tools).toEqual([]);
     await host.harness.dispose();
   });
 
@@ -2624,6 +2636,20 @@ describe("auto-review plugin", () => {
       // Only the gate's own tools completed: the agent never worked on the review.
       host.completeItem({ seq: 101, item: { type: "toolCall", tool: "ExitPlanMode" } });
       host.completeItem({ seq: 102, item: { type: "toolCall", tool: "EnterPlanMode" } });
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+      await host.harness.dispose();
+    });
+
+    it("never counts a ReportReview call as work on the review, bridged or not", async () => {
+      const host = await hostWith();
+      await holdAndDispatch(host);
+      host.completeItem({ seq: 101, item: { type: "toolCall", tool: "ReportReview" } });
+      host.completeItem({
+        seq: 102,
+        item: { type: "toolCall", tool: "ReportReview", server: "bb-bridge" },
+      });
       await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
       expect(host.resolutions).toEqual([DENY]);
       expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
@@ -3005,6 +3031,18 @@ describe("auto-review plugin", () => {
         await host.harness.dispose();
       });
 
+      it("never counts a ReportReview call in between as work on the review", async () => {
+        const host = await armed();
+        host.completeItem({ seq: 101, item: { type: "toolCall", tool: "ReportReview" } });
+        host.completeItem({
+          seq: 102,
+          item: { type: "toolCall", tool: "ReportReview", server: "bb-bridge" },
+        });
+        const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
+        expect(result).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+        await host.harness.dispose();
+      });
+
       it("approves automatically once a tool call completed in between", async () => {
         const host = await armed();
         host.completeItem({ seq: 101, item: { type: "toolCall", tool: "Read" } });
@@ -3337,5 +3375,328 @@ describe("auto-review plugin", () => {
     );
     expect(await lastFireOf(host)).toMatchObject({ reason: "send-failed" });
     await host.harness.dispose();
+  });
+});
+
+describe("auto-review plugin: review reports", () => {
+  const ctx = { threadId: THREAD_ID, projectId: "project-1" };
+  const finding = (overrides: Record<string, unknown> = {}) => ({
+    key: "null-deref",
+    title: "Null dereference",
+    file: "src/a.ts",
+    line: 3,
+    severity: "high",
+    status: "open",
+    ...overrides,
+  });
+  const REPORT = { outcome: "committed", summary: "done", findings: [finding()] };
+
+  const report = (host: Host, input: unknown = REPORT) =>
+    host.harness.callAgentTool("ReportReview", input, ctx);
+
+  const rejected = (result: Awaited<ReturnType<typeof report>>) =>
+    typeof result !== "string" && result.isError === true;
+
+  async function store(host: Host, id: string = THREAD_ID) {
+    return ((await host.bb.storage.kv.get(`findings:${id}`)) ?? null) as {
+      chains: Record<string, Record<string, unknown>>;
+      lastReport?: { reviewId: number; outcome: string; summary: string };
+      incidents: Array<{ kind: string; detail: string }>;
+    } | null;
+  }
+
+  /** Review ids are timestamps, so two reviews in one test must not land in the same millisecond. */
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 3));
+
+  async function reviewing(options: HostOptions = {}) {
+    const host = createHost(options);
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    return host;
+  }
+
+  describe("acceptance after each delivery path", () => {
+    it("accepts after an immediate send, which stamps the delivery id and cursor", async () => {
+      const host = await reviewing();
+      expect(host.metadata.phase).toBe("awaiting-review");
+      expect(host.metadata.reviewDeliveredAt).toEqual(expect.any(Number));
+      expect(host.metadata.reviewDeliveredSeq).toBe(100);
+      expect(rejected(await report(host))).toBe(false);
+      expect((await store(host))?.lastReport).toMatchObject({
+        reviewId: host.metadata.reviewDeliveredAt,
+        outcome: "committed",
+      });
+      await host.harness.dispose();
+    });
+
+    it("rejects while the review is still queued, then accepts once message.dispatched delivers it", async () => {
+      const host = await reviewing({ sendDelivery: "queued", queuedRows: [{ id: "qm-1" }] });
+      expect(host.metadata.phase).toBe("pending-dispatch");
+      expect(host.metadata.reviewDeliveredAt).toBeUndefined();
+      expect(rejected(await report(host))).toBe(true);
+      expect(await store(host)).toBeNull();
+
+      await host.harness.behavior.emitThreadEvent("message.dispatched", { entry: queueEntry() });
+      expect(host.metadata.phase).toBe("awaiting-review");
+      expect(host.metadata.reviewDeliveredAt).toEqual(expect.any(Number));
+      expect(host.metadata.reviewDeliveredSeq).toBe(100);
+      expect(rejected(await report(host))).toBe(false);
+      await host.harness.dispose();
+    });
+
+    it("accepts after the idle-time promotion of a dispatched row whose event was missed", async () => {
+      const host = await reviewing({ sendDelivery: "queued", queuedRows: [] });
+      host.metadata.dispatchedAt = Date.now() - STALE_WINDOW_MS - 1_000;
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      expect(host.metadata.reviewDeliveredAt).toEqual(expect.any(Number));
+      expect(host.metadata.pendingEntryId).toBeUndefined();
+      expect(rejected(await report(host))).toBe(false);
+      await host.harness.dispose();
+    });
+
+    it("promotes and accepts inside the tool when the dispatched row is gone but no event arrived", async () => {
+      const host = await reviewing({ sendDelivery: "queued", queuedRows: [] });
+      expect(host.metadata.phase).toBe("pending-dispatch");
+      expect(rejected(await report(host))).toBe(false);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      expect(host.metadata.pendingEntryId).toBeUndefined();
+      expect(host.metadata.reviewDeliveredAt).toEqual(expect.any(Number));
+      expect((await store(host))?.lastReport).toMatchObject({ outcome: "committed" });
+      await host.harness.dispose();
+    });
+
+    it("rejects a report with no review in progress", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      expect(rejected(await report(host))).toBe(true);
+      await emitActive(host);
+      expect(rejected(await report(host))).toBe(true);
+      expect(await store(host)).toBeNull();
+      await host.harness.dispose();
+    });
+  });
+
+  describe("outcomes", () => {
+    it("records no incident when the report arrives before idle", async () => {
+      const host = await reviewing();
+      await report(host);
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("idle");
+      expect(host.metadata.reviewDeliveredAt).toBeUndefined();
+      const saved = await store(host);
+      expect(saved?.lastReport?.outcome).toBe("committed");
+      expect(saved?.incidents).toEqual([]);
+      await host.harness.dispose();
+    });
+
+    it("records not-reported with an incident and the restart hint when idle comes without a report", async () => {
+      const host = await reviewing();
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("idle");
+      const saved = await store(host);
+      expect(saved?.lastReport).toMatchObject({ outcome: "not-reported" });
+      expect(saved?.incidents).toHaveLength(1);
+      expect(saved?.incidents[0]).toMatchObject({ kind: "not-reported" });
+      expect(saved?.incidents[0]?.detail).toContain("restart it");
+      await host.harness.dispose();
+    });
+
+    it("records not-reported for a thread latched before the upgrade (no delivery id)", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await startReview(host, THREAD_ID);
+      await emitIdle(host);
+      expect((await store(host))?.lastReport).toMatchObject({ outcome: "not-reported" });
+      await host.harness.dispose();
+    });
+
+    it("records stopped, with no incident, when the user stopped the review turn", async () => {
+      const host = await reviewing();
+      host.interrupt({ seq: 150, reason: "manual-stop" });
+      await emitIdle(host);
+      const saved = await store(host);
+      expect(saved?.lastReport).toMatchObject({ outcome: "stopped" });
+      expect(saved?.incidents).toEqual([]);
+      await host.harness.dispose();
+    });
+
+    it("does not count a stop that happened before the review was delivered", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await emitActive(host);
+      host.setMaxSeq(200);
+      host.interrupt({ seq: 150, reason: "host-daemon-restarted" });
+      await emitIdle(host);
+      await emitIdle(host);
+      expect((await store(host))?.lastReport).toMatchObject({ outcome: "not-reported" });
+      await host.harness.dispose();
+    });
+
+    it("records stopped when a queued review is cancelled before it ran", async () => {
+      const host = await reviewing({ sendDelivery: "queued" });
+      await host.harness.behavior.emitThreadEvent("message.cancelled", { entry: queueEntry() });
+      const saved = await store(host);
+      expect(saved?.lastReport).toMatchObject({ outcome: "stopped", reviewId: expect.any(Number) });
+      expect(saved?.incidents).toEqual([]);
+      expect(host.metadata.phase).toBe("idle");
+      await host.harness.dispose();
+    });
+
+    it("records unavailable and a send-failed incident when the review cannot be sent", async () => {
+      const host = createHost({ sendThrows: true });
+      await plugin(host.bb);
+      await emitActive(host);
+      await emitIdle(host);
+      const saved = await store(host);
+      expect(saved?.lastReport).toMatchObject({ outcome: "unavailable" });
+      expect(saved?.incidents).toEqual([{ at: expect.any(Number), kind: "send-failed", detail: "send failed" }]);
+      expect(host.metadata.phase).toBe("idle");
+      await host.harness.dispose();
+    });
+
+    it("shows the outcome in status and keeps it pending while a later review runs", async () => {
+      const host = await reviewing();
+      await report(host, { outcome: "merged", summary: "ok", findings: [finding()] });
+      await emitIdle(host);
+      const done = JSON.parse((await host.harness.runCli(["status", THREAD_ID, "--json"])).stdout);
+      expect(done).toMatchObject({ reviewResult: { status: "merged" }, openFindings: 1 });
+      await emitActive(host);
+      host.setWorkingTree([{ path: "src/b.ts" }]);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts")]);
+      await emitIdle(host);
+      const pending = JSON.parse((await host.harness.runCli(["status", THREAD_ID, "--json"])).stdout);
+      expect(pending.reviewResult.status).toBe("pending");
+      await host.harness.dispose();
+    });
+  });
+
+  describe("mid-review resets", () => {
+    it("records not-reported on thread.archived and keeps the findings", async () => {
+      const host = await reviewing();
+      await emitIdle(host);
+      await tick();
+      await emitActive(host);
+      host.setWorkingTree([{ path: "src/b.ts" }]);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts")]);
+      // First review ended unreported; the second one is in flight when the thread is archived.
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      await host.harness.behavior.emitThreadEvent("thread.archived", { thread: thread() } as never);
+      const saved = await store(host);
+      expect(saved?.lastReport).toMatchObject({ outcome: "not-reported" });
+      expect(saved?.incidents).toHaveLength(2);
+      expect(host.metadata.phase).toBe("idle");
+      await host.harness.dispose();
+    });
+
+    it("records stopped on bb auto-review reset and rejects a report after it", async () => {
+      const host = await reviewing();
+      const reviewId = host.metadata.reviewDeliveredAt;
+      expect((await host.harness.runCli(["reset", THREAD_ID])).exitCode).toBe(0);
+      expect((await store(host))?.lastReport).toMatchObject({ outcome: "stopped", reviewId });
+      expect(host.metadata.reviewDeliveredAt).toBeUndefined();
+      expect(rejected(await report(host))).toBe(true);
+      expect((await store(host))?.lastReport?.outcome).toBe("stopped");
+      await host.harness.dispose();
+    });
+  });
+
+  describe("chains across reviews", () => {
+    it("tells the next review what is still open, and marks a repeat as re-raised", async () => {
+      const host = await reviewing();
+      await report(host, { outcome: "committed", summary: "s", findings: [finding(), finding({ key: "gone", status: "fixed" })] });
+      await emitIdle(host);
+
+      await emitActive(host);
+      host.setWorkingTree([{ path: "src/b.ts" }]);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts")]);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(2);
+      const second = promptText(host, 1);
+      expect(second).toContain("null-deref | high | open | src/a.ts:3 | Null dereference");
+      expect(second).not.toContain("gone |");
+
+      await report(host, { outcome: "committed", summary: "s", findings: [finding({ key: "gone" })] });
+      expect((await store(host))?.chains.gone).toMatchObject({ status: "open", reRaised: true });
+      await host.harness.dispose();
+    });
+  });
+
+  describe("thread deletion and orphans", () => {
+    const seed = {
+      chains: {},
+      lastReport: { reviewId: 1, at: 1, outcome: "merged", summary: "s", counts: { open: 0, fixed: 0, falsePositive: 0 } },
+      incidents: [],
+    };
+
+    it("deletes the findings on thread.deleted but keeps them on archive and failure", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      for (const event of ["thread.archived", "thread.failed"] as const) {
+        await host.bb.storage.kv.set(`findings:${THREAD_ID}`, seed);
+        await host.harness.behavior.emitThreadEvent(event, { thread: thread() } as never);
+        expect(await store(host)).not.toBeNull();
+      }
+      await host.harness.behavior.emitThreadEvent("thread.deleted", { thread: thread() } as never);
+      expect(await store(host)).toBeNull();
+      await host.harness.dispose();
+    });
+
+    it("deletes a deleted thread's findings without recording a not-reported outcome first", async () => {
+      const host = await reviewing();
+      await host.harness.behavior.emitThreadEvent("thread.deleted", { thread: thread() } as never);
+      expect(await host.bb.storage.kv.list("findings:")).toEqual([]);
+      await host.harness.dispose();
+    });
+
+    it("sweeps findings whose thread is definitely gone, and keeps them on a transient error", async () => {
+      const host = createHost({ notFoundFor: ["ghost"], getThrowsFor: ["flaky"] });
+      await plugin(host.bb);
+      for (const id of ["ghost", "flaky", SIBLING_ID, "soft-deleted"]) {
+        await host.bb.storage.kv.set(`findings:${id}`, seed);
+      }
+      host.setEnvThreads([
+        { id: THREAD_ID, status: "idle" },
+        { id: SIBLING_ID, status: "idle" },
+        { id: "soft-deleted", status: "idle", deletedAt: 5 },
+      ]);
+      await host.harness.runSchedule("sweep-deferrals");
+      expect((await host.bb.storage.kv.list("findings:")).sort()).toEqual([
+        "findings:flaky",
+        `findings:${SIBLING_ID}`,
+      ]);
+      expect(host.harness.logEntries.some((entry) => entry.level === "warn" && entry.message.includes("keeping its findings"))).toBe(true);
+      await host.harness.dispose();
+    });
+  });
+
+  describe("realtime", () => {
+    const channel = `auto-review:thread:${THREAD_ID}`;
+    const count = (host: Host) => host.harness.realtimeSignals.filter((signal) => signal.channel === channel).length;
+
+    it("publishes on dispatch, report, idle, cancel and unlatch", async () => {
+      const host = createHost({ sendDelivery: "queued" });
+      await plugin(host.bb);
+      await emitActive(host);
+      const before = count(host);
+      await emitIdle(host);
+      expect(count(host)).toBeGreaterThan(before);
+
+      const beforeCancel = count(host);
+      await host.harness.behavior.emitThreadEvent("message.cancelled", { entry: queueEntry() });
+      expect(count(host)).toBeGreaterThan(beforeCancel);
+
+      const host2 = await reviewing();
+      const beforeReport = count(host2);
+      await report(host2);
+      expect(count(host2)).toBeGreaterThan(beforeReport);
+      const beforeUnlatch = count(host2);
+      await host2.harness.behavior.emitThreadEvent("thread.archived", { thread: thread() } as never);
+      expect(count(host2)).toBeGreaterThan(beforeUnlatch);
+      await host.harness.dispose();
+      await host2.harness.dispose();
+    });
   });
 });

@@ -79,6 +79,17 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   thread context, not a security boundary); the agent mentions that the approval may have
   come from auto-review rather than from the user. A turn that ended since the review was
   delivered (a `turn/completed` event) voids the evidence.
+- The review turn ends by calling the `ReportReview` agent tool (offered to every top-level,
+  non-plugin thread on every provider, whatever the global switch says; inert outside a review)
+  with an outcome (`committed`, `merged`, `uncommitted`, `blocked`, `no-changes`), a summary and
+  structured findings. Findings persist per thread as chains with stable keys (plugin KV,
+  `findings:<thread id>`): the next review is told what is still open, a repeat is marked
+  re-raised (severity keeps its maximum), and dismissing a finding as a false positive a second
+  time needs a new reason. The last report of a review replaces earlier ones. Outcomes are
+  agent-reported, not verified against git; a review that ran but never reported is recorded as
+  `not-reported`, one the user stopped or cancelled as `stopped`, one that could not be sent as
+  `unavailable` — none of these ever reads as a pass. A session started before the plugin
+  update does not have the tool until restarted, so its reviews show "Review not reported".
 - Ships enabled (opt-out). Turn it off globally or per project with `bb auto-review`;
   there is no per-thread skip.
 
@@ -87,7 +98,11 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
 - Settings: global `enabled`, default `mergeEligibleMainlines`, default `reviewMode`, plus a
   Plan auto-approve section listing each project with its own switch (Tools → Auto review).
 - Per-project overrides live in the plugin's own storage.
-- CLI: `bb auto-review status|show|enable|disable|auto-approve|reset` (all `--json`). `status`
+- CLI: `bb auto-review status|show|enable|disable|auto-approve|findings|reset` (all `--json`). `status`
+  adds the last review's outcome and open-finding counts (`reviewResult`); `findings [thread-id]
+  [--clear]` lists a thread's finding chains and incidents (`--clear` is terminal-only and needs
+  an explicit thread id). The `threadReview` RPC and the realtime channel `auto-review:thread:<id>`
+  serve the same state to the UI. `status`
   reports `planGate`: whether this thread is a top-level, enabled `claude-code`
   thread, so its plan review is owned here, by the native gate, rather than by another gate
   (e.g. agent-hooks). It does not reflect `PresentPlan`, which has no equivalent gate to hand

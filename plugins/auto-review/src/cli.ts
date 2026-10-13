@@ -12,9 +12,11 @@ import {
   type GlobalDefaults,
 } from "./config.js";
 import { setAutoApprove } from "./cli-auto-approve.js";
+import { reviewStatusView, showFindings } from "./cli-findings.js";
 import { json } from "./cli-result.js";
 import { removeDeferral } from "./deferrals.js";
 import { isBusyStatus, planGateServes } from "./gate.js";
+import { recordUnfinishedReview } from "./review-outcome.js";
 import {
   LATCH_KEYS,
   PLAN_GATE_KEYS,
@@ -32,7 +34,7 @@ interface ParsedArgs {
 }
 
 /** Flags that never take a value, so they must not swallow a following positional. */
-const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["json", "global"]);
+const BOOLEAN_FLAGS: ReadonlySet<string> = new Set(["json", "global", "clear"]);
 
 function parseArgs(argv: string[]): ParsedArgs {
   const positionals: string[] = [];
@@ -184,6 +186,12 @@ export function registerAutoReviewCli(
         usage: "bb auto-review auto-approve <on|off> --project <id> [--json]",
       },
       {
+        name: "findings",
+        summary:
+          "List what a thread's reviews reported (finding chains and incidents); --clear drops the chains (terminal only, explicit thread id)",
+        usage: "bb auto-review findings [thread-id] [--json] [--clear]",
+      },
+      {
         name: "reset",
         summary:
           "Clear a wedged latch for one idle thread; refused while it is running or holds a deferred turn",
@@ -207,6 +215,14 @@ export function registerAutoReviewCli(
           value: parsed.positionals[0],
           projectId: parsed.flags.get("project"),
           global: parsed.flags.has("global"),
+          wantsJson,
+        });
+      }
+
+      if (command === "findings") {
+        return showFindings(bb, context, {
+          threadId: parsed.positionals[0],
+          clear: parsed.flags.has("clear"),
           wantsJson,
         });
       }
@@ -250,6 +266,8 @@ export function registerAutoReviewCli(
                   "or send the thread another message (a new turn re-checks the deferred one and reviews it).",
               };
             }
+            // A review cut off by the reset must not leave the badge on the one before it.
+            await recordUnfinishedReview(bb, threadId, before, "stopped");
             await writeState(bb, threadId, { phase: "idle" }, [
               ...LATCH_KEYS,
               // Leftover from the removed per-thread skip flag.
@@ -312,6 +330,7 @@ export function registerAutoReviewCli(
         const config = effectiveConfig(getGlobals(), project);
         const planGate = planGateServes(thread, config);
         const lastFire = await readLastFire(bb, projectId, threadId);
+        const review = await reviewStatusView(bb, threadId, state.phase);
         const payload = {
           threadId,
           projectId,
@@ -324,6 +343,7 @@ export function registerAutoReviewCli(
           deferredSince: state.deferredSince ?? null,
           heldBy: state.heldBy ?? null,
           lastFire,
+          ...review.fields,
         };
         if (wantsJson) {
           return json(payload);
@@ -350,7 +370,8 @@ export function registerAutoReviewCli(
             `planGate: ${planGate}\n` +
             `phase: ${state.phase}\n` +
             deferredText +
-            `lastFire: ${lastFireText}\n`,
+            `lastFire: ${lastFireText}\n` +
+            review.text,
         };
       }
 
@@ -392,7 +413,7 @@ export function registerAutoReviewCli(
       return {
         exitCode: 2,
         stderr:
-          "Usage: bb auto-review <status|show|enable|disable|auto-approve|reset> [--json]\n",
+          "Usage: bb auto-review <status|show|enable|disable|auto-approve|findings|reset> [--json]\n",
       };
     },
   });

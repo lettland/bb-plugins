@@ -1,18 +1,16 @@
 import type { BbPluginApi, PluginCliContext, PluginCliResult } from "@get-bb/plugin-sdk";
-import { json } from "./cli-result.js";
+import { commandError, json } from "./cli-result.js";
 import { setAutoApprovePlans } from "./config.js";
 
 const AUTO_APPROVE_USAGE = "Usage: bb auto-review auto-approve <on|off> --project <id> [--json]\n";
 
-/** A failed `auto-approve`: the message on stderr, or the `{ ok: false }` shape under `--json`. */
+/** A failed `auto-approve`. */
 function autoApproveError(
   message: string,
   wantsJson: boolean,
   extra: Record<string, unknown> = {},
 ): PluginCliResult {
-  return wantsJson
-    ? json({ ok: false, command: "auto-approve", ...extra, error: message }, 2)
-    : { exitCode: 2, stderr: `${message}\n` };
+  return commandError("auto-approve", message, wantsJson, extra);
 }
 
 /**

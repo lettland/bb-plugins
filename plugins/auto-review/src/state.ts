@@ -63,6 +63,16 @@ export const threadStateSchema = z.object({
    */
   turnDecided: z.literal(true).optional(),
   /**
+   * When the review prompt actually reached the agent (immediate delivery, the
+   * queued row's dispatch, or the idle-time promotion of a dispatched row). It
+   * is the review's id: a `ReportReview` call is accepted only against it, and
+   * the findings store keys a review's report by it. A latch key, so every
+   * reset clears it together with the phase it belongs to.
+   */
+  reviewDeliveredAt: z.number().optional(),
+  /** The timeline cursor at that moment; a stop after it ended the review. */
+  reviewDeliveredSeq: z.number().int().nonnegative().optional(),
+  /**
    * Set when a plan's first presentation was held back for review; the next
    * presentation (the reviewed plan) is released to the user and clears it.
    * Deliberately not a latch key: an idle reset must not re-arm plan review
@@ -140,6 +150,30 @@ export async function writeState(
     set: set as MetadataSet,
     ...(remove === undefined ? {} : { remove }),
   });
+  if (set.phase !== undefined) {
+    publishThreadReview(bb, threadId);
+  }
+}
+
+/** The realtime channel the thread-header badge listens on for one thread. */
+export function threadReviewChannel(threadId: string): string {
+  return `auto-review:thread:${threadId}`;
+}
+
+/**
+ * Tells the badge to refetch. Best effort: a failed publish is logged, never
+ * thrown, so no state or findings write can fail on it.
+ */
+export function publishThreadReview(bb: BbPluginApi, threadId: string): void {
+  try {
+    bb.realtime.publish(threadReviewChannel(threadId), {});
+  } catch (error) {
+    bb.log.warn(
+      `auto-review: could not publish the review update for ${threadId}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 export const LATCH_KEYS: readonly string[] = [
@@ -149,6 +183,8 @@ export const LATCH_KEYS: readonly string[] = [
   "deferredSince",
   "turnDecided",
   "heldBy",
+  "reviewDeliveredAt",
+  "reviewDeliveredSeq",
 ];
 
 /** Native plan-gate keys, cleared together whenever that gate disarms. */

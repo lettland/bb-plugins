@@ -20,6 +20,7 @@ import {
   type PlanApproval,
 } from "./plan.js";
 import { buildPlanReviewPrompt, PLAN_HOLD_ANSWER } from "./prompt.js";
+import { REPORT_REVIEW_TOOL_NAME } from "./report-tool.js";
 import {
   PLAN_GATE_KEYS,
   planDenyFresh,
@@ -30,8 +31,11 @@ import {
   type ThreadState,
 } from "./state.js";
 
-/** The plan gate's own tools: completing one of these is not the agent working on the review. */
-const NATIVE_GATE_TOOLS = ["ExitPlanMode", "EnterPlanMode", "AskUserQuestion"];
+/**
+ * The plan gate's own tools: completing one of these is not the agent working on the review.
+ * `ReportReview` is auto-review's own bookkeeping, so even a rejected call proves nothing.
+ */
+const NATIVE_GATE_TOOLS = ["ExitPlanMode", "EnterPlanMode", "AskUserQuestion", REPORT_REVIEW_TOOL_NAME];
 
 /**
  * Hold a plan's first presentation for review. The review turn is queued

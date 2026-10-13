@@ -2,6 +2,7 @@ import type { ReviewContext } from "./context.js";
 import { deferralProviderId, providerReviewInFlight } from "./deferral.js";
 import { readDeferrals, removeDeferral } from "./deferrals.js";
 import { evaluate } from "./evaluate.js";
+import { deleteFindings, isThreadNotFound, listFindingThreadIds } from "./findings.js";
 import { passesThreadGate } from "./gate.js";
 import {
   readState,
@@ -116,5 +117,33 @@ export async function sweepDeferrals(ctx: ReviewContext): Promise<void> {
       await writeState(bb, entry.threadId, set, remove);
       await removeDeferral(bb, entry.threadId);
     });
+  }
+}
+
+/**
+ * Drops the findings of threads that no longer exist, for a delete this plugin
+ * missed (it was disabled, or the event never arrived). A key goes only when
+ * the host definitely reports its thread missing or deleted: a transient
+ * failure keeps it for the next pass.
+ */
+export async function sweepOrphanFindings(ctx: ReviewContext): Promise<void> {
+  const { bb } = ctx;
+  for (const threadId of await listFindingThreadIds(bb)) {
+    try {
+      const thread = await bb.sdk.threads.get({ threadId });
+      if (thread.deletedAt !== null && thread.deletedAt !== undefined) {
+        await deleteFindings(bb, threadId);
+      }
+    } catch (error) {
+      if (isThreadNotFound(error)) {
+        await deleteFindings(bb, threadId);
+      } else {
+        bb.log.warn(
+          `auto-review: could not check whether ${threadId} still exists; keeping its findings: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
   }
 }

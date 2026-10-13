@@ -10,8 +10,10 @@ import { decide } from "./decide.js";
 import { deferTurn, providerReviewInFlight } from "./deferral.js";
 import { removeDeferral } from "./deferrals.js";
 import type { TurnChanges } from "./detect.js";
+import { openFindingsForPrompt, readFindings, recordUnreported } from "./findings.js";
 import { buildReviewPrompt, renderScope } from "./prompt.js";
 import { withProviderLock } from "./provider-lock.js";
+import { deliveredPatch } from "./review-outcome.js";
 import { addReview, removeReview } from "./reviews.js";
 import { resetToIdlePatch, writeState, type ThreadState } from "./state.js";
 
@@ -77,10 +79,11 @@ async function sendReview(
   extra: FireExtra,
 ): Promise<void> {
   const { bb } = ctx;
+  const dispatchedAt = Date.now();
   await writeState(
     bb,
     thread.id,
-    { phase: "awaiting-review", dispatchedAt: Date.now() },
+    { phase: "awaiting-review", dispatchedAt },
     ["pendingEntryId", "deferredSince", "heldBy"],
   );
   await addReview(bb, { threadId: thread.id, providerId: thread.providerId });
@@ -101,6 +104,15 @@ async function sendReview(
     const { set, remove } = resetToIdlePatch();
     await writeState(bb, thread.id, set, remove);
     await removeReview(bb, thread.id);
+    await recordUnreported(bb, thread.id, {
+      reviewId: dispatchedAt,
+      outcome: "unavailable",
+      summary: "The review could not be sent to the agent.",
+      incident: {
+        kind: "send-failed",
+        detail: error instanceof Error ? error.message : String(error),
+      },
+    });
     await recordFire(ctx, thread.projectId, thread.id, "stood-down", "send-failed", extra);
     return;
   }
@@ -109,6 +121,8 @@ async function sendReview(
       phase: "pending-dispatch",
       pendingEntryId: result.queuedMessage.id,
     });
+  } else {
+    await writeState(bb, thread.id, await deliveredPatch(bb, thread.id));
   }
   await recordFire(ctx, thread.projectId, thread.id, "fired", "fired", extra);
 }
@@ -134,6 +148,7 @@ export async function dispatchReview(
       return;
     }
 
+    const prior = openFindingsForPrompt(await readFindings(ctx.bb, thread.id), Date.now());
     const prompt = buildReviewPrompt({
       decision,
       reviewMode: config.reviewMode,
@@ -142,6 +157,8 @@ export async function dispatchReview(
       commitScanFrom: commitScanHead(turn, state),
       foreignCommits: turn.foreignCommits.map(({ sha }) => sha),
       aislopScan: await aislopScanAvailable(ctx.bb),
+      priorFindings: prior.findings,
+      priorFindingsOmitted: prior.omitted,
     });
     await sendReview(ctx, thread, prompt, extra);
   });

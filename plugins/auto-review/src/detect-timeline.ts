@@ -16,6 +16,28 @@ export async function captureSinceSeq(
 }
 
 /**
+ * `captureSinceSeq` for callers that can do without the cursor: a failure is
+ * logged, naming what the cursor was for (`purpose`, which also says what is
+ * lost without it), and yields undefined instead of throwing.
+ */
+export async function tryCaptureSinceSeq(
+  bb: BbPluginApi,
+  threadId: string,
+  purpose: string,
+): Promise<number | undefined> {
+  try {
+    return await captureSinceSeq(bb, threadId);
+  } catch (error) {
+    bb.log.warn(
+      `auto-review: could not capture a timeline cursor for ${purpose}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return undefined;
+  }
+}
+
+/**
  * Whether the user stopped the thread after the turn-start cursor. A stop the
  * thread took for any other reason — a daemon restart, the provider-turn
  * watchdog — was not the user's call and does not count.

@@ -1,6 +1,8 @@
 import { effectiveConfig, readProjectConfig, setAutoApprovePlans } from "./config.js";
 import type { ReviewContext } from "./context.js";
+import { readFindings, summarizeReview } from "./findings.js";
 import { autoReviewRpcContract } from "./rpc-contract.js";
+import { readState, REVIEW_IN_FLIGHT_PHASES } from "./state.js";
 
 async function listProjects(ctx: ReviewContext) {
   const projects = await ctx.bb.sdk.projects.list({ includePersonal: true });
@@ -26,6 +28,13 @@ export function registerAutoReviewRpc(ctx: ReviewContext): void {
         }),
       );
       return { projects: rows };
+    },
+    async threadReview(input) {
+      const [store, state] = await Promise.all([
+        readFindings(bb, input.threadId),
+        readState(bb, input.threadId),
+      ]);
+      return summarizeReview(store, REVIEW_IN_FLIGHT_PHASES.includes(state.phase));
     },
     async setAutoApprovePlans(input) {
       const projects = await listProjects(ctx);

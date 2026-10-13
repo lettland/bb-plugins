@@ -4,6 +4,7 @@ import { captureSinceSeq, captureTree } from "./detect.js";
 import { handleIdle } from "./evaluate.js";
 import { passesThreadGate } from "./gate.js";
 import { releaseDeferred } from "./release.js";
+import { deliveredPatch, recordCancelledReview } from "./review-outcome.js";
 import { removeReview } from "./reviews.js";
 import {
   PLAN_GATE_KEYS,
@@ -122,9 +123,12 @@ export async function onMessageDispatched(
       state.phase === "pending-dispatch" &&
       state.pendingEntryId === entry.id
     ) {
-      await writeState(bb, entry.threadId, { phase: "awaiting-review" }, [
-        "pendingEntryId",
-      ]);
+      await writeState(
+        bb,
+        entry.threadId,
+        { phase: "awaiting-review", ...(await deliveredPatch(bb, entry.threadId)) },
+        ["pendingEntryId"],
+      );
     }
   });
 }
@@ -148,6 +152,7 @@ export async function onMessageCancelled(
       const { set, remove } = resetToIdlePatch();
       await writeState(bb, entry.threadId, set, remove);
       await removeReview(bb, entry.threadId);
+      await recordCancelledReview(bb, entry.threadId, state);
       return true;
     }
     return false;

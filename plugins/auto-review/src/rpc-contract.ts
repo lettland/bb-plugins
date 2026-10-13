@@ -1,5 +1,6 @@
 import type { PluginRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { REVIEW_OUTCOMES } from "./findings.js";
 
 const projectSettingSchema = z.object({
   id: z.string(),
@@ -9,6 +10,16 @@ const projectSettingSchema = z.object({
   reviewActive: z.boolean(),
 });
 export type ProjectSetting = z.infer<typeof projectSettingSchema>;
+
+const threadReviewSchema = z.object({
+  /** `pending` while a review is in flight, else the last review's outcome, else `none`. */
+  status: z.enum(["pending", "none", ...REVIEW_OUTCOMES]),
+  at: z.number().nullable(),
+  openCount: z.number(),
+  reRaisedCount: z.number(),
+  lastIncident: z.object({ at: z.number(), kind: z.string(), detail: z.string() }).nullable(),
+});
+export type ThreadReview = z.infer<typeof threadReviewSchema>;
 
 export const autoReviewRpcContract = {
   listProjectSettings: {
@@ -24,6 +35,10 @@ export const autoReviewRpcContract = {
       projectId: z.string(),
       autoApprovePlans: z.boolean(),
     }),
+  },
+  threadReview: {
+    input: z.object({ threadId: z.string().min(1).max(128) }),
+    output: threadReviewSchema,
   },
 } satisfies PluginRpcContract;
 

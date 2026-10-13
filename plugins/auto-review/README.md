@@ -82,6 +82,15 @@ It ships enabled (opt-out).
   more than 400 files is reviewed but left for the user to commit.
 - After committing, the review turn checks the thread's plan and continues genuinely
   unfinished planned work. It never invents work.
+- Records what each review reported. The review turn ends by calling the `ReportReview` tool
+  with an outcome (`committed`, `merged`, `uncommitted`, `blocked`, `no-changes`), a summary
+  and its findings. Findings persist per thread as chains with stable keys: the next review is
+  told what is still open, a repeat is marked re-raised, and dismissing a false positive a
+  second time needs a new reason. A review that never reported shows as `not-reported`, a
+  stopped or cancelled one as `stopped`, one that could not be sent as `unavailable`; none
+  reads as a pass. Outcomes are agent-reported, not verified against git. A session started
+  before this plugin version does not have the tool until restarted and shows "Review not
+  reported". See `bb auto-review status` and `bb auto-review findings`.
 
 The full behavior, including the branch policy table and every `status` reason, is in
 [`skills/auto-review/SKILL.md`](skills/auto-review/SKILL.md). The skill ships with the
@@ -111,11 +120,12 @@ All commands accept `--json`.
 
 | Command | What it does |
 |---|---|
-| `bb auto-review status` | Effective state (including `planGate`, whether this thread's plan review is served here by the native ExitPlanMode gate) and last-fire outcome for the current thread |
+| `bb auto-review status` | Effective state (including `planGate`, whether this thread's plan review is served here by the native ExitPlanMode gate), last-fire outcome, and the last review's reported outcome with open/re-raised finding counts (`reviewResult`) for the current thread |
 | `bb auto-review show` | Global defaults, project override and resolved settings for the current project |
 | `bb auto-review enable [--global \| --project <id>]` | Turn it on; bare `enable` is global |
 | `bb auto-review disable [--global \| --project <id>]` | Turn it off, same scoping |
 | `bb auto-review auto-approve <on\|off> --project <id>` | Approve reviewed plans automatically for one project (off by default); `--project` is required and must exist, and `on` is refused from inside a bb thread (an accident guard, not a security boundary) |
+| `bb auto-review findings [thread-id] [--clear]` | List what a thread's reviews reported (finding chains, flagging high/blocker ones dismissed more than once, and incidents). `--clear` drops the chains only; it is refused inside a bb thread and needs an explicit thread id |
 | `bb auto-review reset <thread-id>` | Clear a wedged loop-guard latch on an idle thread; refused while the thread is running or holds a `deferred` turn (its review runs when the hold clears) |
 
 The agent-hooks plugin's `review-plan-before-exit.sh` reads `planGate` from
