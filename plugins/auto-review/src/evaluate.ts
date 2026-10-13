@@ -34,6 +34,7 @@ import {
   isStale,
   readState,
   resetToIdlePatch,
+  REVIEW_CONTINUATION_CAP_MS,
   REVIEW_IN_FLIGHT_PHASES,
   writeState,
   type ThreadState,
@@ -292,10 +293,48 @@ export async function evaluate(
   });
 }
 
+/**
+ * Whether the review is still being carried on by its children: one running,
+ * or a wake-up (any non-user message) queued behind the review turn. Past the
+ * cap it never holds, so a hung child cannot keep the latch forever. A failed
+ * lookup warns and answers no — the latch must never stick on an error.
+ */
+async function reviewContinuationPending(
+  ctx: ReviewContext,
+  state: ThreadState,
+  threadId: string,
+): Promise<boolean> {
+  const since = state.reviewDeliveredAt ?? state.dispatchedAt;
+  if (since !== undefined && Date.now() - since > REVIEW_CONTINUATION_CAP_MS) {
+    return false;
+  }
+  try {
+    if ((await runningChildIds(ctx.bb, threadId)).length > 0) {
+      return true;
+    }
+    const rows = await ctx.bb.sdk.threads.queuedMessages.list({ threadId });
+    return rows.some((row) => row.failureReason === null && row.initiator !== "user");
+  } catch (error) {
+    ctx.bb.log.warn(
+      `auto-review: could not check what ${threadId}'s review is waiting on; ending it: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return false;
+  }
+}
+
 export async function handleIdle(ctx: ReviewContext, thread: GateThreadLike): Promise<void> {
   const { bb } = ctx;
   const state = await readState(bb, thread.id);
   if (state.phase === "awaiting-review") {
+    // A review that handed its lens reviews or fixes to child threads ends
+    // its own turn while they run. Each child's wake-up turn is the review's
+    // continuation, so it stays in flight until none are running or queued —
+    // otherwise the turns that apply its fixes would be reviewed again, round after round.
+    if (await reviewContinuationPending(ctx, state, thread.id)) {
+      return;
+    }
     await recordUnfinishedReview(bb, thread.id, state, "idle");
     const { set, remove } = resetToIdlePatch();
     await writeState(bb, thread.id, set, remove);

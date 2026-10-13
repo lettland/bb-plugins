@@ -80,6 +80,8 @@ interface HostOptions {
   raceItemOnDeny?: boolean;
   /** Withdrawing a queued message fails, as when core already dispatched it. */
   deleteQueuedThrows?: boolean;
+  /** Listing a thread's spawned children (`threads.list` with a parent) fails. */
+  childListThrows?: boolean;
   /** The environment status read reports the workspace unavailable. */
   statusUnavailable?: boolean;
   checkoutKind?: string;
@@ -374,6 +376,9 @@ function createHost(options: HostOptions = {}) {
         },
       },
       list: async (args?: { parentThreadId?: string }) => {
+        if (options.childListThrows === true && args?.parentThreadId !== undefined) {
+          throw new Error("threads.list unavailable");
+        }
         const rows = envThreads.map((entry) => ({
           parentThreadId: null,
           lifecycleOwnerThreadId: null,
@@ -1402,6 +1407,115 @@ describe("auto-review plugin", () => {
       await host.harness.dispose();
     },
   );
+
+  describe("a review delegated to child threads", () => {
+    const runningChild: EnvThread[] = [
+      { id: THREAD_ID, status: "idle" },
+      { id: "child-1", status: "active", parentThreadId: THREAD_ID },
+    ];
+
+    it("stays in flight while a spawned child is running", async () => {
+      const host = createHost({ envThreads: runningChild });
+      await plugin(host.bb);
+      await startReview(host, THREAD_ID);
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeTruthy();
+      expect(await host.bb.storage.kv.get(`findings:${THREAD_ID}`)).toBeFalsy();
+      expect(host.sends).toHaveLength(0);
+      await host.harness.dispose();
+    });
+
+    it("ends with its last child, without reviewing the wake-up turn's changes", async () => {
+      const host = createHost({ envThreads: runningChild });
+      await plugin(host.bb);
+      await startReview(host, THREAD_ID);
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("awaiting-review");
+
+      host.setEnvThreads([
+        { id: THREAD_ID, status: "idle" },
+        { id: "child-1", status: "idle", parentThreadId: THREAD_ID },
+      ]);
+      // The child's wake-up turn applies its fixes, so the tree changes.
+      await emitActive(host);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/fix.ts" }]);
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("idle");
+      expect(host.metadata.turnStart).toBeUndefined();
+      expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeFalsy();
+      expect(host.sends).toHaveLength(0);
+      await host.harness.dispose();
+    });
+
+    it("stays in flight behind a queued wake-up, and ends once it is gone", async () => {
+      const host = createHost({
+        queuedRows: [{ id: "wake-1", initiator: "system", origin: null, failureReason: null }],
+      });
+      await plugin(host.bb);
+      await startReview(host, THREAD_ID);
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeTruthy();
+
+      host.setQueuedRows([]);
+      await emitActive(host);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/fix.ts" }]);
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("idle");
+      expect(host.sends).toHaveLength(0);
+      await host.harness.dispose();
+    });
+
+    it("ignores a user's queued message and a failed wake-up", async () => {
+      const host = createHost({
+        queuedRows: [
+          { id: "u-1", initiator: "user", origin: "app", failureReason: null },
+          { id: "w-1", initiator: "system", origin: null, failureReason: "send-failed" },
+        ],
+      });
+      await plugin(host.bb);
+      await startReview(host, THREAD_ID);
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("idle");
+      await host.harness.dispose();
+    });
+
+    it("stops holding for a running child once the review is over two hours old", async () => {
+      const host = createHost({ envThreads: runningChild });
+      await plugin(host.bb);
+      await startReview(host, THREAD_ID);
+      Object.assign(host.metadata, {
+        dispatchedAt: Date.now() - 3 * 60 * 60 * 1_000,
+        reviewDeliveredAt: Date.now() - 3 * 60 * 60 * 1_000,
+      });
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("idle");
+      expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeFalsy();
+      await host.harness.dispose();
+    });
+
+    it("keeps holding for a running child inside the two-hour cap", async () => {
+      const host = createHost({ envThreads: runningChild });
+      await plugin(host.bb);
+      await startReview(host, THREAD_ID);
+      Object.assign(host.metadata, { reviewDeliveredAt: Date.now() - 60 * 60 * 1_000 });
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      await host.harness.dispose();
+    });
+
+    it("ends the review when the children lookup fails", async () => {
+      const host = createHost({ envThreads: runningChild, childListThrows: true });
+      await plugin(host.bb);
+      await startReview(host, THREAD_ID);
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("idle");
+      expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeFalsy();
+      expect(host.sends).toHaveLength(0);
+      await host.harness.dispose();
+    });
+  });
 
   it("does not hold the turn for a lifecycle-owned-only helper or a plugin-originated child", async () => {
     const host = createHost({

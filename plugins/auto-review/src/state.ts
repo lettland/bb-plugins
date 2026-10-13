@@ -18,6 +18,9 @@ export const REVIEW_IN_FLIGHT_PHASES: readonly AutoReviewPhase[] = [
 
 export const STALE_WINDOW_MS = 30 * 60 * 1_000;
 
+/** How long a review waiting on its children or their wake-ups may hold the latch before it ends anyway. */
+export const REVIEW_CONTINUATION_CAP_MS = 2 * 60 * 60 * 1_000;
+
 /**
  * The working tree as the turn found it: a fingerprint per uncommitted path and
  * the commits already ahead of the base. Diffed against the tree at idle, it

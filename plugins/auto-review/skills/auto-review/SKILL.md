@@ -316,6 +316,13 @@ review stages, commits and merges only the files its own turn authored (explicit
 skips any file carrying edits it did not make, and the merge step itself refuses to run
 while the tree holds changes this turn did not make.
 
+A review turn that hands its lens reviews or fixes to child threads stays in flight, not
+ended, until none of its children is running and no non-user wake-up message is queued
+(or until 2 hours after the review was delivered, so a hung child cannot hold it forever):
+bb's wake-up turns that apply those fixes are the review's own continuation and are not
+reviewed again. Known gap: a user message answered while the review is still waiting on its
+children is folded into that review and not reviewed separately.
+
 What auto-review also limits is how many reviews run at once **per provider**, because
 reviews on one provider share that provider's usage limits: a Claude Code review here and a
 Claude Code review in another project compete, a Claude Code review and a Codex review do

@@ -65,6 +65,12 @@ It ships enabled (opt-out).
   transitively): bb wakes it with a new turn each time one ends, but only the turn after
   the last one ends reviews its work — an earlier wake-up with another child still running
   just re-parks.
+- A review that hands its work to child threads stays in flight until none of its children
+  is running and no wake-up (a non-user queued message) is waiting, or until 2 hours after
+  it was delivered, whichever comes first. The wake-up turns that apply its fixes are part
+  of that review and are not reviewed again. Known gap: a user message answered while the
+  review is still waiting on its children is folded into that review and not reviewed
+  separately.
 - Runs one review at a time per provider across all projects, since those reviews share
   the provider's usage limits. A turn ending behind another review is deferred, not
   dropped, and fires when the blocking review ends.
