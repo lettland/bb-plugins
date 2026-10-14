@@ -303,7 +303,11 @@ export async function turnCommits(
   }));
 }
 
-/** The remote-tracking ref of a base branch; a base that already names one is used as it is. */
+/**
+ * The remote-tracking ref of a base branch; a base that already names one is
+ * used as it is. Only a remote named `origin` is checked: with any other name
+ * the ref does not resolve and every commit is kept.
+ */
 export function remoteRef(base: string): string {
   return base.startsWith("origin/") ? base : `origin/${base}`;
 }
@@ -311,15 +315,20 @@ export function remoteRef(base: string): string {
 /**
  * The shas of `shas` the remote base already holds. Asks for the commits
  * ahead of `origin/<base>`: a turn commit missing from that list is reachable
- * from the remote, so someone else's merged work is among them. The answer is
- * trusted only when the ref resolved and the ahead list is complete; any doubt
- * gives an empty set, which keeps every commit with the turn.
+ * from the remote or patch-equivalent to a commit it holds (the host lists the
+ * commits ahead with `git log --cherry-pick`), so someone else's merged work is
+ * among them. The answer is trusted only when the ref resolved, the ahead list
+ * is complete, and the checkout is still at `expectedHead`. An empty list is
+ * trusted only when HEAD is the merge base, so a squash merge the host
+ * detected cannot mark every commit as held. Any doubt gives an empty set,
+ * which keeps every commit with the turn.
  */
 export async function remoteReachableShas(
   bb: BbPluginApi,
   environmentId: string,
   base: string,
   shas: readonly string[],
+  expectedHead: string | null,
 ): Promise<Set<string>> {
   const ref = remoteRef(base);
   const skip = (reason: string) => {
@@ -330,7 +339,7 @@ export async function remoteReachableShas(
   try {
     status = await bb.sdk.environments.status({ environmentId, mergeBaseBranch: ref });
   } catch {
-    return skip(`no ${ref} to compare against`);
+    return skip("the status call failed");
   }
   if (status.outcome !== "available" || status.workspace.mergeBase === null) {
     return skip(`no ${ref} to compare against`);
@@ -339,8 +348,15 @@ export async function remoteReachableShas(
   if (mergeBase.mergeBaseBranch !== ref || mergeBase.baseRef === null) {
     return skip("the answer was not for that ref");
   }
+  const head = headShaOf(status.workspace);
+  if (head === null || head !== expectedHead) {
+    return skip("the checkout moved while the remote base was checked");
+  }
   if (mergeBase.aheadCount !== mergeBase.commits.length) {
     return skip("the list of commits ahead is incomplete");
+  }
+  if (mergeBase.commits.length === 0 && mergeBase.baseRef !== head) {
+    return skip("an empty list of commits ahead may be a squash merge, not HEAD held by the remote");
   }
   const ahead = new Set(mergeBase.commits.map(({ sha }) => sha));
   return new Set(shas.filter((sha) => !ahead.has(sha)));

@@ -67,7 +67,9 @@ export function committedSinceHead(turn: TurnChanges, state: ThreadState): strin
 /**
  * The turn-start head the secret scan runs from: set by any commit made during
  * the turn, this thread's or another's. A head that moved with no such commit
- * (a pull, a rebase, a branch switch) leaves it null.
+ * (a pull, a rebase, a branch switch) leaves it null; so does a turn whose only
+ * commits arrived with the remote base, which scans nothing, as pulled commits
+ * always did.
  */
 export function commitScanHead(turn: TurnChanges, state: ThreadState): string | null {
   return turnStartHeadIf(turn.commits.length > 0 || turn.foreignCommits.length > 0, state);

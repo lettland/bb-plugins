@@ -1,9 +1,9 @@
 import type { Decision } from "./decide.js";
-import { commitScan, foreignCommitNote, upstreamCommitNote } from "./prompt-commits.js";
+import { COMMIT_SHA_ALLOW, turnCommitText } from "./prompt-commits.js";
 import { priorFindingsSection, reportReviewStep, type PromptFinding } from "./prompt-findings.js";
 import { SCOPE_PATH_ALLOW } from "./scope-path.js";
 
-export { SCOPE_PATH_ALLOW };
+export { COMMIT_SHA_ALLOW, SCOPE_PATH_ALLOW };
 export const AUTO_REVIEW_MARKER = "[bb auto-review]";
 /**
  * Past this many paths the list is too long to hand over reliably. It is then
@@ -85,9 +85,6 @@ const SECRET_PATTERNS = [
 function devkitReview(scope: string): string {
   return `call \`devkit_load_skill({ slug: "review-code" })\` and follow that workflow with scope \`${scope}\``;
 }
-
-/** A commit sha, the only shape a committed range is ever rendered from. */
-export const COMMIT_SHA_ALLOW = /^[0-9a-f]{7,64}$/u;
 
 /**
  * What the review covers. Work the turn already committed is not in the
@@ -363,9 +360,14 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
   const { decision, reviewMode, scope } = input;
   const committedSince = allowedSha(input.committedSince);
   const scanSince = allowedSha(input.commitScanFrom ?? input.committedSince);
-  const foreign = (input.foreignCommits ?? []).filter((sha) => COMMIT_SHA_ALLOW.test(sha));
-  const upstream = (input.upstreamCommits ?? []).filter((sha) => COMMIT_SHA_ALLOW.test(sha));
-  const own = (input.ownCommits ?? []).filter((sha) => COMMIT_SHA_ALLOW.test(sha));
+  const commits = turnCommitText({
+    foreign: input.foreignCommits ?? [],
+    upstream: input.upstreamCommits ?? [],
+    own: input.ownCommits ?? [],
+    committedSince,
+    scanSince,
+    merge: decision.commit && decision.merge,
+  });
   const lines: string[] = [];
   lines.push(
     `${AUTO_REVIEW_MARKER} You changed files during your last turn. Review them, apply fixes, and record the result. Follow these steps in order.`,
@@ -377,14 +379,8 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
     );
     lines.push("");
   }
-  if (foreign.length > 0) {
-    lines.push(foreignCommitNote(foreign, committedSince));
-    lines.push("");
-  }
-  const rangeFrom = committedSince ?? scanSince;
-  if (upstream.length > 0 && rangeFrom !== null) {
-    lines.push(upstreamCommitNote(upstream, own, rangeFrom));
-    lines.push("");
+  for (const note of commits.notes) {
+    lines.push(note, "");
   }
 
   lines.push(...scopeSection(scope));
@@ -394,24 +390,15 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
   lines.push(
     "3. Stage ONLY the files you yourself edited this turn — those in the list above — using an explicit pathspec (`git add -- <path> …`). Never use `git add -A`, `git add -a`, or `git add .`. Do not stage, revert, checkout, stash, or clean any other modified or untracked file — it was already there and is not yours to touch. Before staging each file, confirm its current contents are the changes you made this turn; if a file also contains edits you did not make (a concurrent human or sibling edit), skip it and report it rather than committing someone else's work.",
   );
-  const committedScan = commitScan({
-    scanSince,
-    hasForeign: foreign.length > 0,
-    hasUpstream: upstream.length > 0,
-    hasOwn: committedSince !== null,
-    merge: decision.commit && decision.merge,
-  });
   const changedFiles =
     committedSince === null
       ? "`git diff --cached --name-only`"
       : `\`git diff --cached --name-only\` together with this turn's commits (\`git diff --name-only ${committedSince}..HEAD\`)`;
-  const otherThreadFiles =
-    foreign.length > 0 ? " Leave out the files of the other thread's commits named above (list them with `git show --name-only --format= <sha>`)." : "";
   lines.push(
-    `4. Check that what you staged is a complete, working change, not a fragment of one. Compare ${changedFiles} with the list above and with what the change needs: a definition, export, type, schema, event contract, migration, or test that the staged code depends on must be staged with it.${otherThreadFiles} Then run the project's relevant checks (typecheck or build, and the tests covering these files) and fix what fails.`,
+    `4. Check that what you staged is a complete, working change, not a fragment of one. Compare ${changedFiles} with the list above and with what the change needs: a definition, export, type, schema, event contract, migration, or test that the staged code depends on must be staged with it.${commits.skipFiles} Then run the project's relevant checks (typecheck or build, and the tests covering these files) and fix what fails.`,
   );
   lines.push(
-    `5. Scan the staged changes for secrets, credentials, or build artifacts before committing. Watch for: ${SECRET_PATTERNS.join("; ")}. If you find any, STOP: unstage, do not commit, and report what you found. Do not commit past a secret.${committedScan}`,
+    `5. Scan the staged changes for secrets, credentials, or build artifacts before committing. Watch for: ${SECRET_PATTERNS.join("; ")}. If you find any, STOP: unstage, do not commit, and report what you found. Do not commit past a secret.${commits.scan}`,
   );
 
   const overflow = decision.commit && scope.overflowCount > 0;

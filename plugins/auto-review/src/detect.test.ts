@@ -1182,14 +1182,20 @@ describe("workspace capture edge cases", () => {
       timelinePage: { hasOlderRows: false, olderCursor: null },
     });
 
-    /** What `status` answers for `origin/<base>`: the commits still ahead of it. */
-    const remoteStatus = (ref: string, ahead: readonly { sha: string }[], over: Record<string, unknown> = {}) => ({
+    /** What `status` answers for `origin/<base>`: the commits still ahead of it, with HEAD where the checkout is. */
+    const remoteStatus = (
+      ref: string,
+      ahead: readonly { sha: string }[],
+      over: Record<string, unknown> = {},
+      checkout: Record<string, unknown> = { kind: "branch", branchName: "b", headSha: "head" },
+    ) => ({
       outcome: "available",
       workspace: ws({
+        checkout,
         mergeBase: {
           files: [],
           mergeBaseBranch: ref,
-          baseRef: "base0",
+          baseRef: "head",
           aheadCount: ahead.length,
           commits: ahead.map(({ sha }) => ({ sha })),
           ...over,
@@ -1473,12 +1479,19 @@ describe("workspace capture edge cases", () => {
       });
 
       const doubts: Array<[string, Parameters<typeof attribute>[0], string]> = [
-        ["status throws", { remote: () => { throw new Error("no ref"); } }, "no origin/master to compare against"],
+        ["status throws", { remote: () => { throw new Error("no ref"); } }, "the status call failed"],
         ["the merge base is null", { remote: () => ({ outcome: "available", workspace: ws({ mergeBase: null }) }) }, "no origin/master to compare against"],
         ["the answer is for another ref", { remote: (_ref, ahead) => remoteStatus("origin/other", ahead) }, "the answer was not for that ref"],
         ["the ahead list is incomplete", { remote: (ref, ahead) => remoteStatus(ref, ahead, { aheadCount: ahead.length + 1 }) }, "the list of commits ahead is incomplete"],
         ["the ref is unavailable", { remote: () => ({ outcome: "unavailable" }) }, "no origin/master to compare against"],
         ["the base ref is null", { remote: (ref, ahead) => remoteStatus(ref, ahead, { baseRef: null }) }, "the answer was not for that ref"],
+        ["the checkout moved to another head", { remote: (ref, ahead) => remoteStatus(ref, ahead, {}, { kind: "branch", branchName: "b", headSha: "moved" }) }, "the checkout moved while the remote base was checked"],
+        ["the checkout is no longer a branch", { remote: (ref, ahead) => remoteStatus(ref, ahead, {}, { kind: "unborn" }) }, "the checkout moved while the remote base was checked"],
+        [
+          "an empty list of commits ahead is not HEAD held by the remote",
+          { remote: (ref, ahead) => remoteStatus(ref, ahead, { baseRef: "base0" }) },
+          "an empty list of commits ahead may be a squash merge, not HEAD held by the remote",
+        ],
         [
           "the thread's timeline is truncated",
           {
@@ -1505,6 +1518,99 @@ describe("workspace capture edge cases", () => {
         expect(infos).toEqual([
           `auto-review: not checking whether the turn's commits came from origin/master: ${reason}`,
         ]);
+      });
+
+      it("keeps a commit the thread authored in an earlier turn and then rewrote and pushed", async () => {
+        const earlier = { thr_self: [rowAt(5_000, 6_000, "git commit -m original")] };
+        const amended = await attribute({
+          timelines: earlier,
+          commits: [upstreamCommit("u1", 5_500)],
+          upstream: ["u1"],
+        });
+        expect(amended.remoteCalls).toEqual(["origin/master"]);
+        expect(amended.result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+        // The same row does not cover a commit authored later, which was merged by someone else.
+        const merged = await attribute({
+          timelines: earlier,
+          commits: [upstreamCommit("u1", 8_000)],
+          upstream: ["u1"],
+        });
+        expect(merged.result).toMatchObject({ commits: [], upstreamCommits: ["u1"] });
+      });
+
+      it("keeps everything when the thread's timeline cannot be read back to the earliest commit", async () => {
+        const { result, infos } = await attribute({
+          timeline: async () => ({
+            rows: [command("ls", { createdAt: 9_000, startedAt: 9_000, completedAt: 9_200 })],
+            maxSeq: 0,
+            timelinePage: {
+              hasOlderRows: true,
+              olderCursor: { anchorId: "a", anchorSeq: 9 },
+              olderRowsSourceSeqEnd: 3,
+            },
+          }),
+          commits: [upstreamCommit("u1", 5_500)],
+          upstream: ["u1"],
+        });
+        expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+        expect(infos).toEqual([
+          "auto-review: not checking whether the turn's commits came from origin/master: the thread's timeline back to the earliest commit is truncated",
+        ]);
+      });
+
+      it("keeps a commit touching a file the thread or its child edited through its tools", async () => {
+        const own = await attribute({
+          timelines: { thr_self: [edit("lib/merged.ts")] },
+          commits: [upstreamCommit("u1")],
+          upstream: ["u1"],
+        });
+        expect(own.result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+        const kin = await attribute({
+          entries: [self, child],
+          timelines: { thr_child: [edit("lib/merged.ts")] },
+          commits: [upstreamCommit("u1")],
+          upstream: ["u1"],
+        });
+        expect(kin.result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+        const elsewhere = await attribute({
+          timelines: { thr_self: [edit("lib/other.ts")] },
+          commits: [upstreamCommit("u1")],
+          upstream: ["u1"],
+        });
+        expect(elsewhere.result).toMatchObject({ commits: [], upstreamCommits: ["u1"] });
+      });
+
+      it("keeps a commit whose paths could not be read", async () => {
+        const { result } = await attribute({
+          commits: [commit("u1", null, 20_000)],
+          upstream: ["u1"],
+        });
+        expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+      });
+
+      it("does not ask the remote when every commit lies inside one of the thread's windows", async () => {
+        const { result, remoteCalls } = await attribute({
+          timelines: { thr_self: [search(null, { startedAt: 19_500, completedAt: 21_000 })] },
+          commits: [upstreamCommit("u1", 20_500)],
+          upstream: ["u1"],
+        });
+        expect(remoteCalls).toEqual([]);
+        expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+      });
+
+      it("reads a child thread once for the upstream and the foreign check together", async () => {
+        const { result, remoteCalls, timelineCalls } = await attribute({
+          entries: [self, sibling, child],
+          timelines: {
+            thr_sibling: [command(gitCommit)],
+            thr_child: [command("ls", { createdAt: 12_000, startedAt: 12_000, completedAt: 12_500 })],
+          },
+          commits: [upstreamCommit("u1", 15_000), commit("theirs", ["src/b.ts"], 20_500)],
+          upstream: ["u1"],
+        });
+        expect(remoteCalls).toEqual(["origin/master"]);
+        expect(result).toMatchObject({ commits: [], foreignCommits: [foreign("theirs")], upstreamCommits: ["u1"] });
+        expect(timelineCalls.filter(({ threadId }) => threadId === "thr_child")).toHaveLength(1);
       });
 
       it("keeps a commit whose author date is unknown", async () => {

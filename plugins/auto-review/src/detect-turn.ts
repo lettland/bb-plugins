@@ -10,6 +10,8 @@ import {
   authoredPathsFromRows,
   kinEvidence,
   ownWindows,
+  pageInTurn,
+  recentTimelineRows,
   siblingAuthoredPaths,
   turnTimeline,
   withinWindow,
@@ -18,10 +20,11 @@ import type { KinEvidence, SiblingEvidence } from "./detect-timeline.js";
 
 import { contentHash, fingerprintsMatch, statPart } from "./detect-tree.js";
 
-import { isHarnessOutput, mainlineBase } from "./detect-workspace.js";
+import { headShaOf, isHarnessOutput, mainlineBase } from "./detect-workspace.js";
 import type {
   AvailableWorkspace,
   ThreadListEntry,
+  TimelineRow,
   WorkingTreeFile,
 } from "./detect-workspace.js";
 
@@ -146,6 +149,8 @@ interface UpstreamInput {
   startedAt: number;
   now: number;
   ownRows: Awaited<ReturnType<typeof turnTimeline>>;
+  /** Paths the thread's own rows changed through its tools this turn. */
+  ownPaths: ReadonlySet<string>;
   commits: readonly CommitChange[];
 }
 
@@ -184,49 +189,86 @@ async function foreignCommitsOf(foreign: ForeignInput): Promise<ForeignCommit[]>
   );
 }
 
+/** The thread's rows back to `since`, or why they cannot be had. */
+async function rowsSince(
+  bb: BbPluginApi,
+  threadId: string,
+  since: number,
+): Promise<TimelineRow[] | string> {
+  try {
+    const { rows, truncated } = await recentTimelineRows(bb, threadId, pageInTurn(since));
+    return truncated ? "the thread's timeline back to the earliest commit is truncated" : rows;
+  } catch {
+    return "the thread's earlier timeline could not be read";
+  }
+}
+
 /**
  * The commits the remote base brought in that someone else merged: reachable
  * from `origin/<base>` and authored outside every window this thread's family
- * was running, the windows `foreignCommitsOf` treats as ours. A commit the
- * thread makes is authored while one of its rows runs, whatever tool made it,
- * so only a commit written while nothing of the family ran is dropped. Any
- * doubt keeps a commit with the turn.
+ * was running, the windows `foreignCommitsOf` treats as ours, and touching none
+ * of the family's tool-edited files. A commit the thread makes is authored
+ * while one of its rows runs, whatever tool made it. A rewrite keeps the author
+ * date, though (`git commit --amend`, `rebase`, `cherry-pick`): one of the
+ * thread's earlier turns may have authored a commit that this turn only
+ * amended and pushed. So the windows reach back to the earliest candidate's
+ * author date. What stays accepted is a rewrite of a commit the thread never
+ * authored, such as a cherry-pick of someone else's old commit: it still counts
+ * as upstream. Any doubt keeps a commit with the turn.
  */
 async function upstreamCommitsOf(
   upstream: UpstreamInput,
 ): Promise<{ shas: string[]; kin: KinEvidence | undefined }> {
-  const { bb, input, startedAt, now, ownRows, commits } = upstream;
+  const { bb, input, startedAt, now, ownRows, ownPaths, commits } = upstream;
   const base = mainlineBase(input.workspace);
   const none = { shas: [], kin: undefined };
+  const skip = (reason: string, kin?: KinEvidence) => {
+    bb.log.info(`auto-review: not checking whether the turn's commits came from ${remoteRef(base)}: ${reason}`);
+    return { shas: [], kin };
+  };
+  const dated = commits.flatMap(({ sha, authoredAt, paths }) =>
+    authoredAt === null ? [] : [{ sha, authoredAt, paths }],
+  );
+  if (dated.length === 0) {
+    return none;
+  }
+  if (ownRows.truncated) {
+    return skip("the thread's timeline is truncated");
+  }
+  const own = ownWindows(ownRows.rows, startedAt, now);
+  const outside = dated.filter(({ authoredAt }) => !own.some((window) => withinWindow(window, authoredAt)));
+  if (outside.length === 0) {
+    return none;
+  }
   const reachable = await remoteReachableShas(
     bb,
     input.environmentId,
     base,
-    commits.map(({ sha }) => sha),
+    outside.map(({ sha }) => sha),
+    headShaOf(input.workspace),
   );
-  if (reachable.size === 0) {
-    return none;
-  }
-  if (ownRows.truncated) {
-    bb.log.info(`auto-review: not checking whether the turn's commits came from ${remoteRef(base)}: the thread's timeline is truncated`);
-    return none;
-  }
-  const own = ownWindows(ownRows.rows, startedAt, now);
-  const candidates = commits.flatMap(({ sha, authoredAt }) =>
-    reachable.has(sha) && authoredAt !== null && !own.some((window) => withinWindow(window, authoredAt))
-      ? [{ sha, authoredAt }]
-      : [],
-  );
+  const candidates = outside.filter(({ sha }) => reachable.has(sha));
   if (candidates.length === 0) {
     return none;
   }
-  const kin = await kinEvidence(bb, input.threadEntries, input.threadId, startedAt, now);
-  if (!kin.complete) {
-    bb.log.info(`auto-review: not checking whether the turn's commits came from ${remoteRef(base)}: a child thread could not be read in full`);
-    return { shas: [], kin };
+  const since = Math.min(startedAt, ...candidates.map(({ authoredAt }) => authoredAt));
+  const rows = since < startedAt ? await rowsSince(bb, input.threadId, since) : ownRows.rows;
+  if (typeof rows === "string") {
+    return skip(rows);
   }
+  const kin = await kinEvidence(bb, input.threadEntries, input.threadId, since, now);
+  if (!kin.complete) {
+    return skip("a child thread could not be read in full", kin);
+  }
+  const windows = [...ownWindows(rows, since, now), ...kin.windows];
+  const familyPaths = new Set([...ownPaths, ...kin.paths]);
   const shas = candidates
-    .filter(({ authoredAt }) => !kin.windows.some((window) => withinWindow(window, authoredAt)))
+    .filter(
+      ({ authoredAt, paths }) =>
+        paths !== null &&
+        !windows.some((window) => withinWindow(window, authoredAt)) &&
+        !paths.some((path) => familyPaths.has(path)),
+    )
     .map(({ sha }) => sha);
   return { shas, kin };
 }
@@ -246,17 +288,15 @@ function withoutCommits(tree: TreeChanges, dropped: ReadonlySet<string>): TreeCh
 
 /** `fetched` without the commits that arrived with the remote base, which are logged; none are dropped when the turn start time is unknown. */
 async function withoutUpstream(
-  bb: BbPluginApi,
-  input: TurnChangeInput,
-  ownRows: UpstreamInput["ownRows"],
+  context: Omit<UpstreamInput, "startedAt" | "commits">,
   fetched: TreeChanges,
-  now: number,
 ): Promise<{ tree: TreeChanges; shas: string[]; kin: KinEvidence | undefined }> {
+  const { bb, input } = context;
   const { startedAt } = input.turnStart;
   const { shas, kin } =
     startedAt === undefined || fetched.commitChanges.length === 0
       ? { shas: [], kin: undefined }
-      : await upstreamCommitsOf({ bb, input, startedAt, now, ownRows, commits: fetched.commitChanges });
+      : await upstreamCommitsOf({ ...context, startedAt, commits: fetched.commitChanges });
   for (const sha of shas) {
     bb.log.info(`auto-review: commit ${sha} came from ${remoteRef(mainlineBase(input.workspace))}; not this turn's`);
   }
@@ -289,7 +329,7 @@ export async function turnChangedPaths(
   const fetched = await treeChangedPaths(bb, environmentId, turnStart.tree, workspace, turnStart.startedAt);
   const { startedAt } = turnStart;
   const now = Date.now();
-  const upstream = await withoutUpstream(bb, input, ownRows, fetched, now);
+  const upstream = await withoutUpstream({ bb, input, now, ownRows, ownPaths: ownSet }, fetched);
   const { tree } = upstream;
   const unattributed = (paths: readonly string[]) =>
     paths.filter((path) => !ownSet.has(path) && !harnessOutput.has(path));

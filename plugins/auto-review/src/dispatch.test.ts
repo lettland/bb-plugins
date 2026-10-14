@@ -75,4 +75,10 @@ describe("a turn that made only another thread's commits", () => {
     const moved = { paths: ["a.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [] };
     expect(commitScanHead(moved, state)).toBeNull();
   });
+
+  it("scans nothing for a turn whose only commits arrived with the remote base", () => {
+    const pulled = { paths: ["a.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: ["abcdef1"] };
+    expect(committedSinceHead(pulled, state)).toBeNull();
+    expect(commitScanHead(pulled, state)).toBeNull();
+  });
 });

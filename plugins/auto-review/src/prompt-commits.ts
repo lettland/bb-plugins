@@ -1,4 +1,7 @@
-/** Review-prompt text about the commits of the turn, this thread's, another thread's and the remote base's. Shas arrive already validated. */
+/** Review-prompt text about the commits of the turn, this thread's, another thread's and the remote base's. */
+
+/** A commit sha, the only shape a committed range is ever rendered from. */
+export const COMMIT_SHA_ALLOW = /^[0-9a-f]{7,64}$/u;
 
 /**
  * Commits another thread made during the turn. Only their shas are named, and
@@ -61,4 +64,65 @@ export function commitScan({ scanSince, hasForeign, hasUpstream, hasOwn, merge }
       : `Scan the commits the other thread made this turn too (${range}); a secret found there`;
   const skipMerge = merge ? " and skip the merge in step 8, saying so in your reply" : "";
   return ` ${scanned} is not yours: report it by file:line and type, never by value, and do not rewrite history. Do not STOP for it: still commit your own work${skipMerge}.`;
+}
+
+interface TurnCommitTextInput {
+  /** Commits another thread made during the turn. */
+  foreign: readonly string[];
+  /** Commits merged from the remote base; named only when there is a range to put them in. */
+  upstream: readonly string[];
+  /** This thread's own commits; named only next to `upstream`. */
+  own: readonly string[];
+  committedSince: string | null;
+  scanSince: string | null;
+  /** Step 8, the merge, is part of this prompt. */
+  merge: boolean;
+}
+
+interface TurnCommitText {
+  /** Notes naming the commits that are not this thread's, each its own paragraph. */
+  notes: string[];
+  /** The step 5 scan of the turn's commits. */
+  scan: string;
+  /** The step 4 sentence leaving the other commits' files out; empty when there are none. */
+  skipFiles: string;
+}
+
+/**
+ * The commit-related text `buildReviewPrompt` assembles. Anything not shaped
+ * like a commit sha is dropped first, so a value from outside never reaches the
+ * prompt.
+ */
+export function turnCommitText(input: TurnCommitTextInput): TurnCommitText {
+  const shas = (values: readonly string[]) => values.filter((sha) => COMMIT_SHA_ALLOW.test(sha));
+  const foreign = shas(input.foreign);
+  const upstream = shas(input.upstream);
+  const { committedSince, scanSince } = input;
+  const rangeFrom = committedSince ?? scanSince;
+  const notes: string[] = [];
+  if (foreign.length > 0) {
+    notes.push(foreignCommitNote(foreign, committedSince));
+  }
+  const upstreamNamed = upstream.length > 0 && rangeFrom !== null;
+  if (upstreamNamed) {
+    notes.push(upstreamCommitNote(upstream, shas(input.own), rangeFrom));
+  }
+  const named = [
+    ...(foreign.length > 0 ? ["the other thread's commits"] : []),
+    ...(upstreamNamed ? ["the commits merged from the remote base"] : []),
+  ];
+  return {
+    notes,
+    scan: commitScan({
+      scanSince,
+      hasForeign: foreign.length > 0,
+      hasUpstream: upstream.length > 0,
+      hasOwn: committedSince !== null,
+      merge: input.merge,
+    }),
+    skipFiles:
+      named.length === 0
+        ? ""
+        : ` Leave out the files of ${named.join(" and of ")} named above (list them with \`git show --name-only --format= <sha>\`).`,
+  };
 }

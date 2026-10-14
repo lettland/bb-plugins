@@ -179,7 +179,7 @@ export async function authoredPaths(
  * Pages a thread's timeline back from the latest segment for as long as
  * `olderMayMatter` says the next older page can still hold relevant rows.
  */
-async function recentTimelineRows(
+export async function recentTimelineRows(
   bb: BbPluginApi,
   threadId: string,
   olderMayMatter: (timeline: TimelineResult) => boolean,
@@ -242,7 +242,7 @@ function oldestCreatedAt(rows: readonly TimelineRow[]): number | null {
 }
 
 /** Whether a page can still hold rows from the turn: its oldest row is inside it, or no row carries a time. */
-function pageInTurn(startedAt: number): (timeline: TimelineResult) => boolean {
+export function pageInTurn(startedAt: number): (timeline: TimelineResult) => boolean {
   return (timeline) => {
     const oldest = oldestCreatedAt(timeline.rows);
     return oldest === null || oldest >= startedAt;

@@ -414,6 +414,29 @@ describe("buildReviewPrompt", () => {
       expect(text).not.toContain("Scan the other commits");
     });
 
+    it("leaves the files of the upstream commits out of step 4", () => {
+      expect(build()).toMatch(
+        /4\. Check[^\n]*Leave out the files of the commits merged from the remote base named above \(list them with `git show --name-only --format= <sha>`\)\./u,
+      );
+      expect(build({ committedSince: null, commitScanFrom: null, ownCommits: [] })).not.toContain("Leave out the files");
+    });
+
+    it("handles the other thread's, the remote base's and its own commits together", () => {
+      const text = build({ foreignCommits: ["abcdef9"], decision: { commit: true, merge: true } });
+      expect(text).toContain("Another thread in this checkout made this commit during this turn: abcdef9.");
+      expect(text).toContain("merged from the remote base, not made by this thread: abcdef1, 1234567.");
+      expect(text).toContain("This thread's own commit is fedcba9");
+      expect(text).toMatch(
+        /4\. Check[^\n]*Leave out the files of the other thread's commits and of the commits merged from the remote base named above \(list them with `git show --name-only --format= <sha>`\)\./u,
+      );
+      const scan = text.split("\n").find((line) => line.startsWith("5. ")) ?? "";
+      expect(scan).toContain("a secret found in one of your commits is already committed, so STOP");
+      expect(scan).toContain("A secret found only in one of the other commits is not yours");
+      expect(scan).toContain("Do not STOP for it: still commit your own work and skip the merge in step 8");
+      const others = scan.slice(scan.indexOf("A secret found only in one of the other commits"));
+      expect(others.replace("Do not STOP", "")).not.toContain("STOP");
+    });
+
     it("names only values shaped like a commit sha", () => {
       const text = build({ upstreamCommits: ["abcdef1", "main; echo pwned"], ownCommits: ["HEAD~1"] });
       expect(text).toContain("a commit merged from the remote base, not made by this thread: abcdef1. It may appear");
