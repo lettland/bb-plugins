@@ -29,7 +29,7 @@ export function upstreamCommitNote(
   const reviewOwn =
     own.length === 0
       ? ""
-      : ` This thread's own ${own.length === 1 ? "commit is" : "commits are"} ${own.join(", ")}: review exactly ${own.length === 1 ? "that one" : "those"} (\`git show <sha>\`), not the rest of the range, and ignore the other commits' files in the range's diff.`;
+      : ` This thread's own ${own.length === 1 ? "commit is" : "commits are"} ${own.join(", ")}: review exactly ${own.length === 1 ? "that one" : "those"} (\`git show <sha>\`), not the rest of the range, and ignore the other commits' changes in the range's diff, except in files this thread's own commits touch too.`;
   return `The range after ${rangeFrom} also holds ${many ? "commits" : "a commit"} merged from the remote base, not made by this thread: ${upstream.join(", ")}. ${many ? "They" : "It"} may appear in that range and in its diff, but ${many ? "are" : "is"} not part of your work: do not review, stage, complete, amend, or otherwise rewrite ${many ? "them" : "it"}; only a secret in ${many ? "them" : "it"} is reported (step 5).${reviewOwn}`;
 }
 
@@ -123,6 +123,6 @@ export function turnCommitText(input: TurnCommitTextInput): TurnCommitText {
     skipFiles:
       named.length === 0
         ? ""
-        : ` Leave out the files of ${named.join(" and of ")} named above (list them with \`git show --name-only --format= <sha>\`).`,
+        : ` Leave out the files of ${named.join(" and of ")} named above, unless your own commits touch them too (list them with \`git show --name-only --format= <sha>\`).`,
   };
 }

@@ -257,11 +257,18 @@ async function upstreamCommitsOf(
     return skip(rows);
   }
   const kin = await kinEvidence(bb, input.threadEntries, input.threadId, since, now);
+  // Evidence read from an earlier `since` holds windows `foreignCommitsOf` must not count as ours.
+  const reusable = since === startedAt ? kin : undefined;
   if (!kin.complete) {
-    return skip("a child thread could not be read in full", kin);
+    return skip("a related thread could not be read in full", reusable);
   }
   const windows = [...ownWindows(rows, since, now), ...kin.windows];
-  const familyPaths = new Set([...ownPaths, ...kin.paths]);
+  // Every row of the lookback counts; of this turn's own rows only the turn's, as for `ownPaths`.
+  const lookbackPaths = authoredPathsFromRows(
+    rows,
+    since < startedAt ? Number.NEGATIVE_INFINITY : input.turnStart.sinceSeq,
+  );
+  const familyPaths = new Set([...ownPaths, ...lookbackPaths, ...kin.paths]);
   const shas = candidates
     .filter(
       ({ authoredAt, paths }) =>
@@ -270,7 +277,7 @@ async function upstreamCommitsOf(
         !paths.some((path) => familyPaths.has(path)),
     )
     .map(({ sha }) => sha);
-  return { shas, kin };
+  return { shas, kin: reusable };
 }
 
 /** `tree` without the commits `dropped`, and the paths only they touched. */

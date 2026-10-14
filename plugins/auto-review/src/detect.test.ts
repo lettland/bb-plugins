@@ -1465,7 +1465,7 @@ describe("workspace capture edge cases", () => {
         expect(result).toMatchObject({ commits: [], upstreamCommits: ["u1"] });
       });
 
-      it("keeps everything when a child thread could not be read in full", async () => {
+      it("keeps everything when a related thread could not be read in full", async () => {
         const { result, infos } = await attribute({
           entries: [self, child],
           timelines: { thr_child: new Error("gone") },
@@ -1474,7 +1474,7 @@ describe("workspace capture edge cases", () => {
         });
         expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
         expect(infos).toEqual([
-          "auto-review: not checking whether the turn's commits came from origin/master: a child thread could not be read in full",
+          "auto-review: not checking whether the turn's commits came from origin/master: a related thread could not be read in full",
         ]);
       });
 
@@ -1580,6 +1580,47 @@ describe("workspace capture edge cases", () => {
         expect(elsewhere.result).toMatchObject({ commits: [], upstreamCommits: ["u1"] });
       });
 
+      it("keeps a commit touching a file the thread edited through its tools in an earlier turn", async () => {
+        const earlierEdit = (path: string) => ({ ...edit(path), sourceSeqStart: 2 });
+        const own = await attribute({
+          timelines: { thr_self: [earlierEdit("lib/merged.ts")] },
+          commits: [upstreamCommit("u1", 5_500)],
+          upstream: ["u1"],
+        });
+        expect(own.result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+        const elsewhere = await attribute({
+          timelines: { thr_self: [earlierEdit("lib/other.ts")] },
+          commits: [upstreamCommit("u1", 5_500)],
+          upstream: ["u1"],
+        });
+        expect(elsewhere.result).toMatchObject({ commits: [], upstreamCommits: ["u1"] });
+      });
+
+      it("keeps a teammate's commit authored inside an earlier, unrelated row of the thread", async () => {
+        // The deliberate conservative choice: an author date alone cannot tell it from a rewrite of the thread's own commit.
+        const { result } = await attribute({
+          timelines: { thr_self: [search(null, { createdAt: 5_000, startedAt: 5_000, completedAt: 6_000 })] },
+          commits: [upstreamCommit("u1", 5_500)],
+          upstream: ["u1"],
+        });
+        expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+      });
+
+      it("keeps a path in scope that an upstream commit and a kept own commit both touched", async () => {
+        const { result } = await attribute({
+          timelines: { thr_self: [rowAt(30_000, 31_000, "git commit -m own")] },
+          commits: [commit("u1", ["lib/shared.ts"], 20_000), commit("c1", ["lib/shared.ts"], 30_500)],
+          upstream: ["u1"],
+        });
+        expect(result).toEqual({
+          paths: ["lib/shared.ts"],
+          commits: ["c1"],
+          committedPaths: ["lib/shared.ts"],
+          foreignCommits: [],
+          upstreamCommits: ["u1"],
+        });
+      });
+
       it("keeps a commit whose paths could not be read", async () => {
         const { result } = await attribute({
           commits: [commit("u1", null, 20_000)],
@@ -1611,6 +1652,20 @@ describe("workspace capture edge cases", () => {
         expect(remoteCalls).toEqual(["origin/master"]);
         expect(result).toMatchObject({ commits: [], foreignCommits: [foreign("theirs")], upstreamCommits: ["u1"] });
         expect(timelineCalls.filter(({ threadId }) => threadId === "thr_child")).toHaveLength(1);
+      });
+
+      it("reads the foreign check's evidence from the turn start when the upstream check read an earlier one", async () => {
+        // The child went idle at 7 s with a stale pending row: read from 5.5 s it spans the sibling's commit, read from the turn start it is not read at all.
+        const { result } = await attribute({
+          entries: [self, sibling, { ...child, updatedAt: 7_000 }],
+          timelines: {
+            thr_sibling: [command(gitCommit)],
+            thr_child: [command("ls", { createdAt: 8_000, startedAt: 8_000, status: "pending", completedAt: null })],
+          },
+          commits: [upstreamCommit("u1", 5_500), commit("theirs", ["src/b.ts"], 20_500)],
+          upstream: ["u1"],
+        });
+        expect(result).toMatchObject({ commits: [], foreignCommits: [foreign("theirs")], upstreamCommits: ["u1"] });
       });
 
       it("keeps a commit whose author date is unknown", async () => {
