@@ -345,7 +345,10 @@ describe("a sibling's text, strictly", () => {
 describe("where a sibling's shell is", () => {
   const rows = (...items: Array<[string, string?]>) =>
     items.map(([text, cwd]) => ({ threadId: "sib-1", text, cwd: cwd ?? "" }));
-  const written = (items: Array<{ threadId: string; text: string; cwd: string }>, candidates = ["lib/a.ts", "a.ts", "lib/b.ts"]) =>
+  const written = (
+    items: Array<{ threadId: string; text: string; cwd: string }>,
+    candidates = ["lib/a.ts", "a.ts", "lib/b.ts", "sub/a.ts", "sub/lib/a.ts"],
+  ) =>
     [...siblingWrittenPaths(candidates, items, [], ROOT).keys()].sort();
 
   it("is the checkout root for an empty or null cwd", () => {
@@ -367,11 +370,11 @@ describe("where a sibling's shell is", () => {
     expect(written(rows(["cd sub"], ["echo x > /elsewhere/lib/a.ts"]))).toEqual([]);
   });
 
-  it("is found again by a cd back to the root", () => {
+  it("is found again only by a cd to the root by an absolute path", () => {
     expect(written(rows(["cd /w"], ["echo x > lib/a.ts"]))).toEqual(["lib/a.ts"]);
     expect(written(rows(["cd sub"], ["cd /w"], ["echo x > lib/a.ts"]))).toEqual(["lib/a.ts"]);
-    expect(written(rows(["cd sub && cd .."], ["echo x > lib/a.ts"]))).toEqual(["lib/a.ts"]);
-    expect(written(rows(["cd /w/sub"], ["cd .."], ["echo x > lib/a.ts"]))).toEqual(["lib/a.ts"]);
+    expect(written(rows(["cd sub && cd .."], ["echo x > lib/a.ts"]))).toEqual([]);
+    expect(written(rows(["cd /w/sub"], ["cd .."], ["echo x > lib/a.ts"]))).toEqual([]);
   });
 
   it("resolves against a row's own absolute cwd whatever came before", () => {

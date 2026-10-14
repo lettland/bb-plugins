@@ -21,6 +21,9 @@ interface CreditInput {
   candidates: readonly string[];
 }
 
+/** The most paths one log line names. */
+const LOG_LINE_PATHS = 20;
+
 async function checkoutPath(bb: BbPluginApi, environmentId: string): Promise<string | null> {
   try {
     const { path } = await bb.sdk.environments.get({ environmentId });
@@ -35,7 +38,8 @@ async function checkoutPath(bb: BbPluginApi, environmentId: string): Promise<str
  * turn, with that sibling, when nothing of this thread's family names them
  * (see `siblingWrittenPaths`). Nothing moves when this thread's timeline is
  * truncated, a related thread could not be read in full or the checkout path is
- * unknown. Every credited path is logged, one line per sibling, never the commands.
+ * unknown. Every credited path is logged, in lines of at most 20 paths that each name
+ * the sibling, never the commands.
  */
 export async function pathsLeftToSiblings(credit: CreditInput): Promise<Map<string, string>> {
   const { bb, sibling, startedAt, now } = credit;
@@ -72,7 +76,10 @@ export async function pathsLeftToSiblings(credit: CreditInput): Promise<Map<stri
     bySibling.set(threadId, [...(bySibling.get(threadId) ?? []), path]);
   }
   for (const [threadId, paths] of bySibling) {
-    bb.log.info(`auto-review: left to thread ${threadId}, named in its write during the turn: ${paths.join(", ")}`);
+    for (let from = 0; from < paths.length; from += LOG_LINE_PATHS) {
+      const line = paths.slice(from, from + LOG_LINE_PATHS).join(", ");
+      bb.log.info(`auto-review: left to thread ${threadId}, named in its write during the turn: ${line}`);
+    }
   }
   return credited;
 }

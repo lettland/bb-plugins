@@ -1,6 +1,6 @@
 import { familyMatcher } from "./detect-family.js";
 import { globMatcher, globQualifies, isGlob } from "./detect-globs.js";
-import { commandOf, gitCommand, lexCommands } from "./detect-mentions.js";
+import { commandOf, commandStart, gitCommand, lexCommands } from "./detect-mentions.js";
 import type { Command, Word } from "./detect-mentions.js";
 import { scriptTokens } from "./detect-script-writes.js";
 
@@ -11,6 +11,8 @@ const INTERPRETER = /^(?:python[\d.]*|node|ruby|perl)$/u;
 /** `sed -i` and `--in-place`; for perl a short-flag cluster with `i` (`-pi`, `-i.bak`, `-0pi`) that does not start with `-M`, `-m`, `-I` or `-x`. */
 const SED_IN_PLACE = /^-(?:[A-Za-z]*i|-in-place)/u;
 const PERL_IN_PLACE = /^-(?![MmIx-])[A-Za-z0-9]*i/u;
+/** An assignment that points git at another repository or index, so its paths no longer resolve against the shell's. */
+const GIT_LOCATION = /^GIT_(?:DIR|WORK_TREE|INDEX_FILE)=/u;
 
 /** A target that is not scratch space: `~`, `/dev` and `/tmp`. */
 const checkoutBound = (token: string) => token !== "" && !/^(?:~|\/dev\/|\/tmp\/)/u.test(token);
@@ -89,9 +91,10 @@ function argumentTargets(name: string, args: readonly Word[], heredocs: readonly
 /** What one simple command writes to, as it names it: its redirect targets and what its arguments write. */
 function rawTargets({ words, redirects, heredocs }: Command): string[] {
   const command = commandOf(words);
+  const relocated = command?.name === "git" && words.slice(0, commandStart(words)).some(({ text }) => GIT_LOCATION.test(text));
   return [
     ...redirects.map(({ text }) => text),
-    ...(command === null ? [] : argumentTargets(command.name, command.args, heredocs)),
+    ...(command === null || relocated ? [] : argumentTargets(command.name, command.args, heredocs)),
   ];
 }
 
@@ -163,28 +166,32 @@ function namedCandidates(path: string, candidates: readonly string[], wanted: Re
   return globQualifies(path) ? candidates.filter(globMatcher(path)) : [];
 }
 
+/** Where a `cd` or `pushd` to `target` leaves a shell that was at `dir`: the checkout root, or null for anywhere else or anywhere unknown. */
+function movedTo(dir: string | null, target: string | undefined, root: string): string | null {
+  if (target === undefined || /^[-~]|[$`{}]/u.test(target) || (dir === null && !target.startsWith("/"))) {
+    return null;
+  }
+  const to = `/${segmentsOf(target.startsWith("/") ? target : `${dir}/${target}`).join("/")}`;
+  return to === `/${segmentsOf(root).join("/")}` ? root : null;
+}
+
 /**
  * Where the shell is after a text, when it changes directory: the checkout
- * root or another directory, null when that cannot be told (`cd` alone, a
- * variable, `popd`). Undefined when the text changes no directory.
+ * root, or null for anywhere else (`cd src`, `cd ..`, `cd -`, `cd` alone, a
+ * variable, `popd`), since a relative token no longer resolves there. A `cd`
+ * inside a subshell or a command substitution does not move the shell.
+ * Undefined when the text changes no directory.
  */
-function directoryAfter(text: string, start: string | null): string | null | undefined {
+function directoryAfter(text: string, start: string | null, root: string): string | null | undefined {
   let dir = start;
   let changed = false;
-  for (const { words } of lexCommands(text, SIBLING_TEXT_LIMIT)) {
+  for (const { words, depth } of lexCommands(text, SIBLING_TEXT_LIMIT)) {
     const parsed = commandOf(words);
-    if (parsed === null || !DIRECTORY_CHANGERS.has(parsed.name)) {
+    if (parsed === null || depth > 0 || !DIRECTORY_CHANGERS.has(parsed.name)) {
       continue;
     }
-    const target = plain(parsed.args)[0];
     changed = true;
-    if (parsed.name === "popd" || target === undefined || /^[-~]|[$`{}]/u.test(target)) {
-      dir = null;
-    } else if (target.startsWith("/") || dir !== null) {
-      dir = `/${segmentsOf(target.startsWith("/") ? target : `${dir}/${target}`).join("/")}`;
-    } else {
-      dir = null;
-    }
+    dir = parsed.name === "popd" ? null : movedTo(dir, plain(parsed.args)[0], root);
   }
   return changed ? dir : undefined;
 }
@@ -214,8 +221,8 @@ function writtenBy(
 /**
  * The candidates a sibling's shell texts write to, with the first sibling that
  * did. An empty or unknown `cwd` is the checkout root until that sibling's
- * earlier rows `cd` somewhere else, and again once one `cd`s back; while it is
- * elsewhere only absolute targets resolve.
+ * earlier rows `cd` somewhere else, and again once one `cd`s to the root by an
+ * absolute path; while it is elsewhere only absolute targets resolve.
  */
 function writtenCandidates(
   candidates: readonly string[],
@@ -233,7 +240,7 @@ function writtenCandidates(
         written.set(candidate, threadId);
       }
     }
-    const after = directoryAfter(text, base);
+    const after = directoryAfter(text, base, root);
     if (after !== undefined) {
       shellDirs.set(threadId, after);
     }

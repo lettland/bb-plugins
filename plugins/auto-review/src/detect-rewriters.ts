@@ -6,6 +6,7 @@
 
 import { gitCommand } from "./detect-mentions.js";
 import type { Word } from "./detect-mentions.js";
+import { packageWords } from "./detect-packages.js";
 import type { Parsed } from "./detect-wrappers.js";
 
 export const FIXER_FLAGS: ReadonlySet<string> = new Set([
@@ -36,8 +37,19 @@ const FD_WRITING: ReadonlySet<string> = new Set(["-x", "-X", "--exec", "--exec-b
  */
 const REWRITING_SCRIPT = /fix|format|fmt|codemod|generate|gen|update|sync|prettier/iu;
 /** Programs that run the script file they are given. */
-const SCRIPT_RUNNER = /^(?:python[\d.]*|node|ruby|perl|bash|sh|zsh|tsx|ts-node|bun|deno|php|lua|Rscript)$/u;
-const SHELL = /^(?:bash|sh|zsh)$/u;
+const SCRIPT_RUNNER = /^(?:python[\d.]*|node|ruby|perl|bash|sh|zsh|dash|ksh|tsx|ts-node|bun|deno|php|lua|Rscript)$/u;
+/** For a shell, `-e`, `-u`, `-x` and `-o <opt>` are options; only `-c` (or a cluster ending in `c`) takes a command string. */
+const SHELL = /^(?:bash|sh|zsh|dash|ksh)$/u;
+const SHELL_COMMAND_FLAG = /^-[A-Za-z]*c$/u;
+/** For `node`, `python`, `ruby` and `perl`, `-e` and `-c` take the code itself. */
+const EVAL_FLAG = /^-[A-Za-z]*[ce]$/u;
+/** Options of a script runner that take the next word as their value. */
+const RUNNER_VALUE_OPTIONS: ReadonlySet<string> = new Set([
+  "-o", "+o", "--import", "--require", "-r", "--loader", "--experimental-loader", "-W", "-X", "-I",
+]);
+const PYTHON = /^python[\d.]*$/u;
+/** Formatters that `python -m` runs and that rewrite the tree they are given. */
+const PYTHON_FORMATTERS: ReadonlySet<string> = new Set(["black", "isort", "ruff", "autopep8", "yapf"]);
 /** A script file by its name: a relative path, or a name with a script extension. */
 const SCRIPT_WORD = /^[\w.@-]+(?:\/[\w.@-]+)+$|\.(?:[cm]?[jt]sx?|py|rb|pl|php|sh|bash|zsh|lua)$/u;
 
@@ -78,17 +90,23 @@ function gitRewritesTree(sub: string, rest: readonly Word[]): boolean {
       return !flags.includes("--cached") || flags.includes("--index");
     case "reset":
       return flags.some((flag) => ["--hard", "--merge", "--keep"].includes(flag));
+    case "submodule":
+      return flags.find((flag) => !flag.startsWith("-")) === "update";
     default:
       return REWRITING_GIT.has(sub);
   }
 }
+
+/** Whether a command is given a fixer flag; a package manager's `-w` selects a workspace and fixes nothing. */
+const hasFixerFlag = ({ name, args }: Parsed) =>
+  args.some(({ text }) => FIXER_FLAGS.has(text) && !(text === "-w" && PACKAGE_MANAGERS.has(name)));
 
 /** A fixer flag with no path to apply it to, outside a reader and git: it fixes the whole tree. */
 function fixesTree(parsed: Parsed): boolean {
   return (
     parsed.name !== "git" &&
     !isReader(parsed) &&
-    parsed.args.some(({ text }) => FIXER_FLAGS.has(text)) &&
+    hasFixerFlag(parsed) &&
     pathArgs(parsed.args).length === 0
   );
 }
@@ -102,8 +120,12 @@ function formatsTree({ name, args }: Parsed): boolean {
       return first === "fmt";
     case "gofmt":
       return args.some(({ text }) => text === "-w") && wholeTree(args);
+    case "deno":
+      return first === "fmt" && wholeTree(args) && !args.some(({ text }) => text === "--check");
     case "black":
     case "isort":
+    case "autopep8":
+    case "yapf":
       return wholeTree(args);
     case "ruff":
       return (first === "format" || (first === "check" && args.some(({ text }) => text === "--fix"))) && wholeTree(args);
@@ -129,15 +151,35 @@ function runsRewritingScript({ name, args }: Parsed): boolean {
   if (!PACKAGE_MANAGERS.has(name)) {
     return false;
   }
-  const words = positional(args);
+  const words = packageWords(name, args);
   const script = words[0] === "run" ? words[1] : name === "pnpm" || name === "yarn" ? words[0] : undefined;
   return script !== undefined && REWRITING_SCRIPT.test(script);
 }
 
-/** The string a `sh -c`, `bash -lc` or `zsh -c` runs; null for any other command. */
+/** The string a `sh -c`, `bash -lc`, `dash -c` or `ksh -c` runs, or the words an `eval` joins and runs; null for any other command. */
 export function shellScript({ name, args }: Parsed): string | null {
-  const flag = SHELL.test(name) ? args.findIndex(({ text }) => /^-[A-Za-z]*c$/u.test(text)) : -1;
+  if (name === "eval") {
+    return args.map(({ text }) => text).join(" ");
+  }
+  const flag = SHELL.test(name) ? args.findIndex(({ text }) => SHELL_COMMAND_FLAG.test(text)) : -1;
   return flag < 0 ? null : (args[flag + 1]?.text ?? null);
+}
+
+/** The first word of a script runner's arguments that is not an option or an option's value; a shell's `-euo pipefail` takes one too. */
+function runnerOperand(name: string, args: readonly Word[]): string | undefined {
+  for (let at = 0; at < args.length; at += 1) {
+    const text = args[at]?.text ?? "";
+    if (text === "--") {
+      return args[at + 1]?.text;
+    }
+    if (!/^[-+]/u.test(text)) {
+      return text;
+    }
+    if (RUNNER_VALUE_OPTIONS.has(text) || (SHELL.test(name) && /^[-+][A-Za-z]*o$/u.test(text))) {
+      at += 1;
+    }
+  }
+  return undefined;
 }
 
 /** A script file, which can do anything: a program given a file, a script named through a wrapper, or a relative path run directly. */
@@ -145,11 +187,30 @@ function runsScriptFile({ word, name, args, wrapped }: Parsed): boolean {
   if (/^[\w.@-]+(?:\/[\w.@-]+)+$/u.test(word) || (wrapped && SCRIPT_WORD.test(word))) {
     return true;
   }
-  if (!SCRIPT_RUNNER.test(name) || args.some(({ text }) => /^-[A-Za-z]*[ce]$/u.test(text))) {
+  const evalFlag = SHELL.test(name) ? SHELL_COMMAND_FLAG : EVAL_FLAG;
+  if (!SCRIPT_RUNNER.test(name) || args.some(({ text }) => evalFlag.test(text))) {
     return false;
   }
-  const file = positional(args)[0];
+  const file = runnerOperand(name, args);
   return file !== undefined && isPathLike(file);
+}
+
+/**
+ * `python -m <module>`: a formatter (`black`, `isort`, `ruff`, `autopep8`,
+ * `yapf`) given no path or `.`, a module named like a rewriting script
+ * (`fix`, `format`, `gen`, …) and a dotted module, which is project code that
+ * can do anything. `pip` and any other plain module name are left alone.
+ */
+function runsPythonModule({ name, args }: Parsed): boolean {
+  const flag = PYTHON.test(name) ? args.findIndex(({ text }) => text === "-m") : -1;
+  const module = flag < 0 ? undefined : args[flag + 1]?.text;
+  if (module === undefined || module === "pip") {
+    return false;
+  }
+  if (PYTHON_FORMATTERS.has(module)) {
+    return formatsTree({ word: module, name: module, args: args.slice(flag + 2), wrapped: false });
+  }
+  return REWRITING_SCRIPT.test(module) || isPathLike(module);
 }
 
 /** `tar` that unpacks: `x` in its mode (`xf`, `-xzf`) or `--extract`. */
@@ -189,13 +250,14 @@ export function rewritesTree(parsed: Parsed): boolean {
     return git !== null && gitRewritesTree(git.sub, git.rest);
   }
   const changesPackages =
-    PACKAGE_MANAGERS.has(parsed.name) && PACKAGE_CHANGES.has(positional(parsed.args)[0] ?? "");
+    PACKAGE_MANAGERS.has(parsed.name) && PACKAGE_CHANGES.has(packageWords(parsed.name, parsed.args)[0] ?? "");
   return (
     changesPackages ||
     writesInBulk(parsed) ||
     fixesTree(parsed) ||
     formatsTree(parsed) ||
     runsRewritingScript(parsed) ||
+    runsPythonModule(parsed) ||
     runsScriptFile(parsed)
   );
 }
@@ -218,5 +280,5 @@ export function writesFiles(parsed: Parsed | null, hasTarget: boolean): boolean 
   if (parsed.name === "git" && PATH_WRITING_GIT.has(gitCommand(parsed.args)?.sub ?? "")) {
     return true;
   }
-  return !isReader(parsed) && parsed.args.some(({ text }) => FIXER_FLAGS.has(text));
+  return !isReader(parsed) && hasFixerFlag(parsed);
 }

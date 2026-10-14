@@ -278,7 +278,23 @@ describe("turnChangedPaths and a sibling's shell edits", () => {
     it("by a tool's string arguments, whatever their depth, read as text and not as JSON", () => {
       const rows = [tool({ edits: [{ note: "x\nsrc/a.ts", count: 2 }], path: "dir/my file.ts" }, { startedAt: 20_000 })];
       const texts = rowTexts(rows as never, STARTED_AT, { pending: 30_000, unended: 30_000 }, { includeUnapproved: true });
-      expect(texts.map(({ text }) => text)).toEqual(["x\nsrc/a.ts", "dir/my file.ts", '"dir/my file.ts"']);
+      expect(texts.map(({ text }) => text)).toEqual([
+        "edits",
+        "note",
+        "x\nsrc/a.ts",
+        "count",
+        "path",
+        "dir/my file.ts",
+        '"dir/my file.ts"',
+      ]);
+    });
+
+    it("by an object key of a tool's arguments", async () => {
+      expect(await keeps({ "kid-1": one(tool({ files: { "/w/lib/b.ts": "x" } })) })).toBe(true);
+      expect(await keeps({ "kid-1": one(tool({ files: { "/w/lib/other.ts": "x" } })) })).toBe(false);
+      const rows = [tool({ files: { "src/a.ts": "x" }, list: ["y"] }, { startedAt: 20_000 })];
+      const texts = rowTexts(rows as never, STARTED_AT, { pending: 30_000, unended: 30_000 }, { includeUnapproved: true });
+      expect(texts.map(({ text }) => text)).toEqual(["files", "src/a.ts", "x", "list", "y"]);
     });
 
     it("by a file-read or search row that carries no approval status", async () => {
@@ -349,7 +365,7 @@ describe("turnChangedPaths and a sibling's shell edits", () => {
     });
   });
 
-  it("logs every credited path, one line per sibling", async () => {
+  it("logs every credited path, in lines of at most 20 paths that each name the sibling", async () => {
     const many = Array.from({ length: 25 }, (_, at) => `lib/f${String(at).padStart(2, "0")}.ts`);
     const { result, infos } = await attribute({
       timelines: { "sib-1": one(command(`echo x | tee ${many.join(" ")}`)) },
@@ -357,6 +373,7 @@ describe("turnChangedPaths and a sibling's shell edits", () => {
     });
     expect(pathsOf(result)).toEqual(["lib/mine.ts", "lib/own.ts"]);
     const lines = infos.filter((line) => line.includes("left to"));
-    expect(lines).toEqual([`auto-review: left to thread sib-1, named in its write during the turn: ${many.join(", ")}`]);
+    const line = (paths: string[]) => `auto-review: left to thread sib-1, named in its write during the turn: ${paths.join(", ")}`;
+    expect(lines).toEqual([line(many.slice(0, 20)), line(many.slice(20))]);
   });
 });

@@ -82,7 +82,7 @@ export interface RowText {
 
 const MAX_ARGUMENT_DEPTH = 32;
 
-/** The string values anywhere in a tool's arguments, which are what the tool acts on. */
+/** The strings anywhere in a tool's arguments, which are what the tool acts on: its string values and its object keys (`{files: {"src/a.ts": "…"}}`). */
 function leafStrings(value: unknown, depth = 0): string[] {
   if (typeof value === "string") {
     return [value];
@@ -90,7 +90,10 @@ function leafStrings(value: unknown, depth = 0): string[] {
   if (depth >= MAX_ARGUMENT_DEPTH || typeof value !== "object" || value === null) {
     return [];
   }
-  return Object.values(value).flatMap((member) => leafStrings(member, depth + 1));
+  if (Array.isArray(value)) {
+    return value.flatMap((member) => leafStrings(member, depth + 1));
+  }
+  return Object.entries(value).flatMap(([key, member]) => [key, ...leafStrings(member, depth + 1)]);
 }
 
 /** A path as shell text: itself, and, when it has a blank, once more quoted so it stays one word. */

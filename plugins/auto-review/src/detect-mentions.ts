@@ -5,6 +5,8 @@
  * can backtrack badly on input a command row carries.
  */
 
+import { prepare } from "./detect-prepare.js";
+
 export interface Word {
   text: string;
   /** Any part of the word was quoted. */
@@ -20,11 +22,12 @@ export interface Command {
   inputs: Word[];
   /** Heredoc bodies the command reads. */
   heredocs: string[];
+  /** How many parentheses were open around it; above zero it runs in a subshell or a command substitution. */
+  depth: number;
 }
 
-/** A heredoc operator and its tag: `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"` and `<<\EOF`. */
-const HEREDOC_TAG = /<<(-?)[ \t]*(?:'([A-Za-z_]\w*)'|"([A-Za-z_]\w*)"|\\?([A-Za-z_]\w*))/uy;
 const HEREDOC_MARKER = /^\u0001(\d+)\u0001$/u;
+const EMBEDDED_MARKER = /\u0001(\d+)\u0001/gu;
 
 /** A quoted string (an unterminated one runs to the end), an escaped character, an operator, blanks, or a run of plain characters. */
 const SHELL_PIECE =
@@ -35,144 +38,6 @@ const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
 const KEYWORDS: ReadonlySet<string> = new Set(["{", "!", "if", "then", "elif", "else", "do", "while", "until"]);
 /** Plain wrappers the sibling side looks through; the family side reads their options as well. */
 const PLAIN_WRAPPERS: ReadonlySet<string> = new Set(["time", "sudo", "command"]);
-
-interface Prepared {
-  /** The text without comments and heredoc bodies, with a marker word where each heredoc operator was. */
-  text: string;
-  /** The heredoc bodies by marker; null for one whose body never began. */
-  bodies: Array<string | null>;
-  comments: string[];
-  /** A heredoc has no terminator line. */
-  unterminated: boolean;
-  /** The text ends inside a heredoc body. */
-  midBody: boolean;
-}
-
-interface PendingHeredoc {
-  dash: boolean;
-  tag: string;
-  index: number;
-}
-
-function readBody(text: string, from: number, { dash, tag }: PendingHeredoc): { body: string; at: number; closed: boolean } {
-  const body: string[] = [];
-  let at = from;
-  while (at < text.length) {
-    const end = text.indexOf("\n", at);
-    const line = text.slice(at, end < 0 ? text.length : end);
-    at = end < 0 ? text.length : end + 1;
-    if ((dash ? line.replace(/^\t+/u, "") : line) === tag) {
-      return { body: body.join("\n"), at, closed: true };
-    }
-    body.push(line);
-  }
-  return { body: body.join("\n"), at, closed: false };
-}
-
-interface Scan {
-  /** The quote character the scan is inside, or an empty string. */
-  quote: string;
-  /** The scan is where a word could begin, so a `#` here starts a comment. */
-  blank: boolean;
-  /** Heredocs whose body starts at the next line. */
-  pending: PendingHeredoc[];
-}
-
-interface Step {
-  /** What the step keeps of the text it read. */
-  keep: string;
-  /** How much text it read. */
-  width: number;
-}
-
-function scanQuoted(char: string, following: string, scan: Scan): Step {
-  const escaped = char === "\\" && scan.quote === '"';
-  scan.quote = char === scan.quote ? "" : scan.quote;
-  scan.blank = false;
-  return escaped ? { keep: char + following, width: 2 } : { keep: char, width: 1 };
-}
-
-function scanComment(text: string, at: number, prepared: Prepared): Step {
-  const end = text.indexOf("\n", at);
-  const stop = end < 0 ? text.length : end;
-  prepared.comments.push(text.slice(at + 1, stop));
-  return { keep: "", width: stop - at };
-}
-
-/** A heredoc operator and tag at `at`, kept as a marker word; null when the `<<` is something else. */
-function scanHeredoc(text: string, at: number, scan: Scan, prepared: Prepared): Step | null {
-  if (text.charAt(at - 1) === "<" || text.charAt(at + 2) === "<") {
-    return null;
-  }
-  HEREDOC_TAG.lastIndex = at;
-  const found = HEREDOC_TAG.exec(text);
-  if (found === null) {
-    return null;
-  }
-  scan.pending.push({ dash: found[1] === "-", tag: found[2] ?? found[3] ?? found[4] ?? "", index: prepared.bodies.length });
-  prepared.bodies.push(null);
-  scan.blank = true;
-  return { keep: ` \u0001${prepared.bodies.length - 1}\u0001 `, width: found[0].length };
-}
-
-/** The newline that ends a line with heredocs, with the bodies after it. */
-function scanBodies(text: string, at: number, scan: Scan, prepared: Prepared): Step {
-  let end = at + 1;
-  for (const heredoc of scan.pending.splice(0)) {
-    const read = readBody(text, end, heredoc);
-    end = read.at;
-    prepared.bodies[heredoc.index] = read.body;
-    prepared.midBody ||= !read.closed;
-  }
-  scan.blank = true;
-  return { keep: "\n", width: end - at };
-}
-
-function scanStep(text: string, at: number, scan: Scan, prepared: Prepared): Step {
-  const char = text.charAt(at);
-  const following = text.charAt(at + 1);
-  if (scan.quote !== "") {
-    return scanQuoted(char, following, scan);
-  }
-  const wordStart = scan.blank;
-  scan.blank = false;
-  if (char === "\\") {
-    return { keep: char + following, width: 2 };
-  }
-  if (char === "'" || char === '"') {
-    scan.quote = char;
-    return { keep: char, width: 1 };
-  }
-  if (char === "#" && wordStart) {
-    return scanComment(text, at, prepared);
-  }
-  const heredoc = char === "<" && following === "<" ? scanHeredoc(text, at, scan, prepared) : null;
-  if (heredoc !== null) {
-    return heredoc;
-  }
-  if (char === "\n" && scan.pending.length > 0) {
-    return scanBodies(text, at, scan, prepared);
-  }
-  scan.blank = /[\s;|&()<>]/u.test(char);
-  return { keep: char, width: 1 };
-}
-
-/**
- * Cuts comments and heredoc bodies out of the text, leaving a marker word where
- * a heredoc operator was. A `<<` or `#` inside quotes is plain text.
- */
-function prepare(text: string): Prepared {
-  const prepared: Prepared = { text: "", bodies: [], comments: [], unterminated: false, midBody: false };
-  const scan: Scan = { quote: "", blank: true, pending: [] };
-  let at = 0;
-  while (at < text.length) {
-    const { keep, width } = scanStep(text, at, scan, prepared);
-    prepared.text += keep;
-    at += width;
-  }
-  prepared.unterminated = prepared.midBody || scan.pending.length > 0;
-  return prepared;
-}
 
 /** A word piece without its quotes or escaping backslash; an unterminated quote runs to the end. */
 function pieceText(piece: string): string {
@@ -214,15 +79,36 @@ interface Lexing {
   /** What the next word is: a redirect's target, or an input redirect's file to drop. */
   expecting: "target" | "skip" | null;
   bodies: ReadonlyArray<string | null>;
+  /** Parentheses open now. */
+  depth: number;
+  /** The `$(` substitutions open, each with the command it sits in and the depth it opened at. */
+  subs: Array<{ outer: Outer; depth: number }>;
 }
 
+/** The command a `$(` substitution sits in, set aside while the commands inside it are read. */
+type Outer = Pick<Lexing, "words" | "redirects" | "inputs" | "heredocs" | "word" | "quoted" | "expecting">;
+
 const EXPECTED_AFTER: Partial<Record<PieceKind, "target" | "skip">> = { input: "skip", redirect: "target" };
+
+/** A word without the heredoc markers inside it, whose bodies the command reads: a heredoc in a quoted `$(…)`. */
+function withoutMarkers(lexing: Lexing, text: string): string {
+  if (!text.includes("\u0001")) {
+    return text;
+  }
+  return text.replace(EMBEDDED_MARKER, (_marker, index: string) => {
+    const body = lexing.bodies[Number(index)];
+    if (body !== undefined && body !== null) {
+      lexing.heredocs.push(body);
+    }
+    return "";
+  });
+}
 
 function endWord(lexing: Lexing): void {
   if (lexing.word === null) {
     return;
   }
-  const done = { text: lexing.word, quoted: lexing.quoted };
+  const done = { text: HEREDOC_MARKER.test(lexing.word) ? lexing.word : withoutMarkers(lexing, lexing.word), quoted: lexing.quoted };
   const wanted = lexing.expecting;
   lexing.word = null;
   lexing.quoted = false;
@@ -247,7 +133,7 @@ function endCommand(lexing: Lexing): void {
   lexing.expecting = null;
   const { words, redirects, inputs, heredocs } = lexing;
   if (words.length > 0 || redirects.length > 0 || heredocs.length > 0) {
-    lexing.commands.push({ words, redirects, inputs, heredocs });
+    lexing.commands.push({ words, redirects, inputs, heredocs, depth: lexing.depth });
   }
   lexing.words = [];
   lexing.redirects = [];
@@ -255,10 +141,54 @@ function endCommand(lexing: Lexing): void {
   lexing.heredocs = [];
 }
 
+/** A `(` right after a `$`: the commands inside are read on their own, and the outer command goes on after the `)`. */
+function openSubstitution(lexing: Lexing): void {
+  const { words, redirects, inputs, heredocs, word, quoted, expecting } = lexing;
+  lexing.subs.push({ outer: { words, redirects, inputs, heredocs, word, quoted, expecting }, depth: lexing.depth });
+  lexing.words = [];
+  lexing.redirects = [];
+  lexing.inputs = [];
+  lexing.heredocs = [];
+  lexing.word = null;
+  lexing.quoted = false;
+  lexing.expecting = null;
+}
+
+/** The `)` that closes a substitution: the outer command carries on with `$()` as the word. */
+function closeSubstitution(lexing: Lexing): void {
+  endCommand(lexing);
+  const open = lexing.subs.pop();
+  if (open !== undefined) {
+    Object.assign(lexing, open.outer, { word: `${open.outer.word ?? ""}()` });
+  }
+}
+
+function lexParenthesis(lexing: Lexing, piece: string): void {
+  if (piece === "(") {
+    lexing.depth += 1;
+    if (lexing.word?.endsWith("$") === true) {
+      openSubstitution(lexing);
+    } else {
+      endCommand(lexing);
+    }
+    return;
+  }
+  if (lexing.subs.at(-1)?.depth === lexing.depth) {
+    closeSubstitution(lexing);
+  } else {
+    endCommand(lexing);
+  }
+  lexing.depth = Math.max(0, lexing.depth - 1);
+}
+
 function lexPiece(lexing: Lexing, piece: string): void {
   const kind = pieceKind(piece);
   if (kind === "separator") {
-    endCommand(lexing);
+    if (piece === "(" || piece === ")") {
+      lexParenthesis(lexing, piece);
+    } else {
+      endCommand(lexing);
+    }
   } else if (kind === "word") {
     lexing.word = (lexing.word ?? "") + pieceText(piece);
     lexing.quoted ||= piece.startsWith("'") || piece.startsWith('"');
@@ -308,17 +238,22 @@ export function lexText(text: string, limit: number): Lexed {
     quoted: false,
     expecting: null,
     bodies,
+    depth: 0,
+    subs: [],
   };
   for (const [piece] of cut.matchAll(SHELL_PIECE)) {
     lexPiece(lexing, piece);
   }
   const finished = lexing.commands.length;
+  while (lexing.subs.length > 0) {
+    closeSubstitution(lexing);
+  }
   endCommand(lexing);
   const cutShort = text.length > limit;
   if (cutShort && midBody) {
     lexing.commands.at(-1)?.heredocs.pop();
-  } else if (cutShort && endsInCommand(head) && lexing.commands.length > finished) {
-    lexing.commands.pop();
+  } else if (cutShort && endsInCommand(head)) {
+    lexing.commands.splice(finished);
   }
   return { commands: lexing.commands, comments, unterminated };
 }

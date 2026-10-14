@@ -44,6 +44,8 @@ const WRAPPERS: ReadonlyMap<string, Wrapper> = new Map([
   ["stdbuf", wrapper(["-i", "-o", "-e"])],
   ["npx", wrapper(["-p", "--package"])],
   ["bunx", wrapper()],
+  ["uvx", wrapper(["--from", "--with", "-w", "-p", "--python", "--directory", "--project", "--env-file"])],
+  ["cross-env", wrapper()],
   ["pnpm", wrapper(["-C", "--dir", "-F", "--filter"], 0, ["exec", "dlx"])],
   ["yarn", wrapper(["-p", "--package"], 0, ["dlx"])],
   ["uv", wrapper(["--with", "-w", "-p", "--python", "--directory", "--project", "--package", "--extra", "--env-file", "--group"], 0, ["run"])],
@@ -79,7 +81,7 @@ function wrapped(name: string, args: readonly Word[]): readonly Word[] | null {
   if (found === undefined) {
     return null;
   }
-  const at = skipOptions(args, found.values, 0, name === "env");
+  const at = skipOptions(args, found.values, 0, name === "env" || name === "cross-env");
   if (found.subs.length === 0) {
     return args.slice(at + found.operands);
   }

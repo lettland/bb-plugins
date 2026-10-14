@@ -8,10 +8,12 @@ import type { Word } from "./detect-mentions.js";
 
 /** A script body that writes a file: Python's `open(…, 'w')`, `.write(`, `write_text`, Node's `writeFile`. */
 const SCRIPT_WRITE =
-  /\bopen\s*\([^\n]{0,200}?['"][wax][bt+]*['"]|\.write\(|\bwrite_text\b|\bwriteFile(?:Sync)?\b/u;
+  /\bopen\s*\([^)\n]{0,200}?['"][wax][bt+]*['"]|\.write\(|\bwrite_text\b|\bwriteFile(?:Sync)?\b/u;
 const SCRIPT_TOKEN = /[\w@.+\-/*?]+/gu;
-/** `open(<first argument>, …'w')`: group 2 is the first argument when it is a string literal on its own. */
-const OPEN_WRITE = /\bopen\s*\(\s*(?:(['"])([^'"\n]{1,200})\1|[^,)\n]{0,200})\s*,[^\n]{0,200}?['"][wax][bt+]*['"]/gu;
+/** `open(<first argument>, …'w')`, the mode inside the call's own parentheses: group 2 is the first argument when it is a string literal on its own. */
+const OPEN_WRITE = /\bopen\s*\(\s*(?:(['"])([^'"\n]{1,200})\1|[^,)\n]{0,200})\s*,[^)\n]{0,200}?['"][wax][bt+]*['"]/gu;
+/** Any `open(…)` for writing, its arguments allowed one level of parentheses (`open(str(p), 'w')`), so a call that builds its path is counted. */
+const OPEN_WRITE_CALL = /\bopen\s*\((?:[^()\n]|\([^()\n]*\)){0,200}?['"][wax][bt+]*['"]/gu;
 const WRITE_FILE = /\bwriteFile(?:Sync)?\s*\(\s*(?:(['"`])([^'"`$\n]{1,200})\1(?=\s*[,)])|[^,)\n]{0,200})/gu;
 const WRITE_TEXT = /\bwrite_text\b/gu;
 const LITERAL_WRITE_TEXT = /\bPath\s*\(\s*(['"])([^'"\n]{1,200})\1\s*\)\s*\.write_text\b/gu;
@@ -23,7 +25,7 @@ const LITERAL_WRITE_TEXT = /\bPath\s*\(\s*(['"])([^'"\n]{1,200})\1\s*\)\s*\.writ
  */
 export function literalWriteTargets(body: string): string[] | null {
   const calls = [...body.matchAll(OPEN_WRITE), ...body.matchAll(WRITE_FILE)];
-  const total = calls.length + [...body.matchAll(WRITE_TEXT)].length;
+  const total = [OPEN_WRITE_CALL, WRITE_FILE, WRITE_TEXT].reduce((sum, call) => sum + [...body.matchAll(call)].length, 0);
   const literals = [...calls, ...body.matchAll(LITERAL_WRITE_TEXT)].flatMap((call) => (call[2] === undefined ? [] : [call[2]]));
   return total > 0 && literals.length === total ? literals : null;
 }
