@@ -9,17 +9,17 @@ const state = {
 
 describe("committedSinceHead", () => {
   it("gives the turn-start head when the turn made commits", () => {
-    const turn = { paths: ["a.ts"], commits: ["c1"], committedPaths: ["a.ts"], foreignCommits: [] };
+    const turn = { paths: ["a.ts"], commits: ["c1"], committedPaths: ["a.ts"], foreignCommits: [], upstreamCommits: [] };
     expect(committedSinceHead(turn, state)).toBe("0123abcd");
   });
 
   it("still gives the head for a commit whose paths could not be read", () => {
-    const turn = { paths: [], commits: ["unread"], committedPaths: [], foreignCommits: [] };
+    const turn = { paths: [], commits: ["unread"], committedPaths: [], foreignCommits: [], upstreamCommits: [] };
     expect(committedSinceHead(turn, state)).toBe("0123abcd");
   });
 
   it("gives no committed range when the turn made no commits", () => {
-    const turn = { paths: ["a.ts"], commits: [], committedPaths: [], foreignCommits: [] };
+    const turn = { paths: ["a.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [] };
     const committedSince = committedSinceHead(turn, state);
     expect(committedSince).toBeNull();
     const text = buildReviewPrompt({
@@ -41,6 +41,7 @@ describe("a turn that made only another thread's commits", () => {
     commits: [],
     committedPaths: [],
     foreignCommits: [{ sha: "abcdef1", threadId: "thr_sibling" }],
+    upstreamCommits: [],
   };
 
   it("has no committed range of its own but scans from the turn-start head", () => {
@@ -71,7 +72,7 @@ describe("a turn that made only another thread's commits", () => {
   });
 
   it("does not widen the scan for a head that moved without a commit of the turn", () => {
-    const moved = { paths: ["a.ts"], commits: [], committedPaths: [], foreignCommits: [] };
+    const moved = { paths: ["a.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [] };
     expect(commitScanHead(moved, state)).toBeNull();
   });
 });

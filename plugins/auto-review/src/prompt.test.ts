@@ -370,6 +370,59 @@ describe("buildReviewPrompt", () => {
     });
   });
 
+  describe("commits that arrived with the remote base", () => {
+    const build = (over: Partial<Parameters<typeof buildReviewPrompt>[0]> = {}) =>
+      buildReviewPrompt({
+        decision: { commit: true, merge: false },
+        reviewMode: "auto",
+        scope: baseScope,
+        committedSince: "0123abcd",
+        commitScanFrom: "0123abcd",
+        upstreamCommits: ["abcdef1", "1234567"],
+        ownCommits: ["fedcba9"],
+        ...over,
+      });
+
+    it("names them as merged work from the remote base and the turn's own commits to review", () => {
+      const text = build();
+      expect(text).toContain(
+        "The range after 0123abcd also holds commits merged from the remote base, not made by this thread: abcdef1, 1234567. They may appear in that range and in its diff, but are not part of your work: do not review, stage, complete, amend, or otherwise rewrite them; only a secret in them is reported (step 5).",
+      );
+      expect(text).toContain(
+        "This thread's own commit is fedcba9: review exactly that one (`git show <sha>`), not the rest of the range",
+      );
+    });
+
+    it("reports a secret in them without a STOP or a history rewrite", () => {
+      expect(build()).toMatch(
+        /5\. Scan the staged changes[^\n]*yours and the other commits in that range \(`git diff 0123abcd\.\.HEAD`\); a secret found in one of your commits is already committed, so STOP[^\n]*A secret found only in one of the other commits is not yours: report it by file:line and type, never by value[^\n]*Do not STOP for it: still commit your own work\./u,
+      );
+      expect(build({ ownCommits: [], committedSince: null })).toMatch(
+        /Scan the other commits in that range too \(`git diff 0123abcd\.\.HEAD`\); a secret found there is not yours/u,
+      );
+    });
+
+    it("names the turn's own commits in the plural and skips the merge on a teammate's secret", () => {
+      const text = build({ ownCommits: ["fedcba9", "7654321"], decision: { commit: true, merge: true } });
+      expect(text).toContain("This thread's own commits are fedcba9, 7654321: review exactly those");
+      expect(text).toContain("skip the merge in step 8");
+    });
+
+    it("says nothing about them when the prompt has no range to put them in", () => {
+      const text = build({ committedSince: null, commitScanFrom: null, ownCommits: [] });
+      expect(text).not.toContain("merged from the remote base");
+      expect(text).not.toContain("Scan the other commits");
+    });
+
+    it("names only values shaped like a commit sha", () => {
+      const text = build({ upstreamCommits: ["abcdef1", "main; echo pwned"], ownCommits: ["HEAD~1"] });
+      expect(text).toContain("a commit merged from the remote base, not made by this thread: abcdef1. It may appear");
+      expect(text).not.toContain("pwned");
+      expect(text).not.toContain("HEAD~1");
+      expect(text).not.toContain("This thread's own commit");
+    });
+  });
+
   it("limits the review to the turn's own files, never concurrent work in the range", () => {
     for (const reviewMode of ["auto", "devkit", "self"] as const) {
       for (const committedSince of ["0123abcd", null]) {

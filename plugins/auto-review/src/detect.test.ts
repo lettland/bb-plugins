@@ -18,6 +18,9 @@ import {
   type AvailableWorkspace,
 } from "./detect.js";
 import { isHistoryWritingGit } from "./detect-shell.js";
+import { commitScanHead, committedSinceHead } from "./dispatch.js";
+import { buildReviewPrompt, renderScope } from "./prompt.js";
+import type { ThreadState } from "./state.js";
 
 type Rows = Parameters<typeof authoredPathsFromRows>[0];
 
@@ -1034,7 +1037,7 @@ describe("workspace capture edge cases", () => {
         workspace: ws({ workingTree: { files: [tracked("shell.ts")] } }),
         threadEntries: [],
       });
-      expect(paths).toEqual({ paths: ["own.ts"], commits: [], committedPaths: [], foreignCommits: [] });
+      expect(paths).toEqual({ paths: ["own.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [] });
       expect(diffFileCalls).toEqual([]);
     });
 
@@ -1100,6 +1103,7 @@ describe("workspace capture edge cases", () => {
         commits: ["c1"],
         committedPaths: ["own.ts", "shell.ts"],
         foreignCommits: [],
+        upstreamCommits: [],
       });
     });
 
@@ -1178,26 +1182,58 @@ describe("workspace capture edge cases", () => {
       timelinePage: { hasOlderRows: false, olderCursor: null },
     });
 
+    /** What `status` answers for `origin/<base>`: the commits still ahead of it. */
+    const remoteStatus = (ref: string, ahead: readonly { sha: string }[], over: Record<string, unknown> = {}) => ({
+      outcome: "available",
+      workspace: ws({
+        mergeBase: {
+          files: [],
+          mergeBaseBranch: ref,
+          baseRef: "base0",
+          aheadCount: ahead.length,
+          commits: ahead.map(({ sha }) => ({ sha })),
+          ...over,
+        },
+      }),
+    });
+
+    /** What `status` answers for the turn-start head: the commits since it. */
+    const turnStartStatus = (commits: ReturnType<typeof commit>[]) => ({
+      outcome: "available",
+      workspace: ws({
+        mergeBase: {
+          files: [],
+          commits: commits.map(({ sha, authoredAt }) => (authoredAt === null ? { sha } : { sha, authoredAt })),
+        },
+      }),
+    });
+
     async function attribute(options: {
       timelines?: Record<string, unknown[] | Error>;
       entries?: unknown[];
       commits?: ReturnType<typeof commit>[];
       uncommitted?: string[];
       timeline?: (args: Record<string, unknown>) => Promise<unknown>;
+      /** The mainline the checkout's default branch names. */
+      base?: string;
+      /** Shas the remote base already holds; by default none, so every commit is still ahead of it. */
+      upstream?: string[];
+      /** Replaces the answer for `origin/<base>`. */
+      remote?: (ref: string, ahead: readonly { sha: string }[]) => unknown;
+      turnStart?: Record<string, unknown>;
     }) {
       const commits = options.commits ?? [];
+      const remoteCalls: string[] = [];
       const { bb, warnings, infos, timelineCalls } = fakeBb({
-        status: async () => ({
-          outcome: "available",
-          workspace: ws({
-            mergeBase: {
-              files: [],
-              commits: commits.map(({ sha, authoredAt }) =>
-                authoredAt === null ? { sha } : { sha, authoredAt },
-              ),
-            },
-          }),
-        }),
+        status: async (args) => {
+          const ref = args?.mergeBaseBranch;
+          if (typeof ref !== "string" || !ref.startsWith("origin/")) {
+            return turnStartStatus(commits);
+          }
+          remoteCalls.push(ref);
+          const ahead = commits.filter(({ sha }) => !(options.upstream ?? []).includes(sha));
+          return options.remote === undefined ? remoteStatus(ref, ahead) : options.remote(ref, ahead);
+        },
         diffFiles: async ({ sha }) => {
           const paths = commits.find((candidate) => candidate.sha === sha)?.paths;
           if (paths === null || paths === undefined) {
@@ -1218,15 +1254,16 @@ describe("workspace capture edge cases", () => {
       const result = await turnChangedPaths(bb, {
         threadId: "thr_self",
         environmentId: "env",
-        turnStart: { sinceSeq: 5, startedAt, tree: { headSha: "h0", files: {}, commits: [] } },
+        turnStart: { sinceSeq: 5, startedAt, tree: { headSha: "h0", files: {}, commits: [] }, ...options.turnStart },
         workspace: ws({
+          branch: { currentBranch: "b", defaultBranch: options.base ?? "master" },
           checkout: { kind: "branch", headSha: "head" },
           mergeBase: null,
           workingTree: { files: (options.uncommitted ?? []).map((path) => tracked(path)) },
         }),
         threadEntries: (options.entries ?? [self, sibling]) as never,
       });
-      return { result, warnings, infos, timelineCalls };
+      return { result, warnings, infos, timelineCalls, remoteCalls };
     }
 
     const siblingRuns = (row: unknown) => ({ thr_sibling: [row] });
@@ -1243,6 +1280,7 @@ describe("workspace capture edge cases", () => {
         commits: [],
         committedPaths: [],
         foreignCommits: [foreign("c1"), foreign("c2")],
+        upstreamCommits: [],
       });
       expect(infos).toEqual([
         "auto-review: commit c1 was made by thread thr_sibling during the turn; left to that thread",
@@ -1301,6 +1339,7 @@ describe("workspace capture edge cases", () => {
         commits: ["c1"],
         committedPaths: ["src/own.ts", "src/a.ts"],
         foreignCommits: [],
+        upstreamCommits: [],
       });
     });
 
@@ -1315,6 +1354,7 @@ describe("workspace capture edge cases", () => {
         commits: ["c1"],
         committedPaths: ["src/child.ts"],
         foreignCommits: [],
+        upstreamCommits: [],
       });
     });
 
@@ -1329,6 +1369,7 @@ describe("workspace capture edge cases", () => {
         commits: ["mine"],
         committedPaths: ["src/own.ts"],
         foreignCommits: [foreign("theirs")],
+        upstreamCommits: [],
       });
       expect(infos).toHaveLength(1);
     });
@@ -1344,6 +1385,216 @@ describe("workspace capture edge cases", () => {
         commits: [],
         committedPaths: [],
         foreignCommits: [foreign("theirs")],
+        upstreamCommits: [],
+      });
+    });
+
+    describe("commits that arrived with the remote base", () => {
+      const mergedFile = (sha: string) => (sha === "u1" ? "lib/merged.ts" : "lib/upstream.ts");
+      const upstreamCommit = (sha: string, authoredAt: number | null = 20_000) =>
+        commit(sha, [mergedFile(sha)], authoredAt);
+      const state = {
+        turnStart: { sinceSeq: 5, startedAt, tree: { headSha: "0123abcd", files: {}, commits: [] } },
+      } as unknown as ThreadState;
+      const rowAt = (startedAtMs: number, completedAt: number, text: string) =>
+        command(text, { createdAt: startedAtMs, startedAt: startedAtMs, completedAt });
+      // An earlier review turn ended at 13 s; the thread sat idle until the user's turn at 30 s.
+      const incident = {
+        base: "dev",
+        timelines: {
+          thr_self: [
+            rowAt(12_000, 13_000, "git commit -m review"),
+            rowAt(30_000, 30_500, "git checkout -b feat/x origin/dev"),
+          ],
+        },
+        commits: [upstreamCommit("u1"), upstreamCommit("u2", 20_100)],
+        upstream: ["u1", "u2"],
+        uncommitted: ["lib/own.ts"],
+      };
+
+      it("leaves out commits merged into the remote base while the thread was idle", async () => {
+        const { result, infos, remoteCalls } = await attribute(incident);
+        expect(remoteCalls).toEqual(["origin/dev"]);
+        expect(result).toEqual({
+          paths: ["lib/own.ts"],
+          commits: [],
+          committedPaths: [],
+          foreignCommits: [],
+          upstreamCommits: ["u1", "u2"],
+        });
+        expect(infos).toEqual([
+          "auto-review: commit u1 came from origin/dev; not this turn's",
+          "auto-review: commit u2 came from origin/dev; not this turn's",
+        ]);
+        expect(committedSinceHead(result, state)).toBeNull();
+        expect(commitScanHead(result, state)).toBeNull();
+      });
+
+      it("keeps a commit authored while one of the thread's rows of any kind ran", async () => {
+        const { result } = await attribute({
+          timelines: { thr_self: [search(null, { startedAt: 19_500, completedAt: 21_000 })] },
+          commits: [upstreamCommit("u1", 20_500)],
+          upstream: ["u1"],
+        });
+        expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+      });
+
+      it("keeps a commit a child thread pushed to the remote base inside its window", async () => {
+        const { result } = await attribute({
+          entries: [self, child],
+          timelines: { thr_child: [command("git push origin HEAD:master")] },
+          commits: [upstreamCommit("u1", 20_500)],
+          upstream: ["u1"],
+        });
+        expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+      });
+
+      it("still drops a commit that falls outside the child's window too", async () => {
+        const { result } = await attribute({
+          entries: [self, child],
+          timelines: { thr_child: [command("git push origin HEAD:master")] },
+          commits: [upstreamCommit("u1", 15_000)],
+          upstream: ["u1"],
+        });
+        expect(result).toMatchObject({ commits: [], upstreamCommits: ["u1"] });
+      });
+
+      it("keeps everything when a child thread could not be read in full", async () => {
+        const { result, infos } = await attribute({
+          entries: [self, child],
+          timelines: { thr_child: new Error("gone") },
+          commits: [upstreamCommit("u1", 15_000)],
+          upstream: ["u1"],
+        });
+        expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+        expect(infos).toEqual([
+          "auto-review: not checking whether the turn's commits came from origin/master: a child thread could not be read in full",
+        ]);
+      });
+
+      const doubts: Array<[string, Parameters<typeof attribute>[0], string]> = [
+        ["status throws", { remote: () => { throw new Error("no ref"); } }, "no origin/master to compare against"],
+        ["the merge base is null", { remote: () => ({ outcome: "available", workspace: ws({ mergeBase: null }) }) }, "no origin/master to compare against"],
+        ["the answer is for another ref", { remote: (_ref, ahead) => remoteStatus("origin/other", ahead) }, "the answer was not for that ref"],
+        ["the ahead list is incomplete", { remote: (ref, ahead) => remoteStatus(ref, ahead, { aheadCount: ahead.length + 1 }) }, "the list of commits ahead is incomplete"],
+        ["the ref is unavailable", { remote: () => ({ outcome: "unavailable" }) }, "no origin/master to compare against"],
+        ["the base ref is null", { remote: (ref, ahead) => remoteStatus(ref, ahead, { baseRef: null }) }, "the answer was not for that ref"],
+        [
+          "the thread's timeline is truncated",
+          {
+            timeline: async () => ({
+              rows: [],
+              maxSeq: 0,
+              timelinePage: {
+                hasOlderRows: true,
+                olderCursor: { anchorId: "a", anchorSeq: 9 },
+                olderRowsSourceSeqEnd: 9,
+              },
+            }),
+          },
+          "the thread's timeline is truncated",
+        ],
+      ];
+      it.each(doubts)("keeps everything when %s", async (_name, options, reason) => {
+        const { result, infos } = await attribute({
+          ...options,
+          commits: [upstreamCommit("u1")],
+          upstream: ["u1"],
+        });
+        expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+        expect(infos).toEqual([
+          `auto-review: not checking whether the turn's commits came from origin/master: ${reason}`,
+        ]);
+      });
+
+      it("keeps a commit whose author date is unknown", async () => {
+        const { result } = await attribute({
+          commits: [upstreamCommit("u1", null)],
+          upstream: ["u1"],
+        });
+        expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+      });
+
+      it("keeps a commit made straight onto the mainline that is not pushed", async () => {
+        const { result, infos } = await attribute({
+          commits: [commit("c1", ["src/a.ts"], 20_000)],
+        });
+        expect(result).toMatchObject({ commits: ["c1"], upstreamCommits: [] });
+        expect(infos).toEqual([]);
+      });
+
+      it("reports a commit authored during a sibling's git window as upstream, not foreign", async () => {
+        const { result } = await attribute({
+          timelines: siblingRuns(command(gitCommit)),
+          commits: [upstreamCommit("u1", 20_500)],
+          upstream: ["u1"],
+        });
+        expect(result).toEqual({
+          paths: [],
+          commits: [],
+          committedPaths: [],
+          foreignCommits: [],
+          upstreamCommits: ["u1"],
+        });
+      });
+
+      it("keeps the thread's own commit next to upstream ones and words the prompt for both", async () => {
+        const { result } = await attribute({
+          timelines: { thr_self: [rowAt(30_000, 31_000, "git commit -m own")] },
+          commits: [upstreamCommit("deadbee"), commit("c0ffee1", ["src/own.ts"], 30_500)],
+          upstream: ["deadbee"],
+        });
+        expect(result).toMatchObject({ commits: ["c0ffee1"], upstreamCommits: ["deadbee"], foreignCommits: [] });
+        const text = buildReviewPrompt({
+          decision: { commit: true, merge: true },
+          reviewMode: "auto",
+          scope: renderScope(result.paths),
+          committedSince: committedSinceHead(result, state),
+          commitScanFrom: commitScanHead(result, state),
+          upstreamCommits: result.upstreamCommits,
+          ownCommits: result.commits,
+        });
+        expect(text).toContain("merged from the remote base, not made by this thread: deadbee.");
+        expect(text).toContain("This thread's own commit is c0ffee1");
+        expect(text).toContain("A secret found only in one of the other commits is not yours");
+        expect(text).toContain("skip the merge in step 8");
+      });
+
+      it("takes a base that already names the remote ref as it is", async () => {
+        const { result, remoteCalls } = await attribute({
+          base: "origin/dev",
+          commits: [upstreamCommit("u1")],
+          upstream: ["u1"],
+        });
+        expect(remoteCalls).toEqual(["origin/dev"]);
+        expect(result.upstreamCommits).toEqual(["u1"]);
+      });
+
+      it("does not ask the remote without a turn start time or without commits", async () => {
+        const unknownStart = await attribute({
+          turnStart: { startedAt: undefined },
+          commits: [upstreamCommit("u1")],
+          upstream: ["u1"],
+        });
+        expect(unknownStart.remoteCalls).toEqual([]);
+        expect(unknownStart.result.commits).toEqual(["u1"]);
+        const noCommits = await attribute({ uncommitted: ["lib/own.ts"] });
+        expect(noCommits.remoteCalls).toEqual([]);
+      });
+
+      it("keeps a path in scope through the thread's own edit when an upstream commit touched it too", async () => {
+        const { result } = await attribute({
+          commits: [commit("u1", ["lib/shared.ts"], 20_000)],
+          upstream: ["u1"],
+          uncommitted: ["lib/shared.ts"],
+        });
+        expect(result).toEqual({
+          paths: ["lib/shared.ts"],
+          commits: [],
+          committedPaths: [],
+          foreignCommits: [],
+          upstreamCommits: ["u1"],
+        });
       });
     });
 

@@ -4,7 +4,7 @@ import type { TreeSnapshot, TurnStart } from "./state.js";
 
 import { mapLimit, HASH_CONCURRENCY } from "./detect-limit.js";
 
-import { commitPaths, novelCommits, turnCommits } from "./detect-commits.js";
+import { commitPaths, novelCommits, remoteReachableShas, remoteRef, turnCommits } from "./detect-commits.js";
 
 import {
   authoredPathsFromRows,
@@ -14,11 +14,11 @@ import {
   turnTimeline,
   withinWindow,
 } from "./detect-timeline.js";
-import type { SiblingEvidence } from "./detect-timeline.js";
+import type { KinEvidence, SiblingEvidence } from "./detect-timeline.js";
 
 import { contentHash, fingerprintsMatch, statPart } from "./detect-tree.js";
 
-import { isHarnessOutput } from "./detect-workspace.js";
+import { isHarnessOutput, mainlineBase } from "./detect-workspace.js";
 import type {
   AvailableWorkspace,
   ThreadListEntry,
@@ -123,6 +123,8 @@ export interface TurnChanges {
   committedPaths: string[];
   /** Commits made during the turn that a sibling thread's git made; the sibling's to review. */
   foreignCommits: ForeignCommit[];
+  /** Commits that arrived with the remote base during the turn, merged by someone else; not the turn's work. */
+  upstreamCommits: string[];
 }
 
 interface ForeignInput {
@@ -134,6 +136,17 @@ interface ForeignInput {
   ownPaths: ReadonlySet<string>;
   commits: readonly CommitChange[];
   sibling: SiblingEvidence;
+  /** The kin evidence already read for the upstream check, when there was one. */
+  kin: KinEvidence | undefined;
+}
+
+interface UpstreamInput {
+  bb: BbPluginApi;
+  input: TurnChangeInput;
+  startedAt: number;
+  now: number;
+  ownRows: Awaited<ReturnType<typeof turnTimeline>>;
+  commits: readonly CommitChange[];
 }
 
 /**
@@ -155,7 +168,7 @@ async function foreignCommitsOf(foreign: ForeignInput): Promise<ForeignCommit[]>
   if (candidates.length === 0 || ownRows.truncated) {
     return [];
   }
-  const kin = await kinEvidence(bb, input.threadEntries, input.threadId, startedAt, now);
+  const kin = foreign.kin ?? (await kinEvidence(bb, input.threadEntries, input.threadId, startedAt, now));
   if (!kin.complete) {
     return [];
   }
@@ -172,12 +185,92 @@ async function foreignCommitsOf(foreign: ForeignInput): Promise<ForeignCommit[]>
 }
 
 /**
+ * The commits the remote base brought in that someone else merged: reachable
+ * from `origin/<base>` and authored outside every window this thread's family
+ * was running, the windows `foreignCommitsOf` treats as ours. A commit the
+ * thread makes is authored while one of its rows runs, whatever tool made it,
+ * so only a commit written while nothing of the family ran is dropped. Any
+ * doubt keeps a commit with the turn.
+ */
+async function upstreamCommitsOf(
+  upstream: UpstreamInput,
+): Promise<{ shas: string[]; kin: KinEvidence | undefined }> {
+  const { bb, input, startedAt, now, ownRows, commits } = upstream;
+  const base = mainlineBase(input.workspace);
+  const none = { shas: [], kin: undefined };
+  const reachable = await remoteReachableShas(
+    bb,
+    input.environmentId,
+    base,
+    commits.map(({ sha }) => sha),
+  );
+  if (reachable.size === 0) {
+    return none;
+  }
+  if (ownRows.truncated) {
+    bb.log.info(`auto-review: not checking whether the turn's commits came from ${remoteRef(base)}: the thread's timeline is truncated`);
+    return none;
+  }
+  const own = ownWindows(ownRows.rows, startedAt, now);
+  const candidates = commits.flatMap(({ sha, authoredAt }) =>
+    reachable.has(sha) && authoredAt !== null && !own.some((window) => withinWindow(window, authoredAt))
+      ? [{ sha, authoredAt }]
+      : [],
+  );
+  if (candidates.length === 0) {
+    return none;
+  }
+  const kin = await kinEvidence(bb, input.threadEntries, input.threadId, startedAt, now);
+  if (!kin.complete) {
+    bb.log.info(`auto-review: not checking whether the turn's commits came from ${remoteRef(base)}: a child thread could not be read in full`);
+    return { shas: [], kin };
+  }
+  const shas = candidates
+    .filter(({ authoredAt }) => !kin.windows.some((window) => withinWindow(window, authoredAt)))
+    .map(({ sha }) => sha);
+  return { shas, kin };
+}
+
+/** `tree` without the commits `dropped`, and the paths only they touched. */
+function withoutCommits(tree: TreeChanges, dropped: ReadonlySet<string>): TreeChanges {
+  const commitChanges = tree.commitChanges.filter(({ sha }) => !dropped.has(sha));
+  const committedPaths = [...new Set(commitChanges.flatMap(({ paths }) => paths ?? []))];
+  return {
+    paths: [...new Set([...tree.uncommittedPaths, ...committedPaths])],
+    commits: commitChanges.map(({ sha }) => sha),
+    committedPaths,
+    commitChanges,
+    uncommittedPaths: tree.uncommittedPaths,
+  };
+}
+
+/** `fetched` without the commits that arrived with the remote base, which are logged; none are dropped when the turn start time is unknown. */
+async function withoutUpstream(
+  bb: BbPluginApi,
+  input: TurnChangeInput,
+  ownRows: UpstreamInput["ownRows"],
+  fetched: TreeChanges,
+  now: number,
+): Promise<{ tree: TreeChanges; shas: string[]; kin: KinEvidence | undefined }> {
+  const { startedAt } = input.turnStart;
+  const { shas, kin } =
+    startedAt === undefined || fetched.commitChanges.length === 0
+      ? { shas: [], kin: undefined }
+      : await upstreamCommitsOf({ bb, input, startedAt, now, ownRows, commits: fetched.commitChanges });
+  for (const sha of shas) {
+    bb.log.info(`auto-review: commit ${sha} came from ${remoteRef(mainlineBase(input.workspace))}; not this turn's`);
+  }
+  return { tree: withoutCommits(fetched, new Set(shas)), shas, kin };
+}
+
+/**
  * Every path this turn changed. The thread's own `file-change` rows always
  * count. On top of them, whatever the working tree shows changed since turn
  * start counts too — edits from shell commands, scripts and commits leave no
  * such row — except paths a sibling thread in the same checkout changed
  * through its own tools during the turn, and commits it made with git, which
- * are the sibling's to review.
+ * are the sibling's to review. Commits that merely arrived with the remote base
+ * are no one's to review here, and their paths do not count either.
  */
 export async function turnChangedPaths(
   bb: BbPluginApi,
@@ -187,16 +280,19 @@ export async function turnChangedPaths(
   const ownRows = await turnTimeline(bb, threadId, turnStart.sinceSeq);
   const own = authoredPathsFromRows(ownRows.rows, turnStart.sinceSeq);
   if (turnStart.tree === undefined) {
-    return { paths: own, commits: [], committedPaths: [], foreignCommits: [] };
+    return { paths: own, commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [] };
   }
   const ownSet = new Set(own);
   const harnessOutput = new Set(
     workspace.workingTree.files.filter(isHarnessOutput).map((file) => file.path),
   );
-  const tree = await treeChangedPaths(bb, environmentId, turnStart.tree, workspace, turnStart.startedAt);
+  const fetched = await treeChangedPaths(bb, environmentId, turnStart.tree, workspace, turnStart.startedAt);
+  const { startedAt } = turnStart;
+  const now = Date.now();
+  const upstream = await withoutUpstream(bb, input, ownRows, fetched, now);
+  const { tree } = upstream;
   const unattributed = (paths: readonly string[]) =>
     paths.filter((path) => !ownSet.has(path) && !harnessOutput.has(path));
-  const { startedAt } = turnStart;
   const sibling =
     startedAt === undefined ||
     (unattributed(tree.paths).length === 0 && tree.commits.length === 0)
@@ -209,11 +305,12 @@ export async function turnChangedPaths(
           bb,
           input,
           startedAt,
-          now: Date.now(),
+          now,
           ownRows,
           ownPaths: ownSet,
           commits: tree.commitChanges,
           sibling,
+          kin: upstream.kin,
         });
   for (const { sha, threadId: siblingId } of foreignCommits) {
     bb.log.info(`auto-review: commit ${sha} was made by thread ${siblingId} during the turn; left to that thread`);
@@ -227,5 +324,6 @@ export async function turnChangedPaths(
     commits: kept.map(({ sha }) => sha),
     committedPaths: keptPaths.filter(ours),
     foreignCommits,
+    upstreamCommits: upstream.shas,
   };
 }

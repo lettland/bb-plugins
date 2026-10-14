@@ -157,6 +157,8 @@ export async function dispatchReview(
       committedSince: committedSinceHead(turn, state),
       commitScanFrom: commitScanHead(turn, state),
       foreignCommits: turn.foreignCommits.map(({ sha }) => sha),
+      upstreamCommits: turn.upstreamCommits,
+      ownCommits: turn.commits,
       aislopScan: await aislopScanAvailable(ctx.bb),
       priorFindings: prior.findings,
       priorFindingsOmitted: prior.omitted,

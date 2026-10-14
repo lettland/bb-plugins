@@ -160,7 +160,8 @@ async function mainlineNovelCommits(input: MainlineReplayInput): Promise<string[
  * Every commit in a fast-forward range descends from the turn-start head, so
  * one authored before the turn began was brought in (pull, merge,
  * cherry-pick), not written this turn. A commit with no metadata is kept:
- * nothing proves it came from elsewhere.
+ * nothing proves it came from elsewhere. One authored after the turn began that
+ * the remote base already holds is caught later, by `remoteReachableShas`.
  */
 function authoredDuringTurn(
   commits: readonly string[],
@@ -247,7 +248,9 @@ async function novelShas(
  * The commits of `commits` this turn authored. After a fast forward from the
  * turn-start head, those authored at or after `startedAt`; commits pulled in
  * from upstream predate the turn. Otherwise, those whose patch is not one that
- * was already there at turn start, so a rebase replay is not claimed.
+ * was already there at turn start, so a rebase replay is not claimed. A commit
+ * teammates merged into the remote base while the thread was idle is not
+ * dropped here, whatever its date; `remoteReachableShas` finds those.
  */
 export async function novelCommits(
   bb: BbPluginApi,
@@ -298,4 +301,47 @@ export async function turnCommits(
     sha: commit.sha,
     authoredAt: typeof commit.authoredAt === "number" ? commit.authoredAt : null,
   }));
+}
+
+/** The remote-tracking ref of a base branch; a base that already names one is used as it is. */
+export function remoteRef(base: string): string {
+  return base.startsWith("origin/") ? base : `origin/${base}`;
+}
+
+/**
+ * The shas of `shas` the remote base already holds. Asks for the commits
+ * ahead of `origin/<base>`: a turn commit missing from that list is reachable
+ * from the remote, so someone else's merged work is among them. The answer is
+ * trusted only when the ref resolved and the ahead list is complete; any doubt
+ * gives an empty set, which keeps every commit with the turn.
+ */
+export async function remoteReachableShas(
+  bb: BbPluginApi,
+  environmentId: string,
+  base: string,
+  shas: readonly string[],
+): Promise<Set<string>> {
+  const ref = remoteRef(base);
+  const skip = (reason: string) => {
+    bb.log.info(`auto-review: not checking whether the turn's commits came from ${ref}: ${reason}`);
+    return new Set<string>();
+  };
+  let status: Awaited<ReturnType<BbPluginApi["sdk"]["environments"]["status"]>>;
+  try {
+    status = await bb.sdk.environments.status({ environmentId, mergeBaseBranch: ref });
+  } catch {
+    return skip(`no ${ref} to compare against`);
+  }
+  if (status.outcome !== "available" || status.workspace.mergeBase === null) {
+    return skip(`no ${ref} to compare against`);
+  }
+  const { mergeBase } = status.workspace;
+  if (mergeBase.mergeBaseBranch !== ref || mergeBase.baseRef === null) {
+    return skip("the answer was not for that ref");
+  }
+  if (mergeBase.aheadCount !== mergeBase.commits.length) {
+    return skip("the list of commits ahead is incomplete");
+  }
+  const ahead = new Set(mergeBase.commits.map(({ sha }) => sha));
+  return new Set(shas.filter((sha) => !ahead.has(sha)));
 }

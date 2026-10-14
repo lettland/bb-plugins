@@ -1,5 +1,5 @@
 import type { Decision } from "./decide.js";
-import { commitScan, foreignCommitNote } from "./prompt-commits.js";
+import { commitScan, foreignCommitNote, upstreamCommitNote } from "./prompt-commits.js";
 import { priorFindingsSection, reportReviewStep, type PromptFinding } from "./prompt-findings.js";
 import { SCOPE_PATH_ALLOW } from "./scope-path.js";
 
@@ -52,6 +52,10 @@ export interface BuildPromptInput {
   commitScanFrom?: string | null;
   /** Commits another thread made during the turn; they are not this thread's to review. */
   foreignCommits?: readonly string[];
+  /** Commits merged into the remote base by someone else; the range after `committedSince` may hold them. */
+  upstreamCommits?: readonly string[];
+  /** The commits this thread made during the turn; named only next to `upstreamCommits`. */
+  ownCommits?: readonly string[];
   /** Whether the aislop plugin's `bb aislop scan` is available to run. */
   aislopScan?: boolean;
   /** Findings earlier reviews of this thread left open (or recently dismissed); see `priorFindingsSection`. */
@@ -360,6 +364,8 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
   const committedSince = allowedSha(input.committedSince);
   const scanSince = allowedSha(input.commitScanFrom ?? input.committedSince);
   const foreign = (input.foreignCommits ?? []).filter((sha) => COMMIT_SHA_ALLOW.test(sha));
+  const upstream = (input.upstreamCommits ?? []).filter((sha) => COMMIT_SHA_ALLOW.test(sha));
+  const own = (input.ownCommits ?? []).filter((sha) => COMMIT_SHA_ALLOW.test(sha));
   const lines: string[] = [];
   lines.push(
     `${AUTO_REVIEW_MARKER} You changed files during your last turn. Review them, apply fixes, and record the result. Follow these steps in order.`,
@@ -375,6 +381,11 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
     lines.push(foreignCommitNote(foreign, committedSince));
     lines.push("");
   }
+  const rangeFrom = committedSince ?? scanSince;
+  if (upstream.length > 0 && rangeFrom !== null) {
+    lines.push(upstreamCommitNote(upstream, own, rangeFrom));
+    lines.push("");
+  }
 
   lines.push(...scopeSection(scope));
   lines.push(...priorFindingsSection(input.priorFindings ?? [], input.priorFindingsOmitted ?? 0));
@@ -386,6 +397,7 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
   const committedScan = commitScan({
     scanSince,
     hasForeign: foreign.length > 0,
+    hasUpstream: upstream.length > 0,
     hasOwn: committedSince !== null,
     merge: decision.commit && decision.merge,
   });
