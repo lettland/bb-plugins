@@ -43,8 +43,30 @@ It ships enabled (opt-out).
   is only left to the sibling when nothing of this thread's own family (this thread, its
   bb children and owned threads) was running at the commit's time and the commit touches
   none of the files that family edited with tools; any doubt keeps the commit with this
-  thread. Known gaps:
-  - a sibling's uncommitted shell edits are still credited to this turn
+  thread. Uncommitted paths a sibling's shell command wrote to by name during the turn (a
+  redirect or `tee` target, the last argument of `cp`/`mv`/`install`, `rm`, `sed -i`,
+  `git checkout --` and `git restore` paths, and the paths in a `python`, `node`, `ruby` or `perl`
+  script that writes a file) are left to it the same way, when no tool edit or kept commit of
+  this thread's family accounts for them and nothing the family ran names them: its command text,
+  the path of its reads and searches and its tool arguments all count, as does any glob that
+  matches, any directory in a command that writes (`--fix`, `--write`, `-u`, `rm -r`), and git or
+  package-manager commands that rewrite the tree (`checkout`, `stash`, `rebase`, `npm install`, …),
+  which name every path. Running tests or `npm run …` does not. The match is strict on the sibling
+  side and generous on the family side; nothing moves when this thread's or a related thread's
+  timeline cannot be read in full, or the checkout path is unknown. The log names the path and the
+  sibling, never the command. Known gaps:
+  - a sibling write that names no path, builds it from variables or brace expansion, or uses a
+    pattern the strict rules reject (a bare `*`, a glob without a directory or a literal in its last
+    segment, anything after a `cd`) stays with this thread, so it is reviewed one extra time
+  - if a command of this thread's family changes a file without naming it (codegen, `npm run …`,
+    scripts) and a sibling also names that file in a write, the file goes to the sibling
+  - a script that writes one file while reading another it names (`sys.stdout.write(open(F).read())`,
+    or a doc that lists paths) credits every path it names
+  - a path left to a sibling is covered by that sibling's own review only if its write changed the
+    content during the sibling's turn; otherwise neither review covers it (content-neutral targets
+    such as `touch` and `git restore --staged` are excluded to keep this rare)
+  - a family row that began more than 30 minutes before the turn and is still running is not seen
+  - the real fix for a shared checkout is one checkout per session (BB's "Checkout, then worktree")
   - this thread's own shell edits (no tool row) swept into a sibling's `git add -A` commit
     are left to the sibling
   - a sibling's `rebase`, `cherry-pick` and `am` commits keep their author date, so they are

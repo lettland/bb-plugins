@@ -6,12 +6,15 @@ import { mapLimit, HASH_CONCURRENCY } from "./detect-limit.js";
 
 import { commitPaths, novelCommits, remoteReachableShas, remoteRef, turnCommits } from "./detect-commits.js";
 
+import { pathsLeftToSiblings } from "./detect-sibling-credit.js";
+
 import {
   authoredPathsFromRows,
   kinEvidence,
   ownWindows,
   pageInTurn,
   recentTimelineRows,
+  rowsSince,
   siblingAuthoredPaths,
   turnTimeline,
   withinWindow,
@@ -158,9 +161,12 @@ interface UpstreamInput {
  * The commits another thread made: authored while a sibling ran git that
  * writes history, while nothing of this thread's family was running, and
  * touching none of the family's tool-edited files. Any doubt keeps a commit
- * with this thread — a missed review costs more than an extra one.
+ * with this thread — a missed review costs more than an extra one. The kin
+ * evidence it read comes back too, so it is read once.
  */
-async function foreignCommitsOf(foreign: ForeignInput): Promise<ForeignCommit[]> {
+async function foreignCommitsOf(
+  foreign: ForeignInput,
+): Promise<{ commits: ForeignCommit[]; kin: KinEvidence | undefined }> {
   const { bb, input, startedAt, now, ownRows, ownPaths, commits, sibling } = foreign;
   const candidates = commits.flatMap((commit) => {
     const { authoredAt } = commit;
@@ -171,15 +177,15 @@ async function foreignCommitsOf(foreign: ForeignInput): Promise<ForeignCommit[]>
     return window === undefined ? [] : [{ commit, threadId: window.threadId }];
   });
   if (candidates.length === 0 || ownRows.truncated) {
-    return [];
+    return { commits: [], kin: foreign.kin };
   }
   const kin = foreign.kin ?? (await kinEvidence(bb, input.threadEntries, input.threadId, startedAt, now));
   if (!kin.complete) {
-    return [];
+    return { commits: [], kin };
   }
   const windows = [...ownWindows(ownRows.rows, startedAt, now), ...kin.windows];
   const familyPaths = new Set([...ownPaths, ...kin.paths]);
-  return candidates.flatMap(({ commit: { sha, paths, authoredAt }, threadId }) =>
+  const made = candidates.flatMap(({ commit: { sha, paths, authoredAt }, threadId }) =>
     paths !== null &&
     authoredAt !== null &&
     !windows.some((window) => withinWindow(window, authoredAt)) &&
@@ -187,20 +193,7 @@ async function foreignCommitsOf(foreign: ForeignInput): Promise<ForeignCommit[]>
       ? [{ sha, threadId }]
       : [],
   );
-}
-
-/** The thread's rows back to `since`, or why they cannot be had. */
-async function rowsSince(
-  bb: BbPluginApi,
-  threadId: string,
-  since: number,
-): Promise<TimelineRow[] | string> {
-  try {
-    const { rows, truncated } = await recentTimelineRows(bb, threadId, pageInTurn(since));
-    return truncated ? "the thread's timeline back to the earliest commit is truncated" : rows;
-  } catch {
-    return "the thread's earlier timeline could not be read";
-  }
+  return { commits: made, kin };
 }
 
 /**
@@ -310,14 +303,55 @@ async function withoutUpstream(
   return { tree: withoutCommits(fetched, new Set(shas)), shas, kin };
 }
 
+interface SiblingReading {
+  /** Undefined when nothing needed it read. */
+  sibling: SiblingEvidence | undefined;
+  foreignCommits: ForeignCommit[];
+  /** The kin evidence read along the way, when there was one. */
+  kin: KinEvidence | undefined;
+}
+
+/**
+ * What the sibling threads did, read only when the tree shows something this
+ * thread's own tool edits do not account for, and the commits of theirs that
+ * are left to them, which are logged.
+ */
+async function readSiblings(
+  context: Omit<UpstreamInput, "startedAt" | "commits">,
+  tree: TreeChanges,
+  hasUnattributed: boolean,
+  upstreamKin: KinEvidence | undefined,
+): Promise<SiblingReading> {
+  const { bb, input } = context;
+  const { startedAt } = input.turnStart;
+  if (startedAt === undefined || (!hasUnattributed && tree.commits.length === 0)) {
+    return { sibling: undefined, foreignCommits: [], kin: upstreamKin };
+  }
+  const sibling = await siblingAuthoredPaths(bb, input.threadEntries, input.threadId, startedAt);
+  const { commits, kin } = await foreignCommitsOf({
+    ...context,
+    startedAt,
+    commits: tree.commitChanges,
+    sibling,
+    kin: upstreamKin,
+  });
+  for (const { sha, threadId } of commits) {
+    bb.log.info(`auto-review: commit ${sha} was made by thread ${threadId} during the turn; left to that thread`);
+  }
+  return { sibling, foreignCommits: commits, kin };
+}
+
 /**
  * Every path this turn changed. The thread's own `file-change` rows always
  * count. On top of them, whatever the working tree shows changed since turn
  * start counts too — edits from shell commands, scripts and commits leave no
  * such row — except paths a sibling thread in the same checkout changed
  * through its own tools during the turn, and commits it made with git, which
- * are the sibling's to review. Commits that merely arrived with the remote base
- * are no one's to review here, and their paths do not count either.
+ * are the sibling's to review. So are uncommitted paths a sibling's shell
+ * command wrote to by name, when nothing of this thread's family (this thread
+ * and its kin) names them and nothing about the turn's evidence is in doubt.
+ * Commits that merely arrived with the remote base are no one's to review
+ * here, and their paths do not count either.
  */
 export async function turnChangedPaths(
   bb: BbPluginApi,
@@ -340,34 +374,39 @@ export async function turnChangedPaths(
   const { tree } = upstream;
   const unattributed = (paths: readonly string[]) =>
     paths.filter((path) => !ownSet.has(path) && !harnessOutput.has(path));
-  const sibling =
-    startedAt === undefined ||
-    (unattributed(tree.paths).length === 0 && tree.commits.length === 0)
-      ? undefined
-      : await siblingAuthoredPaths(bb, input.threadEntries, threadId, startedAt);
-  const foreignCommits =
-    startedAt === undefined || sibling === undefined
-      ? []
-      : await foreignCommitsOf({
-          bb,
-          input,
-          startedAt,
-          now,
-          ownRows,
-          ownPaths: ownSet,
-          commits: tree.commitChanges,
-          sibling,
-          kin: upstream.kin,
-        });
-  for (const { sha, threadId: siblingId } of foreignCommits) {
-    bb.log.info(`auto-review: commit ${sha} was made by thread ${siblingId} during the turn; left to that thread`);
-  }
+  const { sibling, foreignCommits, kin } = await readSiblings(
+    { bb, input, now, ownRows, ownPaths: ownSet },
+    tree,
+    unattributed(tree.paths).length > 0,
+    upstream.kin,
+  );
   const foreignShas = new Set(foreignCommits.map(({ sha }) => sha));
   const kept = tree.commitChanges.filter(({ sha }) => !foreignShas.has(sha));
   const keptPaths = [...new Set(kept.flatMap(({ paths }) => paths ?? []))];
   const ours = (path: string) => ownSet.has(path) || !sibling?.paths.has(path);
+  const committed = new Set(keptPaths);
+  const credited =
+    startedAt === undefined || sibling === undefined
+      ? new Map<string, string>()
+      : await pathsLeftToSiblings({
+          bb,
+          threadId,
+          environmentId,
+          threadEntries: input.threadEntries,
+          startedAt,
+          now,
+          ownRowsTruncated: ownRows.truncated,
+          sibling,
+          kin,
+          candidates: unattributed(tree.uncommittedPaths).filter((path) => ours(path) && !committed.has(path)),
+        });
   return {
-    paths: [...own, ...unattributed([...new Set([...tree.uncommittedPaths, ...keptPaths])]).filter(ours)],
+    paths: [
+      ...own,
+      ...unattributed([...new Set([...tree.uncommittedPaths, ...keptPaths])]).filter(
+        (path) => ours(path) && !credited.has(path),
+      ),
+    ],
     commits: kept.map(({ sha }) => sha),
     committedPaths: keptPaths.filter(ours),
     foreignCommits,

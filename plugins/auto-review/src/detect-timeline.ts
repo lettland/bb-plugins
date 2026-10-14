@@ -1,5 +1,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
+import { rowTexts, rowWindow, shellText, walkRows } from "./detect-rows.js";
+import type { OpenRowEnds, RowText, TimeWindow, WorkRow } from "./detect-rows.js";
 import { isHistoryWritingGit } from "./detect-shell.js";
 import { AUTO_REVIEW_MARKER } from "./prompt.js";
 import type {
@@ -7,6 +9,8 @@ import type {
   TimelineResult,
   TimelineRow,
 } from "./detect-workspace.js";
+
+export type { TimeWindow };
 
 export async function captureSinceSeq(
   bb: BbPluginApi,
@@ -89,25 +93,6 @@ export async function firstUserTurnSince(
     }
   }
   return first;
-}
-
-function nestedRows(row: TimelineRow): readonly TimelineRow[] {
-  if ("childRows" in row && Array.isArray(row.childRows)) {
-    return row.childRows;
-  }
-  if ("children" in row && Array.isArray(row.children)) {
-    return row.children;
-  }
-  return [];
-}
-
-function* walkRows(
-  rows: readonly TimelineRow[],
-): Generator<TimelineRow, void, void> {
-  for (const row of rows) {
-    yield row;
-    yield* walkRows(nestedRows(row));
-  }
 }
 
 /** The timeline endpoint's own ceiling; asking for more is rejected with a 400. */
@@ -249,65 +234,18 @@ export function pageInTurn(startedAt: number): (timeline: TimelineResult) => boo
   };
 }
 
-type WorkRow = Extract<TimelineRow, { kind: "work" }>;
-
-export interface TimeWindow {
-  start: number;
-  end: number;
-}
-
 export interface SiblingWindow extends TimeWindow {
   threadId: string;
 }
-
-/** Git truncates `authoredAt` to whole seconds, so a window is widened by one on both sides. */
-const WINDOW_SLACK_MS = 1_000;
 
 /** Whether a time falls inside a window. */
 export function withinWindow(window: TimeWindow, time: number): boolean {
   return time >= window.start && time <= window.end;
 }
 
-/** The shell text of a row that ran one: `command` rows carry it in `command`, search and file-read rows in a nullable `cmd`. */
-function shellText(row: WorkRow): string | null {
-  switch (row.workKind) {
-    case "command":
-      return row.command;
-    case "search":
-    case "file-read":
-      return row.cmd;
-    default:
-      return null;
-  }
-}
-
 function runsHistoryGit(row: WorkRow): boolean {
   const text = shellText(row);
   return text !== null && isHistoryWritingGit(text);
-}
-
-/** Until when a row with no recorded end is taken to be running; null skips it. */
-interface OpenRowEnds {
-  /** A pending row. */
-  pending: number | null;
-  /** A finished row whose end was not recorded. */
-  unended: number | null;
-}
-
-/** When a row could have been running, or null when it never ran or no end is known. */
-function rowWindow(row: WorkRow, open: OpenRowEnds): TimeWindow | null {
-  if ("approvalStatus" in row && row.approvalStatus !== null) {
-    return null;
-  }
-  let end: number | null = null;
-  if (row.status === "pending") {
-    end = open.pending;
-  } else if ("completedAt" in row) {
-    end = row.completedAt ?? open.unended;
-  }
-  return end === null
-    ? null
-    : { start: row.startedAt - WINDOW_SLACK_MS, end: end + WINDOW_SLACK_MS };
 }
 
 /** The windows of the wanted rows that overlap the turn, which began at `startedAt`. */
@@ -347,13 +285,18 @@ export interface SiblingEvidence {
   paths: Set<string>;
   /** When a sibling ran git that writes history. */
   commitWindows: SiblingWindow[];
+  /** The shell text of the sibling rows that ran during the turn. */
+  texts: Array<RowText & { threadId: string }>;
+  /** Per sibling, whether its timeline was read in full; a sibling that was not credits nothing. */
+  complete: Map<string, boolean>;
 }
 
 /**
  * What other threads in the same checkout did since `startedAt`: the paths
- * they changed through their own tools, and when they ran git that writes
- * history. A thread that has been idle and untouched since before the turn
- * began cannot have done either, so its timeline is not read.
+ * they changed through their own tools, when they ran git that writes
+ * history, and the shell text of the rows that ran. A thread that has been
+ * idle and untouched since before the turn began cannot have done any of it,
+ * so its timeline is not read.
  */
 export async function siblingAuthoredPaths(
   bb: BbPluginApi,
@@ -371,12 +314,17 @@ export async function siblingAuthoredPaths(
   const now = Date.now();
   const paths = new Set<string>();
   const commitWindows: SiblingWindow[] = [];
+  const texts: SiblingEvidence["texts"] = [];
+  const complete = new Map<string, boolean>();
   for (const sibling of siblings) {
     let rows: TimelineRow[];
     try {
-      ({ rows } = await recentTimelineRows(bb, sibling.id, pageInTurn(startedAt)));
+      const paged = await recentTimelineRows(bb, sibling.id, pageInTurn(startedAt));
+      rows = paged.rows;
+      complete.set(sibling.id, !paged.truncated);
     } catch {
       // Gone since it was listed; it has nothing left to review.
+      complete.set(sibling.id, false);
       continue;
     }
     addChangedPaths(rows, (row) => row.createdAt >= startedAt, paths);
@@ -385,14 +333,22 @@ export async function siblingAuthoredPaths(
     for (const window of overlappingWindows(rows, startedAt, open, runsHistoryGit)) {
       commitWindows.push({ threadId: sibling.id, ...window });
     }
+    for (const text of rowTexts(rows, startedAt, open, { includeUnapproved: false })) {
+      texts.push({ threadId: sibling.id, ...text });
+    }
   }
-  return { paths, commitWindows };
+  return { paths, commitWindows, texts, complete };
 }
+
+/** How far before the turn a family timeline is paged, so a row that began earlier and still runs is seen. */
+export const FAMILY_LOOKBACK_MS = 30 * 60 * 1_000;
 
 export interface KinEvidence {
   /** Paths this thread's bb children and owned threads changed through their own tools. */
   paths: Set<string>;
   windows: TimeWindow[];
+  /** The text of the rows that overlapped the turn, as the family side reads them. */
+  texts: RowText[];
   /** False when a thread could not be read in full; nothing it did can be ruled out. */
   complete: boolean;
 }
@@ -415,16 +371,37 @@ export async function kinEvidence(
       own.has(entry.id) &&
       (entry.status !== "idle" || entry.updatedAt >= startedAt),
   );
-  const evidence: KinEvidence = { paths: new Set(), windows: [], complete: true };
+  const evidence: KinEvidence = { paths: new Set(), windows: [], texts: [], complete: true };
   for (const thread of kin) {
     try {
-      const { rows, truncated } = await recentTimelineRows(bb, thread.id, pageInTurn(startedAt));
+      const { rows, truncated } = await recentTimelineRows(
+        bb,
+        thread.id,
+        pageInTurn(startedAt - FAMILY_LOOKBACK_MS),
+      );
       evidence.complete &&= !truncated;
       addChangedPaths(rows, (row) => row.createdAt >= startedAt, evidence.paths);
       evidence.windows.push(...ownWindows(rows, startedAt, now));
+      evidence.texts.push(
+        ...rowTexts(rows, startedAt, { pending: now, unended: now }, { includeUnapproved: true }),
+      );
     } catch {
       evidence.complete = false;
     }
   }
   return evidence;
+}
+
+/** The thread's rows back to `since`, or why they cannot be had. */
+export async function rowsSince(
+  bb: BbPluginApi,
+  threadId: string,
+  since: number,
+): Promise<TimelineRow[] | string> {
+  try {
+    const { rows, truncated } = await recentTimelineRows(bb, threadId, pageInTurn(since));
+    return truncated ? "the thread's timeline back to the earliest commit is truncated" : rows;
+  } catch {
+    return "the thread's earlier timeline could not be read";
+  }
 }
