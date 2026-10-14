@@ -4075,6 +4075,7 @@ describe("auto-review plugin: review reports", () => {
       await report(host, { outcome: "committed", summary: "s", findings: [finding(), finding({ key: "gone", status: "fixed" })] });
       await emitIdle(host);
 
+      await tick();
       await emitActive(host);
       host.setWorkingTree([{ path: "src/b.ts" }]);
       host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts")]);
