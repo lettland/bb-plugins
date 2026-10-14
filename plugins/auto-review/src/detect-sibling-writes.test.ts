@@ -208,3 +208,183 @@ describe("siblingWrittenPaths", () => {
     });
   });
 });
+
+describe("a sibling's text, strictly", () => {
+  const found = ["src/a.ts", "b.ts", "lib/a.test.ts", "report.txt", "notes.md"];
+  const limit = 8_192;
+
+  describe("cut at the limit", () => {
+    const tail = "cp b.ts src/a.ts.orig";
+    // Cut right after `src/a.ts`: a cut word must never become a target.
+    const cutAfterTarget = `echo ${"x".repeat(limit - "cp b.ts src/a.ts".length - "echo ; ".length)}; ${tail}`;
+
+    it("drops the command the cut touched", () => {
+      expect(cutAfterTarget.slice(0, limit).endsWith("cp b.ts src/a.ts")).toBe(true);
+      expect(writeTargets(cutAfterTarget)).toEqual([]);
+      expect(credited(found, cutAfterTarget)).toEqual([]);
+    });
+
+    it("keeps the commands before it, and one the cut leaves whole", () => {
+      expect(writeTargets(`echo x > b.ts; ${cutAfterTarget}`)).toEqual(["b.ts"]);
+      const frame = (filler: string) => `echo x > b.ts; echo ${filler}; echo y > notes.md; `;
+      const whole = `${frame("x".repeat(limit - frame("").length))}echo z > src/a.ts`;
+      expect(whole.slice(0, limit)).toBe(frame("x".repeat(limit - frame("").length)));
+      expect(writeTargets(whole)).toEqual(["b.ts", "notes.md"]);
+      const open = `echo x > b.ts\n${"echo y\n".repeat(2_000)}`;
+      expect(writeTargets(open)).toEqual(["b.ts"]);
+    });
+
+    it("drops a heredoc body cut mid-way, and keeps the command that read it", () => {
+      const script = "python3 - <<'EOF'\nopen('src/a.ts', 'w').write('x')\n";
+      expect(writeTargets(`${script}${"#".repeat(limit)}`)).toEqual([]);
+      expect(writeTargets(`cat > notes.md <<'EOF'\n${"y".repeat(limit)}`)).toEqual(["notes.md"]);
+      expect(writeTargets(`${script}EOF`)).toEqual(["src/a.ts"]);
+    });
+  });
+
+  describe("git's directory options", () => {
+    it.each([
+      "git -C sub checkout -- b.ts",
+      "git -C sub restore b.ts",
+      "git --git-dir=x/.git restore b.ts",
+      "git --git-dir x/.git restore b.ts",
+      "git --work-tree=x checkout -- b.ts",
+      "git --work-tree x restore b.ts",
+    ])("give no targets: `%s`", (text) => {
+      expect(writeTargets(text)).toEqual([]);
+    });
+
+    it("leave the other options alone", () => {
+      expect(writeTargets("git -c core.x=y restore b.ts")).toEqual(["b.ts"]);
+      expect(writeTargets("git --no-pager checkout -- b.ts")).toEqual(["b.ts"]);
+    });
+  });
+
+  describe("perl -i", () => {
+    it.each(["perl -pi -e s/a/b/ b.ts", "perl -i.bak -pe s/a/b/ b.ts", "perl -0pi -e s/a/b/ b.ts", "perl -Mstrict -pi -e s/a/b/ b.ts"])(
+      "edits in place: `%s`",
+      (text) => {
+        expect(writeTargets(text)).toEqual(["b.ts"]);
+      },
+    );
+
+    it.each([
+      "perl -Mstrict -ne 'print' src/a.ts",
+      "perl -mstrict -ne 'print' src/a.ts",
+      "perl -Ilib -ne 'print' src/a.ts",
+      "perl -x src/a.ts",
+      "perl -ne 'print' src/a.ts",
+    ])("does not otherwise: `%s`", (text) => {
+      expect(writeTargets(text)).toEqual([]);
+      expect(credited(found, text)).toEqual([]);
+    });
+  });
+
+  describe("comments", () => {
+    it("end the words of their line", () => {
+      expect(writeTargets("sed -i 's/x/y/' b.ts # see src/a.ts")).toEqual(["b.ts"]);
+      expect(writeTargets("# echo x > src/a.ts\necho y > b.ts")).toEqual(["b.ts"]);
+      expect(writeTargets("echo x > b.ts # > src/a.ts\necho y > notes.md")).toEqual(["b.ts", "notes.md"]);
+    });
+
+    it("do not start inside a word or a quote", () => {
+      expect(writeTargets("echo x > a#b.ts")).toEqual(["a#b.ts"]);
+      expect(writeTargets("echo '# x' > b.ts; echo \"#y\" > notes.md")).toEqual(["b.ts", "notes.md"]);
+    });
+
+    it("do not let a quote in one swallow the lines after it", () => {
+      expect(writeTargets("# it's here\necho x > b.ts")).toEqual(["b.ts"]);
+    });
+  });
+
+  describe("heredoc tags", () => {
+    it("read the `<<\\EOF` form, so its body is not run", () => {
+      expect(writeTargets("cat <<\\EOF > notes.md\necho hi > src/a.ts\nEOF")).toEqual(["notes.md"]);
+      expect(credited(found, "cat <<\\EOF > notes.md\necho hi > src/a.ts\nEOF")).toEqual(["notes.md"]);
+    });
+
+    it("do not start inside quotes", () => {
+      expect(writeTargets('grep -n "<<EOF" x.sh\necho x > b.ts')).toEqual(["b.ts"]);
+      expect(writeTargets("echo '<<EOF' > notes.md\necho x > b.ts")).toEqual(["notes.md", "b.ts"]);
+    });
+  });
+
+  describe("interpreter scripts", () => {
+    it("credit only the literal targets when every write call has one", () => {
+      const text = "python3 -c \"import glob; n=len(glob.glob('src/**/*.ts')); open('report.txt','w').write(str(n))\"";
+      expect(credited(found, text)).toEqual(["report.txt"]);
+      const two = "python3 - <<'EOF'\nopen('b.ts','a').write('x')\nPath('notes.md').write_text('y')\nEOF";
+      expect(credited(found, two)).toEqual(["b.ts", "notes.md"]);
+      expect(credited(found, "node -e \"require('fs').writeFileSync('report.txt', 'x'); glob('src/**/*.ts')\"")).toEqual([
+        "report.txt",
+      ]);
+    });
+
+    it("keep the literal names and qualifying globs when a write call targets a variable", () => {
+      const variable = "python3 - <<'EOF'\np='lib/a.test.ts'\ns=open(p).read()\nopen(p,'w').write(s)\nEOF";
+      expect(credited(found, variable)).toEqual(["lib/a.test.ts"]);
+      const loop =
+        "python3 - <<'EOF'\nimport glob\nfor f in glob.glob('lib/react/*.test.tsx')+['lib/react/helpers/setup.ts']:\n    s=open(f).read()\n    open(f,'w').write(s)\nEOF";
+      const loops = ["lib/react/a.test.tsx", "lib/react/helpers/setup.ts", "lib/react/c.ts"];
+      expect(credited(loops, loop)).toEqual(["lib/react/a.test.tsx", "lib/react/helpers/setup.ts"]);
+    });
+
+    it("keep them too when one write call is literal and another is not", () => {
+      const mixed = "python3 - <<'EOF'\np='lib/a.test.ts'\nopen('report.txt','w').write('x')\nopen(p,'w').write('y')\nEOF";
+      expect(credited(found, mixed)).toEqual(["lib/a.test.ts", "report.txt"]);
+      const concatenated = "python3 -c \"open('src/a.ts' + x, 'w').write('y'); open('b.ts','w')\"";
+      expect(credited(found, concatenated)).toEqual(["b.ts", "src/a.ts"]);
+    });
+
+    it("keep them when the script writes only through `.write(`", () => {
+      expect(credited(found, "python3 -c \"import sys; sys.stdout.write('b.ts')\"")).toEqual(["b.ts"]);
+    });
+  });
+});
+
+describe("where a sibling's shell is", () => {
+  const rows = (...items: Array<[string, string?]>) =>
+    items.map(([text, cwd]) => ({ threadId: "sib-1", text, cwd: cwd ?? "" }));
+  const written = (items: Array<{ threadId: string; text: string; cwd: string }>, candidates = ["lib/a.ts", "a.ts", "lib/b.ts"]) =>
+    [...siblingWrittenPaths(candidates, items, [], ROOT).keys()].sort();
+
+  it("is the checkout root for an empty or null cwd", () => {
+    expect(written(rows(["sed -i s/x/y/ lib/a.ts"]))).toEqual(["lib/a.ts"]);
+    expect(written([{ threadId: "sib-1", text: "sed -i s/x/y/ lib/a.ts", cwd: null as never }])).toEqual(["lib/a.ts"]);
+  });
+
+  it("is lost after a cd elsewhere, so a later row's relative targets credit nothing", () => {
+    const earlier = rows(["cd sub && ls"], ["sed -i s/x/y/ a.ts"]);
+    expect(written(earlier)).toEqual([]);
+    expect(written(rows(["pushd sub"], ["echo x > lib/a.ts"]))).toEqual([]);
+    expect(written(rows(["cd .."], ["echo x > lib/a.ts"]))).toEqual([]);
+    expect(written(rows(["cd"], ["echo x > lib/a.ts"]))).toEqual([]);
+    expect(written(rows(["cd $HOME"], ["echo x > lib/a.ts"]))).toEqual([]);
+  });
+
+  it("still credits an absolute target under the checkout while it is lost", () => {
+    expect(written(rows(["cd sub"], ["echo x > /w/lib/a.ts"]))).toEqual(["lib/a.ts"]);
+    expect(written(rows(["cd sub"], ["echo x > /elsewhere/lib/a.ts"]))).toEqual([]);
+  });
+
+  it("is found again by a cd back to the root", () => {
+    expect(written(rows(["cd /w"], ["echo x > lib/a.ts"]))).toEqual(["lib/a.ts"]);
+    expect(written(rows(["cd sub"], ["cd /w"], ["echo x > lib/a.ts"]))).toEqual(["lib/a.ts"]);
+    expect(written(rows(["cd sub && cd .."], ["echo x > lib/a.ts"]))).toEqual(["lib/a.ts"]);
+    expect(written(rows(["cd /w/sub"], ["cd .."], ["echo x > lib/a.ts"]))).toEqual(["lib/a.ts"]);
+  });
+
+  it("resolves against a row's own absolute cwd whatever came before", () => {
+    expect(written(rows(["cd sub"], ["sed -i s/x/y/ a.ts", "/w/lib"]))).toEqual(["lib/a.ts"]);
+  });
+
+  it("is tracked per sibling, and a cd inside a text still stops that text", () => {
+    const items = [
+      { threadId: "sib-2", text: "cd sub", cwd: "" },
+      { threadId: "sib-1", text: "echo x > lib/a.ts", cwd: "" },
+      { threadId: "sib-2", text: "echo x > lib/b.ts", cwd: "" },
+    ];
+    expect([...siblingWrittenPaths(["lib/a.ts", "lib/b.ts"], items, [], ROOT)]).toEqual([["lib/a.ts", "sib-1"]]);
+    expect(written(rows(["cd /w && echo x > lib/a.ts"]))).toEqual([]);
+  });
+});

@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  commandOf,
-  gitCommand,
-  globMatcher,
-  globQualifies,
-  lexCommands,
-} from "./detect-mentions.js";
+import { globMatcher, globQualifies } from "./detect-globs.js";
+import { commandOf, gitCommand, lexCommands, lexText } from "./detect-mentions.js";
 
 const LIMIT = 8_192;
 
@@ -51,6 +46,41 @@ describe("lexCommands", () => {
     ]);
   });
 
+  it("reads a `<<` inside quotes, a here-string and a comment as no heredoc", () => {
+    expect(shapes('grep -n "<<EOF" x.sh\nls')).toEqual([
+      { words: ["grep", "-n", "<<EOF", "x.sh"], redirects: [], heredocs: [] },
+      { words: ["ls"], redirects: [], heredocs: [] },
+    ]);
+    expect(shapes("cat <<<word\nls").map(({ words }) => words)).toEqual([["cat"], ["ls"]]);
+    expect(shapes("ls # cat <<EOF\nwc")).toEqual([
+      { words: ["ls"], redirects: [], heredocs: [] },
+      { words: ["wc"], redirects: [], heredocs: [] },
+    ]);
+  });
+
+  it("reads the `<<\\EOF` tag form", () => {
+    expect(shapes("cat <<\\EOF > a.md\nx > b.md\nEOF\nls")).toEqual([
+      { words: ["cat"], redirects: ["a.md"], heredocs: ["x > b.md"] },
+      { words: ["ls"], redirects: [], heredocs: [] },
+    ]);
+  });
+
+  it("splits comments from commands, and keeps a `#` inside a word or a quote", () => {
+    const lexed = lexText("ls a#b # note\necho '# x' \"#y\" # it's", LIMIT);
+    expect(lexed.comments).toEqual([" note", " it's"]);
+    expect(lexed.commands.map(({ words }) => words.map(({ text }) => text))).toEqual([
+      ["ls", "a#b"],
+      ["echo", "# x", "#y"],
+    ]);
+  });
+
+  it("reports a heredoc with no terminator line", () => {
+    expect(lexText("cat <<EOF\nbody", LIMIT).unterminated).toBe(true);
+    expect(lexText("cat <<EOF", LIMIT).unterminated).toBe(true);
+    expect(lexText("cat <<EOF\nbody\nEOF", LIMIT).unterminated).toBe(false);
+    expect(lexText('grep "<<EOF" x', LIMIT).unterminated).toBe(false);
+  });
+
   it("never reads a quoted `>` as a redirect", () => {
     expect(shapes("rg '=>' lib/c.ts")).toEqual([{ words: ["rg", "=>", "lib/c.ts"], redirects: [], heredocs: [] }]);
     expect(shapes('echo "a > b"')).toEqual([{ words: ["echo", "a > b"], redirects: [], heredocs: [] }]);
@@ -85,7 +115,7 @@ describe("lexCommands", () => {
 
   it("reads only the first characters it is given", () => {
     expect(shapes("a > x\nb > y".padEnd(20, " ")).length).toBe(2);
-    expect(lexCommands("a > x\nb > y", 9).map(({ redirects }) => redirects.length)).toEqual([1, 0]);
+    expect(lexCommands("a > x\nb > y", 9).map(({ redirects }) => redirects.length)).toEqual([1]);
   });
 });
 
@@ -106,6 +136,14 @@ describe("commandOf and gitCommand", () => {
 
   it("skips git's own options", () => {
     expect(gitCommand(commandOf(words("git -C sub -c a=b --no-pager restore x"))?.args ?? [])?.sub).toBe("restore");
+  });
+
+  it("reads the value of git's directory options, and says when one moved git", () => {
+    const git = (text: string) => gitCommand(commandOf(words(text))?.args ?? []);
+    expect(git("git --git-dir x/.git --work-tree y restore z")).toMatchObject({ sub: "restore", relocated: true });
+    expect(git("git --git-dir=x restore z")).toMatchObject({ sub: "restore", relocated: true });
+    expect(git("git -C sub restore z")).toMatchObject({ sub: "restore", relocated: true });
+    expect(git("git -c a=b restore z")).toMatchObject({ sub: "restore", relocated: false });
   });
 });
 

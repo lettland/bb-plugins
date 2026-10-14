@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { siblingAuthoredPaths, turnChangedPaths } from "./detect.js";
+import { rowTexts } from "./detect-rows.js";
 
 const STARTED_AT = 10_000;
 const LEAK = "leak-token-3d92";
@@ -221,11 +222,9 @@ describe("turnChangedPaths and a sibling's shell edits", () => {
   it("leaves the paths a sibling's shell writes name to the sibling, whatever the child ran meanwhile", async () => {
     const { result, infos, environmentGets } = await attribute({});
     expect(pathsOf(result)).toEqual(["lib/c.ts", "lib/mine.ts", "lib/own.ts", "package.json"]);
-    expect(infos.filter((line) => line.includes("left to thread sib-1")).sort()).toEqual(
-      creditable
-        .map((path) => `auto-review: ${path} left to thread sib-1: named in its write during the turn`)
-        .sort(),
-    );
+    const lines = infos.filter((line) => line.includes("left to thread sib-1"));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.replace(/^.*during the turn: /u, "").split(", ").sort()).toEqual([...creditable].sort());
     expect(JSON.stringify(infos)).not.toContain(LEAK);
     expect(environmentGets).toEqual([{ environmentId: "env" }]);
   });
@@ -274,6 +273,12 @@ describe("turnChangedPaths and a sibling's shell edits", () => {
 
     it("by a tool's arguments", async () => {
       expect(await keeps({ "kid-1": one(tool({ file_path: "/w/lib/b.ts" })) })).toBe(true);
+    });
+
+    it("by a tool's string arguments, whatever their depth, read as text and not as JSON", () => {
+      const rows = [tool({ edits: [{ note: "x\nsrc/a.ts", count: 2 }], path: "dir/my file.ts" }, { startedAt: 20_000 })];
+      const texts = rowTexts(rows as never, STARTED_AT, { pending: 30_000, unended: 30_000 }, { includeUnapproved: true });
+      expect(texts.map(({ text }) => text)).toEqual(["x\nsrc/a.ts", "dir/my file.ts", '"dir/my file.ts"']);
     });
 
     it("by a file-read or search row that carries no approval status", async () => {
@@ -344,7 +349,7 @@ describe("turnChangedPaths and a sibling's shell edits", () => {
     });
   });
 
-  it("logs at most 20 paths and then a count", async () => {
+  it("logs every credited path, one line per sibling", async () => {
     const many = Array.from({ length: 25 }, (_, at) => `lib/f${String(at).padStart(2, "0")}.ts`);
     const { result, infos } = await attribute({
       timelines: { "sib-1": one(command(`echo x | tee ${many.join(" ")}`)) },
@@ -352,8 +357,6 @@ describe("turnChangedPaths and a sibling's shell edits", () => {
     });
     expect(pathsOf(result)).toEqual(["lib/mine.ts", "lib/own.ts"]);
     const lines = infos.filter((line) => line.includes("left to"));
-    expect(lines).toHaveLength(21);
-    expect(lines.slice(0, 20).every((line) => /^auto-review: lib\/f\d\d\.ts left to thread sib-1: named in its write/u.test(line))).toBe(true);
-    expect(lines[20]).toBe("auto-review: 5 more paths left to sibling threads: named in their writes during the turn");
+    expect(lines).toEqual([`auto-review: left to thread sib-1, named in its write during the turn: ${many.join(", ")}`]);
   });
 });

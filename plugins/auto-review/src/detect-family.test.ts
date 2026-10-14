@@ -8,8 +8,12 @@ const none = () => [];
 const targets = ({ words }: Command) =>
   ["cp", "tee"].includes(words[0]?.text ?? "") ? [words[words.length - 1]?.text ?? ""] : [];
 
-const names = (texts: string[], path: string, targetsOf: (command: Command) => string[] = none) =>
-  familyMatcher(texts, ROOT, targetsOf)(path);
+const names = (
+  texts: string[],
+  path: string,
+  targetsOf: (command: Command) => string[] = none,
+  unresolved: (command: Command) => boolean = () => false,
+) => familyMatcher(texts, ROOT, { targets: targetsOf, unresolved })(path);
 
 /** The three paths a sibling wrote in the replayed incident, as placeholders. */
 const PROTECTED = ["lib/x/a.test.ts", "lib/react/b.test.tsx", "lib/svc/c.test.ts"];
@@ -47,8 +51,13 @@ describe("familyMatcher", () => {
       expect(names(["ls *.test.tsx"], "lib/react/a.test.tsx")).toBe(false);
     });
 
-    it.each(["*", "**", "/**", "*/", "lib/*", "lib/**", "lib/*.*"])("never counts bare `%s`", (glob) => {
+    it.each(["*", "**", "/**", "*/"])("never counts bare `%s`", (glob) => {
       expect(names([`cp tpl ${glob}`], "lib/react/a.test.tsx", targets)).toBe(false);
+    });
+
+    it.each(["lib/*", "lib/**", "lib/*.*"])("counts only as the directory before the star in `%s`", (glob) => {
+      expect(names([`cp tpl ${glob}`], "lib/react/a.test.tsx", targets)).toBe(true);
+      expect(names([`cp tpl other/${glob.slice(4)}`], "lib/react/a.test.tsx", targets)).toBe(false);
     });
   });
 

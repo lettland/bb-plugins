@@ -1,33 +1,28 @@
 import { familyMatcher } from "./detect-family.js";
-import {
-  commandOf,
-  gitCommand,
-  globMatcher,
-  globQualifies,
-  isGlob,
-  lexCommands,
-} from "./detect-mentions.js";
+import { globMatcher, globQualifies, isGlob } from "./detect-globs.js";
+import { commandOf, gitCommand, lexCommands } from "./detect-mentions.js";
 import type { Command, Word } from "./detect-mentions.js";
+import { scriptTokens } from "./detect-script-writes.js";
 
 /** Only this much of a sibling's shell text is read, so the cost stays linear in what a row carries. */
 const SIBLING_TEXT_LIMIT = 8_192;
 const DIRECTORY_CHANGERS: ReadonlySet<string> = new Set(["cd", "pushd", "popd"]);
 const INTERPRETER = /^(?:python[\d.]*|node|ruby|perl)$/u;
-/** A script body that writes a file: Python's `open(…, 'w')`, `.write(`, `write_text`, Node's `writeFile`. */
-const SCRIPT_WRITE =
-  /\bopen\s*\([^\n]{0,200}?['"][wax][bt+]*['"]|\.write\(|\bwrite_text\b|\bwriteFile(?:Sync)?\b/u;
-const SCRIPT_TOKEN = /[\w@.+\-/*?]+/gu;
+/** `sed -i` and `--in-place`; for perl a short-flag cluster with `i` (`-pi`, `-i.bak`, `-0pi`) that does not start with `-M`, `-m`, `-I` or `-x`. */
+const SED_IN_PLACE = /^-(?:[A-Za-z]*i|-in-place)/u;
+const PERL_IN_PLACE = /^-(?![MmIx-])[A-Za-z0-9]*i/u;
 
-/** A target the sibling side cannot resolve or that is scratch space: variables, expansions, `~`, `/dev` and `/tmp`. */
-function usable(token: string): boolean {
-  return token !== "" && !/[$`{}]/u.test(token) && !/^(?:~|\/dev\/|\/tmp\/)/u.test(token);
-}
+/** A target that is not scratch space: `~`, `/dev` and `/tmp`. */
+const checkoutBound = (token: string) => token !== "" && !/^(?:~|\/dev\/|\/tmp\/)/u.test(token);
+
+/** A target the sibling side can resolve: no variables, expansions or braces. */
+const usable = (token: string) => checkoutBound(token) && !/[$`{}]/u.test(token);
 
 const plain = (args: readonly Word[]) => args.filter(({ text }) => !text.startsWith("-")).map(({ text }) => text);
 
 /** The files `sed -i` or `perl -i` edits: the plain arguments left once the script is set aside. */
 function inPlaceTargets(name: string, args: readonly Word[]): string[] {
-  if (!args.some(({ text }) => /^-(?:[A-Za-z]*i|-in-place)/u.test(text))) {
+  if (!args.some(({ text }) => (name === "sed" ? SED_IN_PLACE : PERL_IN_PLACE).test(text))) {
     return [];
   }
   const takesScript = name === "sed" ? /^-[A-Za-z]*[ef]$|^--(?:expression|file)$/u : /^-[A-Za-z]*e$/u;
@@ -48,22 +43,16 @@ function inPlaceTargets(name: string, args: readonly Word[]): string[] {
   return scripted ? files : files.slice(1);
 }
 
-/** Every path-like token in an interpreter body that writes a file. */
-function scriptTokens(args: readonly Word[], heredocs: readonly string[]): string[] {
-  const flag = args.findIndex(({ text }) => /^-[A-Za-z]*[ce]$/u.test(text));
-  const inline = flag >= 0 ? [args[flag + 1]?.text ?? ""] : [];
-  return [...heredocs, ...inline]
-    .filter((body) => SCRIPT_WRITE.test(body))
-    .flatMap((body) => body.match(SCRIPT_TOKEN) ?? []);
-}
-
 function gitTargets(args: readonly Word[]): string[] {
   const git = gitCommand(args);
-  if (git?.sub === "checkout") {
+  if (git === null || git.relocated) {
+    return [];
+  }
+  if (git.sub === "checkout") {
     const dashes = git.rest.findIndex(({ text }) => text === "--");
     return dashes < 0 ? [] : git.rest.slice(dashes + 1).map(({ text }) => text);
   }
-  if (git?.sub === "restore") {
+  if (git.sub === "restore") {
     const flags = git.rest.map(({ text }) => text);
     const staged = flags.some((flag) => flag === "--staged" || /^-[A-Za-z]*S[A-Za-z]*$/u.test(flag));
     const worktree = flags.some((flag) => flag === "--worktree" || /^-[A-Za-z]*W[A-Za-z]*$/u.test(flag));
@@ -98,13 +87,20 @@ function argumentTargets(name: string, args: readonly Word[], heredocs: readonly
 }
 
 /** What one simple command writes to, as it names it: its redirect targets and what its arguments write. */
-function commandTargets({ words, redirects, heredocs }: Command): string[] {
+function rawTargets({ words, redirects, heredocs }: Command): string[] {
   const command = commandOf(words);
   return [
     ...redirects.map(({ text }) => text),
     ...(command === null ? [] : argumentTargets(command.name, command.args, heredocs)),
-  ].filter(usable);
+  ];
 }
+
+const commandTargets = (command: Command) => rawTargets(command).filter(usable);
+/** What a command writes outside scratch space, whether or not it can be resolved. */
+const writtenTargets = (command: Command) => rawTargets(command).filter(checkoutBound);
+
+/** A write target built from a variable, a command substitution or a backtick, which no one can resolve. */
+const hasUnresolvedTarget = (command: Command) => rawTargets(command).some((token) => /[$`]/u.test(token));
 
 /**
  * The tokens a shell text writes to, as it names them: redirect targets,
@@ -139,9 +135,11 @@ function segmentsOf(path: string): string[] {
   return segments;
 }
 
-/** A token as a path relative to the checkout, resolved against the row's cwd; null outside the checkout. */
-function repoPath(token: string, cwd: string | null, root: string): string | null {
-  const base = cwd === null ? root : cwd.startsWith("/") ? cwd : `${root}/${cwd}`;
+/** A token as a path relative to the checkout, resolved against the shell's directory; null outside the checkout, or relative when that directory is unknown. */
+function repoPath(token: string, base: string | null, root: string): string | null {
+  if (base === null && !token.startsWith("/")) {
+    return null;
+  }
   const segments = segmentsOf(token.startsWith("/") ? token : `${base}/${token}`);
   const rootSegments = segmentsOf(root);
   if (!rootSegments.every((segment, at) => segments[at] === segment)) {
@@ -165,7 +163,60 @@ function namedCandidates(path: string, candidates: readonly string[], wanted: Re
   return globQualifies(path) ? candidates.filter(globMatcher(path)) : [];
 }
 
-/** The candidates a sibling's shell texts write to, with the first sibling that did. */
+/**
+ * Where the shell is after a text, when it changes directory: the checkout
+ * root or another directory, null when that cannot be told (`cd` alone, a
+ * variable, `popd`). Undefined when the text changes no directory.
+ */
+function directoryAfter(text: string, start: string | null): string | null | undefined {
+  let dir = start;
+  let changed = false;
+  for (const { words } of lexCommands(text, SIBLING_TEXT_LIMIT)) {
+    const parsed = commandOf(words);
+    if (parsed === null || !DIRECTORY_CHANGERS.has(parsed.name)) {
+      continue;
+    }
+    const target = plain(parsed.args)[0];
+    changed = true;
+    if (parsed.name === "popd" || target === undefined || /^[-~]|[$`{}]/u.test(target)) {
+      dir = null;
+    } else if (target.startsWith("/") || dir !== null) {
+      dir = `/${segmentsOf(target.startsWith("/") ? target : `${dir}/${target}`).join("/")}`;
+    } else {
+      dir = null;
+    }
+  }
+  return changed ? dir : undefined;
+}
+
+/** Where a row's relative tokens resolve: its own cwd, else where the sibling's earlier rows left the shell; null when that is unknown. */
+function rowBase(cwd: string | null, left: string | null, root: string): string | null {
+  if (cwd === null || cwd === "") {
+    return left;
+  }
+  return cwd.startsWith("/") ? cwd : `${root}/${cwd}`;
+}
+
+/** The candidates one text writes to, resolved against `base`. */
+function writtenBy(
+  text: string,
+  base: string | null,
+  candidates: readonly string[],
+  wanted: ReadonlySet<string>,
+  root: string,
+): string[] {
+  return writeTargets(text).flatMap((token) => {
+    const path = repoPath(token, base, root);
+    return path === null ? [] : namedCandidates(path, candidates, wanted);
+  });
+}
+
+/**
+ * The candidates a sibling's shell texts write to, with the first sibling that
+ * did. An empty or unknown `cwd` is the checkout root until that sibling's
+ * earlier rows `cd` somewhere else, and again once one `cd`s back; while it is
+ * elsewhere only absolute targets resolve.
+ */
 function writtenCandidates(
   candidates: readonly string[],
   siblingTexts: readonly SiblingText[],
@@ -173,14 +224,18 @@ function writtenCandidates(
 ): Map<string, string> {
   const wanted = new Set(candidates);
   const written = new Map<string, string>();
+  const shellDirs = new Map<string, string | null>();
   for (const { threadId, text, cwd } of siblingTexts) {
-    for (const token of writeTargets(text)) {
-      const path = repoPath(token, cwd, root);
-      for (const candidate of path === null ? [] : namedCandidates(path, candidates, wanted)) {
-        if (!written.has(candidate)) {
-          written.set(candidate, threadId);
-        }
+    const left = shellDirs.get(threadId);
+    const base = rowBase(cwd, left === undefined ? root : left, root);
+    for (const candidate of writtenBy(text, base, candidates, wanted, root)) {
+      if (!written.has(candidate)) {
+        written.set(candidate, threadId);
       }
+    }
+    const after = directoryAfter(text, base);
+    if (after !== undefined) {
+      shellDirs.set(threadId, after);
     }
   }
   return written;
@@ -202,7 +257,7 @@ export function siblingWrittenPaths(
   const base = root.replace(/\/+$/u, "");
   const written = writtenCandidates(candidates, siblingTexts, base);
   if (written.size > 0) {
-    const named = familyMatcher(familyTexts, base, commandTargets);
+    const named = familyMatcher(familyTexts, base, { targets: writtenTargets, unresolved: hasUnresolvedTarget });
     for (const path of [...written.keys()].filter(named)) {
       written.delete(path);
     }

@@ -80,15 +80,33 @@ export interface RowText {
   cwd: string | null;
 }
 
-/** What a row names besides its shell text: a read's or search's path, a search's query, a tool's arguments. */
+const MAX_ARGUMENT_DEPTH = 32;
+
+/** The string values anywhere in a tool's arguments, which are what the tool acts on. */
+function leafStrings(value: unknown, depth = 0): string[] {
+  if (typeof value === "string") {
+    return [value];
+  }
+  if (depth >= MAX_ARGUMENT_DEPTH || typeof value !== "object" || value === null) {
+    return [];
+  }
+  return Object.values(value).flatMap((member) => leafStrings(member, depth + 1));
+}
+
+/** A path as shell text: itself, and, when it has a blank, once more quoted so it stays one word. */
+function pathTexts(path: string): string[] {
+  return /[ \t]/u.test(path) && !path.includes("\n") ? [path, `"${path.replace(/["\\$`]/gu, "\\$&")}"`] : [path];
+}
+
+/** What a row names besides its shell text: a read's or search's path, a search's query, a tool's string arguments. */
 function namedTexts(row: WorkRow): string[] {
   switch (row.workKind) {
     case "file-read":
-      return [row.path];
+      return pathTexts(row.path);
     case "search":
-      return row.path === null ? [row.query] : [row.path, row.query];
+      return row.path === null ? [row.query] : [...pathTexts(row.path), row.query];
     case "tool":
-      return [JSON.stringify(row.toolArgs)];
+      return leafStrings(row.toolArgs).flatMap(pathTexts);
     default:
       return [];
   }

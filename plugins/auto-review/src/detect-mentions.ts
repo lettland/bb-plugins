@@ -2,8 +2,7 @@
  * Reads shell text for the paths it names. Two readings share it: the sibling
  * side is strict (only what a write target provably names), the family side
  * generous (anything that could name a path). Nothing here uses a regex that
- * can backtrack badly on input a command row carries; globs are matched by a
- * segment matcher instead.
+ * can backtrack badly on input a command row carries.
  */
 
 export interface Word {
@@ -23,7 +22,8 @@ export interface Command {
   heredocs: string[];
 }
 
-const HEREDOC = /(?<!<)<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/gu;
+/** A heredoc operator and its tag: `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"` and `<<\EOF`. */
+const HEREDOC_TAG = /<<(-?)[ \t]*(?:'([A-Za-z_]\w*)'|"([A-Za-z_]\w*)"|\\?([A-Za-z_]\w*))/uy;
 const HEREDOC_MARKER = /^\u0001(\d+)\u0001$/u;
 
 /** A quoted string (an unterminated one runs to the end), an escaped character, an operator, blanks, or a run of plain characters. */
@@ -31,37 +31,147 @@ const SHELL_PIECE =
   /'[^']*(?:'|$)|"(?:\\[\s\S]|[^"\\])*(?:"|$)|\\[\s\S]|(?:\d+|&)?>[>|]?(?:&\d*-?)?|<+|&&|\|\||[;|\n&()]|[^\S\n]+|[^\s;|&()'"\\<>]+/gu;
 
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
-/** Words that can open a command line before the command word. */
-const LEADING_WORDS: ReadonlySet<string> = new Set([
-  "{", "!", "if", "then", "elif", "else", "do", "while", "until", "time", "sudo", "command",
-]);
+/** Shell keywords that can open a command line before the command word. */
+const KEYWORDS: ReadonlySet<string> = new Set(["{", "!", "if", "then", "elif", "else", "do", "while", "until"]);
+/** Plain wrappers the sibling side looks through; the family side reads their options as well. */
+const PLAIN_WRAPPERS: ReadonlySet<string> = new Set(["time", "sudo", "command"]);
 
-/** Cuts every heredoc body out of the text, leaving a marker word where its operator was. */
-function cutHeredocs(text: string): { text: string; bodies: string[] } {
-  const lines = text.split("\n");
-  const bodies: string[] = [];
-  const kept: string[] = [];
-  let at = 0;
-  while (at < lines.length) {
-    const found: Array<{ dash: boolean; tag: string }> = [];
-    kept.push(
-      (lines[at] ?? "").replace(HEREDOC, (_match, dash: string, _quote: string, tag: string) => {
-        found.push({ dash: dash === "-", tag });
-        return ` \u0001${bodies.length + found.length - 1}\u0001 `;
-      }),
-    );
-    at += 1;
-    for (const { dash, tag } of found) {
-      const body: string[] = [];
-      while (at < lines.length && (dash ? (lines[at] ?? "").replace(/^\t+/u, "") : lines[at]) !== tag) {
-        body.push(lines[at] ?? "");
-        at += 1;
-      }
-      at += 1;
-      bodies.push(body.join("\n"));
+interface Prepared {
+  /** The text without comments and heredoc bodies, with a marker word where each heredoc operator was. */
+  text: string;
+  /** The heredoc bodies by marker; null for one whose body never began. */
+  bodies: Array<string | null>;
+  comments: string[];
+  /** A heredoc has no terminator line. */
+  unterminated: boolean;
+  /** The text ends inside a heredoc body. */
+  midBody: boolean;
+}
+
+interface PendingHeredoc {
+  dash: boolean;
+  tag: string;
+  index: number;
+}
+
+function readBody(text: string, from: number, { dash, tag }: PendingHeredoc): { body: string; at: number; closed: boolean } {
+  const body: string[] = [];
+  let at = from;
+  while (at < text.length) {
+    const end = text.indexOf("\n", at);
+    const line = text.slice(at, end < 0 ? text.length : end);
+    at = end < 0 ? text.length : end + 1;
+    if ((dash ? line.replace(/^\t+/u, "") : line) === tag) {
+      return { body: body.join("\n"), at, closed: true };
     }
+    body.push(line);
   }
-  return { text: kept.join("\n"), bodies };
+  return { body: body.join("\n"), at, closed: false };
+}
+
+interface Scan {
+  /** The quote character the scan is inside, or an empty string. */
+  quote: string;
+  /** The scan is where a word could begin, so a `#` here starts a comment. */
+  blank: boolean;
+  /** Heredocs whose body starts at the next line. */
+  pending: PendingHeredoc[];
+}
+
+interface Step {
+  /** What the step keeps of the text it read. */
+  keep: string;
+  /** How much text it read. */
+  width: number;
+}
+
+function scanQuoted(char: string, following: string, scan: Scan): Step {
+  const escaped = char === "\\" && scan.quote === '"';
+  scan.quote = char === scan.quote ? "" : scan.quote;
+  scan.blank = false;
+  return escaped ? { keep: char + following, width: 2 } : { keep: char, width: 1 };
+}
+
+function scanComment(text: string, at: number, prepared: Prepared): Step {
+  const end = text.indexOf("\n", at);
+  const stop = end < 0 ? text.length : end;
+  prepared.comments.push(text.slice(at + 1, stop));
+  return { keep: "", width: stop - at };
+}
+
+/** A heredoc operator and tag at `at`, kept as a marker word; null when the `<<` is something else. */
+function scanHeredoc(text: string, at: number, scan: Scan, prepared: Prepared): Step | null {
+  if (text.charAt(at - 1) === "<" || text.charAt(at + 2) === "<") {
+    return null;
+  }
+  HEREDOC_TAG.lastIndex = at;
+  const found = HEREDOC_TAG.exec(text);
+  if (found === null) {
+    return null;
+  }
+  scan.pending.push({ dash: found[1] === "-", tag: found[2] ?? found[3] ?? found[4] ?? "", index: prepared.bodies.length });
+  prepared.bodies.push(null);
+  scan.blank = true;
+  return { keep: ` \u0001${prepared.bodies.length - 1}\u0001 `, width: found[0].length };
+}
+
+/** The newline that ends a line with heredocs, with the bodies after it. */
+function scanBodies(text: string, at: number, scan: Scan, prepared: Prepared): Step {
+  let end = at + 1;
+  for (const heredoc of scan.pending.splice(0)) {
+    const read = readBody(text, end, heredoc);
+    end = read.at;
+    prepared.bodies[heredoc.index] = read.body;
+    prepared.midBody ||= !read.closed;
+  }
+  scan.blank = true;
+  return { keep: "\n", width: end - at };
+}
+
+function scanStep(text: string, at: number, scan: Scan, prepared: Prepared): Step {
+  const char = text.charAt(at);
+  const following = text.charAt(at + 1);
+  if (scan.quote !== "") {
+    return scanQuoted(char, following, scan);
+  }
+  const wordStart = scan.blank;
+  scan.blank = false;
+  if (char === "\\") {
+    return { keep: char + following, width: 2 };
+  }
+  if (char === "'" || char === '"') {
+    scan.quote = char;
+    return { keep: char, width: 1 };
+  }
+  if (char === "#" && wordStart) {
+    return scanComment(text, at, prepared);
+  }
+  const heredoc = char === "<" && following === "<" ? scanHeredoc(text, at, scan, prepared) : null;
+  if (heredoc !== null) {
+    return heredoc;
+  }
+  if (char === "\n" && scan.pending.length > 0) {
+    return scanBodies(text, at, scan, prepared);
+  }
+  scan.blank = /[\s;|&()<>]/u.test(char);
+  return { keep: char, width: 1 };
+}
+
+/**
+ * Cuts comments and heredoc bodies out of the text, leaving a marker word where
+ * a heredoc operator was. A `<<` or `#` inside quotes is plain text.
+ */
+function prepare(text: string): Prepared {
+  const prepared: Prepared = { text: "", bodies: [], comments: [], unterminated: false, midBody: false };
+  const scan: Scan = { quote: "", blank: true, pending: [] };
+  let at = 0;
+  while (at < text.length) {
+    const { keep, width } = scanStep(text, at, scan, prepared);
+    prepared.text += keep;
+    at += width;
+  }
+  prepared.unterminated = prepared.midBody || scan.pending.length > 0;
+  return prepared;
 }
 
 /** A word piece without its quotes or escaping backslash; an unterminated quote runs to the end. */
@@ -103,7 +213,7 @@ interface Lexing {
   quoted: boolean;
   /** What the next word is: a redirect's target, or an input redirect's file to drop. */
   expecting: "target" | "skip" | null;
-  bodies: readonly string[];
+  bodies: ReadonlyArray<string | null>;
 }
 
 const EXPECTED_AFTER: Partial<Record<PieceKind, "target" | "skip">> = { input: "skip", redirect: "target" };
@@ -123,7 +233,10 @@ function endWord(lexing: Lexing): void {
   } else if (wanted === "skip") {
     lexing.inputs.push(done);
   } else if (wanted === null && marker !== null) {
-    lexing.heredocs.push(lexing.bodies[Number(marker[1])] ?? "");
+    const body = lexing.bodies[Number(marker[1])];
+    if (body !== undefined && body !== null) {
+      lexing.heredocs.push(body);
+    }
   } else if (wanted === null) {
     lexing.words.push(done);
   }
@@ -157,13 +270,34 @@ function lexPiece(lexing: Lexing, piece: string): void {
   }
 }
 
+export interface Lexed {
+  commands: Command[];
+  /** Comment text, without the `#`. */
+  comments: string[];
+  /** A heredoc has no terminator line. */
+  unterminated: boolean;
+}
+
+/** Whether the text ends with a command begun but not finished, so a cut there can have cut a word. */
+function endsInCommand(text: string): boolean {
+  let at = text.length - 1;
+  while (at >= 0 && (text[at] === " " || text[at] === "\t")) {
+    at -= 1;
+  }
+  return at >= 0 && !";|&\n()".includes(text.charAt(at));
+}
+
 /**
  * Splits the first `limit` characters of shell text into simple commands at
- * separators outside quotes, with heredocs cut out first. A quoted `>` is part
- * of its word, never a redirect.
+ * separators outside quotes, with comments and heredoc bodies cut out first. A
+ * quoted `>` is part of its word, never a redirect. When the text is longer
+ * than `limit`, the command the cut touched is dropped, since a cut word can
+ * name a different path than the whole one did, and so is a heredoc body cut
+ * mid-way.
  */
-export function lexCommands(text: string, limit: number): Command[] {
-  const { text: cut, bodies } = cutHeredocs(text.slice(0, limit));
+export function lexText(text: string, limit: number): Lexed {
+  const head = text.slice(0, limit);
+  const { text: cut, bodies, comments, unterminated, midBody } = prepare(head);
   const lexing: Lexing = {
     commands: [],
     words: [],
@@ -178,134 +312,55 @@ export function lexCommands(text: string, limit: number): Command[] {
   for (const [piece] of cut.matchAll(SHELL_PIECE)) {
     lexPiece(lexing, piece);
   }
+  const finished = lexing.commands.length;
   endCommand(lexing);
-  return lexing.commands;
+  const cutShort = text.length > limit;
+  if (cutShort && midBody) {
+    lexing.commands.at(-1)?.heredocs.pop();
+  } else if (cutShort && endsInCommand(head) && lexing.commands.length > finished) {
+    lexing.commands.pop();
+  }
+  return { commands: lexing.commands, comments, unterminated };
+}
+
+export const lexCommands = (text: string, limit: number): Command[] => lexText(text, limit).commands;
+
+/** Where the command word of a simple command is: past assignments, shell keywords and, unless asked not to, `time`, `sudo` and `command`. */
+export function commandStart(words: readonly Word[], wrappers = true): number {
+  let at = 0;
+  while (at < words.length) {
+    const text = words[at]?.text ?? "";
+    if (!ENV_ASSIGNMENT.test(text) && !KEYWORDS.has(text) && !(wrappers && PLAIN_WRAPPERS.has(text))) {
+      break;
+    }
+    at += 1;
+  }
+  return at;
 }
 
 /** The command word as written and by its base name, and its arguments; null for a command of assignments alone. */
 export function commandOf(words: readonly Word[]): { word: string; name: string; args: Word[] } | null {
-  let at = 0;
-  while (at < words.length && (ENV_ASSIGNMENT.test(words[at]?.text ?? "") || LEADING_WORDS.has(words[at]?.text ?? ""))) {
-    at += 1;
-  }
+  const at = commandStart(words);
   const word = words[at];
   return word === undefined
     ? null
     : { word: word.text, name: word.text.replace(/^.*\//u, ""), args: words.slice(at + 1) };
 }
 
-/** A git subcommand and its arguments, past git's own options. */
-export function gitCommand(args: readonly Word[]): { sub: string; rest: Word[] } | null {
+/** Options before git's subcommand that take a value in the next word. */
+const GIT_VALUE_OPTIONS: ReadonlySet<string> = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix"]);
+/** Options that point git at another directory, so its paths no longer resolve against the shell's. */
+const GIT_RELOCATING = /^(?:-C|--git-dir|--work-tree)(?:=|$)/u;
+
+/** A git subcommand and its arguments, past git's own options; `relocated` when an option moved git to another directory. */
+export function gitCommand(args: readonly Word[]): { sub: string; rest: Word[]; relocated: boolean } | null {
   let at = 0;
+  let relocated = false;
   while ((args[at]?.text ?? "").startsWith("-")) {
-    at += args[at]?.text === "-C" || args[at]?.text === "-c" ? 2 : 1;
+    const option = args[at]?.text ?? "";
+    relocated ||= GIT_RELOCATING.test(option);
+    at += GIT_VALUE_OPTIONS.has(option) ? 2 : 1;
   }
   const sub = args[at];
-  return sub === undefined ? null : { sub: sub.text, rest: args.slice(at + 1) };
-}
-
-/** Longest glob taken at face value; a longer one is not matched. */
-export const MAX_GLOB_LENGTH = 256;
-
-export function isGlob(token: string): boolean {
-  return /[*?[]/u.test(token);
-}
-
-/**
- * Whether a glob names files with enough certainty for the sibling side: it
- * contains `/`, starts with a literal directory, and its last segment has a
- * literal character other than `*`, `?` and `.`. A bare `*` or `**` never does.
- */
-export function globQualifies(glob: string): boolean {
-  const segments = glob.split("/");
-  const first = segments[0] ?? "";
-  return (
-    glob.length <= MAX_GLOB_LENGTH &&
-    segments.length >= 2 &&
-    first !== "" &&
-    !isGlob(first) &&
-    /[^*?.]/u.test(segments[segments.length - 1] ?? "")
-  );
-}
-
-function classMatches(body: string, char: string): boolean {
-  const negated = body.startsWith("!") || body.startsWith("^");
-  const set = negated ? body.slice(1) : body;
-  let hit = false;
-  for (let at = 0; at < set.length; at += 1) {
-    if (set[at + 1] === "-" && at + 2 < set.length) {
-      hit ||= char >= (set[at] ?? "") && char <= (set[at + 2] ?? "");
-      at += 2;
-    } else {
-      hit ||= set[at] === char;
-    }
-  }
-  return hit !== negated;
-}
-
-/**
- * Matches items against a pattern, where a star token spans any number of
- * items. One backtrack point keeps it polynomial, whatever the pattern.
- */
-function wildcardMatch<P, T>(
-  pattern: readonly P[],
-  items: readonly T[],
-  isStar: (token: P) => boolean,
-  matches: (token: P, item: T) => boolean,
-): boolean {
-  let at = 0;
-  let pos = 0;
-  let star = -1;
-  let starPos = 0;
-  while (pos < items.length) {
-    const token = pattern[at];
-    if (token !== undefined && isStar(token)) {
-      star = at;
-      at += 1;
-      starPos = pos;
-    } else if (token !== undefined && matches(token, items[pos] as T)) {
-      at += 1;
-      pos += 1;
-    } else if (star >= 0) {
-      at = star + 1;
-      starPos += 1;
-      pos = starPos;
-    } else {
-      return false;
-    }
-  }
-  while (at < pattern.length && isStar(pattern[at] as P)) {
-    at += 1;
-  }
-  return at === pattern.length;
-}
-
-/** A segment pattern as tokens: `*`, `?`, a `[…]` class or a literal character. */
-function patternTokens(pattern: string): string[] {
-  const tokens: string[] = [];
-  for (let at = 0; at < pattern.length; at += 1) {
-    const end = pattern[at] === "[" ? pattern.indexOf("]", at + 2) : -1;
-    tokens.push(pattern.slice(at, end > 0 ? end + 1 : at + 1));
-    at = end > 0 ? end : at;
-  }
-  return tokens;
-}
-
-function charMatches(token: string, char: string): boolean {
-  if (token.length > 2 && token.startsWith("[")) {
-    return classMatches(token.slice(1, -1), char);
-  }
-  return token === "?" || token === char;
-}
-
-/** One path segment against one pattern segment. */
-function segmentMatches(pattern: string, text: string): boolean {
-  return wildcardMatch(patternTokens(pattern), text.split(""), (token) => token === "*", charMatches);
-}
-
-/** A matcher for a glob against a whole path. */
-export function globMatcher(glob: string): (path: string) => boolean {
-  const segments = glob.split("/");
-  // A `**` segment spans any number of path segments, none included.
-  return (path) => wildcardMatch(segments, path.split("/"), (segment) => segment === "**", segmentMatches);
+  return sub === undefined ? null : { sub: sub.text, rest: args.slice(at + 1), relocated };
 }

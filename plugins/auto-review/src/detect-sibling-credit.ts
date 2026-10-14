@@ -6,9 +6,6 @@ import { FAMILY_LOOKBACK_MS, kinEvidence, rowsSince } from "./detect-timeline.js
 import type { KinEvidence, SiblingEvidence } from "./detect-timeline.js";
 import type { ThreadListEntry } from "./detect-workspace.js";
 
-/** Lines logged for credited paths before the rest are only counted. */
-const LOGGED_CREDITS = 20;
-
 interface CreditInput {
   bb: BbPluginApi;
   threadId: string;
@@ -38,7 +35,7 @@ async function checkoutPath(bb: BbPluginApi, environmentId: string): Promise<str
  * turn, with that sibling, when nothing of this thread's family names them
  * (see `siblingWrittenPaths`). Nothing moves when this thread's timeline is
  * truncated, a related thread could not be read in full or the checkout path is
- * unknown. Only the paths are logged, never the commands.
+ * unknown. Every credited path is logged, one line per sibling, never the commands.
  */
 export async function pathsLeftToSiblings(credit: CreditInput): Promise<Map<string, string>> {
   const { bb, sibling, startedAt, now } = credit;
@@ -70,13 +67,12 @@ export async function pathsLeftToSiblings(credit: CreditInput): Promise<Map<stri
     family,
     root,
   );
-  for (const [path, threadId] of [...credited].slice(0, LOGGED_CREDITS)) {
-    bb.log.info(`auto-review: ${path} left to thread ${threadId}: named in its write during the turn`);
+  const bySibling = new Map<string, string[]>();
+  for (const [path, threadId] of credited) {
+    bySibling.set(threadId, [...(bySibling.get(threadId) ?? []), path]);
   }
-  if (credited.size > LOGGED_CREDITS) {
-    bb.log.info(
-      `auto-review: ${credited.size - LOGGED_CREDITS} more paths left to sibling threads: named in their writes during the turn`,
-    );
+  for (const [threadId, paths] of bySibling) {
+    bb.log.info(`auto-review: left to thread ${threadId}, named in its write during the turn: ${paths.join(", ")}`);
   }
   return credited;
 }
