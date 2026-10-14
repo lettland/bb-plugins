@@ -17,6 +17,8 @@ export interface Command {
   words: Word[];
   /** Targets of `>`, `>>` and their fd forms; `>&2` and `2>&1` name none. */
   redirects: Word[];
+  /** Files an input redirect (`<`, `<<<`) reads. */
+  inputs: Word[];
   /** Heredoc bodies the command reads. */
   heredocs: string[];
 }
@@ -94,6 +96,7 @@ interface Lexing {
   commands: Command[];
   words: Word[];
   redirects: Word[];
+  inputs: Word[];
   heredocs: string[];
   /** The word being built; null between words. */
   word: string | null;
@@ -117,6 +120,8 @@ function endWord(lexing: Lexing): void {
   const marker = HEREDOC_MARKER.exec(done.text);
   if (wanted === "target") {
     lexing.redirects.push(done);
+  } else if (wanted === "skip") {
+    lexing.inputs.push(done);
   } else if (wanted === null && marker !== null) {
     lexing.heredocs.push(lexing.bodies[Number(marker[1])] ?? "");
   } else if (wanted === null) {
@@ -127,12 +132,13 @@ function endWord(lexing: Lexing): void {
 function endCommand(lexing: Lexing): void {
   endWord(lexing);
   lexing.expecting = null;
-  const { words, redirects, heredocs } = lexing;
+  const { words, redirects, inputs, heredocs } = lexing;
   if (words.length > 0 || redirects.length > 0 || heredocs.length > 0) {
-    lexing.commands.push({ words, redirects, heredocs });
+    lexing.commands.push({ words, redirects, inputs, heredocs });
   }
   lexing.words = [];
   lexing.redirects = [];
+  lexing.inputs = [];
   lexing.heredocs = [];
 }
 
@@ -162,6 +168,7 @@ export function lexCommands(text: string, limit: number): Command[] {
     commands: [],
     words: [],
     redirects: [],
+    inputs: [],
     heredocs: [],
     word: null,
     quoted: false,
@@ -196,7 +203,7 @@ export function gitCommand(args: readonly Word[]): { sub: string; rest: Word[] }
 }
 
 /** Longest glob taken at face value; a longer one is not matched. */
-const MAX_GLOB_LENGTH = 256;
+export const MAX_GLOB_LENGTH = 256;
 
 export function isGlob(token: string): boolean {
   return /[*?[]/u.test(token);
@@ -299,133 +306,4 @@ export function globMatcher(glob: string): (path: string) => boolean {
   const segments = glob.split("/");
   // A `**` segment spans any number of path segments, none included.
   return (path) => wildcardMatch(segments, path.split("/"), (segment) => segment === "**", segmentMatches);
-}
-
-/** Only this much of a family text is read; a longer one is taken to name every path. */
-const FAMILY_TEXT_LIMIT = 65_536;
-const FAMILY_TOKEN = /[^\s'"`;|&<>()=,:\\]+/gu;
-const WRITE_FLAGS =
-  /(?<![\w-])(?:--fix|--write|--update-snapshot|-w|-u)(?![\w-])|(?<![\w-])rm\s+(?:-[A-Za-z-]+\s+)*-(?:[A-Za-z]*[rR][A-Za-z]*|-recursive)(?![\w-])/u;
-const TREE_GIT = new Set([
-  "checkout", "switch", "restore", "reset", "stash", "apply", "am", "merge", "pull", "rebase", "cherry-pick", "revert",
-]);
-const PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
-const PACKAGE_CHANGES = new Set(["install", "i", "add", "remove", "rm", "update", "up", "upgrade", "uninstall"]);
-
-/** Whether a family text runs git that rewrites the tree or a package manager that changes dependencies. */
-function rewritesTree(text: string): boolean {
-  if (!/\b(?:git|npm|pnpm|yarn|bun)\b/u.test(text)) {
-    return false;
-  }
-  return lexCommands(text, FAMILY_TEXT_LIMIT).some(({ words }) => {
-    const command = commandOf(words);
-    if (command === null) {
-      return false;
-    }
-    if (command.name === "git") {
-      return TREE_GIT.has(gitCommand(command.args)?.sub ?? "");
-    }
-    return (
-      PACKAGE_MANAGERS.has(command.name) &&
-      PACKAGE_CHANGES.has(command.args.find(({ text: arg }) => !arg.startsWith("-"))?.text ?? "")
-    );
-  });
-}
-
-/** A token without the leading `./` and `../` of a relative path, and without a trailing `/`. */
-function bare(token: string): string {
-  let rest = token === "." || token === ".." ? "" : token;
-  while (rest.startsWith("./") || rest.startsWith("../")) {
-    rest = rest.slice(rest.startsWith("./") ? 2 : 3);
-  }
-  return rest.replace(/\/+$/u, "");
-}
-
-function suffixesOf(segments: readonly string[]): string[] {
-  return segments.map((_segment, at) => segments.slice(at).join("/"));
-}
-
-interface FamilyIndex {
-  /** Something the family ran names every path. */
-  all: boolean;
-  exact: Set<string>;
-  /** The `/`-suffixes of the absolute paths it named. */
-  absolute: Set<string>;
-  /** Directories named in a row that writes. */
-  dirs: Set<string>;
-  globs: Set<string>;
-}
-
-function addToken(index: FamilyIndex, raw: string, writing: boolean, root: string): void {
-  let token = raw;
-  if (token.startsWith("/")) {
-    if (!isGlob(token)) {
-      suffixesOf(token.split("/").slice(1)).forEach((suffix) => index.absolute.add(suffix));
-    }
-    if (!token.startsWith(`${root}/`)) {
-      return;
-    }
-    token = token.slice(root.length + 1);
-  }
-  const rest = bare(token);
-  if (rest === "") {
-    index.all ||= writing && /^\.{1,2}\/?$/u.test(token);
-  } else if (isGlob(rest)) {
-    // A glob too long to match is taken to name everything.
-    index.all ||= rest.length > MAX_GLOB_LENGTH;
-    index.globs.add(rest);
-  } else {
-    index.exact.add(rest);
-    if (writing) {
-      index.dirs.add(rest);
-    }
-  }
-}
-
-function indexFamily(texts: readonly string[], root: string, writesTo: (text: string) => boolean): FamilyIndex {
-  const index: FamilyIndex = { all: false, exact: new Set(), absolute: new Set(), dirs: new Set(), globs: new Set() };
-  for (const text of texts) {
-    if (text.length > FAMILY_TEXT_LIMIT || rewritesTree(text)) {
-      index.all = true;
-      break;
-    }
-    const writing = WRITE_FLAGS.test(text) || writesTo(text);
-    for (const [token] of text.matchAll(FAMILY_TOKEN)) {
-      addToken(index, token, writing, root);
-    }
-  }
-  return index;
-}
-
-/**
- * Whether the family's shell text and tool arguments name a path. The reading
- * is generous: a token names a path when it equals it, is a `/`-bounded suffix
- * of it (relative to a cwd or a `cd`), is an absolute path ending in `/<path>`,
- * or is a glob that matches it; in a row that writes, a directory prefixing it
- * names it too. A text over 65,536 characters, tree-rewriting git and a
- * dependency change name every path. `writesTo` says whether a text has a write
- * target.
- */
-export function familyMatcher(
-  texts: readonly string[],
-  root: string,
-  writesTo: (text: string) => boolean,
-): (path: string) => boolean {
-  const index = indexFamily(texts, root, writesTo);
-  if (index.all) {
-    return () => true;
-  }
-  const globMatchers = [...index.globs].map(globMatcher);
-  const namesDirectory = (segments: readonly string[], from: number) =>
-    segments.slice(from + 1).some((_segment, at) => index.dirs.has(segments.slice(from, from + 1 + at).join("/")));
-  return (path) => {
-    const segments = path.split("/");
-    return (
-      index.absolute.has(path) ||
-      segments.some((_segment, from) => {
-        const suffix = segments.slice(from).join("/");
-        return index.exact.has(suffix) || globMatchers.some((matches) => matches(suffix)) || namesDirectory(segments, from);
-      })
-    );
-  };
 }

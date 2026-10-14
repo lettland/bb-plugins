@@ -180,6 +180,19 @@ describe("siblingWrittenPaths", () => {
       expect(credited(candidates, "echo x > lib/c.ts", { family: [family] })).toEqual([]);
     });
 
+    it("does not for the read-only and index-only commands a replayed incident's family ran", () => {
+      const written = ["lib/x/a.test.ts", "lib/react/b.test.tsx", "lib/svc/c.test.ts"];
+      const text = "tee lib/x/a.test.ts lib/react/b.test.tsx lib/svc/c.test.ts";
+      const family = [
+        'grep -rn "foo\\|bar" src/ui --include=*.tsx | head -20; bb status',
+        "python3 - <<'EOF'\np='src/util/badge.ts'\nopen(p,'w').write(open(p).read())\n/**\n * Doc\n */\nEOF",
+        "git diff -U3 lib/shared.test.tsx > /tmp/p.patch; git apply --cached /tmp/p.patch",
+        "git reset -q -- src/a.ts lib/shared.test.tsx; git status --short",
+        'pnpm exec jest lib/react 2>&1 | grep -E "^(FAIL|Tests:)" | sort -u',
+      ];
+      expect(credited(written, text, { family })).toEqual([...written].sort());
+    });
+
     it("does not when the family only runs scripts or tests", () => {
       const family = ["npm run build", "npm test", "pnpm exec vitest", "git status", "cat lib/d.ts"];
       expect(credited(candidates, "echo x > lib/c.ts", { family })).toEqual(["lib/c.ts"]);

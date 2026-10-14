@@ -49,9 +49,12 @@ It ships enabled (opt-out).
   script that writes a file) are left to it the same way, when no tool edit or kept commit of
   this thread's family accounts for them and nothing the family ran names them: its command text,
   the path of its reads and searches and its tool arguments all count, as does any glob that
-  matches, any directory in a command that writes (`--fix`, `--write`, `-u`, `rm -r`), and git or
-  package-manager commands that rewrite the tree (`checkout`, `stash`, `rebase`, `npm install`, …),
-  which name every path. Running tests or `npm run …` does not. The match is strict on the sibling
+  matches (a glob without a `/` only inside a command that writes), any directory in the same
+  simple command when it writes (a write target, `rm -r`, or `--fix`, `--write`, `-u` outside a
+  reader such as `grep` or `sort`), and git or package-manager commands that rewrite the tree
+  (`stash`, `merge`, `rebase`, `checkout <branch>`, `apply` without `--cached`, `reset --hard`,
+  `npm install`, …), which name every path. Running tests, `npm run …`, `git reset <paths>` and
+  `git apply --cached` do not. The match is strict on the sibling
   side and generous on the family side; nothing moves when this thread's or a related thread's
   timeline cannot be read in full, or the checkout path is unknown. The log names the path and the
   sibling, never the command. Known gaps:

@@ -1,13 +1,13 @@
+import { familyMatcher } from "./detect-family.js";
 import {
   commandOf,
-  familyMatcher,
   gitCommand,
   globMatcher,
   globQualifies,
   isGlob,
   lexCommands,
 } from "./detect-mentions.js";
-import type { Word } from "./detect-mentions.js";
+import type { Command, Word } from "./detect-mentions.js";
 
 /** Only this much of a sibling's shell text is read, so the cost stays linear in what a row carries. */
 const SIBLING_TEXT_LIMIT = 8_192;
@@ -97,6 +97,15 @@ function argumentTargets(name: string, args: readonly Word[], heredocs: readonly
   }
 }
 
+/** What one simple command writes to, as it names it: its redirect targets and what its arguments write. */
+function commandTargets({ words, redirects, heredocs }: Command): string[] {
+  const command = commandOf(words);
+  return [
+    ...redirects.map(({ text }) => text),
+    ...(command === null ? [] : argumentTargets(command.name, command.args, heredocs)),
+  ].filter(usable);
+}
+
 /**
  * The tokens a shell text writes to, as it names them: redirect targets,
  * `tee`, `cp`/`mv`/`install` destinations, `rm`, `sed -i`, `git checkout --`
@@ -107,17 +116,14 @@ function argumentTargets(name: string, args: readonly Word[], heredocs: readonly
  */
 export function writeTargets(text: string): string[] {
   const targets: string[] = [];
-  for (const { words, redirects, heredocs } of lexCommands(text, SIBLING_TEXT_LIMIT)) {
-    const command = commandOf(words);
-    if (command !== null && DIRECTORY_CHANGERS.has(command.name)) {
+  for (const command of lexCommands(text, SIBLING_TEXT_LIMIT)) {
+    const parsed = commandOf(command.words);
+    if (parsed !== null && DIRECTORY_CHANGERS.has(parsed.name)) {
       break;
     }
-    targets.push(...redirects.map(({ text: target }) => target));
-    if (command !== null) {
-      targets.push(...argumentTargets(command.name, command.args, heredocs));
-    }
+    targets.push(...commandTargets(command));
   }
-  return targets.filter(usable);
+  return targets;
 }
 
 /** Collapses `.` and `..` in an absolute path into its segments. */
@@ -196,7 +202,7 @@ export function siblingWrittenPaths(
   const base = root.replace(/\/+$/u, "");
   const written = writtenCandidates(candidates, siblingTexts, base);
   if (written.size > 0) {
-    const named = familyMatcher(familyTexts, base, (text) => writeTargets(text).length > 0);
+    const named = familyMatcher(familyTexts, base, commandTargets);
     for (const path of [...written.keys()].filter(named)) {
       written.delete(path);
     }

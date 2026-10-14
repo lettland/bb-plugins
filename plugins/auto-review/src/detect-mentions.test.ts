@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   commandOf,
-  familyMatcher,
   gitCommand,
   globMatcher,
   globQualifies,
@@ -79,8 +78,9 @@ describe("lexCommands", () => {
     ]);
   });
 
-  it("drops the word after an input redirect", () => {
+  it("drops the word after an input redirect from the words and keeps it as an input", () => {
     expect(shapes("sort < in.txt > out.txt")).toEqual([{ words: ["sort"], redirects: ["out.txt"], heredocs: [] }]);
+    expect(lexCommands("sort < in.txt", LIMIT)[0]?.inputs.map(({ text }) => text)).toEqual(["in.txt"]);
   });
 
   it("reads only the first characters it is given", () => {
@@ -150,73 +150,5 @@ describe("globQualifies", () => {
 
   it("rejects a glob past the length cap", () => {
     expect(globQualifies(`lib/${"a*".repeat(200)}.ts`)).toBe(false);
-  });
-});
-
-describe("familyMatcher", () => {
-  const root = "/w";
-  const never = () => false;
-  const names = (texts: string[], path: string, writes: (text: string) => boolean = never) =>
-    familyMatcher(texts, root, writes)(path);
-
-  it("matches an exact token, a `/`-bounded suffix and an absolute path ending in the path", () => {
-    expect(names(["cat lib/c.ts"], "lib/c.ts")).toBe(true);
-    expect(names(["cat c.ts"], "lib/c.ts")).toBe(true);
-    expect(names(["cat react/c.ts"], "lib/react/c.ts")).toBe(true);
-    expect(names(["cat ./c.ts"], "lib/c.ts")).toBe(true);
-    expect(names(["cat ../lib/c.ts"], "lib/c.ts")).toBe(true);
-    expect(names(["cat /elsewhere/lib/c.ts"], "lib/c.ts")).toBe(true);
-    expect(names(["cat /w/lib/c.ts:12"], "lib/c.ts")).toBe(true);
-    expect(names(["cat ib/c.ts"], "lib/c.ts")).toBe(false);
-    expect(names(["cat lib/d.ts"], "lib/c.ts")).toBe(false);
-  });
-
-  it("matches a glob, relative or absolute under the root", () => {
-    expect(names(["ls lib/react/*.test.tsx"], "lib/react/a.test.tsx")).toBe(true);
-    expect(names(["ls *.test.tsx"], "lib/react/a.test.tsx")).toBe(true);
-    expect(names(["ls /w/lib/**/*.tsx"], "lib/react/a.test.tsx")).toBe(true);
-    expect(names(["ls lib/other/*.tsx"], "lib/react/a.test.tsx")).toBe(false);
-  });
-
-  it("matches a directory only in a row that writes", () => {
-    expect(names(["jest lib/react"], "lib/react/a.ts")).toBe(false);
-    expect(names(["eslint --fix lib/react"], "lib/react/a.ts")).toBe(true);
-    expect(names(["jest -u lib/react"], "lib/react/a.ts")).toBe(true);
-    expect(names(["jest --update-snapshot lib/react"], "lib/react/a.ts")).toBe(true);
-    expect(names(["prettier --write lib"], "lib/react/a.ts")).toBe(true);
-    expect(names(["rm -rf lib/react"], "lib/react/a.ts")).toBe(true);
-    expect(names(["rm lib/react"], "lib/react/a.ts")).toBe(false);
-    expect(names(["cp -r a lib/react"], "lib/react/a.ts", (text) => text.startsWith("cp"))).toBe(true);
-    expect(names(["eslint --fix ."], "lib/react/a.ts")).toBe(true);
-  });
-
-  it.each([
-    "git checkout .",
-    "git -C sub stash pop",
-    "git restore lib",
-    "git reset --hard",
-    "git rebase main",
-    "npm install",
-    "pnpm --silent add left-pad",
-    "yarn remove x",
-    "bun update",
-  ])("names every path after `%s`", (command) => {
-    expect(names([command], "lib/unrelated.ts")).toBe(true);
-  });
-
-  it.each(["npm run build", "npm test", "pnpm exec vitest", "git status", "git diff lib/other.ts", "git log"])(
-    "does not name every path after `%s`",
-    (command) => {
-      expect(names([command], "lib/unrelated.ts")).toBe(false);
-    },
-  );
-
-  it("takes a text over 65,536 characters as naming every path", () => {
-    expect(names(["x".repeat(65_537)], "lib/unrelated.ts")).toBe(true);
-    expect(names(["x".repeat(65_536)], "lib/unrelated.ts")).toBe(false);
-  });
-
-  it("does not read a git command inside a heredoc body", () => {
-    expect(names(["cat > notes.md <<EOF\ngit checkout .\nnpm install\nEOF"], "lib/unrelated.ts")).toBe(false);
   });
 });
