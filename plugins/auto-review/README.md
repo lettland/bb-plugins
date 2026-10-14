@@ -53,8 +53,12 @@ It ships enabled (opt-out).
   full, or the checkout path is unknown. The log names every credited path, in lines of at most
   20 paths that each name the sibling, never the command. What each side reads:
   - Sibling side (strict). Only the first 8,192 characters of a text are read; the command the cut
-    touched and a heredoc body cut mid-way are dropped, so a cut word is never a target, and the
-    shell's directory is unknown for the sibling's later rows, since a `cd` may sit past the cut.
+    touched and a heredoc body cut mid-way are dropped, so a cut word is never a target. The part
+    past the cut (up to 1,000,000 characters) is scanned, not lexed, for a `cd`, `pushd`, `popd`,
+    `builtin cd`, `command cd` or `export GIT_DIR=`/`GIT_WORK_TREE=` at the start of a line or
+    after `;`, `&`, `|`, `(` or `{`; only a match, or a remainder longer than that, makes the
+    shell's directory unknown for the sibling's later rows, so a long heredoc body with no such
+    line leaves it known.
     Comments and heredoc bodies (`<<EOF`, `<<-EOF`, `<<'EOF'`, `<<\EOF`, tags such as `END-X`,
     `EOF.1` or `1EOF`, and a quoted tag may hold blanks, `<<'END TEXT'`) are not commands, and a
     `<<` or `#` in single quotes, or in double quotes outside a `$(…)`, is plain text; a `<<TAG`

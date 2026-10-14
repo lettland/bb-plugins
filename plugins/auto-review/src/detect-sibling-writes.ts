@@ -7,6 +7,17 @@ import { scriptTokens } from "./detect-script-writes.js";
 
 /** Only this much of a sibling's shell text is read, so the cost stays linear in what a row carries. */
 const SIBLING_TEXT_LIMIT = 8_192;
+/** How much of a text past the limit is scanned for a directory change; a longer remainder leaves the shell unknown. */
+const PAST_CUT_SCAN_LIMIT = 1_000_000;
+/** Where a command can begin: the start of the text, a line, or after `;`, `&`, `|`, `(`, `{`; blanks may lead it. */
+const COMMAND_POSITION = "(?:^|[;&|({\\n])[ \\t]*";
+const EXPORT_GIT_LOCATION = "export[ \\t]+GIT_(?:DIR|WORK_TREE)=";
+/** A `cd`, `pushd` or `popd` (also after `builtin` or `command`), or an `export` of git's location, at a command position. */
+const DIRECTORY_PAST_CUT = new RegExp(
+  `${COMMAND_POSITION}(?:(?:(?:builtin|command)[ \\t]+)?(?:cd|pushd|popd)(?=[\\s;&|)]|$)|${EXPORT_GIT_LOCATION})`,
+  "u",
+);
+const GIT_LOCATION_PAST_CUT = new RegExp(`${COMMAND_POSITION}${EXPORT_GIT_LOCATION}`, "u");
 const DIRECTORY_CHANGERS: ReadonlySet<string> = new Set(["cd", "pushd", "popd"]);
 const INTERPRETER = /^(?:python[\d.]*|node|ruby|perl)$/u;
 /** `sed -i` and `--in-place`; for perl a short-flag cluster with `i` (`-pi`, `-i.bak`, `-0pi`) that does not start with `-M`, `-m`, `-I` or `-x`. */
@@ -137,8 +148,26 @@ export function writeTargets(text: string, gitMoved = false): string[] {
   return targets;
 }
 
+/**
+ * Whether a text cut at the limit may hide, past the cut, a command that matches `pattern`. The scan
+ * starts at the command the cut touched (a cut `cd s` still shows) and is a bounded linear regex, not
+ * a lexing; a remainder over the scan limit is taken to hide one.
+ */
+function hiddenPastCut(text: string, pattern: RegExp): boolean {
+  if (text.length <= SIBLING_TEXT_LIMIT) {
+    return false;
+  }
+  if (text.length - SIBLING_TEXT_LIMIT > PAST_CUT_SCAN_LIMIT) {
+    return true;
+  }
+  const head = text.slice(0, SIBLING_TEXT_LIMIT);
+  const from = Math.max(0, ...[";", "&", "|", "(", "{", "\n"].map((separator) => head.lastIndexOf(separator)));
+  return pattern.test(text.slice(from));
+}
+
 /** Whether a sibling's text points git elsewhere for the rows after it. */
-const movesGit = (text: string) => lexCommands(text, SIBLING_TEXT_LIMIT).some(exportsGitLocation);
+const movesGit = (text: string) =>
+  lexCommands(text, SIBLING_TEXT_LIMIT).some(exportsGitLocation) || hiddenPastCut(text, GIT_LOCATION_PAST_CUT);
 
 /** Collapses `.` and `..` in an absolute path into its segments. */
 function segmentsOf(path: string): string[] {
@@ -195,7 +224,8 @@ function movedTo(dir: string | null, target: string | undefined, root: string): 
  * root, or null for anywhere else (`cd src`, `cd ..`, `cd -`, `cd` alone, a
  * variable, `popd`), since a relative token no longer resolves there. A `cd`
  * inside a subshell or a command substitution does not move the shell. A text
- * cut at the limit leaves the shell unknown, since a `cd` may sit past the cut.
+ * cut at the limit leaves the shell unknown only when a `cd`, `pushd`, `popd` or
+ * an export of git's location may sit past the cut (see `hiddenPastCut`).
  * Undefined when the text changes no directory.
  */
 function directoryAfter(text: string, start: string | null, root: string): string | null | undefined {
@@ -209,7 +239,7 @@ function directoryAfter(text: string, start: string | null, root: string): strin
     changed = true;
     dir = parsed.name === "popd" ? null : movedTo(dir, plain(parsed.args)[0], root);
   }
-  if (text.length > SIBLING_TEXT_LIMIT) {
+  if (hiddenPastCut(text, DIRECTORY_PAST_CUT)) {
     return null;
   }
   return changed ? dir : undefined;

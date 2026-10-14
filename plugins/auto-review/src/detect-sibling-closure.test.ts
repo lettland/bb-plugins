@@ -66,14 +66,50 @@ describe("an interpreter script credits only a file-writing call", () => {
 
 describe("a text cut at the limit", () => {
   const long = `: ${"x".repeat(9_000)}\ncd src`;
+  const later = "sed -i '' 's/a/b/' lib/a.ts";
+  const heredoc = (body: string) => `python3 - <<'EOF'\n${body}\nEOF`;
+  const filler = "x = 'a'\n".repeat(1_250);
 
-  it("leaves the shell unknown, since a `cd` may sit past the cut", () => {
+  it("leaves the shell unknown when a `cd` sits past the cut", () => {
     expect(credited(both, [long, "echo x > a.ts"])).toEqual([]);
     expect(credited(both, [": x\ncd /w", "echo x > a.ts"])).toEqual(["a.ts"]);
+    expect(credited(["lib/a.ts"], [`${heredoc(filler)}\ncd sub`, later])).toEqual([]);
+  });
+
+  it.each(["pushd sub", "popd", "builtin cd sub", "command cd sub", "echo y; cd sub", "(cd /w) && cd sub", "export GIT_WORK_TREE=/o", "export GIT_DIR=/o"])(
+    "leaves it unknown for `%s` past the cut",
+    (command) => {
+      expect(credited(["lib/a.ts"], [`${heredoc(filler)}\n${command}`, later])).toEqual([]);
+    },
+  );
+
+  it("sees a command the cut itself split", () => {
+    const split = `${": x\n".repeat(2_047)}  cd sub`;
+    expect(split.slice(8_190, 8_192)).toBe("cd");
+    expect(credited(["lib/a.ts"], [split, later])).toEqual([]);
+  });
+
+  it("keeps it known when the cut falls in a heredoc body that has no such line", () => {
+    expect(credited(["lib/a.ts"], [heredoc(filler), later])).toEqual(["lib/a.ts"]);
+    expect(credited(["lib/a.ts"], [heredoc(`${filler}echo cdx; echo mycd\ncat cd.txt\nGIT_DIR=x git status`), later])).toEqual(["lib/a.ts"]);
+  });
+
+  it("credits a long write's own target before the cut and the rows after it", () => {
+    const write = `cat > lib/new.ts <<'EOF'\n${"y".repeat(9_500)}\nEOF`;
+    expect(credited(["lib/new.ts", "lib/b.ts"], [write, "sed -i '' 's/a/b/' lib/b.ts"])).toEqual(["lib/b.ts", "lib/new.ts"]);
+  });
+
+  it("leaves it unknown when the remainder is longer than the scan limit", () => {
+    expect(credited(["lib/a.ts"], [heredoc("z".repeat(1_100_000)), later])).toEqual([]);
   });
 
   it("still resolves an absolute target afterwards", () => {
     expect(credited(both, [long, "echo x > /w/src/a.ts"])).toEqual(["src/a.ts"]);
+  });
+
+  it("makes later git targets unresolvable when git's location is exported past the cut", () => {
+    expect(credited(["a.ts"], [`${heredoc(filler)}\nexport GIT_DIR=/o`, "git checkout -- a.ts"])).toEqual([]);
+    expect(credited(["a.ts"], [heredoc(filler), "git checkout -- a.ts"])).toEqual(["a.ts"]);
   });
 });
 
