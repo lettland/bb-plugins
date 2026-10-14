@@ -706,7 +706,17 @@ describe("devkit README", () => {
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.truncated).toBe(false);
-      for (const phrase of ["manifest.tsv", "--no-index", "baseline <dir>", "**3 closure rounds**"]) {
+      for (const phrase of [
+        "manifest.tsv",
+        "--no-index",
+        "baseline <dir>",
+        "**3 closure rounds**",
+        "{ shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-64",
+        "not 64 hex characters",
+        "## Promoting",
+        "<hash>.pending",
+        "/dev/null",
+      ]) {
         expect(r.content).toContain(phrase);
       }
     }
