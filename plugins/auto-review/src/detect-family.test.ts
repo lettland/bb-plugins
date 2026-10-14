@@ -289,15 +289,15 @@ describe("familyMatcher", () => {
     });
 
     it.each([
-      "npm run lint",
+      "npm run lint:fix",
       "npm run format",
       "pnpm run fix",
-      "pnpm -r run lint",
+      "pnpm -r run lint-fix",
       "yarn run codemod",
       "bun run generate",
       "npm run update-snapshots",
       "npm run sync",
-      "pnpm lint",
+      "pnpm lint:fix",
       "yarn prettier",
       "yarn gen",
     ])("(3) names every path for the script `%s`", (command) => {
@@ -314,18 +314,21 @@ describe("familyMatcher", () => {
       "npm run test:coverage",
       "npm run typecheck",
       "pnpm exec jest lib/react",
+      "pnpm lint",
+      "npm run lint",
+      "yarn lint",
     ])("(3) does not for the script `%s`", (command) => {
       expect(everyPath(command)).toBe(false);
     });
 
-    it.each(["make", "make lint", "make format", "make generate", "make -C sub fix", "make -j4 sync"])(
+    it.each(["make", "make lint-fix", "make format", "make generate", "make -C sub fix", "make -j4 sync"])(
       "(4) names every path for `%s`",
       (command) => {
         expect(everyPath(command)).toBe(true);
       },
     );
 
-    it.each(["make test", "make build", "make -C sub test", "make test CC=gcc"])("(4) does not for `%s`", (command) => {
+    it.each(["make test", "make build", "make lint", "make -C sub test", "make test CC=gcc"])("(4) does not for `%s`", (command) => {
       expect(everyPath(command)).toBe(false);
     });
 
@@ -357,6 +360,36 @@ describe("familyMatcher", () => {
       const text = "python3 - <<'EOF'\np='src/util/badge.ts'\nopen(p,'w').write(open(p).read())\nEOF";
       expect(names([text], "src/util/badge.ts")).toBe(true);
       expect(named([text])).toEqual([]);
+    });
+
+    it("names exactly three files for a script that edits them, whatever test source its body holds, followed by prettier on those files, lint, typecheck and tests", () => {
+      const edited = ["src/ts/ui/fmt.ts", "tests/ui/fmt.test.ts", "tests/ui/Card.test.tsx"];
+      const text = [
+        "python3 - <<'EOF'",
+        "p='src/ts/ui/fmt.ts'",
+        "s=open(p).read()",
+        "s=s.replace(\"import { A } from './a';\",\"import { A, B } from './a';\")",
+        "open(p,'w').write(s)",
+        "",
+        "p='tests/ui/fmt.test.ts'",
+        "s=open(p).read()",
+        "s=s.replace(\"\"\"        ['Popular', A.popular],",
+        "        ['Newbie', 'badge-warning'],",
+        "    ])('%s → %s (case-insensitive)', (name, colorClass) => {",
+        "        expect(getStatus(2, name)).toEqual({ text: `${name} 2`, colorClass, id: 'badge-u' });",
+        "        expect(el.querySelector('progress')?.className).toContain('progress-x');",
+        "        const rows = [...document.querySelectorAll('li')].map((li) => li.textContent);\"\"\",\"\"\"x\"\"\")",
+        "open(p,'w').write(s)",
+        "",
+        "p='tests/ui/Card.test.tsx'",
+        "s=open(p).read()",
+        "s=s.replace(\"it('a', () => {\",\"it('a', () => {\\n    --fix -u -w\",1)",
+        "open(p,'w').write(s)",
+        "EOF",
+        "source ~/.nvm/nvm.sh && nvm use && pnpm exec prettier --write src/ts/ui/fmt.ts tests/ui/fmt.test.ts tests/ui/Card.test.tsx && pnpm lint 2>&1 | tail -8 && pnpm typecheck 2>&1 | tail -8 && pnpm exec jest tests/ui/fmt.test.ts tests/ui/Card.test.tsx 2>&1 | tail -15",
+      ].join("\n");
+      expect(edited.filter((path) => names([text], path))).toEqual(edited);
+      expect(["src/ts/ui/other.ts", "tests/ui/other.test.ts", "lib/unrelated.ts", ...PROTECTED].filter((path) => names([text], path))).toEqual([]);
     });
 
     it("lets one rewriting command among harmless ones name every path", () => {

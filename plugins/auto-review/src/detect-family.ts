@@ -26,8 +26,11 @@ const PACKAGE_CHANGES: ReadonlySet<string> = new Set([
   "install", "i", "add", "remove", "rm", "update", "up", "upgrade", "uninstall",
 ]);
 
-/** Scripts and make targets that rewrite files without naming them. */
-const REWRITING_SCRIPT = /fix|format|fmt|lint|codemod|generate|gen|update|sync|prettier/iu;
+/**
+ * Scripts and make targets that rewrite files without naming them. A bare
+ * `lint` is left out: it reads, and `lint:fix` or `lint-fix` still match `fix`.
+ */
+const REWRITING_SCRIPT = /fix|format|fmt|codemod|generate|gen|update|sync|prettier/iu;
 const INTERPRETER = /^(?:python[\d.]*|node|ruby|perl|bash|sh)$/u;
 
 interface Parsed {
