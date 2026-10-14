@@ -37,7 +37,7 @@ const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
 /** Shell keywords that can open a command line before the command word. */
 const KEYWORDS: ReadonlySet<string> = new Set(["{", "!", "if", "then", "elif", "else", "do", "while", "until"]);
 /** Plain wrappers the sibling side looks through; the family side reads their options as well. */
-const PLAIN_WRAPPERS: ReadonlySet<string> = new Set(["time", "sudo", "command"]);
+const PLAIN_WRAPPERS: ReadonlySet<string> = new Set(["time", "sudo", "command", "builtin"]);
 
 /** A word piece without its quotes or escaping backslash; an unterminated quote runs to the end. */
 function pieceText(piece: string): string {
@@ -90,15 +90,25 @@ type Outer = Pick<Lexing, "words" | "redirects" | "inputs" | "heredocs" | "word"
 
 const EXPECTED_AFTER: Partial<Record<PieceKind, "target" | "skip">> = { input: "skip", redirect: "target" };
 
-/** A word without the heredoc markers inside it, whose bodies the command reads: a heredoc in a quoted `$(…)`. */
+/** The longest command a quoted `$(…)` is read from, to find which command a heredoc inside it belongs to. */
+const SUBSTITUTION_LIMIT = 8_192;
+
+/**
+ * A word without the heredoc markers inside it: a heredoc in a quoted `$(…)`.
+ * Its body belongs to the command inside the substitution (`cat` in `"$(cat <<EOF`),
+ * so it is set aside as a command of its own and never reaches the outer one.
+ */
 function withoutMarkers(lexing: Lexing, text: string): string {
   if (!text.includes("\u0001")) {
     return text;
   }
-  return text.replace(EMBEDDED_MARKER, (_marker, index: string) => {
+  return text.replace(EMBEDDED_MARKER, (_marker, index: string, offset: number) => {
     const body = lexing.bodies[Number(index)];
     if (body !== undefined && body !== null) {
-      lexing.heredocs.push(body);
+      const before = text.slice(0, offset);
+      const open = before.lastIndexOf("$(");
+      const inner = lexCommands(open < 0 ? before : before.slice(open + 2), SUBSTITUTION_LIMIT).at(-1)?.words ?? [];
+      lexing.commands.push({ words: inner, redirects: [], inputs: [], heredocs: [body], depth: lexing.depth + 1 });
     }
     return "";
   });
@@ -251,7 +261,7 @@ export function lexText(text: string, limit: number): Lexed {
   endCommand(lexing);
   const cutShort = text.length > limit;
   if (cutShort && midBody) {
-    lexing.commands.at(-1)?.heredocs.pop();
+    [...lexing.commands].reverse().find(({ heredocs }) => heredocs.length > 0)?.heredocs.pop();
   } else if (cutShort && endsInCommand(head)) {
     lexing.commands.splice(finished);
   }

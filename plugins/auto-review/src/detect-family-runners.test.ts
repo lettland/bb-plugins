@@ -50,6 +50,16 @@ describe("a shell or interpreter that runs a script file", () => {
     "node --require ./setup.js build.js",
     "node -r ts-node/register build.js",
     "node --loader tsx build.mjs",
+    "node --env-file .env x.js",
+    "node --env-file-if-exists .env x.js",
+    "node --conditions dev x.js",
+    "node -C dev x.js",
+    "node --input-type module --env-file .env x.mjs",
+    "bun run scripts/gen.ts",
+    "bun run build.js",
+    "bun run --bun x.ts",
+    "bun x.ts",
+    "bun scripts/gen.js",
   ])("`%s` names every path", (command) => {
     expect(names(command)).toBe(true);
   });
@@ -66,6 +76,10 @@ describe("a shell or interpreter that runs a script file", () => {
     "perl -e 'print 1'",
     "bash -c 'ls lib'",
     "bash -e -c 'git status'",
+    "node --env-file .env",
+    "bun run build",
+    "bun run dev",
+    "bun test",
   ])("`%s` is not a script file", (command) => {
     expect(names(command)).toBe(false);
   });
@@ -161,6 +175,11 @@ describe("more wrappers and commands", () => {
     "git submodule update --init",
     "git submodule update",
     "git -C sub submodule update",
+    "git submodule foreach pwd",
+    "git submodule foreach --recursive git clean -fd",
+    'eval "$VAR"',
+    "eval $(ssh-agent -s)",
+    "eval `tool env`",
   ])("`%s` names every path", (command) => {
     expect(names(command)).toBe(true);
   });
@@ -173,7 +192,6 @@ describe("more wrappers and commands", () => {
     "eval 'git status'",
     "eval 'ls lib'",
     "git submodule status",
-    "git submodule foreach pwd",
   ])("`%s` does not", (command) => {
     expect(names(command)).toBe(false);
   });

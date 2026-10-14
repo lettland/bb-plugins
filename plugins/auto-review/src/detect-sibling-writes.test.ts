@@ -147,11 +147,8 @@ describe("siblingWrittenPaths", () => {
       expect(Date.now() - started).toBeLessThan(1_000);
     });
 
-    it("for an interpreter script that writes one file while reading another, only the over-credit is documented", () => {
-      // A known limit: every path the script names counts.
-      expect(credited(candidates, "python3 -c \"import sys; sys.stdout.write(open('lib/c.ts').read())\"")).toEqual([
-        "lib/c.ts",
-      ]);
+    it("for an interpreter script that only reads a file and writes to stdout", () => {
+      expect(credited(candidates, "python3 -c \"import sys; sys.stdout.write(open('lib/c.ts').read())\"")).toEqual([]);
     });
   });
 
@@ -336,8 +333,10 @@ describe("a sibling's text, strictly", () => {
       expect(credited(found, concatenated)).toEqual(["b.ts", "src/a.ts"]);
     });
 
-    it("keep them when the script writes only through `.write(`", () => {
-      expect(credited(found, "python3 -c \"import sys; sys.stdout.write('b.ts')\"")).toEqual(["b.ts"]);
+    it("credit nothing when the script writes only through a bare `.write(`", () => {
+      expect(credited(found, "python3 -c \"import sys; sys.stdout.write('b.ts')\"")).toEqual([]);
+      expect(credited(found, "node -e \"process.stdout.write('b.ts')\"")).toEqual([]);
+      expect(credited(found, "node -e \"http.createServer((q, res) => res.write('b.ts'))\"")).toEqual([]);
     });
   });
 });

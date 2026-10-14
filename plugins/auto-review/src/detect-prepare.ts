@@ -3,8 +3,8 @@
  * words, so a body is never read as commands.
  */
 
-/** A heredoc operator and its tag: `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"` and `<<\EOF`; a tag may hold `-`, `.` and digits (`END-X`, `EOF.1`). */
-const HEREDOC_TAG = /<<(-?)[ \t]*(?:'([\w.-]+)'|"([\w.-]+)"|\\?([A-Za-z_][\w.-]*))/uy;
+/** A heredoc operator and its tag: `<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"` and `<<\EOF`; a tag may hold `-`, `.` and digits and may start with a digit (`END-X`, `EOF.1`, `1EOF`), and a quoted one may hold blanks (`'END TEXT'`). */
+const HEREDOC_TAG = /<<(-?)[ \t]*(?:'([^'\n]+)'|"([^"\n]+)"|\\?(\w[\w.-]*))/uy;
 
 export interface Prepared {
   /** The text without comments and heredoc bodies, with a marker word where each heredoc operator was. */

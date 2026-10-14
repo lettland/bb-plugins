@@ -89,22 +89,30 @@ function argumentTargets(name: string, args: readonly Word[], heredocs: readonly
   }
 }
 
-/** What one simple command writes to, as it names it: its redirect targets and what its arguments write. */
-function rawTargets({ words, redirects, heredocs }: Command): string[] {
+/** What one simple command writes to, as it names it: its redirect targets and what its arguments write. `gitMoved`: an earlier `export GIT_DIR=…` pointed git elsewhere. */
+function rawTargets({ words, redirects, heredocs }: Command, gitMoved = false): string[] {
   const command = commandOf(words);
-  const relocated = command?.name === "git" && words.slice(0, commandStart(words)).some(({ text }) => GIT_LOCATION.test(text));
+  const relocated =
+    command?.name === "git" && (gitMoved || words.slice(0, commandStart(words)).some(({ text }) => GIT_LOCATION.test(text)));
   return [
     ...redirects.map(({ text }) => text),
     ...(command === null || relocated ? [] : argumentTargets(command.name, command.args, heredocs)),
   ];
 }
 
-const commandTargets = (command: Command) => rawTargets(command).filter(usable);
+const commandTargets = (command: Command, gitMoved: boolean) => rawTargets(command, gitMoved).filter(usable);
 /** What a command writes outside scratch space, whether or not it can be resolved. */
 const writtenTargets = (command: Command) => rawTargets(command).filter(checkoutBound);
 
 /** A write target built from a variable, a command substitution or a backtick, which no one can resolve. */
 const hasUnresolvedTarget = (command: Command) => rawTargets(command).some((token) => /[$`]/u.test(token));
+
+/** Whether a command sets `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` for the shell: `export GIT_DIR=…`, or the assignment on its own. */
+function exportsGitLocation({ words }: Command): boolean {
+  const parsed = commandOf(words);
+  const exported = parsed === null || parsed.name === "export" ? words : [];
+  return exported.some(({ text }) => GIT_LOCATION.test(text));
+}
 
 /**
  * The tokens a shell text writes to, as it names them: redirect targets,
@@ -112,19 +120,25 @@ const hasUnresolvedTarget = (command: Command) => rawTargets(command).some((toke
  * and `git restore` paths, and the paths an interpreter script that writes a
  * file mentions. A heredoc body is never credited unless an interpreter reads
  * it. Nothing after a `cd`, `pushd` or `popd` counts, since later tokens no
- * longer resolve against the row's cwd.
+ * longer resolve against the row's cwd, and no `git` path counts after an
+ * `export GIT_DIR=…` or `GIT_WORK_TREE=…`, in this text or (`gitMoved`) before it.
  */
-export function writeTargets(text: string): string[] {
+export function writeTargets(text: string, gitMoved = false): string[] {
   const targets: string[] = [];
+  let moved = gitMoved;
   for (const command of lexCommands(text, SIBLING_TEXT_LIMIT)) {
     const parsed = commandOf(command.words);
     if (parsed !== null && DIRECTORY_CHANGERS.has(parsed.name)) {
       break;
     }
-    targets.push(...commandTargets(command));
+    targets.push(...commandTargets(command, moved));
+    moved ||= exportsGitLocation(command);
   }
   return targets;
 }
+
+/** Whether a sibling's text points git elsewhere for the rows after it. */
+const movesGit = (text: string) => lexCommands(text, SIBLING_TEXT_LIMIT).some(exportsGitLocation);
 
 /** Collapses `.` and `..` in an absolute path into its segments. */
 function segmentsOf(path: string): string[] {
@@ -180,7 +194,8 @@ function movedTo(dir: string | null, target: string | undefined, root: string): 
  * Where the shell is after a text, when it changes directory: the checkout
  * root, or null for anywhere else (`cd src`, `cd ..`, `cd -`, `cd` alone, a
  * variable, `popd`), since a relative token no longer resolves there. A `cd`
- * inside a subshell or a command substitution does not move the shell.
+ * inside a subshell or a command substitution does not move the shell. A text
+ * cut at the limit leaves the shell unknown, since a `cd` may sit past the cut.
  * Undefined when the text changes no directory.
  */
 function directoryAfter(text: string, start: string | null, root: string): string | null | undefined {
@@ -193,6 +208,9 @@ function directoryAfter(text: string, start: string | null, root: string): strin
     }
     changed = true;
     dir = parsed.name === "popd" ? null : movedTo(dir, plain(parsed.args)[0], root);
+  }
+  if (text.length > SIBLING_TEXT_LIMIT) {
+    return null;
   }
   return changed ? dir : undefined;
 }
@@ -212,8 +230,9 @@ function writtenBy(
   candidates: readonly string[],
   wanted: ReadonlySet<string>,
   root: string,
+  gitMoved: boolean,
 ): string[] {
-  return writeTargets(text).flatMap((token) => {
+  return writeTargets(text, gitMoved).flatMap((token) => {
     const path = repoPath(token, base, root);
     return path === null ? [] : namedCandidates(path, candidates, wanted);
   });
@@ -223,7 +242,8 @@ function writtenBy(
  * The candidates a sibling's shell texts write to, with the first sibling that
  * did. An empty or unknown `cwd` is the checkout root until that sibling's
  * earlier rows `cd` somewhere else, and again once one `cd`s to the root by an
- * absolute path; while it is elsewhere only absolute targets resolve.
+ * absolute path; while it is elsewhere only absolute targets resolve. Once a
+ * sibling exports `GIT_DIR` or `GIT_WORK_TREE`, none of its later `git` targets resolve.
  */
 function writtenCandidates(
   candidates: readonly string[],
@@ -233,10 +253,11 @@ function writtenCandidates(
   const wanted = new Set(candidates);
   const written = new Map<string, string>();
   const shellDirs = new Map<string, string | null>();
+  const gitMoved = new Set<string>();
   for (const { threadId, text, cwd } of siblingTexts) {
     const left = shellDirs.get(threadId);
     const base = rowBase(cwd, left === undefined ? root : left, root);
-    for (const candidate of writtenBy(text, base, candidates, wanted, root)) {
+    for (const candidate of writtenBy(text, base, candidates, wanted, root, gitMoved.has(threadId))) {
       if (!written.has(candidate)) {
         written.set(candidate, threadId);
       }
@@ -244,6 +265,9 @@ function writtenCandidates(
     const after = directoryAfter(text, base, root);
     if (after !== undefined) {
       shellDirs.set(threadId, after);
+    }
+    if (movesGit(text)) {
+      gitMoved.add(threadId);
     }
   }
   return written;

@@ -70,7 +70,7 @@ describe("a heredoc inside a quoted command substitution", () => {
   ])("is cut before the quotes are read: the `%s` command writes nothing", (command, text) => {
     expect(writeTargets(text)).toEqual([]);
     expect(credited(["src/a.ts"], [text])).toEqual([]);
-    expect(lexCommands(text, 8_192).map(({ words }) => words[0]?.text)).toEqual([command]);
+    expect(lexCommands(text, 8_192).map(({ words }) => words[0]?.text)).toEqual(["cat", command]);
   });
 
   it("leaves the commands after it readable", () => {

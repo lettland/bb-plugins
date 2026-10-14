@@ -53,32 +53,46 @@ It ships enabled (opt-out).
   full, or the checkout path is unknown. The log names every credited path, in lines of at most
   20 paths that each name the sibling, never the command. What each side reads:
   - Sibling side (strict). Only the first 8,192 characters of a text are read; the command the cut
-    touched and a heredoc body cut mid-way are dropped, so a cut word is never a target. Comments
-    and heredoc bodies (`<<EOF`, `<<-EOF`, `<<'EOF'`, `<<\EOF`, tags such as `END-X` or `EOF.1`)
-    are not commands, and a `<<` or `#` in single quotes, or in double quotes outside a `$(…)`, is
-    plain text; a `<<TAG` inside a `$(…)` is a heredoc even in double quotes
-    (`git commit -m "$(cat <<'EOF' … EOF)"`), so its body is never read as commands. Nothing after a
-    `cd`, `pushd` or `popd` in the same text counts. A sibling's relative targets resolve only
+    touched and a heredoc body cut mid-way are dropped, so a cut word is never a target, and the
+    shell's directory is unknown for the sibling's later rows, since a `cd` may sit past the cut.
+    Comments and heredoc bodies (`<<EOF`, `<<-EOF`, `<<'EOF'`, `<<\EOF`, tags such as `END-X`,
+    `EOF.1` or `1EOF`, and a quoted tag may hold blanks, `<<'END TEXT'`) are not commands, and a
+    `<<` or `#` in single quotes, or in double quotes outside a `$(…)`, is plain text; a `<<TAG`
+    inside a `$(…)` is a heredoc even in double quotes (`git commit -m "$(cat <<'EOF' … EOF)"`), so
+    its body is never read as commands. It belongs to the command inside the `$(…)` (`cat`), never
+    to the command around it, so `python3 tools/post.py --body "$(cat <<'EOF' … EOF)"` credits
+    nothing. Nothing after a `cd`, `pushd`, `popd`, `builtin cd` or `command cd` in the same text
+    counts. A sibling's relative targets resolve only
     while its shell is known to be at the checkout root: an empty or unknown row `cwd` is the root
     until an earlier row of the same sibling `cd`s or `pushd`s anywhere else (`cd src`, `cd ..`,
     `cd -`, `cd` alone, `popd`, a variable); from then on only absolute targets under the root
     count, until a `cd` to the root by an absolute path. A `cd` inside a subshell `( … )`, a
     `$(…)` or `bash -c '…'` moves nothing for later rows. A row whose own `cwd` is a non-empty
-    absolute path resolves against it. `git -C`, `--git-dir`, `--work-tree` and a `GIT_DIR=`,
-    `GIT_WORK_TREE=` or `GIT_INDEX_FILE=` prefix give no targets. `perl -i` counts as a
-    short-flag cluster with `i` (`-pi`, `-i.bak`, `-0pi`), not `-Mstrict` or `-Ilib`. A script whose
-    every write call (`open(…, 'w')`, `writeFile*`, `write_text`) has a string-literal path credits
-    only those paths. An `open(` call's mode is read only inside that call's own parentheses, so
-    `open(x, encoding='utf8')` and `open('src/a.ts', 'r')` are reads, not writes. If one write call
-    builds its path, every path-like word in the script counts, and a glob counts when it has a
-    directory and a literal in its last segment.
+    absolute path resolves against it, and a relative `cwd` resolves against the checkout root.
+    `git -C`, `--git-dir`, `--work-tree` and a `GIT_DIR=`, `GIT_WORK_TREE=` or `GIT_INDEX_FILE=`
+    prefix give no targets, and neither does any `git` after an `export GIT_DIR=…` or
+    `export GIT_WORK_TREE=…` (or the bare assignment) in the same text or an earlier row of that
+    sibling. `perl -i` counts as a short-flag cluster with `i` (`-pi`, `-i.bak`, `-0pi`), not
+    `-Mstrict` or `-Ilib`. A script credits only when it contains a file-writing call:
+    `open(…, 'w'|'a'|'x'|'w+')` (also `Path(…).open('w')`), `writeFile`, `writeFileSync`,
+    `appendFile*`, `createWriteStream` (also `fs.promises.writeFile`), `write_text` or
+    `write_bytes`. A bare `.write(` (`sys.stdout.write`, `process.stdout.write`, `res.write`) is
+    not one, so `python3 -c "import sys; sys.stdout.write(open('README.md').read())"` credits
+    nothing, while `f=open(p,'w'); f.write(s)` still credits `p`'s literal. A script whose every
+    write call has a string-literal path credits only those paths. An `open(` call's mode is read
+    only inside that call's own parentheses, so `open(x, encoding='utf8')` and
+    `open('src/a.ts', 'r')` are reads, not writes. If one write call builds its path, every
+    path-like word in the script counts, and a glob counts when it has a directory and a literal in
+    its last segment.
   - Family side (generous). Its command text, the path and query of its reads and searches and every
     string in its tool arguments, object keys included, all count. Only command text is read as
     shell; the others only name things (exactly, as a suffix, by an absolute path or by a glob), so
-    a tool called with `{ path: "src/x.ts" }` names `src/x.ts` and nothing else. A tool string with
-    a blank that starts with a known command (`git`, `npm`, `pnpm`, `make`, `python`, `bash`, …,
-    as in `{ command: "npm install" }`) is also read as shell; a single token never is. All of
-    them count, as does any glob that matches (a glob
+    a tool called with `{ path: "src/x.ts" }` names `src/x.ts` and nothing else. A tool string
+    that contains whitespace is lexed as shell text as well as names, whatever its first word
+    (`{ command: "cd web && npm run format" }`, `FOO=1 npm run fix`, `./scripts/gen.sh --all`, a
+    multi-line string starting with a comment), so the commands rule below applies to it; a prose
+    note such as `"see notes"` names nothing but its own words. A string that is a single token
+    stays names-only. All of them count, as does any glob that matches (a glob
     without a `/` only inside a command that writes), a quoted word with a blank taken whole
     (`"dir/my file.ts"`), any directory in the same simple command when it writes (a write target,
     `rm -r`, or `--fix`, `--write`, `-u`, `--update`, `--update-snapshot` outside a reader such as
@@ -87,7 +101,7 @@ It ships enabled (opt-out).
     every path. So does a command that rewrites files without naming them:
     - git that rewrites the tree (`stash`, `merge`, `pull`, `rebase`, `cherry-pick`, `revert`,
       `am`, `switch`, `clean`, `checkout <branch>`, `apply` without `--cached`, `reset --hard`,
-      `submodule update`) and dependency changes (`npm install`, `add`, `remove`, …)
+      `submodule update`, `submodule foreach`) and dependency changes (`npm install`, `add`, `remove`, …)
     - a fixer flag with no path (`eslint --fix`, `jest -u`, `prettier --write`) and a whole-tree
       formatter (`go fmt`, `cargo fmt`, `deno fmt`, `gofmt -w`, `black`, `isort`, `autopep8`, `yapf`,
       `ruff format`); `python -m black .` and the other formatters run through `python -m` count
@@ -101,12 +115,16 @@ It ships enabled (opt-out).
       `yarn workspaces foreach run fix`, `npm --prefix web run fix`, `npm -w web run format`, and the
       same before `install` or `add`
     - a script file (`python x.py`, `node build.js`, `bash x.sh`, `tsx`, `ts-node`, `bun x.ts`,
-      `deno run x.ts`, `./x.sh`), `jscodeshift` and `go generate`. For `bash`, `sh`, `zsh`, `dash`
+      `bun run x.ts`, `deno run x.ts`, `./x.sh`), `jscodeshift` and `go generate`. For `bash`, `sh`, `zsh`, `dash`
       and `ksh`, `-e`, `-u`, `-x` and `-o <opt>` are options, so `bash -e scripts/gen.sh` and
       `bash -euo pipefail x.sh` run a script file; only `-c` (or a cluster ending in `c`, such as
       `-lc`) takes a command string. For `node`, `python`, `ruby` and `perl`, `-e` and `-c` take
       the code itself. Options that take a value (`node --import x`, `--require x`, `-r x`,
-      `--loader x`) are skipped when looking for the script path
+      `--loader x`, `--env-file .env`, `--conditions x`, `--input-type x`) are skipped when looking
+      for the script path, so `node --env-file .env x.js` counts. A script `bun run` names
+      counts like one `bun` is given directly (`bun run build` is a package script and does not)
+    - an `eval` whose string is built from `$…` or a backtick (`eval "$VAR"`, `eval $(ssh-agent -s)`),
+      which cannot be read; an `eval` of plain words is read as the shell text it runs
     - `python -m <module>`: a formatter (`black`, `isort`, `ruff`, `autopep8`, `yapf`) given no path
       or `.`, a module whose name contains one of the rewriting words above, and any dotted module
       (project code, which can do anything); `pip` (so `pip install`), `pytest` and other plain

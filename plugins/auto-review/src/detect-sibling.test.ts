@@ -278,8 +278,11 @@ describe("turnChangedPaths and a sibling's shell edits", () => {
     it("by a tool's string arguments, whatever their depth, read as text and not as JSON", () => {
       const rows = [tool({ edits: [{ note: "x\nsrc/a.ts", count: 2 }], path: "dir/my file.ts" }, { startedAt: 20_000 })];
       const texts = rowTexts(rows as never, STARTED_AT, { pending: 30_000, unended: 30_000 }, { includeUnapproved: true });
-      expect(texts.map(({ text }) => text)).toEqual(["edits", "note", "x\nsrc/a.ts", "count", "path", "dir/my file.ts"]);
-      expect(texts.every(({ shell }) => !shell)).toBe(true);
+      expect(texts.filter(({ shell }) => !shell).map(({ text }) => text)).toEqual([
+        "edits", "note", "x\nsrc/a.ts", "count", "path", "dir/my file.ts",
+      ]);
+      // A string with whitespace is read as shell as well.
+      expect(texts.filter(({ shell }) => shell).map(({ text }) => text)).toEqual(["x\nsrc/a.ts", "dir/my file.ts"]);
     });
 
     it("by an object key of a tool's arguments", async () => {

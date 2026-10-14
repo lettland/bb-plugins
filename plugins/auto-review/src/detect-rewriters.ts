@@ -46,6 +46,8 @@ const EVAL_FLAG = /^-[A-Za-z]*[ce]$/u;
 /** Options of a script runner that take the next word as their value. */
 const RUNNER_VALUE_OPTIONS: ReadonlySet<string> = new Set([
   "-o", "+o", "--import", "--require", "-r", "--loader", "--experimental-loader", "-W", "-X", "-I",
+  "--env-file", "--env-file-if-exists", "-C", "--conditions", "--input-type", "--disable-warning", "--title",
+  "--watch-path", "--experimental-default-type",
 ]);
 const PYTHON = /^python[\d.]*$/u;
 /** Formatters that `python -m` runs and that rewrite the tree they are given. */
@@ -91,7 +93,7 @@ function gitRewritesTree(sub: string, rest: readonly Word[]): boolean {
     case "reset":
       return flags.some((flag) => ["--hard", "--merge", "--keep"].includes(flag));
     case "submodule":
-      return flags.find((flag) => !flag.startsWith("-")) === "update";
+      return ["update", "foreach"].includes(flags.find((flag) => !flag.startsWith("-")) ?? "");
     default:
       return REWRITING_GIT.has(sub);
   }
@@ -192,7 +194,10 @@ function runsScriptFile({ word, name, args, wrapped }: Parsed): boolean {
     return false;
   }
   const file = runnerOperand(name, args);
-  return file !== undefined && isPathLike(file);
+  // `bun run x.ts` runs the file, as `bun x.ts` does.
+  const target =
+    name === "bun" && file === "run" ? runnerOperand(name, args.slice(args.findIndex(({ text }) => text === "run") + 1)) : file;
+  return target !== undefined && isPathLike(target);
 }
 
 /**
@@ -248,6 +253,9 @@ export function rewritesTree(parsed: Parsed): boolean {
   if (parsed.name === "git") {
     const git = gitCommand(parsed.args);
     return git !== null && gitRewritesTree(git.sub, git.rest);
+  }
+  if (parsed.name === "eval" && parsed.args.some(({ text }) => /[$`]/u.test(text))) {
+    return true; // its string is built from an expansion, which cannot be read
   }
   const changesPackages =
     PACKAGE_MANAGERS.has(parsed.name) && PACKAGE_CHANGES.has(packageWords(parsed.name, parsed.args)[0] ?? "");
