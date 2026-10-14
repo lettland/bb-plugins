@@ -12,8 +12,6 @@ import {
   authoredPathsFromRows,
   kinEvidence,
   ownWindows,
-  pageInTurn,
-  recentTimelineRows,
   rowsSince,
   siblingAuthoredPaths,
   turnTimeline,
@@ -27,7 +25,6 @@ import { headShaOf, isHarnessOutput, mainlineBase } from "./detect-workspace.js"
 import type {
   AvailableWorkspace,
   ThreadListEntry,
-  TimelineRow,
   WorkingTreeFile,
 } from "./detect-workspace.js";
 
