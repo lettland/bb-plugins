@@ -90,13 +90,19 @@ finding:
    work verified.
 
 6. **Run a closure review.** After valid findings have been fixed, perform a follow-up review
-   of the post-fix diff before reporting done. For calibrated commands (`/review-code`,
-   `/review-impl`, `/review-plan`), this means one additional pass with the same review
-   perspectives over the updated diff/plan, focused on whether the original findings are
-   closed and whether the fixes introduced new Blockers or Concerns. For the single-pass
-   `/review` and `security-audit` commands, do the same closure pass in-session against the
-   updated diff. Disposition any new valid finding from that closure pass using this same
-   protocol. Do not stop after merely proving that a review was run; the point is a clean,
+   of that round's delta before reporting done. Scope it per `references/review-delta-scope.md`:
+   before applying the fixes (step 2), take a round snapshot of the in-scope files in the run
+   dir; the closure reviews only what changed since that snapshot, and is given the previous
+   round's findings to confirm closed. For calibrated commands (`/review-code`, `/review-impl`,
+   `/review-plan`), this means one additional pass with the same review perspectives over the
+   round delta, focused on whether the original findings are closed and whether the fixes
+   introduced new Blockers or Concerns. For the single-pass `/review` and `security-audit`
+   commands, do the same closure pass in-session against the round delta. Disposition any new
+   valid closure finding using this same protocol; the next round (a fresh snapshot, taken before
+   that fix) covers only that fix's delta. Run at most 3 closure rounds, then report the
+   still-open findings as open and end the loop. A Blocker or security Concern still open after
+   the cap: do not commit and do not present a plan for approval as if clean — stop and report
+   it to the user. Do not stop after merely proving that a review was run; the point is a clean,
    followed-up result.
 
 7. **Report the disposition and closure evidence.** After fixing and follow-up, print a report:
@@ -109,8 +115,9 @@ finding:
    pre-existing code separately from fixes to the change's own code. A pre-existing secret you
    removed still needs rotation — it stays in git history — so report it by `file:line` and type
    as needing rotation. Close with the verification command(s) you ran
-   and the follow-up review verdict. If verification or closure review could not be completed,
-   state the exact blocker instead of implying the review is done.
+   and the follow-up review verdict, with the scope line from `references/review-delta-scope.md`
+   (`Scope: delta vs baseline: N file(s); full: M file(s) (<reason>)`). If verification or
+   closure review could not be completed, state the exact blocker instead of implying the review is done.
 
 **The `(spec)`/`(code)` tag is a routing hint, not a tier.** Reviewers tag each finding
 `(spec)` (the work fails a requirement stated in the provided plan/spec) or `(code)` (a defect
@@ -145,7 +152,7 @@ skip the review because edits are restricted.
   finding is _true_, not whether its tier is _right_.
 - **Not a performative review.** Running reviewers is not completion. Completion means the
   first-pass findings were validated, valid ones were fixed, verification passed or was
-  honestly blocked, and a closure review checked the post-fix diff.
+  honestly blocked, and a closure review checked the round delta.
 - **Not a re-litigation of settled choices.** When the code already reflects a deliberate,
   equally-valid decision, a different-but-equivalent approach is not a defect — reversing it is
   how review becomes churn instead of value. Validate against what is broken, not against how

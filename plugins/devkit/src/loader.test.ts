@@ -699,4 +699,16 @@ describe("devkit README", () => {
     expect(text).not.toContain("declared out of scope: Advisory");
     expect(text).toContain("capped at conditional Concerns");
   });
+
+  it("loads the shipped review-delta-scope reference", async () => {
+    const contentRoot = path.join(import.meta.dirname, "..", "content");
+    const r = await loadSkill(contentRoot, undefined, "review-delta-scope");
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.truncated).toBe(false);
+      for (const phrase of ["manifest.tsv", "--no-index", "baseline <dir>", "**3 closure rounds**"]) {
+        expect(r.content).toContain(phrase);
+      }
+    }
+  });
 });
