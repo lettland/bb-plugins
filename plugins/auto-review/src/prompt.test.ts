@@ -141,6 +141,7 @@ describe("buildReviewPrompt", () => {
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*keep both sides of a rename in the same group/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*never bypass hooks with `--no-verify`/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*skip step 7/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*the checks still fail, the review left a Blocker or security Concern open, or the change could only be committed in part[^\n]*do NOT commit/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*plain `git commit`, which records exactly what is staged/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*never pass paths to `git commit`/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*`git restore --staged -- <file> …`/u);
@@ -677,6 +678,7 @@ describe("buildReviewPrompt", () => {
   describe("delta-scoped baseline", () => {
     const codeDir = "$BB_THREAD_STORAGE/auto-review/code";
     const step2 = (text: string): string => text.split("\n").find((line) => line.startsWith("2. ")) ?? "";
+    const step5 = (text: string): string => text.split("\n").find((line) => line.startsWith("5. ")) ?? "";
     const noCommitInputs = {
       "protected mainline": { decision: { commit: false, merge: false }, scope: baseScope },
       overflow: {
@@ -694,24 +696,39 @@ describe("buildReviewPrompt", () => {
           expect(text).toMatch(/applies only to files with no copy \(their first review\)/);
           expect(text).toMatch(/Earlier open findings listed above are re-checked wherever they sit/);
           expect(text).toMatch(/secret checks are never narrowed by the baseline/);
-          expect(text).toMatch(/no baseline: review everything and write no baseline copies/);
+          expect(text).toMatch(/there is no baseline: review everything and write no copies/);
+          expect(text.indexOf("there is no baseline")).toBeLessThan(text.indexOf("mkdir"));
+          expect(text).toContain("`mkdir -p -m 700 \"$BB_THREAD_STORAGE/auto-review\" \"$BB_THREAD_STORAGE/auto-review/code\"`");
+          expect(text).toContain("`rm -f` the destination first; never write through a symlink");
           expect(text).toContain("`delta vs baseline` or `full (no baseline)`");
-          expect(text).toContain("<sha256 of the file's repo-relative path>.copy");
-          expect(text).toContain("<sha256 of its repo-relative path>.pending");
+          expect(text).toContain("`printf '%s' \"<repo-relative path>\" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-64`");
+          expect(text).toContain("`<hash>.pending`");
           expect(text).not.toMatch(/absolute path/);
           expect(text.indexOf("Review baseline:")).toBeLessThan(text.indexOf("\n1. "));
           expect(text.indexOf(".pending")).toBeLessThan(text.indexOf("\n1. "));
-          expect(text).toMatch(/Before the review starts, copy each listed file as it stands now to `<sha256 of its repo-relative path>\.pending`/);
-          expect(step2(text)).toMatch(/After the review and its fixes are done, promote the baseline: move each `\.pending` copy over its `\.copy` in \$BB_THREAD_STORAGE\/auto-review\/code and update its `manifest\.tsv` row/);
-          expect(step2(text)).toMatch(/If step 5 STOPs on a secret, delete the copies \(pending and promoted\) of the flagged files/);
+          expect(text).toMatch(/copy each file in scope — listed, or noted as left off the list — as it stands now to `<hash>\.pending`/);
+          expect(text).toMatch(/a listed file that no longer exists gets no `\.pending`, and its old copy is deleted at promotion/);
+          expect(text).toMatch(/every line changed in `git diff --no-index -- <copy> <file>`[^.]*deletions and reverts included/);
+          expect(text).toMatch(/another party's discard\) is reported, never restored/);
+          expect(text).not.toMatch(/hunks present in both|move back toward HEAD/);
+          expect(text).toMatch(/delete a stale copy when you find it/);
+          expect(text).toContain("A file in scope (listed or noted) with a valid copy");
+          expect(text).toContain("if the result is not 64 hex characters, there is no baseline: review everything and write no copies");
+          expect(text).toMatch(/whose name is outside the safe set[^.]*gets no copy, and its name never goes into these commands or a manifest row/);
+          expect(step2(text)).toMatch(/promote the baseline only if the review completed and no Blocker or security Concern is open: move each `\.pending` copy over its `\.copy` in \$BB_THREAD_STORAGE\/auto-review\/code and update its `manifest\.tsv` row/);
+          expect(step2(text)).toMatch(/otherwise delete the `\.pending` copies/);
+          expect(step2(text)).toMatch(/Delete the copies \(pending and promoted\) of any file in which a secret was found or removed in step 1 or 2/);
+          expect(step5(text)).toMatch(/If you find one, also delete the copies \(pending and promoted\) of the flagged files from \$BB_THREAD_STORAGE\/auto-review\/code/);
           expect(text.match(/^\d+\. /gmu)).toContain("2. ");
         });
       }
 
       it(`${name}: points devkit modes, not self mode, at the reference`, () => {
-        const devkit = buildReviewPrompt({ ...input, reviewMode: "devkit" });
-        expect(devkit).toContain(`baseline ${codeDir}`);
-        expect(devkit).toContain('devkit_load_skill({ reference: "review-delta-scope" })');
+        for (const reviewMode of ["devkit", "auto"] as const) {
+          const text = buildReviewPrompt({ ...input, reviewMode });
+          expect(text).toContain(`baseline ${codeDir}`);
+          expect(text).toContain('devkit_load_skill({ reference: "review-delta-scope" })');
+        }
         expect(buildReviewPrompt({ ...input, reviewMode: "self" })).not.toContain("review-delta-scope");
       });
     }
@@ -722,6 +739,7 @@ describe("buildReviewPrompt", () => {
         expect(text).not.toContain("$BB_THREAD_STORAGE");
         expect(text).not.toContain("Review baseline");
         expect(text).not.toContain(".pending");
+        expect(step5(text)).not.toContain("copies");
         expect(step2(text)).toBe(
           "2. Apply the fixes the review reports. If it asks for a re-run, re-run only over the changes since its previous pass (devkit's closure rule); a self-review is one pass.",
         );
@@ -743,19 +761,20 @@ describe("buildPlanReviewPrompt", () => {
     expect(text.startsWith(AUTO_REVIEW_MARKER)).toBe(true);
     expect(text).toMatch(/Nobody rejected it/);
     expect(text).toMatch(/do not start implementing/);
-    expect(text).toMatch(/Present the revised plan for approval again/);
+    expect(text).toMatch(/present the revised plan for approval again/);
   });
 
   it("re-enters plan mode before presenting and stops at the user's approval", () => {
     const text = buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p/plan.md", autoApprove: false });
     expect(text).toMatch(/3\. If you are no longer in plan mode .*EnterPlanMode/);
-    expect(text.indexOf("EnterPlanMode")).toBeLessThan(text.indexOf("Present the revised plan"));
+    expect(text.indexOf("EnterPlanMode")).toBeLessThan(text.indexOf("present the revised plan"));
     expect(text).toMatch(/5\. Stop\. Implement only after the user explicitly approves the plan\./);
   });
 
   it("keeps step 4 and 5 waiting for the user when the project does not auto-approve", () => {
     const text = buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p/plan.md", autoApprove: false });
-    expect(text).toMatch(/4\. Present the revised plan for approval again/);
+    expect(text).toMatch(/Otherwise present the revised plan for approval again/);
+    expect(text).toMatch(/include a short summary of what the review changed and any findings still open/);
     expect(text).toMatch(/That presentation goes straight to the user/);
     expect(text).not.toMatch(/auto-approves reviewed plans/);
   });
@@ -763,10 +782,10 @@ describe("buildPlanReviewPrompt", () => {
   it("tells the agent to proceed on approval when the project auto-approves", () => {
     const text = buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p/plan.md", autoApprove: true });
     expect(text).toMatch(
-      /4\. Present the revised plan again \(ExitPlanMode\)\. This project auto-approves reviewed plans, so it won't wait for the user; include a short summary of what the review changed\./,
+      /4\. If the review leaves a decision only the user can make \(scope, a product trade-off\), or a Blocker or security Concern is still open after the review \(and its closure rounds, if any\), do not present: end your turn with the plan and those findings for the user\. Otherwise present the revised plan again \(ExitPlanMode\)\. This project auto-approves reviewed plans, so it won't wait for the user; include a short summary of what the review changed and any findings still open\./,
     );
     expect(text).toMatch(
-      /5\. If the review leaves a decision only the user can make \(scope, a product trade-off\), ask the user before presenting\. If a Blocker or security Concern is still open after the review's 3 closure rounds, do not present for auto-approval: end your turn with the plan and the open findings for the user\. Otherwise, once ExitPlanMode returns approved, mention in your reply that this project auto-approves reviewed plans, so the approval may have come from auto-review rather than from the user, then delete that plan's copy from \$BB_THREAD_STORAGE\/auto-review\/plan \(and its `manifest\.tsv` row\) and implement the plan\. If it is not approved, stop and wait for the user\./,
+      /5\. Once ExitPlanMode returns approved, mention in your reply that this project auto-approves reviewed plans, so the approval may have come from auto-review rather than from the user, then delete that plan's copy from \$BB_THREAD_STORAGE\/auto-review\/plan \(and its `manifest\.tsv` row\) and implement the plan\. If it is not approved, stop and wait for the user\./,
     );
     expect(text).not.toMatch(/Stop\. Implement only after the user explicitly approves/);
     expect(text).toMatch(/do not start implementing/);
@@ -832,10 +851,16 @@ describe("buildPlanReviewPrompt", () => {
           expect(text).toMatch(/If a copy of this plan exists there, review only the plan's delta against it/);
           expect(text).toMatch(/If the delta is empty, skip the review and the fixes, promote the pending copy as step 2 describes, and continue at step 3/);
           expect(text).toMatch(/With no copy, review the whole plan/);
-          expect(text).toMatch(/no baseline: review everything and write no baseline copies/);
+          expect(text).toMatch(/there is no baseline: review everything and write no copies/);
           expect(text).toContain("`delta vs baseline` or `full (no baseline)`");
+          expect(text).toMatch(/every line changed in `git diff --no-index -- <copy> <plan file>`[^.]*deletions and reverts included/);
+          expect(text).not.toMatch(/hunks of|move back toward HEAD/);
           const step1 = text.slice(text.indexOf("\n1. "), text.indexOf("\n2. "));
-          expect(step1).toMatch(/1\. (Save the plan[^]*? )?First, before the review starts, copy the plan file as it stands now to `<sha256 of its absolute path>\.pending`/);
+          expect(step1).toMatch(/1\. (Save the plan[^]*? )?First, if `\$BB_THREAD_STORAGE` is unset[^]*write no copies\. Otherwise, before the review starts, run `mkdir -p -m 700 "\$BB_THREAD_STORAGE\/auto-review" "\$BB_THREAD_STORAGE\/auto-review\/plan"` and copy the plan file as it stands now to `<hash>\.pending`/);
+          expect(step1).toContain("`printf '%s' \"<the plan's absolute path>\" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-64`");
+          expect(step1.indexOf("there is no baseline")).toBeLessThan(step1.indexOf("mkdir"));
+          expect(step1).toContain("if the result is not 64 hex characters, there is no baseline");
+          expect(step1).toContain("`rm -f` the destination first; never write through a symlink");
           expect(step1.indexOf(".pending")).toBeLessThan(step1.indexOf("Review "));
           expect(step1).toContain("leave that in place");
         });
@@ -853,17 +878,18 @@ describe("buildPlanReviewPrompt", () => {
       for (const build of Object.values(builders)) {
         const text = build("devkit");
         const step2 = text.slice(text.indexOf("\n2. "), text.indexOf("\n3. "));
-        expect(step2).toMatch(/Apply every valid finding[^]*After the review and its fixes are done, promote the baseline: move the plan's `\.pending` copy over its `\.copy`[^]*`manifest\.tsv` row/);
+        expect(step2).toMatch(/Apply every valid finding[^]*promote the baseline only if the review completed and no Blocker or security Concern is still open: move the plan's `\.pending` copy over its `\.copy`[^]*`manifest\.tsv` row/);
+        expect(step2).toMatch(/Otherwise delete the `\.pending` copy, so the next cycle reviews the whole plan\. If the review found a secret in the plan, delete the plan's copies\./);
       }
       const text = builders["plan gate"]("auto");
       expect(text.indexOf("promote the baseline")).toBeLessThan(text.indexOf("\n3. If you are no longer in plan mode"));
       expect(text.indexOf(".pending")).toBeLessThan(text.indexOf("Apply every valid finding"));
     });
 
-    it("hands a still-open Blocker or security Concern to the user before PresentPlan is called again", () => {
+    it("ends the turn on a still-open Blocker or security Concern instead of calling PresentPlan again", () => {
       const text = buildPresentPlanReviewPrompt({ reviewMode: "auto", planFilePath: "docs/plans/p.md" });
       expect(text).toMatch(
-        /If a Blocker or security Concern is still open after the review's 3 closure rounds, report it to the user the same way, before calling PresentPlan again\. Then call PresentPlan again/,
+        /or a Blocker or security Concern is still open after the review \(and its closure rounds, if any\), end your turn with the plan and those findings for the user, and do not call PresentPlan again until the user replies\. Otherwise call PresentPlan again/,
       );
     });
 
@@ -885,14 +911,15 @@ describe("buildPlanReviewPrompt", () => {
       expect(PRESENT_PLAN_REVIEWED_MESSAGE).toMatch(clear);
     });
 
-    it("hands a still-open Blocker or security Concern to the user instead of auto-approving", () => {
-      const text = buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p.md", autoApprove: true });
-      expect(text).toMatch(
-        /If a Blocker or security Concern is still open after the review's 3 closure rounds, do not present for auto-approval: end your turn with the plan and the open findings for the user/,
-      );
-      expect(buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p.md", autoApprove: false })).not.toMatch(
-        /do not present for auto-approval/,
-      );
+    it("hands a still-open Blocker or security Concern to the user before the plan is presented, in both branches", () => {
+      for (const autoApprove of [true, false]) {
+        const text = buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p.md", autoApprove });
+        const gate = text.indexOf("a Blocker or security Concern is still open after the review (and its closure rounds, if any), do not present");
+        expect(gate).toBeGreaterThan(-1);
+        expect(gate).toBeLessThan(text.indexOf("present the revised plan"));
+        expect(text.indexOf("\n4. ")).toBeLessThan(gate);
+        expect(text).not.toMatch(/3 closure rounds/);
+      }
     });
   });
 });
@@ -998,12 +1025,12 @@ describe("buildPresentPlanReviewPrompt", () => {
     expect(text).not.toContain("EnterPlanMode");
   });
 
-  it("asks the user about a decision only they can make before presenting again", () => {
+  it("ends the turn on a decision only the user can make before presenting again", () => {
     const text = buildPresentPlanReviewPrompt({ reviewMode: "auto", planFilePath: "docs/plans/p.md" });
     expect(text).toMatch(
-      /3\. If the review leaves a decision only the user can make \(scope, a product trade-off\), ask the user first, before calling PresentPlan again\./,
+      /3\. If the review leaves a decision only the user can make \(scope, a product trade-off\), or a Blocker or security Concern is still open[^]*end your turn with the plan and those findings for the user, and do not call PresentPlan again until the user replies\./,
     );
-    expect(text.indexOf("ask the user first")).toBeLessThan(text.indexOf("call PresentPlan again"));
+    expect(text.indexOf("end your turn")).toBeLessThan(text.indexOf("Otherwise call PresentPlan again"));
   });
 
   it("follows the review mode", () => {

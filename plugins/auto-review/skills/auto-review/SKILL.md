@@ -35,12 +35,14 @@ case it does not auto-continue.
 
 Reviews that leave HEAD where it was (the protected-mainline and over-400-files no-commit
 cases) are delta-scoped: after the first review, the files it read are copied into the thread's
-private storage (`$BB_THREAD_STORAGE/auto-review/code`; each is parked as `.pending` before the
-review and promoted over its `.copy` after the review and its fixes), and later reviews cover only what
-changed since, per devkit's `review-delta-scope`. A file with no copy, or a stale one, gets the
-full review; earlier open findings are still re-checked, and secret checks are never narrowed.
-The final reply states the scope: `delta vs baseline` or `full (no baseline)`. To force a
-full review, delete `$BB_THREAD_STORAGE/auto-review`. Commit-path reviews are unchanged.
+private storage (bb's per-thread storage, `~/.bb/thread-storage/<thread id>/auto-review/code`;
+each is parked as `.pending` before the review and promoted over its `.copy` after the review and
+its fixes, only when the review completed with no Blocker or security Concern open), and later
+reviews cover only what changed since — every changed line, deletions included — per devkit's
+`review-delta-scope`. A file with no copy, or a stale one, gets the full review; earlier open
+findings are still re-checked, and secret checks are never narrowed. The final reply states the
+scope: `delta vs baseline` or `full (no baseline)`. To force a full review, delete that
+`auto-review` directory or ask the agent to. Commit-path reviews are unchanged.
 
 It ships **enabled** (opt-out).
 
@@ -58,13 +60,15 @@ after its next tool result (Claude Code hands a steered message to the model onl
 for a moment the agent has only the bare deny to go on. The agent reviews the plan file
 (devkit's calibrated review in `plan` scope, or a self-review, per the review mode), applies
 every valid finding to the plan, and presents it again. Plan reviews are delta-scoped too: the
-plan as reviewed is parked as `.pending` in `$BB_THREAD_STORAGE/auto-review/plan` before the
-review and promoted over its `.copy` after the review and its fixes, so the next
-cycle reviews only what changed since (an empty delta skips the review), and the reply states
-`delta vs baseline` or `full (no baseline)`. Approval clears the plan's copy; delete
-`$BB_THREAD_STORAGE/auto-review` to force a full review. A Blocker or security Concern still
-open after the review's closure rounds is never auto-approved: the agent hands the plan and
-the open findings to the user. The review turn carries the thread's
+plan as reviewed is parked as `.pending` in the thread's `auto-review/plan` storage
+(`~/.bb/thread-storage/<thread id>/auto-review/plan`) before the review and promoted over its
+`.copy` after the review and its fixes (only when the review completed with no Blocker or
+security Concern open), so the next cycle reviews only what changed since (an empty delta skips
+the review), and the reply states `delta vs baseline` or `full (no baseline)`. Approval clears
+the plan's copy; delete the thread's `auto-review` storage directory, or ask the agent to, to
+force a full review. A Blocker or security Concern still open after the review (and its closure
+rounds, if any) is never presented or auto-approved: the agent hands the plan and the open
+findings to the user. The review turn carries the thread's
 permission mode and can take the agent out of plan mode, where Claude Code's ExitPlanMode
 would approve itself, so the agent re-enters plan mode (EnterPlanMode) before presenting
 and then stops until the user approves (unless the project auto-approves reviewed plans — see
