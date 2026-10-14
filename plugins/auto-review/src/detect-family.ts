@@ -26,9 +26,30 @@ const PACKAGE_CHANGES: ReadonlySet<string> = new Set([
   "install", "i", "add", "remove", "rm", "update", "up", "upgrade", "uninstall",
 ]);
 
+/** Scripts and make targets that rewrite files without naming them. */
+const REWRITING_SCRIPT = /fix|format|fmt|lint|codemod|generate|gen|update|sync|prettier/iu;
+const INTERPRETER = /^(?:python[\d.]*|node|ruby|perl|bash|sh)$/u;
+
 interface Parsed {
+  /** The command word as written. */
+  word: string;
   name: string;
   args: Word[];
+}
+
+const positional = (args: readonly Word[]) => args.filter(({ text }) => !text.startsWith("-")).map(({ text }) => text);
+
+/** A path as an argument: it has a `/`, is `.` or `..`, or is a file name with an extension. */
+function isPathLike(text: string): boolean {
+  return text.includes("/") || /^\.{1,2}$/u.test(text) || /^[\w@-][\w.@-]*\.[A-Za-z0-9]+$/u.test(text);
+}
+
+const pathArgs = (args: readonly Word[]) => positional(args).filter(isPathLike);
+
+/** No path arguments, or `.`: the command works on the whole tree. */
+function wholeTree(args: readonly Word[]): boolean {
+  const paths = pathArgs(args);
+  return paths.length === 0 || paths.some((path) => path === "." || path === "./");
 }
 
 function isReader({ name, args }: Parsed): boolean {
@@ -58,14 +79,87 @@ function gitRewritesTree(sub: string, rest: readonly Word[]): boolean {
   }
 }
 
-/** Whether a command rewrites the tree or changes dependencies, which names every path. */
-function rewritesTree({ name, args }: Parsed): boolean {
-  if (name === "git") {
-    const git = gitCommand(args);
+/** A fixer flag with no path to apply it to, outside a reader and git: it fixes the whole tree. */
+function fixesTree(parsed: Parsed): boolean {
+  return (
+    parsed.name !== "git" &&
+    !isReader(parsed) &&
+    parsed.args.some(({ text }) => FIXER_FLAGS.has(text)) &&
+    pathArgs(parsed.args).length === 0
+  );
+}
+
+/** A formatter run on the whole tree: no path argument, or `.`. */
+function formatsTree({ name, args }: Parsed): boolean {
+  const first = positional(args)[0];
+  switch (name) {
+    case "go":
+    case "cargo":
+      return first === "fmt";
+    case "gofmt":
+      return args.some(({ text }) => text === "-w") && wholeTree(args);
+    case "black":
+    case "isort":
+      return wholeTree(args);
+    case "ruff":
+      return (first === "format" || (first === "check" && args.some(({ text }) => text === "--fix"))) && wholeTree(args);
+    default:
+      return false;
+  }
+}
+
+/** A package script or make target that rewrites files, or `make` with no target. */
+function runsRewritingScript({ name, args }: Parsed): boolean {
+  if (name === "make") {
+    const targets: string[] = [];
+    for (let at = 0; at < args.length; at += 1) {
+      const text = args[at]?.text ?? "";
+      if (text === "-C" || text === "-f") {
+        at += 1;
+      } else if (!text.startsWith("-") && !text.includes("=")) {
+        targets.push(text);
+      }
+    }
+    return targets.length === 0 || targets.some((target) => REWRITING_SCRIPT.test(target));
+  }
+  if (!PACKAGE_MANAGERS.has(name)) {
+    return false;
+  }
+  const words = positional(args);
+  const script = words[0] === "run" ? words[1] : name === "pnpm" || name === "yarn" ? words[0] : undefined;
+  return script !== undefined && REWRITING_SCRIPT.test(script);
+}
+
+/** A script file, which can do anything: an interpreter given a file, or a relative path run directly. */
+function runsScriptFile({ word, name, args }: Parsed): boolean {
+  if (/^[\w.@-]+(?:\/[\w.@-]+)+$/u.test(word)) {
+    return true;
+  }
+  if (!INTERPRETER.test(name) || args.some(({ text }) => /^-[A-Za-z]*[ce]$/u.test(text))) {
+    return false;
+  }
+  const file = positional(args)[0];
+  return file !== undefined && isPathLike(file);
+}
+
+/**
+ * Whether a command rewrites files without naming them, which names every
+ * path: git that rewrites the tree, a dependency change, a fixer or formatter
+ * with no path, a script that likely rewrites, or a script file.
+ */
+function rewritesTree(parsed: Parsed): boolean {
+  if (parsed.name === "git") {
+    const git = gitCommand(parsed.args);
     return git !== null && gitRewritesTree(git.sub, git.rest);
   }
+  const changesPackages =
+    PACKAGE_MANAGERS.has(parsed.name) && PACKAGE_CHANGES.has(positional(parsed.args)[0] ?? "");
   return (
-    PACKAGE_MANAGERS.has(name) && PACKAGE_CHANGES.has(args.find(({ text }) => !text.startsWith("-"))?.text ?? "")
+    changesPackages ||
+    fixesTree(parsed) ||
+    formatsTree(parsed) ||
+    runsRewritingScript(parsed) ||
+    runsScriptFile(parsed)
   );
 }
 
@@ -184,7 +278,7 @@ function indexFamily(texts: readonly string[], root: string, targetsOf: (command
  * ending in `/<path>`, or is a glob that matches it. A glob counts only with a
  * literal in its last segment and either a `/` or a writing command. In a
  * command that writes, a directory prefixing the path names it too. A text over
- * 65,536 characters, git that rewrites the tree and a dependency change name
+ * 65,536 characters and a command that rewrites files without naming them name
  * every path. `targetsOf` gives the write targets of a command.
  */
 export function familyMatcher(

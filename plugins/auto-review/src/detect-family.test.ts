@@ -48,7 +48,7 @@ describe("familyMatcher", () => {
     });
 
     it.each(["*", "**", "/**", "*/", "lib/*", "lib/**", "lib/*.*"])("never counts bare `%s`", (glob) => {
-      expect(names([`prettier --write ${glob}`], "lib/react/a.test.tsx")).toBe(false);
+      expect(names([`cp tpl ${glob}`], "lib/react/a.test.tsx", targets)).toBe(false);
     });
   });
 
@@ -227,6 +227,142 @@ describe("familyMatcher", () => {
 
     it("still names the directory when jest itself updates snapshots", () => {
       expect(names(["pnpm exec jest -u lib/react 2>&1 | sort -u"], "lib/react/b.test.tsx")).toBe(true);
+    });
+  });
+
+  describe("a command that rewrites files without naming them", () => {
+    const everyPath = (command: string) => names([command], "lib/unrelated.ts");
+
+    it.each([
+      "npx eslint --fix",
+      "pnpm exec eslint --fix",
+      "jest -u",
+      "jest --update-snapshot",
+      "prettier --write",
+      "prettier --write --log-level warn",
+    ])("(1) names every path for a fixer flag with no path: `%s`", (command) => {
+      expect(everyPath(command)).toBe(true);
+    });
+
+    it.each([
+      "eslint --fix lib/react",
+      "eslint --fix --ext .ts lib/react",
+      "jest -u lib/react",
+      "prettier --write lib/a.ts",
+      "sort -u",
+      "grep -w x",
+      "git push -u origin main",
+    ])("(1) names only its paths when a fixer flag has paths, or a reader or git runs: `%s`", (command) => {
+      expect(everyPath(command)).toBe(false);
+    });
+
+    it.each([
+      "go fmt",
+      "go fmt ./...",
+      "gofmt -w",
+      "gofmt -w .",
+      "cargo fmt",
+      "cargo fmt --all",
+      "black",
+      "black .",
+      "isort",
+      "isort .",
+      "ruff format",
+      "ruff format .",
+      "ruff check --fix",
+    ])("(2) names every path for the whole-tree formatter `%s`", (command) => {
+      expect(everyPath(command)).toBe(true);
+    });
+
+    it.each([
+      "gofmt -w main.go",
+      "gofmt main.go",
+      "black src/a.py",
+      "isort src/a.py",
+      "ruff format src/a.py",
+      "ruff check src/a.py",
+      "go test ./...",
+      "go build",
+      "cargo test",
+    ])("(2) names only its paths for `%s`", (command) => {
+      expect(everyPath(command)).toBe(false);
+    });
+
+    it.each([
+      "npm run lint",
+      "npm run format",
+      "pnpm run fix",
+      "pnpm -r run lint",
+      "yarn run codemod",
+      "bun run generate",
+      "npm run update-snapshots",
+      "npm run sync",
+      "pnpm lint",
+      "yarn prettier",
+      "yarn gen",
+    ])("(3) names every path for the script `%s`", (command) => {
+      expect(everyPath(command)).toBe(true);
+    });
+
+    it.each([
+      "pnpm test:coverage",
+      "pnpm test",
+      "pnpm typecheck",
+      "pnpm build",
+      "yarn build",
+      "npm run build",
+      "npm run test:coverage",
+      "npm run typecheck",
+      "pnpm exec jest lib/react",
+    ])("(3) does not for the script `%s`", (command) => {
+      expect(everyPath(command)).toBe(false);
+    });
+
+    it.each(["make", "make lint", "make format", "make generate", "make -C sub fix", "make -j4 sync"])(
+      "(4) names every path for `%s`",
+      (command) => {
+        expect(everyPath(command)).toBe(true);
+      },
+    );
+
+    it.each(["make test", "make build", "make -C sub test", "make test CC=gcc"])("(4) does not for `%s`", (command) => {
+      expect(everyPath(command)).toBe(false);
+    });
+
+    it.each([
+      "python3 scripts/x.py",
+      "python3 -u scripts/x.py",
+      "python x.py",
+      "node build.js",
+      "ruby gen.rb",
+      "perl x.pl",
+      "bash scripts/x.sh",
+      "sh x.sh",
+      "./scripts/x.sh",
+      "./scripts/x.sh --flag",
+      "../tools/fix.sh arg",
+      "scripts/x.sh",
+    ])("(5) names every path for the script file `%s`", (command) => {
+      expect(everyPath(command)).toBe(true);
+    });
+
+    it.each(['python3 -c "print(1)"', 'node -e "1"', 'sh -c "ls"', "python3 -m pytest", "node --version", "/usr/bin/env x"])(
+      "(5) does not for `%s`",
+      (command) => {
+        expect(everyPath(command)).toBe(false);
+      },
+    );
+
+    it("(5) keeps a heredoc script that writes one named file to that file", () => {
+      const text = "python3 - <<'EOF'\np='src/util/badge.ts'\nopen(p,'w').write(open(p).read())\nEOF";
+      expect(names([text], "src/util/badge.ts")).toBe(true);
+      expect(named([text])).toEqual([]);
+    });
+
+    it("lets one rewriting command among harmless ones name every path", () => {
+      const family = ["pnpm exec jest lib/react 2>&1 | sort -u", "pnpm test:coverage", "git status --short"];
+      expect(named(family)).toEqual([]);
+      expect(named([...family, "npx eslint --fix"])).toEqual(PROTECTED);
     });
   });
 });

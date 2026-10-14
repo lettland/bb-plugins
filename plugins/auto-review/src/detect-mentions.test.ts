@@ -94,6 +94,7 @@ describe("commandOf and gitCommand", () => {
 
   it("skips assignments and leading words and takes the base name", () => {
     expect(commandOf(words("FOO=1 sudo /usr/bin/sed -i x"))).toEqual({
+      word: "/usr/bin/sed",
       name: "sed",
       args: [
         { text: "-i", quoted: false },

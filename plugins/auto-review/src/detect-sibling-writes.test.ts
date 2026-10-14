@@ -193,6 +193,15 @@ describe("siblingWrittenPaths", () => {
       expect(credited(written, text, { family })).toEqual([...written].sort());
     });
 
+    it("when the family runs a project-wide fixer that names no path", () => {
+      const sed = "sed -i '' 's/a/b/' lib/x.ts";
+      expect(credited(["lib/x.ts"], sed, { family: ["npx eslint --fix"] })).toEqual([]);
+      expect(credited(["lib/x.ts"], sed, { family: ["npm run format"] })).toEqual([]);
+      expect(credited(["lib/x.ts"], sed, { family: ["pnpm test:coverage", "pnpm exec jest lib/react"] })).toEqual([
+        "lib/x.ts",
+      ]);
+    });
+
     it("does not when the family only runs scripts or tests", () => {
       const family = ["npm run build", "npm test", "pnpm exec vitest", "git status", "cat lib/d.ts"];
       expect(credited(candidates, "echo x > lib/c.ts", { family })).toEqual(["lib/c.ts"]);

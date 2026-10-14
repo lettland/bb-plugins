@@ -182,14 +182,16 @@ export function lexCommands(text: string, limit: number): Command[] {
   return lexing.commands;
 }
 
-/** The command word, by its base name, and its arguments; null for a command of assignments alone. */
-export function commandOf(words: readonly Word[]): { name: string; args: Word[] } | null {
+/** The command word as written and by its base name, and its arguments; null for a command of assignments alone. */
+export function commandOf(words: readonly Word[]): { word: string; name: string; args: Word[] } | null {
   let at = 0;
   while (at < words.length && (ENV_ASSIGNMENT.test(words[at]?.text ?? "") || LEADING_WORDS.has(words[at]?.text ?? ""))) {
     at += 1;
   }
   const word = words[at];
-  return word === undefined ? null : { name: word.text.replace(/^.*\//u, ""), args: words.slice(at + 1) };
+  return word === undefined
+    ? null
+    : { word: word.text, name: word.text.replace(/^.*\//u, ""), args: words.slice(at + 1) };
 }
 
 /** A git subcommand and its arguments, past git's own options. */
