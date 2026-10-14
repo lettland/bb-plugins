@@ -146,15 +146,49 @@ function reviewStep(mode: ReviewMode, committedSince: string | null, aislopScan:
 const PLAN_SELF_REVIEW =
   "a focused self-review of the plan from five angles — architecture and feasibility, testability and edge cases, security, user-facing clarity, and compliance (privacy, licensing, regulatory)";
 
+/** Where plan reviews keep their snapshots, in bb's private per-thread storage (the agent's shell expands the variable). */
+const PLAN_BASELINE_DIR = "$BB_THREAD_STORAGE/auto-review/plan";
+
+/** Where no-commit code reviews keep their snapshots. */
+const CODE_BASELINE_DIR = "$BB_THREAD_STORAGE/auto-review/code";
+
+/** Without a usable per-thread directory there is no baseline, and the review is the full one. */
+const NO_BASELINE_RULE =
+  "If $BB_THREAD_STORAGE is unset, or its auto-review directory is a symlink or not owned by the current user, there is no baseline: review everything and write no baseline copies.";
+
+const DELTA_SCOPE_REFERENCE = 'devkit_load_skill({ reference: "review-delta-scope" })';
+
+/**
+ * The delta rule for a plan, stated in full so it works without the devkit
+ * reference; `withReference` adds the pointer where devkit may be in use.
+ */
+function planDeltaRule(withReference: boolean): string {
+  const reference = withReference ? ` — details: \`${DELTA_SCOPE_REFERENCE}\`` : "";
+  return `Baseline: ${PLAN_BASELINE_DIR} is a flat directory (\`mkdir -p -m 700\`) with one \`<sha256 of the plan's absolute path>.copy\` per plan and a \`manifest.tsv\` of path, content sha256, HEAD sha and HEAD blob rows${reference}. If a copy of this plan exists there, review only the plan's delta against it (the hunks of \`git diff --no-index -- <copy> <plan file>\`): report issues the delta causes or exposes anywhere in the plan, and treat unchanged parts it does not affect as context only. If the delta is empty, skip the review and the fixes, promote the pending copy as step 2 describes, and continue at step 3 to present again. With no copy, review the whole plan. ${NO_BASELINE_RULE} State the scope used in your reply: \`delta vs baseline\` or \`full (no baseline)\`.`;
+}
+
+/**
+ * The review reads the old `.copy` for its delta, and devkit's review applies its
+ * own fixes inside step 1, so the content it reads is parked as `.pending` first.
+ */
+const PLAN_PENDING = `First, before the review starts, copy the plan file as it stands now to \`<sha256 of its absolute path>.pending\` in ${PLAN_BASELINE_DIR} (\`mkdir -p -m 700\` first); the review reads the older \`.copy\` for its delta, so leave that in place.`;
+
+/** The end of step 2: once the review and its fixes are done, the pending copy becomes the baseline. */
+const PLAN_PROMOTE = `After the review and its fixes are done, promote the baseline: move the plan's \`.pending\` copy over its \`.copy\` in ${PLAN_BASELINE_DIR} and update its \`manifest.tsv\` row, so the next cycle reviews only what changed since (this cycle's fixes included).`;
+
+/** Approval ends the plan's baseline, so a reused plan file gets a full review next time. */
+const PLAN_BASELINE_CLEAR = `delete that plan's copy from ${PLAN_BASELINE_DIR} (and its \`manifest.tsv\` row)`;
+
 function planReviewStep(mode: ReviewMode, target: string): string {
+  const scope = `plan <that plan file> baseline ${PLAN_BASELINE_DIR}`;
   switch (mode) {
     case "devkit":
-      return `Review ${target} with devkit's calibrated review: ${devkitReview("plan <that plan file>")}. If the devkit_load_skill tool is not available, STOP and report that the devkit review workflow is missing; do not fall back to a self-review.`;
+      return `${PLAN_PENDING} Review ${target} with devkit's calibrated review: ${devkitReview(scope)}. ${planDeltaRule(true)} If the devkit_load_skill tool is not available, STOP and report that the devkit review workflow is missing; do not fall back to a self-review.`;
     case "self":
-      return `Review ${target} with ${PLAN_SELF_REVIEW}.`;
+      return `${PLAN_PENDING} Review ${target} with ${PLAN_SELF_REVIEW}. ${planDeltaRule(false)}`;
     case "auto":
     default:
-      return `Review ${target}: if the devkit_load_skill tool is available, ${devkitReview("plan <that plan file>")}; otherwise do ${PLAN_SELF_REVIEW}.`;
+      return `${PLAN_PENDING} Review ${target}: if the devkit_load_skill tool is available, ${devkitReview(scope)}; otherwise do ${PLAN_SELF_REVIEW}. ${planDeltaRule(true)}`;
   }
 }
 
@@ -168,7 +202,7 @@ function planPathBlock(path: string): string {
  * document itself, nothing else.
  */
 const APPLY_PLAN_FINDINGS =
-  "Apply every valid finding directly to the plan document, whatever its severity; skip a false positive with a one-line reason. Editing the plan document is allowed in plan mode — do not edit any other project file. The review itself is also allowed in plan mode: writing its brief files outside the checkout and spawning, waiting on, stopping, archiving and deleting its bb child threads do not change the project, so try them rather than skipping them; fall back only after a real failure or a denied call.";
+  `Apply every valid finding directly to the plan document, whatever its severity; skip a false positive with a one-line reason. Editing the plan document is allowed in plan mode — do not edit any other project file. The review itself is also allowed in plan mode: writing its brief files outside the checkout and spawning, waiting on, stopping, archiving and deleting its bb child threads do not change the project, so try them rather than skipping them; fall back only after a real failure or a denied call. Writing the review baseline directory (${PLAN_BASELINE_DIR}) is allowed too: it is outside the checkout and does not change the project. ${PLAN_PROMOTE}`;
 
 export interface BuildPlanPromptInput {
   reviewMode: ReviewMode;
@@ -215,14 +249,14 @@ export function buildPlanReviewPrompt(input: BuildPlanPromptInput): string {
       "4. Present the revised plan again (ExitPlanMode). This project auto-approves reviewed plans, so it won't wait for the user; include a short summary of what the review changed.",
     );
     lines.push(
-      "5. If the review leaves a decision only the user can make (scope, a product trade-off), ask the user before presenting. Otherwise, once ExitPlanMode returns approved, mention in your reply that this project auto-approves reviewed plans, so the approval may have come from auto-review rather than from the user, then implement the plan. If it is not approved, stop and wait for the user.",
+      `5. If the review leaves a decision only the user can make (scope, a product trade-off), ask the user before presenting. If a Blocker or security Concern is still open after the review's 3 closure rounds, do not present for auto-approval: end your turn with the plan and the open findings for the user. Otherwise, once ExitPlanMode returns approved, mention in your reply that this project auto-approves reviewed plans, so the approval may have come from auto-review rather than from the user, then ${PLAN_BASELINE_CLEAR} and implement the plan. If it is not approved, stop and wait for the user.`,
     );
   } else {
     lines.push(
       "4. Present the revised plan for approval again, the same way you did before (for example ExitPlanMode). That presentation goes straight to the user, so include a short summary of what the review changed. Without a plan-approval tool, end your turn with the revised plan.",
     );
     lines.push(
-      "5. Stop. Implement only after the user explicitly approves the plan.",
+      `5. Stop. Implement only after the user explicitly approves the plan. Once it is approved and you start implementing, ${PLAN_BASELINE_CLEAR}.`,
     );
   }
   return lines.join("\n");
@@ -254,7 +288,7 @@ export function buildPresentPlanReviewPrompt(input: BuildPresentPlanPromptInput)
   lines.push(`1. ${planReviewStep(input.reviewMode, "that plan file")}`);
   lines.push(`2. ${APPLY_PLAN_FINDINGS}`);
   lines.push(
-    "3. If the review leaves a decision only the user can make (scope, a product trade-off), ask the user first, before calling PresentPlan again. Then call PresentPlan again with the same planFilePath. Its result tells you whether to wait for the user or proceed.",
+    "3. If the review leaves a decision only the user can make (scope, a product trade-off), ask the user first, before calling PresentPlan again. If a Blocker or security Concern is still open after the review's 3 closure rounds, report it to the user the same way, before calling PresentPlan again. Then call PresentPlan again with the same planFilePath. Its result tells you whether to wait for the user or proceed.",
   );
   return lines.join("\n");
 }
@@ -298,7 +332,7 @@ export const PRESENT_PLAN_OFF_MESSAGE =
  * itself rather than treat this tool result as their approval.
  */
 export const PRESENT_PLAN_REVIEWED_MESSAGE =
-  `${AUTO_REVIEW_MARKER} Plan reviewed. End your turn now with the revised plan (or its path) and a short summary of what the review changed, then wait for the user's explicit approval in chat. This result is not the user's approval — do not implement until the user approves.`;
+  `${AUTO_REVIEW_MARKER} Plan reviewed. End your turn now with the revised plan (or its path) and a short summary of what the review changed, then wait for the user's explicit approval in chat. This result is not the user's approval — do not implement until the user approves. Once they approve and you start implementing, ${PLAN_BASELINE_CLEAR}.`;
 
 /**
  * `PresentPlan`'s reply on the second call when the project auto-approves
@@ -306,7 +340,7 @@ export const PRESENT_PLAN_REVIEWED_MESSAGE =
  * approval, and the one text the instructions above carve out as such.
  */
 export const PRESENT_PLAN_APPROVED_MESSAGE =
-  `${AUTO_REVIEW_MARKER} Plan reviewed and approved automatically (this project auto-approves reviewed plans). This PresentPlan result is your approval: say in your reply that auto-review approved the plan automatically (the user did not), summarize what the review changed in one or two lines, then implement the plan. If you are in plan mode, leave it with ExitPlanMode first.`;
+  `${AUTO_REVIEW_MARKER} Plan reviewed and approved automatically (this project auto-approves reviewed plans). This PresentPlan result is your approval: say in your reply that auto-review approved the plan automatically (the user did not), summarize what the review changed in one or two lines, then ${PLAN_BASELINE_CLEAR} and implement the plan. If you are in plan mode, leave it with ExitPlanMode first.`;
 
 /** `PresentPlan`'s reply when `planFilePath` fails `SCOPE_PATH_ALLOW`. */
 export const PRESENT_PLAN_INVALID_PATH_MESSAGE =
@@ -356,6 +390,23 @@ function scopeSection(scope: ScopeRendering): string[] {
   ];
 }
 
+/**
+ * A no-commit review leaves HEAD where it was, so unlike the commit path it
+ * cannot tell a later pass what an earlier one already read. The baseline is a
+ * private per-thread copy of those files, and later passes review only the
+ * delta against it. Secret checks are never narrowed by it.
+ */
+function codeBaselineParagraph(mode: ReviewMode): string {
+  const reference =
+    mode === "self"
+      ? ""
+      : ` (devkit: pass \`baseline ${CODE_BASELINE_DIR}\` in the scope; details: \`${DELTA_SCOPE_REFERENCE}\`)`;
+  return `Review baseline: ${CODE_BASELINE_DIR} is a flat directory (\`mkdir -p -m 700\`) holding copies of the files earlier reviews of this thread read — one \`<sha256 of the file's repo-relative path>.copy\` per file and a \`manifest.tsv\` of path, content sha256, HEAD sha and HEAD blob rows. A listed file with a valid copy (its HEAD blob unchanged since the copy was taken) is reviewed only as its delta: the hunks present in both \`git diff --no-index -- <copy> <file>\` and the diff vs HEAD, never restoring hunks that move back toward HEAD. Report issues the delta causes or exposes anywhere in the file; treat unchanged parts it does not affect as context only${reference}. Before the review starts, copy each listed file as it stands now to \`<sha256 of its repo-relative path>.pending\` there (\`mkdir -p -m 700\` first); the review reads the older \`.copy\` for its delta, so leave that in place until step 2. A file with no copy, or a stale one, gets the full review. The pre-existing-issue rule in step 1 applies only to files with no copy (their first review). Earlier open findings listed above are re-checked wherever they sit, and secret checks are never narrowed by the baseline. ${NO_BASELINE_RULE} State the scope in your final reply: \`delta vs baseline\` or \`full (no baseline)\`, per file when mixed.`;
+}
+
+/** Appended to step 2 of a no-commit review, so step numbers stay put. */
+const CODE_PROMOTE = ` After the review and its fixes are done, promote the baseline: move each \`.pending\` copy over its \`.copy\` in ${CODE_BASELINE_DIR} and update its \`manifest.tsv\` row, so the next review covers only what changed since. If step 5 STOPs on a secret, delete the copies (pending and promoted) of the flagged files.`;
+
 export function buildReviewPrompt(input: BuildPromptInput): string {
   const { decision, reviewMode, scope } = input;
   const committedSince = allowedSha(input.committedSince);
@@ -385,8 +436,15 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
 
   lines.push(...scopeSection(scope));
   lines.push(...priorFindingsSection(input.priorFindings ?? [], input.priorFindingsOmitted ?? 0));
+  const overflow = decision.commit && scope.overflowCount > 0;
+  const noCommit = overflow || !decision.commit;
+  if (noCommit) {
+    lines.push(codeBaselineParagraph(reviewMode), "");
+  }
   lines.push(`1. ${reviewStep(reviewMode, committedSince, input.aislopScan ?? false)}`);
-  lines.push("2. Apply the fixes the review reports. Re-run the review if it asks you to.");
+  lines.push(
+    `2. Apply the fixes the review reports. If it asks for a re-run, re-run only over the changes since its previous pass (devkit's closure rule); a self-review is one pass.${noCommit ? CODE_PROMOTE : ""}`,
+  );
   lines.push(
     "3. Stage ONLY the files you yourself edited this turn — those in the list above — using an explicit pathspec (`git add -- <path> …`). Never use `git add -A`, `git add -a`, or `git add .`. Do not stage, revert, checkout, stash, or clean any other modified or untracked file — it was already there and is not yours to touch. Before staging each file, confirm its current contents are the changes you made this turn; if a file also contains edits you did not make (a concurrent human or sibling edit), skip it and report it rather than committing someone else's work.",
   );
@@ -401,7 +459,6 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
     `5. Scan the staged changes for secrets, credentials, or build artifacts before committing. Watch for: ${SECRET_PATTERNS.join("; ")}. If you find any, STOP: unstage, do not commit, and report what you found. Do not commit past a secret.${commits.scan}`,
   );
 
-  const overflow = decision.commit && scope.overflowCount > 0;
   if (overflow) {
     lines.push(
       `6. Do NOT commit. This turn changed more than ${MAX_SCOPE_ENTRIES} files, too many for auto-review to hand over as a reliable commit boundary. Leave the reviewed changes uncommitted and state in your final reply that they need to be committed by the user, listing any part that is unfinished or failing. Do not merge.`,

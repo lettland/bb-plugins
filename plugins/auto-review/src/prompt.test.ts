@@ -673,6 +673,68 @@ describe("buildReviewPrompt", () => {
       expect(text).toContain("4 more earlier finding(s) are not listed");
     });
   });
+
+  describe("delta-scoped baseline", () => {
+    const codeDir = "$BB_THREAD_STORAGE/auto-review/code";
+    const step2 = (text: string): string => text.split("\n").find((line) => line.startsWith("2. ")) ?? "";
+    const noCommitInputs = {
+      "protected mainline": { decision: { commit: false, merge: false }, scope: baseScope },
+      overflow: {
+        decision: { commit: true, merge: false },
+        scope: renderScope(Array.from({ length: MAX_SCOPE_ENTRIES + 1 }, (_, i) => `f${i}.ts`)),
+      },
+    };
+
+    for (const [name, input] of Object.entries(noCommitInputs)) {
+      for (const reviewMode of ["devkit", "auto", "self"] as const) {
+        it(`${name}, ${reviewMode}: carries the baseline paragraph, parks .pending first and promotes inside step 2`, () => {
+          const text = buildReviewPrompt({ ...input, reviewMode });
+          expect(text).toContain(`Review baseline: ${codeDir}`);
+          expect(text).toMatch(/reviewed only as its delta/);
+          expect(text).toMatch(/applies only to files with no copy \(their first review\)/);
+          expect(text).toMatch(/Earlier open findings listed above are re-checked wherever they sit/);
+          expect(text).toMatch(/secret checks are never narrowed by the baseline/);
+          expect(text).toMatch(/no baseline: review everything and write no baseline copies/);
+          expect(text).toContain("`delta vs baseline` or `full (no baseline)`");
+          expect(text).toContain("<sha256 of the file's repo-relative path>.copy");
+          expect(text).toContain("<sha256 of its repo-relative path>.pending");
+          expect(text).not.toMatch(/absolute path/);
+          expect(text.indexOf("Review baseline:")).toBeLessThan(text.indexOf("\n1. "));
+          expect(text.indexOf(".pending")).toBeLessThan(text.indexOf("\n1. "));
+          expect(text).toMatch(/Before the review starts, copy each listed file as it stands now to `<sha256 of its repo-relative path>\.pending`/);
+          expect(step2(text)).toMatch(/After the review and its fixes are done, promote the baseline: move each `\.pending` copy over its `\.copy` in \$BB_THREAD_STORAGE\/auto-review\/code and update its `manifest\.tsv` row/);
+          expect(step2(text)).toMatch(/If step 5 STOPs on a secret, delete the copies \(pending and promoted\) of the flagged files/);
+          expect(text.match(/^\d+\. /gmu)).toContain("2. ");
+        });
+      }
+
+      it(`${name}: points devkit modes, not self mode, at the reference`, () => {
+        const devkit = buildReviewPrompt({ ...input, reviewMode: "devkit" });
+        expect(devkit).toContain(`baseline ${codeDir}`);
+        expect(devkit).toContain('devkit_load_skill({ reference: "review-delta-scope" })');
+        expect(buildReviewPrompt({ ...input, reviewMode: "self" })).not.toContain("review-delta-scope");
+      });
+    }
+
+    it("leaves the commit path without a baseline or pending copies, but with the closure re-run wording", () => {
+      for (const decision of [{ commit: true, merge: false }, { commit: true, merge: true }]) {
+        const text = buildReviewPrompt({ decision, reviewMode: "auto", scope: baseScope });
+        expect(text).not.toContain("$BB_THREAD_STORAGE");
+        expect(text).not.toContain("Review baseline");
+        expect(text).not.toContain(".pending");
+        expect(step2(text)).toBe(
+          "2. Apply the fixes the review reports. If it asks for a re-run, re-run only over the changes since its previous pass (devkit's closure rule); a self-review is one pass.",
+        );
+      }
+    });
+
+    it("keeps the same re-run wording at the start of step 2 on the no-commit path", () => {
+      const text = buildReviewPrompt({ ...noCommitInputs["protected mainline"], reviewMode: "auto" });
+      expect(step2(text)).toMatch(
+        /^2\. Apply the fixes the review reports\. If it asks for a re-run, re-run only over the changes since its previous pass \(devkit's closure rule\); a self-review is one pass\. After the review and its fixes are done/,
+      );
+    });
+  });
 });
 
 describe("buildPlanReviewPrompt", () => {
@@ -704,7 +766,7 @@ describe("buildPlanReviewPrompt", () => {
       /4\. Present the revised plan again \(ExitPlanMode\)\. This project auto-approves reviewed plans, so it won't wait for the user; include a short summary of what the review changed\./,
     );
     expect(text).toMatch(
-      /5\. If the review leaves a decision only the user can make \(scope, a product trade-off\), ask the user before presenting\. Otherwise, once ExitPlanMode returns approved, mention in your reply that this project auto-approves reviewed plans, so the approval may have come from auto-review rather than from the user, then implement the plan\. If it is not approved, stop and wait for the user\./,
+      /5\. If the review leaves a decision only the user can make \(scope, a product trade-off\), ask the user before presenting\. If a Blocker or security Concern is still open after the review's 3 closure rounds, do not present for auto-approval: end your turn with the plan and the open findings for the user\. Otherwise, once ExitPlanMode returns approved, mention in your reply that this project auto-approves reviewed plans, so the approval may have come from auto-review rather than from the user, then delete that plan's copy from \$BB_THREAD_STORAGE\/auto-review\/plan \(and its `manifest\.tsv` row\) and implement the plan\. If it is not approved, stop and wait for the user\./,
     );
     expect(text).not.toMatch(/Stop\. Implement only after the user explicitly approves/);
     expect(text).toMatch(/do not start implementing/);
@@ -751,6 +813,87 @@ describe("buildPlanReviewPrompt", () => {
     expect(self).toMatch(/five angles/);
     expect(self).toMatch(/compliance/);
     expect(self).not.toContain("devkit_load_skill");
+  });
+
+  describe("delta-scoped review baseline", () => {
+    const planDir = "$BB_THREAD_STORAGE/auto-review/plan";
+    const builders = {
+      "plan gate": (reviewMode: "auto" | "devkit" | "self") =>
+        buildPlanReviewPrompt({ reviewMode, planFilePath: "/p/plan.md", autoApprove: false }),
+      PresentPlan: (reviewMode: "auto" | "devkit" | "self") =>
+        buildPresentPlanReviewPrompt({ reviewMode, planFilePath: "docs/plans/p.md" }),
+    };
+
+    for (const [name, build] of Object.entries(builders)) {
+      for (const mode of ["devkit", "auto", "self"] as const) {
+        it(`${name}, ${mode}: reviews only the delta, skips on empty, parks the pending copy before the review`, () => {
+          const text = build(mode);
+          expect(text).toContain(planDir);
+          expect(text).toMatch(/If a copy of this plan exists there, review only the plan's delta against it/);
+          expect(text).toMatch(/If the delta is empty, skip the review and the fixes, promote the pending copy as step 2 describes, and continue at step 3/);
+          expect(text).toMatch(/With no copy, review the whole plan/);
+          expect(text).toMatch(/no baseline: review everything and write no baseline copies/);
+          expect(text).toContain("`delta vs baseline` or `full (no baseline)`");
+          const step1 = text.slice(text.indexOf("\n1. "), text.indexOf("\n2. "));
+          expect(step1).toMatch(/1\. (Save the plan[^]*? )?First, before the review starts, copy the plan file as it stands now to `<sha256 of its absolute path>\.pending`/);
+          expect(step1.indexOf(".pending")).toBeLessThan(step1.indexOf("Review "));
+          expect(step1).toContain("leave that in place");
+        });
+      }
+
+      it(`${name}: passes the baseline to devkit's plan scope and points to the reference`, () => {
+        const devkit = build("devkit");
+        expect(devkit).toContain(`scope \`plan <that plan file> baseline ${planDir}\``);
+        expect(devkit).toContain('devkit_load_skill({ reference: "review-delta-scope" })');
+        expect(build("self")).not.toContain("devkit_load_skill");
+      });
+    }
+
+    it("promotes the pending copy at the end of step 2, after the fixes and before the plan-mode re-entry step", () => {
+      for (const build of Object.values(builders)) {
+        const text = build("devkit");
+        const step2 = text.slice(text.indexOf("\n2. "), text.indexOf("\n3. "));
+        expect(step2).toMatch(/Apply every valid finding[^]*After the review and its fixes are done, promote the baseline: move the plan's `\.pending` copy over its `\.copy`[^]*`manifest\.tsv` row/);
+      }
+      const text = builders["plan gate"]("auto");
+      expect(text.indexOf("promote the baseline")).toBeLessThan(text.indexOf("\n3. If you are no longer in plan mode"));
+      expect(text.indexOf(".pending")).toBeLessThan(text.indexOf("Apply every valid finding"));
+    });
+
+    it("hands a still-open Blocker or security Concern to the user before PresentPlan is called again", () => {
+      const text = buildPresentPlanReviewPrompt({ reviewMode: "auto", planFilePath: "docs/plans/p.md" });
+      expect(text).toMatch(
+        /If a Blocker or security Concern is still open after the review's 3 closure rounds, report it to the user the same way, before calling PresentPlan again\. Then call PresentPlan again/,
+      );
+    });
+
+    it("lets the baseline be written in plan mode", () => {
+      for (const build of Object.values(builders)) {
+        expect(build("auto")).toMatch(
+          /Writing the review baseline directory \(\$BB_THREAD_STORAGE\/auto-review\/plan\) is allowed too: it is outside the checkout and does not change the project\./,
+        );
+      }
+    });
+
+    it("clears the baseline once the plan is approved and implementation starts", () => {
+      const clear = /delete that plan's copy from \$BB_THREAD_STORAGE\/auto-review\/plan \(and its `manifest\.tsv` row\)/;
+      expect(buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p.md", autoApprove: true })).toMatch(clear);
+      expect(buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p.md", autoApprove: false })).toMatch(
+        /5\. Stop\. Implement only after the user explicitly approves the plan\. Once it is approved and you start implementing, delete that plan's copy/,
+      );
+      expect(PRESENT_PLAN_APPROVED_MESSAGE).toMatch(clear);
+      expect(PRESENT_PLAN_REVIEWED_MESSAGE).toMatch(clear);
+    });
+
+    it("hands a still-open Blocker or security Concern to the user instead of auto-approving", () => {
+      const text = buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p.md", autoApprove: true });
+      expect(text).toMatch(
+        /If a Blocker or security Concern is still open after the review's 3 closure rounds, do not present for auto-approval: end your turn with the plan and the open findings for the user/,
+      );
+      expect(buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p.md", autoApprove: false })).not.toMatch(
+        /do not present for auto-approval/,
+      );
+    });
   });
 });
 

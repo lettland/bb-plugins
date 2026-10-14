@@ -55,6 +55,10 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   latch (persisted in plugin metadata) so it never reviews its own review turn. When that
   turn commits, it judges from the thread's plan whether work remains and continues any
   genuinely-unfinished planned work instead of halting mid-plan (never inventing work).
+- Later reviews are delta-scoped: plan reviews, and no-commit code reviews (protected
+  mainline, over-400-files), snapshot what they read under `$BB_THREAD_STORAGE/auto-review/`
+  and review only what changed since (prompt text only; devkit's `review-delta-scope`). The reply
+  states `delta vs baseline` or `full (no baseline)`; approval clears a plan's copy.
 - Reviews plans too, on every provider, through two paths kept strictly separate by
   provider capability so one plan is never reviewed twice. On Claude Code, whose
   ExitPlanMode routes to a real `interaction.pending` with `subject.kind: "plan"` the
