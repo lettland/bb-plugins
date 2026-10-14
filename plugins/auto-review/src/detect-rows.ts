@@ -78,6 +78,23 @@ export interface RowText {
   text: string;
   /** Where the row's shell ran; null when the row does not say. */
   cwd: string | null;
+  /** The text is shell the row ran, or a string that reads as a command line; any other text only names things. */
+  shell: boolean;
+}
+
+/** Commands whose name at the start of a tool argument with blanks makes it a command line. */
+const COMMAND_WORDS: ReadonlySet<string> = new Set([
+  "git", "npm", "pnpm", "yarn", "bun", "bunx", "npx", "make", "cargo", "go", "uv", "uvx", "poetry", "pipenv",
+  "python", "python3", "node", "deno", "ruby", "perl", "php", "tsx", "ts-node", "bash", "sh", "zsh", "dash", "ksh",
+  "env", "cross-env", "sudo", "time", "timeout", "nohup", "exec", "eval", "xargs", "find", "fd", "sed", "rm", "mv",
+  "cp", "tee", "install", "patch", "rsync", "tar", "unzip", "prettier", "eslint", "jest", "vitest", "black", "isort",
+  "ruff", "gofmt",
+]);
+
+/** A tool argument that holds a command line: it has a blank and starts with a known command. A single token never does. */
+function readsAsCommand(text: string): boolean {
+  const [first, second] = text.trimStart().split(/\s+/u, 2);
+  return second !== undefined && first !== undefined && COMMAND_WORDS.has(first.replace(/^.*\//u, ""));
 }
 
 const MAX_ARGUMENT_DEPTH = 32;
@@ -96,20 +113,16 @@ function leafStrings(value: unknown, depth = 0): string[] {
   return Object.entries(value).flatMap(([key, member]) => [key, ...leafStrings(member, depth + 1)]);
 }
 
-/** A path as shell text: itself, and, when it has a blank, once more quoted so it stays one word. */
-function pathTexts(path: string): string[] {
-  return /[ \t]/u.test(path) && !path.includes("\n") ? [path, `"${path.replace(/["\\$`]/gu, "\\$&")}"`] : [path];
-}
-
-/** What a row names besides its shell text: a read's or search's path, a search's query, a tool's string arguments. */
-function namedTexts(row: WorkRow): string[] {
+/** What a row names besides its shell text: a read's or search's path, a search's query, a tool's string arguments. Only a tool argument that reads as a command line is shell. */
+function namedTexts(row: WorkRow): Array<{ text: string; shell: boolean }> {
+  const names = (texts: readonly string[]) => texts.map((text) => ({ text, shell: false }));
   switch (row.workKind) {
     case "file-read":
-      return pathTexts(row.path);
+      return names([row.path]);
     case "search":
-      return row.path === null ? [row.query] : [...pathTexts(row.path), row.query];
+      return names(row.path === null ? [row.query] : [row.path, row.query]);
     case "tool":
-      return leafStrings(row.toolArgs).flatMap(pathTexts);
+      return leafStrings(row.toolArgs).map((text) => ({ text, shell: readsAsCommand(text) }));
     default:
       return [];
   }
@@ -119,7 +132,8 @@ function namedTexts(row: WorkRow): string[] {
  * The texts of the work rows that overlap the turn, which began at
  * `startedAt`: their shell text and its working directory. With
  * `includeUnapproved`, the family side's reading, denied rows count and so do
- * the paths and arguments a row names outside its shell text.
+ * the paths and arguments a row names outside its shell text, which only name
+ * things (`shell` is false) unless a tool argument reads as a command line.
  */
 export function rowTexts(
   rows: readonly TimelineRow[],
@@ -135,10 +149,10 @@ export function rowTexts(
     }
     const shell = shellText(row);
     if (shell !== null) {
-      texts.push({ text: shell, cwd: row.workKind === "command" ? row.cwd : null });
+      texts.push({ text: shell, cwd: row.workKind === "command" ? row.cwd : null, shell: true });
     }
     if (includeUnapproved) {
-      texts.push(...namedTexts(row).map((text) => ({ text, cwd: null })));
+      texts.push(...namedTexts(row).map((named) => ({ ...named, cwd: null })));
     }
   }
   return texts;

@@ -1,4 +1,5 @@
 import { familyMatcher } from "./detect-family.js";
+import type { FamilyText } from "./detect-family.js";
 import { globMatcher, globQualifies, isGlob } from "./detect-globs.js";
 import { commandOf, commandStart, gitCommand, lexCommands } from "./detect-mentions.js";
 import type { Command, Word } from "./detect-mentions.js";
@@ -258,7 +259,7 @@ function writtenCandidates(
 export function siblingWrittenPaths(
   candidates: readonly string[],
   siblingTexts: readonly SiblingText[],
-  familyTexts: readonly string[],
+  familyTexts: readonly FamilyText[],
   root: string,
 ): Map<string, string> {
   const base = root.replace(/\/+$/u, "");

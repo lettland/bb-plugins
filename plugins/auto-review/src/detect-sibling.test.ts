@@ -135,9 +135,9 @@ describe("siblingAuthoredPaths", () => {
     });
     const evidence = await siblingAuthoredPaths(bb, [self, sibling] as never, "self", STARTED_AT);
     expect(evidence.texts).toEqual([
-      { threadId: "sib-1", text: "echo a > lib/a.ts", cwd: "/w" },
-      { threadId: "sib-1", text: "rg x lib", cwd: null },
-      { threadId: "sib-1", text: "echo sub > lib/f.ts", cwd: "/w/sub" },
+      { threadId: "sib-1", text: "echo a > lib/a.ts", cwd: "/w", shell: true },
+      { threadId: "sib-1", text: "rg x lib", cwd: null, shell: true },
+      { threadId: "sib-1", text: "echo sub > lib/f.ts", cwd: "/w/sub", shell: true },
     ]);
     expect(evidence.complete).toEqual(new Map([["sib-1", true]]));
   });
@@ -278,23 +278,36 @@ describe("turnChangedPaths and a sibling's shell edits", () => {
     it("by a tool's string arguments, whatever their depth, read as text and not as JSON", () => {
       const rows = [tool({ edits: [{ note: "x\nsrc/a.ts", count: 2 }], path: "dir/my file.ts" }, { startedAt: 20_000 })];
       const texts = rowTexts(rows as never, STARTED_AT, { pending: 30_000, unended: 30_000 }, { includeUnapproved: true });
-      expect(texts.map(({ text }) => text)).toEqual([
-        "edits",
-        "note",
-        "x\nsrc/a.ts",
-        "count",
-        "path",
-        "dir/my file.ts",
-        '"dir/my file.ts"',
-      ]);
+      expect(texts.map(({ text }) => text)).toEqual(["edits", "note", "x\nsrc/a.ts", "count", "path", "dir/my file.ts"]);
+      expect(texts.every(({ shell }) => !shell)).toBe(true);
     });
 
     it("by an object key of a tool's arguments", async () => {
-      expect(await keeps({ "kid-1": one(tool({ files: { "/w/lib/b.ts": "x" } })) })).toBe(true);
-      expect(await keeps({ "kid-1": one(tool({ files: { "/w/lib/other.ts": "x" } })) })).toBe(false);
+      expect(await keeps({ "kid-1": one(tool({ files: { "lib/b.ts": "x" } })) })).toBe(true);
+      expect(await keeps({ "kid-1": one(tool({ files: { "lib/other.ts": "x" } })) })).toBe(false);
       const rows = [tool({ files: { "src/a.ts": "x" }, list: ["y"] }, { startedAt: 20_000 })];
       const texts = rowTexts(rows as never, STARTED_AT, { pending: 30_000, unended: 30_000 }, { includeUnapproved: true });
       expect(texts.map(({ text }) => text)).toEqual(["files", "src/a.ts", "x", "list", "y"]);
+    });
+
+    it("by a tool's bare relative path, which names that path and does not run it", async () => {
+      expect(await keeps({ "kid-1": one(tool({ path: "lib/b.ts" })) })).toBe(true);
+      expect(await keeps({ "kid-1": one(tool({ path: "lib/other.ts" })) })).toBe(false);
+      expect(await keeps({ "kid-1": one(tool({ path: "scripts/gen.sh" })) })).toBe(false);
+    });
+
+    it("by a tool's command line, which runs as shell", async () => {
+      expect(await keeps({ "kid-1": one(tool({ command: "npm install" })) })).toBe(true);
+      expect(await keeps({ "kid-1": one(tool({ command: "npm test" })) })).toBe(false);
+      expect(await keeps({ "kid-1": one(tool({ note: "install the package" })) })).toBe(false);
+    });
+
+    it("by a file-read row's absolute path and a search row's query, as names only", async () => {
+      const read = { self: one(edit("lib/own.ts"), fileRead("/w/lib/b.ts", { cmd: null })) };
+      expect(await keeps(read)).toBe(true);
+      expect(await keeps({ self: one(edit("lib/own.ts"), fileRead("/w/lib/other.ts", { cmd: null })) })).toBe(false);
+      expect(await keeps({ self: one(edit("lib/own.ts"), search("lib/**/*.ts", { cmd: null })) })).toBe(true);
+      expect(await keeps({ self: one(edit("lib/own.ts"), search("other/**/*.ts", { cmd: null })) })).toBe(false);
     });
 
     it("by a file-read or search row that carries no approval status", async () => {

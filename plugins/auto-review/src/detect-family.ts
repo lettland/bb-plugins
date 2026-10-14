@@ -152,14 +152,30 @@ function addText(index: FamilyIndex, text: string, root: string, writes: Command
   }
 }
 
-function indexFamily(texts: readonly string[], root: string, writes: CommandWrites): FamilyIndex {
+/** A text the family ran or named; a plain string is shell, and `shell: false` says the text only names things (a path, a query, a tool's argument). */
+export type FamilyText = string | { text: string; shell: boolean };
+
+/** A text that only names things: its tokens count, and a whole text with a blank is a path too, but no word of it is a command. */
+function addName(index: FamilyIndex, text: string, root: string): void {
+  addTokens(index, text, false, root);
+  if (/[ \t]/u.test(text) && !text.includes("\n") && text.length <= MAX_QUOTED_PATH) {
+    addToken(index, text.trim(), false, root);
+  }
+}
+
+function indexFamily(texts: readonly FamilyText[], root: string, writes: CommandWrites): FamilyIndex {
   const index: FamilyIndex = { all: false, exact: new Set(), absolute: new Set(), dirs: new Set(), globs: new Set() };
-  for (const text of texts) {
+  for (const family of texts) {
+    const { text, shell } = typeof family === "string" ? { text: family, shell: true } : family;
     index.all ||= text.length > FAMILY_TEXT_LIMIT;
     if (index.all) {
       break;
     }
-    addText(index, text, root, writes, 0);
+    if (shell) {
+      addText(index, text, root, writes, 0);
+    } else {
+      addName(index, text, root);
+    }
   }
   return index;
 }
@@ -174,9 +190,10 @@ function indexFamily(texts: readonly string[], root: string, writes: CommandWrit
  * characters, a heredoc with no terminator, a write target built from a
  * variable and a command that rewrites files without naming them (see
  * `rewritesTree`) name every path. `writes` reads the write targets of a command.
+ * A text that is not shell only names things: no command rule applies to it.
  */
 export function familyMatcher(
-  texts: readonly string[],
+  texts: readonly FamilyText[],
   root: string,
   writes: CommandWrites,
 ): (path: string) => boolean {

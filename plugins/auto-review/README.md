@@ -72,8 +72,13 @@ It ships enabled (opt-out).
     `open(x, encoding='utf8')` and `open('src/a.ts', 'r')` are reads, not writes. If one write call
     builds its path, every path-like word in the script counts, and a glob counts when it has a
     directory and a literal in its last segment.
-  - Family side (generous). Its command text, the path of its reads and searches and every string
-    in its tool arguments, object keys included (read as shell text), all count, as does any glob that matches (a glob
+  - Family side (generous). Its command text, the path and query of its reads and searches and every
+    string in its tool arguments, object keys included, all count. Only command text is read as
+    shell; the others only name things (exactly, as a suffix, by an absolute path or by a glob), so
+    a tool called with `{ path: "src/x.ts" }` names `src/x.ts` and nothing else. A tool string with
+    a blank that starts with a known command (`git`, `npm`, `pnpm`, `make`, `python`, `bash`, …,
+    as in `{ command: "npm install" }`) is also read as shell; a single token never is. All of
+    them count, as does any glob that matches (a glob
     without a `/` only inside a command that writes), a quoted word with a blank taken whole
     (`"dir/my file.ts"`), any directory in the same simple command when it writes (a write target,
     `rm -r`, or `--fix`, `--write`, `-u`, `--update`, `--update-snapshot` outside a reader such as

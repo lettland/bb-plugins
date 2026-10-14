@@ -64,7 +64,7 @@ export async function pathsLeftToSiblings(credit: CreditInput): Promise<Map<stri
   const family = [
     ...rowTexts(own, startedAt, open, { includeUnapproved: true }),
     ...kin.texts,
-  ].map(({ text }) => text);
+  ].map(({ text, shell }) => ({ text, shell }));
   const credited = siblingWrittenPaths(
     credit.candidates.filter((path) => !kin.paths.has(path)),
     texts,
