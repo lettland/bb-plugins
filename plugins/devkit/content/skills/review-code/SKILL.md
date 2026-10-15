@@ -211,7 +211,8 @@ that lens through to the next, independently per lens.
   than blaming a lens.
 
 - **Your provider's own subagents** — a read-only kind if it has one — when not running under
-  bb, or for a lens whose bb-thread spawn failed or was given up on above.
+  bb, or for a lens whose bb-thread spawn failed or was given up on above. One subagent per
+  lens, never two lenses in one worker.
 
 - **In this thread**, sequentially, when neither tier above is available or both fail for a lens
   (an actual error, a refusal, or a denied tool call — never pre-emptively, and never because
