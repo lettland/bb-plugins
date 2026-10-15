@@ -10,7 +10,8 @@ export interface TimeWindow {
 /** Git truncates `authoredAt` to whole seconds, so a window is widened by one on both sides. */
 const WINDOW_SLACK_MS = 1_000;
 
-function nestedRows(row: TimelineRow): readonly TimelineRow[] {
+/** The rows a row holds: a delegation's `childRows`, a turn's `children`. */
+export function nestedRows(row: TimelineRow): readonly TimelineRow[] {
   if ("childRows" in row && Array.isArray(row.childRows)) {
     return row.childRows;
   }
@@ -96,6 +97,29 @@ export function leafStrings(value: unknown, depth = 0): string[] {
     return value.flatMap((member) => leafStrings(member, depth + 1));
   }
   return Object.entries(value).flatMap(([key, member]) => [key, ...leafStrings(member, depth + 1)]);
+}
+
+/** The fields a tool that runs a shell is given its command in. */
+const SHELL_KEYS: ReadonlySet<string> = new Set(["command", "cmd", "script", "code"]);
+
+/** A word of an argument vector as a shell line takes it: quoted unless it is plain. */
+const quoted = (word: string) => (/^[\w@%+=:,./-]+$/u.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`);
+
+/** The shell lines of a tool's arguments: each `command`, `cmd`, `script` or `code` field anywhere in them, an array of words (`["bash", "-lc", "npm run codegen"]`) joined into one line. */
+export function shellFields(value: unknown, depth = 0): string[] {
+  if (depth >= MAX_ARGUMENT_DEPTH || typeof value !== "object" || value === null) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((member) => shellFields(member, depth + 1));
+  }
+  return Object.entries(value).flatMap(([key, member]) => {
+    if (!SHELL_KEYS.has(key)) {
+      return shellFields(member, depth + 1);
+    }
+    const words = Array.isArray(member) && member.length > 0 && member.every((word) => typeof word === "string");
+    return typeof member === "string" ? [member] : words ? [(member as string[]).map(quoted).join(" ")] : shellFields(member, depth + 1);
+  });
 }
 
 /** What a row names besides its shell text: a read's or search's path, a search's query, a tool's string arguments. A tool argument with whitespace is read as shell as well; a single token only names. */

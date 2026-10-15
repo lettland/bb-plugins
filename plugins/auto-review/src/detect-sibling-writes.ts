@@ -196,6 +196,50 @@ function repoPath(token: string, base: string | null, root: string): string | nu
   return rest === "" ? null : rest;
 }
 
+/** The directories macOS reaches through `/private`, which name the same place with or without it. */
+const MAC_ALIASED: ReadonlySet<string> = new Set(["var", "tmp", "etc"]);
+
+/** A path's segments, with the `/private` of `/private/var` and its kin dropped, so either spelling of a directory compares equal. */
+function canonicalSegments(path: string): string[] {
+  const segments = segmentsOf(path);
+  return segments[0] === "private" && MAC_ALIASED.has(segments[1] ?? "") ? segments.slice(1) : segments;
+}
+
+/** A write target as a path relative to the checkout: "" for the checkout itself, null outside it. */
+export function repoRelative(token: string, base: string, root: string): string | null {
+  const segments = canonicalSegments(token.startsWith("/") ? token : `${base}/${token}`);
+  const rootSegments = canonicalSegments(root);
+  return rootSegments.every((segment, at) => segments[at] === segment) ? segments.slice(rootSegments.length).join("/") : null;
+}
+
+/** Where a command's shell was when it wrote, and whether that is a guess: unknown when no `cwd` and no `cd` says, and when the directory is not under the checkout (a symlinked alias of it). Null once a `cd` left somewhere that is not the root. */
+export function shellDirectory(write: ShellStart, root: string): { dir: string; loose: boolean } | null {
+  const { cwd, steps } = write;
+  const known = cwd !== null && cwd !== "";
+  let dir: string | null = !known ? root : cwd.startsWith("/") ? cwd : `${root}/${cwd}`;
+  for (const { name, target } of steps) {
+    dir = name === "popd" ? null : movedTo(dir, target, root);
+  }
+  return dir === null ? null : { dir, loose: (!known && steps.length === 0) || repoRelative(".", dir, root) === null };
+}
+
+/** Whether a path is a claimed target; with `tree`, whether it lies under it (a directory), or a glob matches a directory above it. */
+export function claimsPath(target: string, path: string, tree: boolean): boolean {
+  if (!isGlob(target)) {
+    return target === "" ? tree : path === target || (tree && path.startsWith(`${target}/`));
+  }
+  const matches = globMatcher(target);
+  const segments = path.split("/");
+  return tree ? segments.some((_segment, at) => matches(segments.slice(0, at + 1).join("/"))) : matches(path);
+}
+
+/** Where a command's shell began and the directory changes made since, as the claim side reads them from a row. */
+export interface ShellStart {
+  /** The row's cwd; empty or null when it records none. */
+  cwd: string | null;
+  steps: ReadonlyArray<{ name: string; target: string | undefined }>;
+}
+
 export interface SiblingText {
   threadId: string;
   text: string;

@@ -1243,6 +1243,8 @@ describe("workspace capture edge cases", () => {
       /** Replaces the answer for `origin/<base>`. */
       remote?: (ref: string, ahead: readonly { sha: string }[]) => unknown;
       turnStart?: Record<string, unknown>;
+      /** Whether the thread's own timeline gets the git row at the start of the turn; on unless false. */
+      startOfTurnGit?: boolean;
     }) {
       const commits = options.commits ?? [];
       const remoteCalls: string[] = [];
@@ -1270,7 +1272,7 @@ describe("workspace capture edge cases", () => {
             if (rows instanceof Error) {
               throw rows;
             }
-            return page([...(rows ?? []), ...(threadId === "thr_self" ? [startOfTurnGit] : [])]);
+            return page([...(rows ?? []), ...(threadId === "thr_self" && options.startOfTurnGit !== false ? [startOfTurnGit] : [])]);
           }),
       });
       const result = await turnChangedPaths(bb, {
@@ -1285,7 +1287,7 @@ describe("workspace capture edge cases", () => {
         }),
         threadEntries: (options.entries ?? [self, sibling]) as never,
       });
-      return { result, warnings, infos: infos.filter((line) => !/attributing the turn|left out of the review/u.test(line)), timelineCalls, remoteCalls };
+      return { result, warnings, infos: infos.filter((line) => !/attributing the turn|left out of the review/u.test(line)), allInfos: infos, timelineCalls, remoteCalls };
     }
 
     const siblingRuns = (row: unknown) => ({ thr_sibling: [row] });
@@ -1419,6 +1421,27 @@ describe("workspace capture edge cases", () => {
       });
     });
 
+    it("leaves a commit nothing of the family could have made out of the review, in exact mode, next to the one left to the sibling", async () => {
+      const { result, allInfos } = await attribute({
+        startOfTurnGit: false,
+        timelines: siblingRuns(command(gitCommit)),
+        commits: [commit("c1", ["src/a.ts"], 20_500), commit("c2", ["src/b.ts"], 30_000)],
+      });
+      expect(result).toEqual({
+        paths: [],
+        commits: [],
+        committedPaths: [],
+        foreignCommits: [foreign("c1")],
+        upstreamCommits: [],
+        mode: "exact",
+        unclaimed: [],
+      });
+      expect(allInfos.filter((line) => line.includes("left out of the review"))).toEqual([
+        "auto-review: commit c2 left out of the review: the family ran no git that writes history, and no command or tool of theirs was running then",
+      ]);
+      expect(JSON.stringify(allInfos)).not.toContain(LEAK);
+    });
+
     describe("commits that arrived with the remote base", () => {
       const mergedFile = (sha: string) => (sha === "u1" ? "lib/merged.ts" : "lib/upstream.ts");
       const upstreamCommit = (sha: string, authoredAt: number | null = 20_000) =>
@@ -1460,6 +1483,19 @@ describe("workspace capture edge cases", () => {
         ]);
         expect(committedSinceHead(result, state)).toBeNull();
         expect(commitScanHead(result, state)).toBeNull();
+      });
+
+      it("leaves a commit nothing of the family could have made out of the review, in exact mode, next to the upstream one", async () => {
+        const { result, allInfos } = await attribute({
+          startOfTurnGit: false,
+          base: "dev",
+          commits: [upstreamCommit("u1"), commit("c2", ["lib/stray.ts"], 30_000)],
+          upstream: ["u1"],
+        });
+        expect(result).toMatchObject({ mode: "exact", paths: [], commits: [], upstreamCommits: ["u1"] });
+        expect(allInfos.filter((line) => line.includes("left out of the review"))).toEqual([
+          "auto-review: commit c2 left out of the review: the family ran no git that writes history, and no command or tool of theirs was running then",
+        ]);
       });
 
       it("keeps a commit authored while one of the thread's rows of any kind ran", async () => {

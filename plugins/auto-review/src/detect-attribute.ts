@@ -31,6 +31,8 @@ interface ClaimContext {
   commits: readonly CommitFacts[];
   /** Paths this thread's own `file-change` rows changed. */
   ownPaths: ReadonlySet<string>;
+  /** Paths a sibling thread changed through its own tools this turn; undefined when siblings were not read. */
+  siblingPaths: ReadonlySet<string> | undefined;
 }
 
 interface ClaimOutcome {
@@ -53,8 +55,11 @@ function examples(paths: readonly string[]): string {
  * Claims the turn's own changes. It is exact when everything the family ran
  * was read-only or named what it wrote, and a sweep otherwise or when the
  * evidence could not be read in full, the reason logged without any command's
- * arguments. A commit is dropped, and logged with its sha, only when nothing
- * the family did could have made it (see `strayCommitReason`).
+ * arguments. In exact mode a commit is dropped, and logged with its sha, only
+ * when nothing the family did could have made it (see `strayCommitReason`), and
+ * a path a sibling changed through its own tools is claimed only when the
+ * family's own file-change rows or targeted commands name it. A sweep keeps every
+ * commit, since an opaque script can make one that keeps an old author date.
  */
 export async function claimOwnChanges(context: ClaimContext): Promise<ClaimOutcome> {
   const { bb, startedAt, loose } = context;
@@ -81,22 +86,28 @@ export async function claimOwnChanges(context: ClaimContext): Promise<ClaimOutco
     family.opaque === undefined
       ? await resolveClaims(bb, context.environmentId, family, [...new Set([...loose, ...commitPaths])])
       : undefined;
-  const familyPaths = new Set([...context.ownPaths, ...kin.paths, ...(resolution?.claimed ?? [])]);
-  const commits = context.commits.filter((commit) => {
-    const reason = strayCommitReason(commit, family, familyPaths);
-    if (reason !== null) {
-      bb.log.info(`auto-review: commit ${commit.sha} left out of the review: ${reason}`);
-    }
-    return reason === null;
-  });
   const reason =
     family.opaque === undefined
       ? resolution?.sweep
       : `${family.opaque} ran, and the files it writes cannot be listed`;
   if (reason !== undefined || resolution === undefined) {
-    return { ...sweep(reason ?? "the writes could not be resolved", kin), commits };
+    return sweep(reason ?? "the writes could not be resolved", kin);
   }
-  const claimed = new Set([...resolution.claimed, ...loose.filter((path) => kin.paths.has(path))]);
+  const familyPaths = new Set([...context.ownPaths, ...kin.paths, ...resolution.claimed]);
+  const commits = context.commits.filter((commit) => {
+    const stray = strayCommitReason(commit, family, familyPaths);
+    if (stray !== null) {
+      bb.log.info(`auto-review: commit ${commit.sha} left out of the review: ${stray}`);
+    }
+    return stray === null;
+  });
+  // A sibling's edit to a path is the sibling's unless the family's own rows or commands name the path too.
+  const named = new Set([...context.ownPaths, ...kin.paths, ...resolution.written]);
+  const claimed = new Set(
+    [...resolution.claimed, ...loose.filter((path) => kin.paths.has(path))].filter(
+      (path) => !context.siblingPaths?.has(path) || named.has(path),
+    ),
+  );
   const kept = new Set(commits.flatMap(({ paths }) => paths ?? []));
   const unclaimed = loose.filter((path) => !claimed.has(path) && !kept.has(path));
   if (unclaimed.length > 0) {
@@ -142,6 +153,7 @@ export async function claimedChanges(turn: TurnReading): Promise<TurnChanges> {
     loose: unattributed(tree.uncommittedPaths),
     commits: tree.commitChanges.filter(({ sha }) => !foreignShas.has(sha)),
     ownPaths: ownSet,
+    siblingPaths: sibling?.paths,
   });
   const keptPaths = [...new Set(outcome.commits.flatMap(({ paths }) => paths ?? []))];
   const result = {

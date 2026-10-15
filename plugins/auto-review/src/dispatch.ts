@@ -79,6 +79,8 @@ export interface DispatchInput {
   isWorktree: boolean;
   scope: string[];
   turn: TurnScope;
+  /** How many uncommitted changes nothing of the thread's family claimed, when there were any; recorded with the fire. */
+  unclaimedCount?: number;
 }
 
 function turnStartHeadIf(condition: boolean, state: ThreadState): string | null {
@@ -164,13 +166,14 @@ export async function dispatchReview(
   ctx: ReviewContext,
   input: DispatchInput,
 ): Promise<void> {
-  const { thread, state, environmentId, config, decision, base, isWorktree, scope, turn } = input;
+  const { thread, state, environmentId, config, decision, base, isWorktree, scope, turn, unclaimedCount } = input;
   const extra: FireExtra = {
     commit: decision.commit,
     merge: decision.merge,
     base,
     isWorktree,
     scopePaths: scope,
+    ...(unclaimedCount === undefined ? {} : { unclaimedCount }),
   };
   await withProviderLock(thread.providerId, async () => {
     if (await providerReviewInFlight(ctx, thread.providerId, thread.id)) {

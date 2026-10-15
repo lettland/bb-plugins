@@ -59,7 +59,10 @@ It ships enabled (opt-out).
   cannot say exactly which files a command wrote, so a turn is decided in one of two modes:
   - **Exact**: everything the family ran was read-only or named every file it writes. The
     turn's own changes are exactly the files its file-change rows record, the files its targeted
-    commands and tool rows name, and the commits it made. Any other change is `unclaimed`.
+    commands and tool rows name, and the commits it made. Any other change is `unclaimed`. A
+    path a sibling thread changed through its own tools stays the sibling's unless the family's own
+    file-change rows or targeted commands name it too; a tool row that only names it does not
+    take it.
   - **Sweep**: the family ran something whose writes cannot be listed, so every working-tree
     change that nothing else accounts for is the turn's, as it was before this rule existed, and
     the sibling rules below still apply. When the evidence cannot be read in full (this thread's
@@ -71,54 +74,99 @@ It ships enabled (opt-out).
   What the family ran is classified from the text of its commands, looking through `bash -c`,
   `env`, `timeout`, subshells, `$( )` and the other wrappers listed under the family side below:
   - **Inert**, claims nothing: `cd`, `pushd`, `popd`, `echo`, `printf`, `pwd`, `true`, `false`,
-    `test`, `[`, `sleep`, `which`, `command -v`, `type`, `export`, `set`, `date`; `cat`, `head`,
+    `test`, `[`, `sleep`, `which`, `command -v`, `type`, `export`, `set`, `date`, `read`; `cat`, `head`,
     `tail`, `less`, `wc`, `ls`, `grep`, `rg`, `cut`, `tr`, `sort`, `uniq`, `diff`, `jq`; `sed`
     without `-i` and without a `w`, `W` or `e` command; `awk` whose program has no `>`, `|` or
-    `system`; `find` without `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprint*` or `-fls`;
+    `system` and that is given no `-i…`, `-E`, `-f…` or their long forms; `find` without `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprint*` or `-fls`;
     read-only git (`log`, `show`, `diff`, `status`, `grep`, `blame`, `rev-parse`, `ls-files`,
     `fetch`, `branch` with no argument or with `--show-current`, `-a`, `-v`, `--list`,
     `config --get`, `stash list`, `remote -v`) and git that only touches the index, the history or
-    a remote (`add`, `commit`, `push`, `tag`, `reset` without `--hard`); `gh pr|issue|run
+    a remote (`add`, `commit`, `push`, `tag`, `reset` without `--hard`, `rm --cached`); `gh pr|issue|run
     view|list|diff|checks`; `bb status|guide`, `bb thread show|log|output|wait|list|tell`,
     `bb auto-review status|show`; `ripwire` in a read mode (`--for`, `--grep`, `--expand`,
     `--callers`, `--impact`, `--uses`, `--exemplar`, `--pack-task`, `--plan-lanes`, `--from-trace`,
-    `--quality-delta`); and check runs with no fix or update flag (`npm test`, `npm run lint`,
-    `npm run typecheck` and `test:*` variants, also through `pnpm`, `yarn` and `bun`;
-    `vitest`, `jest` (without `-u` or `--updateSnapshot`), `tsc --noEmit`, `go test`, `go vet`, `cargo test|check|clippy`, `pytest`, `eslint`,
-    `mypy`, `pyright`). Read tools given an option that writes (`sort -o`, `rg --pre`,
-    `git diff --output`) are not inert. So are the `cmd` of file-read and search rows, rows that
-    were denied or never approved (they never ran), comments, heredoc bodies no interpreter reads,
-    and a redirect into scratch space (`$TMPDIR`, `/tmp`, `/private/tmp`, `/dev`).
-  - **Targeted**, claims what it names: `>` and `>>` redirects, `tee`, `sed -i`, `perl -i`, `cp` and
-    `install` to a file, `mv` (both sides), `rm`, `rmdir`, `touch`, `mkdir`, `git rm`, `git mv`,
-    `git checkout -- <paths>`, `git restore <paths>`. A directory it names (or a glob it
-    contains) claims every changed path under it. A targeted command whose target is built from a
-    variable, a substitution or a brace, that names nothing, or that writes after a `cd` that did
-    not return to the checkout root, is opaque. `cp a.ts src/` is opaque too: a directory
-    destination hides the file names it writes.
+    `--quality-delta`); and check runs with no fix, update, output or report flag (`npm test`,
+    `npm run lint`, `npm run typecheck` and `test:*` variants, also through `pnpm`, `yarn` and
+    `bun`; `vitest`, `jest`, `tsc --noEmit`, `go test`, `go vet`, `cargo test|check|clippy`,
+    `pytest`, `eslint`, `mypy`, `pyright`). A check run is opaque when it is given `-u`, `-w`,
+    `--fix`, `--write`, any `--update*` (`--updateSnapshot`, `--update-snapshots`), a single-dash
+    `-update*` (`go test -update`), `--snapshot-update`, `--force-regen`, `-o`, any `--output*`
+    (`--outputFile`, `--output-file`), `--junit*`, any `--cov*` (`--coverage`), `--createstub`,
+    `-o` (except for `jest`, where it means only-changed, and `pytest`, an ini override), the
+    `go test` profile and output flags (`-coverprofile`, `-cpuprofile`, `-memprofile`, `-trace`,
+    `-outputdir`), `pytest --basetemp` and `--html`, or `tsc --noEmit false`; `npm run tsc` is opaque. Read tools given an option that writes
+    (`sort -o`, `rg --pre`, `git diff --output`) are not inert. So are the `cmd` of file-read and
+    search rows, rows that were denied or never approved (they never ran), comments, heredoc bodies
+    no interpreter reads, and a redirect into scratch space (`$TMPDIR`, `/tmp`, `/private/tmp`,
+    `/var/folders`, `/dev`), unless the checkout itself lies there: a write whose path is under the
+    checkout counts, and one through a variable sweeps.
+  - **Targeted**, claims what it names: `>` and `>>` redirects, `tee`, `sed -i`, `perl -i`, `cp`,
+    `install`, `mv`, `rm`, `rmdir`, `touch`, `mkdir`, `git rm`, `git mv`,
+    `git checkout -- <paths>`, `git restore <paths>`. What each claims:
+    - everything under a path (or under a directory a glob matches) only for `rm`, `rmdir`,
+      `git rm`, a `mv` or `git mv` source and a `git checkout --` or `git restore` path;
+    - `mkdir`, `touch`, `install -d`, `tee`, redirects and `sed -i` claim exactly the paths they
+      name;
+    - a `cp`, `install`, `mv` or `git mv` destination claims itself and `<dest>/<basename of each
+      source>` (the destination may be an existing directory), never the whole directory; `cp -r`
+      and `cp -a` claim what is beneath those too; `sed -i.bak`, `perl -pi.bak` and
+      `--in-place=.bak` also claim each `<file>.bak`; unless every `mv` source is itself a
+      changed file, what it moved is a directory, or something nothing of the turn's rows knew
+      (made by file-change rows or by commands, then moved), so the destination claims itself and
+      everything beneath it, and the moved files are kept;
+    - `git rm --cached` only changes the index and claims nothing.
+
+    A targeted command whose target is built from a variable, a substitution or a brace, that
+    names nothing, that uses `-t` or `--target-directory`, or that writes after a `cd` that did not
+    return to the checkout root, is opaque. A thread's shell keeps its directory from one row to
+    the next (and across turns), as Claude Code's does, so a `cd` in an earlier row counts for the
+    rows after it (a `cd` in a subshell, a `-c` string or a denied row does not). Each thread has
+    its own shell, and so does a delegation. Where a relative path's directory is a guess, because a
+    row records no `cwd` and no `cd` was seen, or its absolute `cwd` is not under the checkout
+    (`/var` for `/private/var` is read as the same place), the command claims every changed path
+    that equals the path or ends in `/<path>`, and with what is beneath it for a command that
+    claims directories. A write is never dropped silently. A `cd` from before the lookback
+    window (30 minutes) is not carried, so the write is a guess again. In Claude Code, a `cd`
+    into a subdirectory makes later relative writes sweep for the lookback window, because its
+    shell keeps the directory and the rows record none.
   - **Opaque**, forces a sweep: interpreters and script runs (`node`, `python`, `perl -e`, `bash x.sh`,
-    `make`), package scripts other than check runs (`npm run build`, `npm install`), formatters
+    `make`), `perl -i` given a script file instead of `-e` code, a `-M` module, or code that calls
+    `system`, `exec`, `open`, `unlink`, `rename`, `mkdir`, `rmdir`, `truncate`, `symlink`, `link` or
+    `chmod`, package scripts other than check runs (`npm run build`, `npm install`), formatters
     and fixers, `ripwire` outside its read modes (`--replace-symbol-body`, `--html`, …), text cut
-    at the lexer limit, a heredoc with no terminator, and any command not listed above, such as
-    `bb aislop scan` or `gh pr create`. The log names only the basename of the first
+    at the lexer limit, a heredoc with no terminator, process substitution (`<(…)`), a delegation
+    row that shows nothing of what its subagent ran (no nested work rows and no readable child
+    thread; the row is given a window like any opaque one), and any command not listed above,
+    such as `bb aislop scan` or `gh pr create`. The log names only the basename of the first
     one's program, never an argument or an environment prefix.
-  - **Tool rows**: a tool on the read-only list (`devkit_*`, `advisor_review`,
-    `agent_checklist_*`, `progressive_skill_*`, `ToolSearch`, `Skill`, `Read`, `fetch`,
-    `WebSearch`, `WebFetch`, and the bookkeeping tools `TodoWrite`, `Task*`, `SendMessage`,
-    `ListAgents`, `Cron*`, `PushNotification`) claims nothing; `Monitor` runs commands and is not
-    on it. Any other tool claims the changed paths its argument strings name exactly (or as the
-    end of an absolute path) and has every string with whitespace classified as shell as above.
-    It is opaque when it has no argument string, and the turn is a sweep, naming the tool, when it
-    names no changed path and none of its strings was read as a shell command (an
-    `edit_symbol {symbol: "Foo.bar"}` may have written anything). Work rows of other kinds (web
-    search and fetch, images viewed, plan steps, questions) are inert; image generation,
-    extensions and workflows are opaque.
+  - **Tool rows**: a tool on the read-only list claims nothing. That list is closed: `Read`,
+    `fetch`, `Grep`, `Glob`, `ToolSearch`, `Skill`, `WebSearch`, `WebFetch`, the bookkeeping
+    tools `TodoWrite`, `Task*`, `SendMessage`, `ListAgents`, `Cron*`, `PushNotification`, the
+    read-only Chrome tools, and these bridge tools by exact name, bare or as `mcp__bb-bridge__<name>`:
+    `advisor_review`, `devkit_find_skills`, `devkit_load_skill`, `devkit_docs`,
+    `agent_checklist_get`, `agent_checklist_update`, `progressive_skill_list`,
+    `progressive_skill_used`, `runtime_search`, `runtime_thread`, `runtime_skill_resource`
+    (and their `platform_*` aliases), `ReportReview`, `PresentPlan`,
+    `update_environment_directory`, `bb_keep_checkout`. The tools that run commands or git
+    (`runtime_container`, `runtime_git`, `runtime_ops`) and `Monitor` are not on it. Any other
+    tool claims the changed paths its argument strings name exactly (or as the end of an absolute
+    path), and a string it is given as a `command`, `cmd`, `script` or `code` field (an array of words is
+    joined into one line) is classified as shell as above. Any other string with whitespace is
+    prose or content, unless it opens with a program that is opaque by name (a package manager
+    not running a check, `npx`, `node`, `python`, `make`, a shell, a formatter or other rewriter), which
+    makes the tool opaque; so does file content that happens to open that way. It is opaque when it has no argument string,
+    and the turn is a sweep, naming the tool, when it names no changed path and has no command
+    field read as shell (an `edit_symbol {symbol: "Foo.bar"}` or a prompt "fix the imports" may
+    have written anything). Work rows of other kinds (web search and fetch, images viewed, plan
+    steps, questions) are inert; image generation, extensions and workflows are opaque.
   - **Open rows from before the turn**: an opaque row that began before the turn and was still
     pending or unended at its idle (a background `npm run dev`) does not force a sweep. It is
     logged, and writes it makes are not claimed in exact mode.
 
-  Commits, in both modes and after the sibling and upstream filtering below, are the thread's
-  when any of these holds; a commit none of them holds for is left out and logged with its sha:
+  Commits, in a sweep, are all kept after the sibling and upstream filtering below, whatever
+  their author date: an opaque script can `cherry-pick` or `commit -C` and keep an old one. In exact
+  mode, after that filtering, a commit is the thread's when any of these holds; a commit none of
+  them holds for is left out and logged with its sha:
   the family ran git that writes history during the turn, read through wrappers (`commit`,
   `merge`, `revert`, `pull`, `rebase`, `cherry-pick`, `am`, `stash pop|apply`, `filter-branch`,
   `reset`); it was authored while an opaque command or a tool of the family ran; its author date
@@ -128,12 +176,15 @@ It ships enabled (opt-out).
   command) an outside edit made during that turn is swept into the review, since the code cannot
   tell it apart. A test, lint or typecheck run counts as read-only, so "run the tests and tell me"
   while you edit in your IDE fires nothing; the miss this accepts is a file such a run writes on
-  its own (a snapshot). Writes a background process makes after the turn started are not
-  claimed in exact mode. A hook that rewrites files when `git commit` runs is not seen.
+  its own (a snapshot), such as `cargo test` or `cargo check` rewriting `Cargo.lock`, and a
+  `lint` or `test` package script that itself runs a fixer (the script's name says it only
+  checks). Writes a background process makes after the turn started are not claimed in exact
+  mode. A hook that rewrites files when `git commit` runs is not seen.
 
   When changes exist and none were claimed, the turn stands down with the reason
   `unclaimed-changes` (`no-authorship` still means nothing changed), and `bb auto-review status`
-  shows how many in `lastFire`, as a count; the log lists at most five example paths.
+  shows how many in `lastFire`, as a count; the log lists at most five example paths. A review
+  that fires with some changes left unclaimed records the count in `lastFire` as well.
 - Attributes work to the turn from the thread's own file-change rows plus a working-tree
   snapshot taken at turn start, so shell edits, generators and commits made during the
   turn all count in a sweep. Files another thread changed, files already dirty and left untouched,

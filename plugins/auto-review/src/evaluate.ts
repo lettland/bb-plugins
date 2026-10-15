@@ -301,6 +301,7 @@ export async function evaluate(
     decision,
     base,
     ...reviewed,
+    ...(reviewed.turn.unclaimed.length === 0 ? {} : { unclaimedCount: reviewed.turn.unclaimed.length }),
   });
 }
 

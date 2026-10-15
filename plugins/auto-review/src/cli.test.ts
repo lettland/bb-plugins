@@ -868,6 +868,18 @@ describe("auto-review cli: status", () => {
     });
   });
 
+  it("shows the unclaimed count of a review that fired with changes the family did not make", async () => {
+    await withHost({}, async (host) => {
+      const stored = lastFire({ outcome: "fired", reason: "fired", scopePaths: ["src/a.ts"], unclaimedCount: 2 });
+      expect(lastFireSchema.safeParse(stored).success).toBe(true);
+      await host.kv.set(`lastfire:${PROJECT_ID}:${THREAD_ID}`, stored);
+      const text = await host.run(["status", THREAD_ID]);
+      expect(text.stdout).toContain("lastFire: fired (fired) at 2026-01-02T03:04:05.000Z, 2 change(s) not made by this thread's family\n");
+      const payload = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(payload.stdout)).toMatchObject({ lastFire: { outcome: "fired", unclaimedCount: 2 } });
+    });
+  });
+
   it("explains how long a deferred turn has waited", async () => {
     await withHost({}, async (host) => {
       const deferredSince = Date.now() - 7 * 60_000 - 5_000;

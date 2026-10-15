@@ -5,12 +5,13 @@
  * not on one is opaque, which only sweeps the turn.
  */
 
-import { awkReadsOnly, perlCodeIsPure, sedScriptIsPure, sedScripts } from "./detect-claim-scripts.js";
+import {
+  awkReadsOnly, bbReads, flagsOf, ghReads, inPlaceSuffix, isCheckRun, perlCodeIsPure, ripwireReads, sedScriptIsPure, sedScripts,
+} from "./detect-claim-scripts.js";
 import { commandStart, gitCommand, lexText } from "./detect-mentions.js";
 import type { Command, Word } from "./detect-mentions.js";
-import { hasFixerFlag, PACKAGE_MANAGERS, positional, rewritesTree, shellScript } from "./detect-rewriters.js";
+import { PACKAGE_MANAGERS, positional, rewritesTree, shellScript } from "./detect-rewriters.js";
 import { DIRECTORY_CHANGERS, gitTargets, inPlaceTargets, PERL_IN_PLACE, plain, SED_IN_PLACE } from "./detect-sibling-writes.js";
-import { packageWords } from "./detect-packages.js";
 import { unwrap } from "./detect-wrappers.js";
 import type { Parsed } from "./detect-wrappers.js";
 
@@ -24,34 +25,65 @@ export interface DirectoryStep {
   name: string;
   /** Where it went, as written; undefined for a bare `cd`. */
   target: string | undefined;
+  /** It moved the shell itself, not a subshell or a `-c` string, so the shell's next command starts there. */
+  lasting: boolean;
+}
+
+/** The paths a command writes, as it names them. */
+interface Names {
+  /** Each is claimed as the path itself: what the command names, and where a directory destination puts each source (`<dest>/<basename>`). */
+  tokens: string[];
+  /** The tokens that are claimed with everything beneath them: what `rm` removes, a `mv` source, a `git checkout --` path. */
+  trees: string[];
+  /** A move: unless every tree is a changed file itself, what it moved is a directory and its files are at the destination, so every token is a tree. */
+  moves: boolean;
 }
 
 /** What one command writes by name, and the directory changes the text made before it. */
-export interface NamedWrite {
-  tokens: string[];
+export interface NamedWrite extends Names {
   steps: DirectoryStep[];
 }
 
 /** What a shell text writes. */
 export interface TextClaims {
   writes: NamedWrite[];
+  /** What it writes to scratch space (`/tmp`, `/dev`, `$TMPDIR`), which is not the checkout unless the checkout lies there. */
+  scratch: NamedWrite[];
   /** The program (its basename, never an argument) of the first command whose writes cannot be listed; undefined when there is none. */
   opaque: string | undefined;
   /** The text runs git that writes history. */
   history: boolean;
+  /** The directory changes that moved the shell itself, which the next command row starts after. */
+  left: DirectoryStep[];
 }
 
-type Verdict = { kind: "inert" } | { kind: "opaque" } | { kind: "write"; tokens: string[] };
+type Verdict = { kind: "inert" } | { kind: "opaque" } | ({ kind: "write" } & Names);
 
 const INERT: Verdict = { kind: "inert" };
 const OPAQUE: Verdict = { kind: "opaque" };
 
 /** A command that writes the files it names; one that names none writes files nobody can list. */
-const writes = (tokens: readonly string[]): Verdict => (tokens.length === 0 ? OPAQUE : { kind: "write", tokens: [...tokens] });
+const writes = (tokens: readonly string[], trees: readonly string[] = [], moves = false): Verdict =>
+  tokens.length === 0 ? OPAQUE : { kind: "write", tokens: [...tokens], trees: [...trees], moves };
+
+/** A path without its trailing slashes. */
+function trimSlashes(token: string): string {
+  let end = token.length;
+  while (end > 0 && token[end - 1] === "/") {
+    end -= 1;
+  }
+  return token.slice(0, end);
+}
+
+/** The last segment of a path, or undefined when it has none (`.`, `..`, `/`). */
+function baseName(token: string): string | undefined {
+  const name = trimSlashes(token).split("/").pop();
+  return name === undefined || name === "" || name === "." || name === ".." ? undefined : name;
+}
 
 /** Builtins and shell syntax words that write nothing; the commands inside a loop or a condition are read on their own. */
 const INERT_WORDS: ReadonlySet<string> = new Set([
-  "echo", "printf", "pwd", "true", "false", "test", "[", "[[", "sleep", "which", "type", "export", "set", "date",
+  "echo", "printf", "pwd", "true", "false", "test", "[", "[[", "sleep", "which", "type", "export", "set", "date", "read",
   "for", "case", "select", "in", "fi", "done", "esac", "}",
 ]);
 const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
@@ -66,23 +98,10 @@ const HISTORY_GIT: ReadonlySet<string> = new Set([
 const BRANCH_READS: ReadonlySet<string> = new Set(["--show-current", "-a", "-v", "-vv", "-r", "--list"]);
 const CONFIG_READS: ReadonlySet<string> = new Set(["--get", "--get-all", "--get-regexp", "--list", "-l"]);
 const WRITERS: ReadonlySet<string> = new Set(["tee", "rm", "rmdir", "touch", "mkdir", "mv", "cp", "install"]);
-const GH_READS: ReadonlySet<string> = new Set(["view", "list", "diff", "checks"]);
-const GH_TOPICS: ReadonlySet<string> = new Set(["pr", "issue", "run"]);
-const BB_READS: Readonly<Record<string, ReadonlySet<string>>> = {
-  thread: new Set(["show", "log", "output", "wait", "list", "tell"]),
-  "auto-review": new Set(["status", "show"]),
-};
-const BB_TOP_LEVEL: ReadonlySet<string> = new Set(["status", "guide"]);
-const RIPWIRE_READS: ReadonlySet<string> = new Set([
-  "for", "grep", "expand", "callers", "impact", "uses", "exemplar", "pack-task", "plan-lanes", "from-trace", "quality-delta",
-]);
-/** Options that shape what a ripwire read prints. */
-const RIPWIRE_SHAPES: ReadonlySet<string> = new Set(["task", "json", "top-k", "max-tokens", "token-budget", "pack-top-n", "format"]);
-const CHECK_SCRIPTS: ReadonlySet<string> = new Set(["test", "t", "tst", "lint", "typecheck", "type-check", "tsc"]);
 const FIND_WRITING: ReadonlySet<string> = new Set(["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fls"]);
 
 /** Where a write is not the checkout's: `/tmp`, `/dev` and the macOS temporary directories, or `$TMPDIR`. */
-function isScratch(token: string): boolean {
+export function isScratch(token: string): boolean {
   return (
     /^(?:\/private)?\/(?:tmp|var\/folders)(?:\/|$)/u.test(token) ||
     token.startsWith("/dev/") ||
@@ -91,11 +110,7 @@ function isScratch(token: string): boolean {
 }
 
 /** A write target no one can resolve: built from a variable, a substitution or a brace, or the home directory. */
-const isUnresolved = (token: string) => /[$`{}]|^~/u.test(token);
-
-function flagsOf(args: readonly Word[]): string[] {
-  return args.map(({ text }) => text);
-}
+export const isUnresolved = (token: string) => /[$`{}]|^~/u.test(token);
 
 /** A tool that only reads, unless a flag makes it write a file or a second file operand names one. */
 function readsOnly({ name, args }: Parsed): boolean {
@@ -110,59 +125,6 @@ function readsOnly({ name, args }: Parsed): boolean {
     default:
       return true;
   }
-}
-
-/** A test, lint or typecheck run that is given no flag that makes it rewrite files. */
-function isCheckRun(parsed: Parsed): boolean {
-  const { name, args } = parsed;
-  if (hasFixerFlag(parsed)) {
-    return false;
-  }
-  const first = positional(args)[0];
-  switch (name) {
-    case "vitest":
-    case "jest":
-    case "pytest":
-    case "py.test":
-    case "eslint":
-    case "mypy":
-    case "pyright":
-      return true;
-    case "tsc":
-      return flagsOf(args).some((flag) => flag.toLowerCase() === "--noemit");
-    case "go":
-      return first === "test" || first === "vet";
-    case "cargo":
-      return first === "test" || first === "check" || first === "clippy" || first === "nextest";
-    default:
-      return PACKAGE_MANAGERS.has(name) && isPackageCheck(name, args);
-  }
-}
-
-/** `npm test`, `pnpm lint`, `yarn run typecheck`, `npm run test:unit`: a package script that tests, lints or typechecks. */
-function isPackageCheck(name: string, args: readonly Word[]): boolean {
-  const words = packageWords(name, args);
-  const script = words[0] === "run" || words[0] === "run-script" ? words[1] : words[0];
-  return script !== undefined && CHECK_SCRIPTS.has(script.split(":")[0] ?? "");
-}
-
-function ripwireVerdict({ args }: Parsed): Verdict {
-  const flags = flagsOf(args).filter((flag) => flag.startsWith("-"));
-  const named = flags.map((flag) => flag.replace(/^--/u, "").split("=")[0] ?? "");
-  const reads = flags.some((flag, at) => flag.startsWith("--") && RIPWIRE_READS.has(named[at] ?? ""));
-  const known = flags.every((flag, at) => flag.startsWith("--") && (RIPWIRE_READS.has(named[at] ?? "") || RIPWIRE_SHAPES.has(named[at] ?? "")));
-  return reads && known ? INERT : OPAQUE;
-}
-
-function ghVerdict({ args }: Parsed): Verdict {
-  const [topic, action] = positional(args);
-  return GH_TOPICS.has(topic ?? "") && GH_READS.has(action ?? "") ? INERT : OPAQUE;
-}
-
-function bbVerdict({ args }: Parsed): Verdict {
-  const [topic, action] = positional(args);
-  const reads = BB_READS[topic ?? ""];
-  return BB_TOP_LEVEL.has(topic ?? "") || (reads !== undefined && reads.has(action ?? "")) ? INERT : OPAQUE;
 }
 
 /** Whether `git <sub> <flags>` only reads, or changes the index, the history or a remote. */
@@ -182,7 +144,7 @@ function gitLeavesTree(sub: string, flags: readonly string[]): boolean {
   }
 }
 
-/** `git`: reads, index and history changes are inert; `rm`, `mv`, `checkout --` and `restore` write the paths they name; the rest is opaque. */
+/** `git`: reads, index and history changes are inert; `rm` (not `--cached`), `mv`, `checkout --` and `restore` write the paths they name; the rest is opaque. */
 function gitVerdict({ args }: Parsed): Verdict {
   const git = gitCommand(args);
   if (git === null) {
@@ -190,9 +152,17 @@ function gitVerdict({ args }: Parsed): Verdict {
   }
   const { sub, rest, relocated } = git;
   if (sub === "rm" || sub === "mv" || sub === "checkout" || sub === "restore") {
-    return relocated ? OPAQUE : writes(sub === "rm" || sub === "mv" ? plain(rest) : gitTargets(args));
+    return relocated ? OPAQUE : gitWrites(sub, rest, args);
   }
   return gitLeavesTree(sub, flagsOf(rest)) ? INERT : OPAQUE;
+}
+
+function gitWrites(sub: string, rest: readonly Word[], args: readonly Word[]): Verdict {
+  if (sub === "mv") {
+    return movedVerdict(plain(rest), flagsOf(rest));
+  }
+  const paths = sub === "rm" ? plain(rest) : gitTargets(args);
+  return sub === "rm" && flagsOf(rest).includes("--cached") ? INERT : writes(paths, paths);
 }
 
 /** Whether a command is git that writes history: commit, merge, revert, pull, rebase, cherry-pick, am, filter-branch, reset, or stash pop or apply. */
@@ -205,33 +175,74 @@ function writesHistory({ name, args }: Parsed): boolean {
   return HISTORY_GIT.has(git.sub) || (git.sub === "stash" && (action === "pop" || action === "apply"));
 }
 
-/** The files `cp`, `install` and `mv` write when they name them: a directory destination, which hides the file names, is opaque. */
-function copyTokens(name: string, args: readonly Word[]): string[] {
-  const files = plain(args);
-  if (name === "mv" || (name === "install" && flagsOf(args).includes("-d"))) {
-    return files;
+/** `-t dir` and `--target-directory` name the destination first, which the plain arguments cannot tell apart. */
+const targetsDirectory = (flags: readonly string[]) => flags.some((flag) => /^-[A-Za-z]*t|^--target-directory/u.test(flag));
+
+/** The destination of a copy or move, and where it puts each source if it is a directory: `<dest>/<basename>`. Null when the arguments do not say. */
+function destinationOf(files: readonly string[], flags: readonly string[]): { dest: string; into: string[]; sources: string[] } | null {
+  const dest = trimSlashes(files.at(-1) ?? "");
+  if (targetsDirectory(flags) || files.length < 2 || dest === "") {
+    return null;
   }
-  const toDirectory = flagsOf(args).some((flag) => /^-[A-Za-z]*t|^--target-directory/u.test(flag));
-  const last = files.at(-1) ?? "";
-  return toDirectory || files.length !== 2 || last.endsWith("/") ? [] : [last];
+  const sources = files.slice(0, -1);
+  return { dest, sources, into: sources.flatMap((source) => baseName(source) ?? []).map((name) => `${dest}/${name}`) };
 }
 
-function writerVerdict({ name, args }: Parsed): Verdict {
-  return writes(name === "cp" || name === "install" || name === "mv" ? copyTokens(name, args) : plain(args));
+/** `mv`: each source is gone, with what is beneath it, and the destination holds it, as itself or as a directory of its sources. */
+function movedVerdict(files: readonly string[], flags: readonly string[]): Verdict {
+  const to = destinationOf(files, flags);
+  return to === null ? OPAQUE : writes([...to.sources, to.dest, ...to.into], to.sources, true);
 }
+
+/** `cp` and `install`: the destination and, if it is a directory, each source inside it; with `-r` all of it, with what is beneath. `install -d` makes the directories it names. */
+function copiedVerdict(name: string, args: readonly Word[]): Verdict {
+  const files = plain(args);
+  const flags = flagsOf(args);
+  if (name === "install" && flags.includes("-d")) {
+    return writes(files);
+  }
+  const to = destinationOf(files, flags);
+  if (to === null) {
+    return OPAQUE;
+  }
+  const tokens = [to.dest, ...to.into];
+  return writes(tokens, flags.some((flag) => /^-[A-Za-z]*[rRa]|^--(?:recursive|archive)$/u.test(flag)) ? tokens : []);
+}
+
+/** `rm` and `rmdir` remove what they name and what is beneath it; `mv`, `cp` and `install` as above; `tee`, `touch` and `mkdir` write exactly the paths they name. */
+function writerVerdict({ name, args }: Parsed): Verdict {
+  switch (name) {
+    case "rm":
+    case "rmdir":
+      return writes(plain(args), plain(args));
+    case "mv":
+      return movedVerdict(plain(args), flagsOf(args));
+    case "cp":
+    case "install":
+      return copiedVerdict(name, args);
+    default:
+      return writes(plain(args));
+  }
+}
+
+/** The files an in-place edit writes, and with a backup suffix (`-i.bak`) the backup of each. */
+const withBackups = (files: readonly string[], suffix: string): string[] => [...files, ...(suffix === "" ? [] : files.map((file) => `${file}${suffix}`))];
 
 /** `sed` and `perl`: in place they write the files they edit; otherwise `sed` only reads, if its script writes nothing, and `perl` runs code. */
 function inPlaceVerdict({ name, args }: Parsed): Verdict {
   const inPlace = args.some(({ text }) => (name === "sed" ? SED_IN_PLACE : PERL_IN_PLACE).test(text));
   if (name === "perl") {
-    return writes(inPlace && perlCodeIsPure(args) ? inPlaceTargets(name, args) : []);
+    return writes(inPlace && perlCodeIsPure(args) ? withBackups(inPlaceTargets(name, args), inPlaceSuffix(name, args)) : []);
   }
   const scripts = sedScripts(args);
   if (scripts === null || !scripts.every((script) => sedScriptIsPure(script, inPlace))) {
     return OPAQUE;
   }
-  return inPlace ? writes(inPlaceTargets(name, args)) : INERT;
+  return inPlace ? writes(withBackups(inPlaceTargets(name, args), inPlaceSuffix(name, args))) : INERT;
 }
+
+/** The programs that are inert only in a read mode, and what says whether a run is one. */
+const READ_MODES: Readonly<Record<string, (parsed: Parsed) => boolean>> = { gh: ghReads, bb: bbReads, ripwire: ripwireReads };
 
 function classify(parsed: Parsed): Verdict {
   const { name, args } = parsed;
@@ -254,14 +265,8 @@ function classify(parsed: Parsed): Verdict {
       return flagsOf(args).some((flag) => FIND_WRITING.has(flag) || flag.startsWith("-fprint")) ? OPAQUE : INERT;
     case "git":
       return gitVerdict(parsed);
-    case "gh":
-      return ghVerdict(parsed);
-    case "bb":
-      return bbVerdict(parsed);
-    case "ripwire":
-      return ripwireVerdict(parsed);
     default:
-      return isCheckRun(parsed) ? INERT : OPAQUE;
+      return (READ_MODES[name] ?? isCheckRun)(parsed) ? INERT : OPAQUE;
   }
 }
 
@@ -275,13 +280,27 @@ const markOpaque = (reading: Reading, program: string) => {
   reading.claims.opaque ??= program;
 };
 
-/** Records the write targets of a command; a target built from a variable or a substitution makes the command opaque, and scratch space is skipped. */
-function addWrite(reading: Reading, tokens: readonly string[], program: string): void {
-  const checkout = tokens.filter((token) => !isScratch(token));
+const redirected = (redirects: readonly string[]): Names => ({ tokens: [...redirects], trees: [], moves: false });
+
+/** Records the write targets of a command; a target built from a variable or a substitution makes the command opaque, and scratch space is kept apart, since the checkout may lie there. */
+function addWrite(reading: Reading, names: Names, program: string): void {
+  const checkout = names.tokens.filter((token) => !isScratch(token));
   if (checkout.some(isUnresolved)) {
     markOpaque(reading, program);
-  } else if (checkout.length > 0) {
-    reading.claims.writes.push({ tokens: checkout, steps: [...reading.steps] });
+    return;
+  }
+  const part = (tokens: readonly string[]): NamedWrite => ({
+    tokens: [...tokens],
+    trees: names.trees.filter((tree) => tokens.includes(tree)),
+    moves: names.moves,
+    steps: [...reading.steps],
+  });
+  if (checkout.length > 0) {
+    reading.claims.writes.push(part(checkout));
+  }
+  const scratch = names.tokens.filter(isScratch);
+  if (scratch.length > 0) {
+    reading.claims.scratch.push(part(scratch));
   }
 }
 
@@ -291,8 +310,16 @@ function isLookup(words: readonly Word[]): boolean {
   return head[0]?.text === "command" && /^-[vV]$/u.test(head[1]?.text ?? "");
 }
 
+/** A process substitution, `<(…)` or `>(…)`: the lexer reads what follows its `)` as a command of its own, so a file argument would be taken for a program and logged as one. */
+const PROCESS_SUBSTITUTION = /[<>]\(/u;
+
 /** A word that runs a command inside it: a backtick or a `$(` the lexer left in a quoted word. */
 const runsSubstitution = ({ text }: Word) => text.includes("`") || text.includes("$(");
+
+/** Notes a `cd`, `pushd` or `popd`; it moved the shell itself only outside a subshell and a `-c` string. */
+function noteDirectoryChange(reading: Reading, { name, args }: Parsed, command: Command, depth: number): void {
+  reading.steps.push({ name, target: plain(args)[0], lasting: depth === 0 && command.depth === 0 });
+}
 
 function readCommand(command: Command, reading: Reading, depth: number): void {
   const redirects = command.redirects.map(({ text }) => text);
@@ -302,7 +329,7 @@ function readCommand(command: Command, reading: Reading, depth: number): void {
     return;
   }
   if (inner === null) {
-    addWrite(reading, redirects, "(redirect)");
+    addWrite(reading, redirected(redirects), "(redirect)");
     return;
   }
   const { parsed } = inner;
@@ -310,22 +337,23 @@ function readCommand(command: Command, reading: Reading, depth: number): void {
     reading.claims.history = true;
   }
   if (DIRECTORY_CHANGERS.has(parsed.name)) {
-    reading.steps.push({ name: parsed.name, target: plain(parsed.args)[0] });
-    addWrite(reading, redirects, parsed.name);
+    noteDirectoryChange(reading, parsed, command, depth);
+    addWrite(reading, redirected(redirects), parsed.name);
     return;
   }
   const rewrites = rewritesTree(parsed);
   const script = rewrites ? null : shellScript(parsed);
   if (script !== null && depth < MAX_SHELL_DEPTH) {
     readText(script, reading, depth + 1);
-    addWrite(reading, redirects, parsed.name);
+    addWrite(reading, redirected(redirects), parsed.name);
     return;
   }
   const verdict = isLookup(command.words) ? INERT : rewrites || script !== null ? OPAQUE : classify(parsed);
   if (verdict.kind === "opaque") {
     markOpaque(reading, parsed.name);
   } else {
-    addWrite(reading, [...redirects, ...(verdict.kind === "write" ? verdict.tokens : [])], parsed.name);
+    const names = verdict.kind === "write" ? verdict : redirected([]);
+    addWrite(reading, { ...names, tokens: [...redirects, ...names.tokens] }, parsed.name);
   }
 }
 
@@ -333,6 +361,9 @@ function readText(text: string, reading: Reading, depth: number): void {
   if (text.length > CLAIM_TEXT_LIMIT) {
     markOpaque(reading, "(text over the limit)");
     return;
+  }
+  if (PROCESS_SUBSTITUTION.test(text)) {
+    markOpaque(reading, "(process substitution)");
   }
   const lexed = lexText(text, CLAIM_TEXT_LIMIT);
   if (lexed.unterminated) {
@@ -343,16 +374,39 @@ function readText(text: string, reading: Reading, depth: number): void {
   }
 }
 
+/** Programs that run code or other programs, whose first word marks a string as a command that cannot be listed. */
+const OPAQUE_PROGRAMS: ReadonlySet<string> = new Set([
+  "npx", "pnpx", "bunx", "node", "deno", "tsx", "ts-node", "ruby", "perl", "php", "make", "cmake", "bash", "sh", "zsh", "dash", "ksh",
+  "go", "cargo", "gradle", "mvn", "docker", "ripwire",
+]);
+
+/**
+ * For a string that is not a shell field of a tool's arguments: the program of
+ * its command when it starts with one that is opaque by name (a package
+ * manager that is not running a check, an interpreter, `make`, a rewriter), and
+ * undefined for any other word, so prose and file content do not read as one.
+ */
+export function opaqueProgram(text: string): string | undefined {
+  const first = lexText(text, CLAIM_TEXT_LIMIT).commands[0];
+  const parsed = first === undefined ? undefined : unwrap(first.words)?.parsed;
+  const word = first?.words[commandStart(first.words)]?.text ?? "";
+  // A path (`src/a.ts is broken`) is not a program: only a bare name counts, also as an `npx` wrapper's.
+  const named = [word, parsed?.name ?? ""].some(
+    (name) => PACKAGE_MANAGERS.has(name) || OPAQUE_PROGRAMS.has(name) || /^python[\d.]*$/u.test(name),
+  );
+  return named || (parsed !== undefined && !parsed.word.includes("/") && rewritesTree(parsed)) ? classifyText(text).opaque : undefined;
+}
+
 /**
  * What a shell text writes: the files its targeted commands name (redirects,
- * `tee`, `sed -i`, `perl -i`, `cp` and `install` to a file, `mv`, `rm`,
- * `touch`, `mkdir`, `git rm`, `git mv`, `git checkout --`, `git restore`), and
+ * `tee`, `sed -i`, `perl -i`, `cp`, `install`, `mv`, `rm`, `rmdir`, `touch`,
+ * `mkdir`, `git rm`, `git mv`, `git checkout --`, `git restore`), and
  * the program of the first command whose writes cannot be listed. Commands
  * inside `bash -c`, `eval`, subshells and `$( )` are read too, and so are the
  * wrappers in front of a command.
  */
 export function classifyText(text: string): TextClaims {
-  const reading: Reading = { claims: { writes: [], opaque: undefined, history: false }, steps: [] };
+  const reading: Reading = { claims: { writes: [], scratch: [], opaque: undefined, history: false, left: [] }, steps: [] };
   readText(text, reading, 0);
-  return reading.claims;
+  return { ...reading.claims, left: reading.steps.filter(({ lasting }) => lasting) };
 }

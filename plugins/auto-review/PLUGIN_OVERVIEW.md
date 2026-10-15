@@ -13,7 +13,11 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   exact mode, when everything the family ran was read-only or named every file it wrote, only
   the files it named count and the rest stands down as `unclaimed-changes`; when it ran
   something whose writes cannot be listed (a build, codegen, a script, an unknown command) the
-  turn is a sweep, as described next. See the README for the classes and the commit rule.
+  turn is a sweep, as described next. A sweep keeps every commit that is not a sibling's or
+  the remote base's; only exact mode drops one nothing of the family could have made. A
+  thread's shell keeps its directory between rows, and a relative path whose directory is a
+  guess claims every changed path that ends in it. See the README for the classes and the
+  commit rule.
 - Attributes work to the turn however it was made: the thread's own `file-change` rows
   after the turn's start cursor, plus whatever the working tree shows changed since the
   turn started (a fingerprint per uncommitted path and the commits ahead of the base,

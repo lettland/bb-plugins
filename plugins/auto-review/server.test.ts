@@ -880,6 +880,32 @@ describe("auto-review plugin", () => {
     return JSON.parse(status.stdout).lastFire;
   }
 
+  it("records how many changes the thread's family did not make when it fires anyway", async () => {
+    const host = createHost({ workingTreeFiles: [] });
+    await plugin(host.bb);
+    await emitActive(host);
+    host.setWorkingTree([
+      { path: "src/a.ts", status: "??", content: "a" },
+      { path: "ide/edit.ts", status: "??", content: "x" },
+      { path: "ide/other.ts", status: "??", content: "y" },
+    ]);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({ outcome: "fired", reason: "fired", scopePaths: ["src/a.ts"], unclaimedCount: 2 });
+    await host.harness.dispose();
+  });
+
+  it("records no unclaimed count when it fires with every change claimed", async () => {
+    const host = createHost({ workingTreeFiles: [] });
+    await plugin(host.bb);
+    await emitActive(host);
+    host.setWorkingTree([{ path: "src/a.ts", status: "??", content: "a" }]);
+    await emitIdle(host);
+    expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
+    expect(await lastFire(host)).not.toHaveProperty("unclaimedCount");
+    await host.harness.dispose();
+  });
+
   it("reviews a file a shell command created, though no timeline row records it", async () => {
     const host = createHost({ authoredRows: [shellRow()], workingTreeFiles: [] });
     await plugin(host.bb);

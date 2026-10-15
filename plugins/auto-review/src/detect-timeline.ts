@@ -349,8 +349,8 @@ export interface KinEvidence {
   windows: TimeWindow[];
   /** The text of the rows that overlapped the turn, as the family side reads them. */
   texts: RowText[];
-  /** The rows of those threads back to the lookback, for the claim side to classify. */
-  rows: TimelineRow[];
+  /** The rows of each of those threads back to the lookback, for the claim side to classify; a thread's shell keeps its directory across its own rows only. */
+  threads: TimelineRow[][];
   /** False when a thread could not be read in full; nothing it did can be ruled out. */
   complete: boolean;
 }
@@ -373,7 +373,7 @@ export async function kinEvidence(
       own.has(entry.id) &&
       (entry.status !== "idle" || entry.updatedAt >= startedAt),
   );
-  const evidence: KinEvidence = { paths: new Set(), windows: [], texts: [], rows: [], complete: true };
+  const evidence: KinEvidence = { paths: new Set(), windows: [], texts: [], threads: [], complete: true };
   for (const thread of kin) {
     try {
       const { rows, truncated } = await recentTimelineRows(
@@ -382,7 +382,7 @@ export async function kinEvidence(
         pageInTurn(startedAt - FAMILY_LOOKBACK_MS),
       );
       evidence.complete &&= !truncated;
-      evidence.rows.push(...rows);
+      evidence.threads.push(rows);
       addChangedPaths(rows, (row) => row.createdAt >= startedAt, evidence.paths);
       evidence.windows.push(...ownWindows(rows, startedAt, now));
       evidence.texts.push(

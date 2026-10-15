@@ -10,31 +10,39 @@
 
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
-import { classifyText } from "./detect-claim-shell.js";
+import { classifyText, isScratch, isUnresolved, opaqueProgram } from "./detect-claim-shell.js";
 import type { DirectoryStep, NamedWrite } from "./detect-claim-shell.js";
-import { globMatcher, isGlob } from "./detect-globs.js";
-import { leafStrings, rowWindow, walkRows } from "./detect-rows.js";
+import { leafStrings, nestedRows, rowWindow, shellFields, walkRows } from "./detect-rows.js";
 import type { OpenRowEnds, TimeWindow, WorkRow } from "./detect-rows.js";
 import { checkoutPath } from "./detect-sibling-credit.js";
-import { movedTo, segmentsOf } from "./detect-sibling-writes.js";
+import { claimsPath, repoRelative, segmentsOf, shellDirectory } from "./detect-sibling-writes.js";
 import { FAMILY_LOOKBACK_MS, kinEvidence, rowsSince, withinWindow } from "./detect-timeline.js";
 import type { KinEvidence } from "./detect-timeline.js";
 import type { ThreadListEntry, TimelineRow } from "./detect-workspace.js";
 
-/** Rows that only read, look something up or ask, whatever they carry. */
+/** Rows that only read, look something up or ask, whatever they carry. A delegation is not one: it is read through its nested rows (see `readsDelegation`). */
 const INERT_KINDS: ReadonlySet<string> = new Set([
-  "file-change", "file-read", "search", "web-search", "web-fetch", "image-view", "plan-steps", "approval", "form", "question", "delegation",
+  "file-change", "file-read", "search", "web-search", "web-fetch", "image-view", "plan-steps", "approval", "form", "question",
 ]);
+/** The bridge tools that do not write the checkout: they read, look things up or keep their own state. Registered by the plugins under `plugins/*`; the runtime tools that run commands or git are left out on purpose. */
+const BRIDGE_READ_ONLY_TOOLS: readonly string[] = [
+  "advisor_review", "devkit_find_skills", "devkit_load_skill", "devkit_docs", "agent_checklist_get", "agent_checklist_update",
+  "progressive_skill_list", "progressive_skill_used", "runtime_search", "runtime_thread", "runtime_skill_resource",
+  "platform_search", "platform_thread", "platform_plugin_resource", "ReportReview", "PresentPlan",
+  "update_environment_directory", "bb_keep_checkout",
+];
+const BRIDGE_PREFIX = "mcp__bb-bridge__";
 /** Tools that only read, look things up or keep their own state, by name as real timelines carry them. */
 const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "read", "Read", "fetch", "Grep", "Glob", "WebSearch", "WebFetch", "ToolSearch", "Skill", "ScheduleWakeup", "TaskOutput",
-  "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "advisor_review", "bb_keep_checkout", "ListMcpResourcesTool",
+  "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "ListMcpResourcesTool",
   "ReadMcpResourceTool", "ReadMcpResourceDirTool", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop",
   "SendMessage", "ListAgents", "CronCreate", "CronDelete", "CronList", "PushNotification",
+  ...BRIDGE_READ_ONLY_TOOLS,
+  ...BRIDGE_READ_ONLY_TOOLS.map((name) => `${BRIDGE_PREFIX}${name}`),
 ]);
 const READ_ONLY_PREFIXES: readonly string[] = [
-  "devkit_", "agent_checklist_", "progressive_skill_", "mcp__bb-bridge__", "mcp__claude-in-chrome__read_",
-  "mcp__claude-in-chrome__get_", "mcp__claude-in-chrome__tabs_context", "mcp__claude-in-chrome__find",
+  "mcp__claude-in-chrome__read_", "mcp__claude-in-chrome__get_", "mcp__claude-in-chrome__tabs_context", "mcp__claude-in-chrome__find",
 ];
 
 /** A tool row that is not known to be read-only. */
@@ -42,12 +50,13 @@ interface ToolUse {
   tool: string;
   /** Its argument strings. */
   names: string[];
-  /** A string of it was read as a shell command that is neither opaque nor a write; it says what it did. */
+  /** A `command` or `cmd` field of it was read as a shell command that is not opaque; it says what it did. */
   shell: boolean;
 }
 
-/** A command's writes, with the directory its shell ran in. */
+/** A command's writes, with the directory its shell began in and the changes made before the write. */
 export interface RowWrite extends NamedWrite {
+  /** Where the shell was when the row began: the row's own cwd, else where the thread's earlier rows left it; empty or null when that is unknown. */
   cwd: string | null;
 }
 
@@ -56,6 +65,8 @@ export interface FamilyClaims {
   opaque: string | undefined;
   /** What the targeted commands write. */
   writes: RowWrite[];
+  /** What commands wrote to scratch space, which counts only when the checkout lies there. */
+  scratch: RowWrite[];
   /** The strings tool rows were given, which name the paths they act on. */
   names: string[];
   /** The tool rows that are not on the read-only list, each of which must claim a changed path or be read as a shell command, or the turn is a sweep. */
@@ -77,19 +88,43 @@ function isStale(row: WorkRow, startedAt: number): boolean {
   return open && row.startedAt < startedAt;
 }
 
+/** Where a command row's shell began, and the directory changes since that point. */
+interface Origin {
+  cwd: string | null;
+  steps: DirectoryStep[];
+}
+
 interface RowReading {
   opaque: string | undefined;
-  writes: NamedWrite[];
+  writes: RowWrite[];
+  scratch: RowWrite[];
   names: string[];
   /** The row ran something, so a commit authored while it ran may be the family's. */
   runs: boolean;
   history: boolean;
   tool: ToolUse | undefined;
+  /** Where the row left its shell, for the rows after it; undefined for a row that has no shell of its own. */
+  left: Origin | undefined;
 }
 
-const quiet = (): RowReading => ({ opaque: undefined, writes: [], names: [], runs: false, history: false, tool: undefined });
+const quiet = (): RowReading => ({
+  opaque: undefined, writes: [], scratch: [], names: [], runs: false, history: false, tool: undefined, left: undefined,
+});
 
-/** A tool row: an allowlisted read-only tool claims nothing; any other claims the paths its argument strings name and is read as shell where a string has whitespace; one with no argument string is opaque, and one that claims no changed path and is not read as a command sweeps the turn (see `resolveClaims`). */
+/** A write as the row ran it: from where its shell began (`origin`), after the changes made before it. */
+const writtenFrom = (write: NamedWrite, origin: Origin): RowWrite => ({
+  ...write,
+  cwd: origin.cwd,
+  steps: [...origin.steps, ...write.steps],
+});
+
+/**
+ * A tool row: an allowlisted read-only tool claims nothing; any other claims
+ * the paths its argument strings name, and a `command` or `cmd` field of it is
+ * read as shell, never any other string (a `description` is prose). One with no
+ * argument string is opaque, and one that claims no changed path and was not
+ * read as a command sweeps the turn (see `resolveClaims`).
+ */
 function readToolRow(toolName: string, toolArgs: unknown): RowReading {
   const reading: RowReading = { ...quiet(), runs: true };
   if (isReadOnlyTool(toolName)) {
@@ -100,58 +135,138 @@ function readToolRow(toolName: string, toolArgs: unknown): RowReading {
     return { ...reading, opaque: toolName };
   }
   reading.names = strings;
-  let shell = false;
-  for (const text of strings.filter((string) => /\s/u.test(string))) {
+  const commands = shellFields(toolArgs);
+  // Any other string with whitespace is prose or content, unless it opens with a program that is opaque by name.
+  for (const text of strings.filter((string) => /\s/u.test(string) && !commands.includes(string))) {
+    reading.opaque ??= opaqueProgram(text);
+  }
+  const origin: Origin = { cwd: null, steps: [] };
+  for (const text of commands) {
     const claims = classifyText(text);
     reading.opaque ??= claims.opaque;
-    reading.writes.push(...claims.writes);
+    reading.writes.push(...claims.writes.map((write) => writtenFrom(write, origin)));
+    reading.scratch.push(...claims.scratch.map((write) => writtenFrom(write, origin)));
     reading.history ||= claims.history;
-    shell ||= claims.opaque === undefined;
   }
-  return { ...reading, tool: { tool: toolName, names: strings, shell } };
+  return { ...reading, tool: { tool: toolName, names: strings, shell: commands.length > 0 } };
 }
 
-function readRow(row: WorkRow): RowReading & { cwd: string | null } {
-  if (row.workKind === "command") {
-    const claims = classifyText(row.command);
-    return { ...quiet(), ...claims, cwd: row.cwd, runs: claims.opaque !== undefined };
+/** Where a command row's shell began: its own cwd when it records one, else where the thread's earlier rows left it. */
+function originOf(cwd: string | null, left: Origin | undefined): Origin {
+  return cwd !== null && cwd !== "" ? { cwd, steps: [] } : (left ?? { cwd, steps: [] });
+}
+
+function readCommandRow(command: string, cwd: string | null, left: Origin | undefined): RowReading {
+  const claims = classifyText(command);
+  const origin = originOf(cwd, left);
+  return {
+    ...quiet(),
+    opaque: claims.opaque,
+    writes: claims.writes.map((write) => writtenFrom(write, origin)),
+    scratch: claims.scratch.map((write) => writtenFrom(write, origin)),
+    history: claims.history,
+    runs: claims.opaque !== undefined,
+    left: { cwd: origin.cwd, steps: [...origin.steps, ...claims.left] },
+  };
+}
+
+/** Whether a delegation can be read through: it has nested work rows, or its child is a thread whose rows were read. Otherwise nothing shows what the subagent ran. */
+function readsDelegation(row: Extract<WorkRow, { workKind: "delegation" }>, readable: ReadonlySet<string>): boolean {
+  return [...walkRows(row.childRows)].some((nested) => nested.kind === "work") || (row.childRef !== null && readable.has(row.childRef));
+}
+
+function readRow(row: WorkRow, left: Origin | undefined, readable: ReadonlySet<string>): RowReading {
+  switch (row.workKind) {
+    case "command":
+      return readCommandRow(row.command, row.cwd, left);
+    case "tool":
+      return readToolRow(row.toolName, row.toolArgs);
+    case "delegation":
+      return readsDelegation(row, readable) ? quiet() : { ...quiet(), opaque: "delegation", runs: true };
+    default:
+      return INERT_KINDS.has(row.workKind) ? quiet() : { ...quiet(), opaque: row.workKind, runs: true };
   }
-  if (row.workKind === "tool") {
-    return { ...readToolRow(row.toolName, row.toolArgs), cwd: null };
+}
+
+interface Pass {
+  claims: FamilyClaims;
+  startedAt: number;
+  open: OpenRowEnds;
+  /** The threads whose rows are being read. */
+  readable: ReadonlySet<string>;
+}
+
+/** Adds what a row ran during the turn to the claims. */
+function record(pass: Pass, row: WorkRow, window: TimeWindow, reading: RowReading): void {
+  const { claims, startedAt } = pass;
+  claims.history ||= reading.history;
+  if (reading.opaque !== undefined && isStale(row, startedAt)) {
+    claims.stale.push(reading.opaque);
+    return;
   }
-  const reading = INERT_KINDS.has(row.workKind) ? quiet() : { ...quiet(), opaque: row.workKind, runs: true };
-  return { ...reading, cwd: null };
+  claims.opaque ??= reading.opaque;
+  claims.names.push(...reading.names);
+  if (reading.tool !== undefined && !isStale(row, startedAt)) {
+    claims.tools.push(reading.tool);
+  }
+  claims.writes.push(...reading.writes);
+  claims.scratch.push(...reading.scratch);
+  if (reading.runs) {
+    claims.windows.push(window);
+  }
+}
+
+/** The work rows of one shell, and the rows a delegation holds, which are another shell's. A turn's rows belong to the thread's shell. */
+function gather(rows: readonly TimelineRow[], work: WorkRow[], apart: TimelineRow[][]): void {
+  for (const row of rows) {
+    if (row.kind === "work") {
+      work.push(row);
+    }
+    const inner = nestedRows(row);
+    if (row.kind === "work" && row.workKind === "delegation") {
+      apart.push([...inner]);
+    } else {
+      gather(inner, work, apart);
+    }
+  }
+}
+
+/** Reads one shell's rows in the order they ran, so a `cd` carries to the rows after it, back to before the turn. */
+function readShell(rows: readonly TimelineRow[], pass: Pass): void {
+  const work: WorkRow[] = [];
+  const apart: TimelineRow[][] = [];
+  gather(rows, work, apart);
+  let left: Origin | undefined;
+  for (const row of work.sort((a, b) => a.startedAt - b.startedAt)) {
+    const window = rowWindow(row, pass.open);
+    if (window === null) {
+      continue;
+    }
+    const reading = readRow(row, left, pass.readable);
+    // A `cd` from before the lookback is not carried: where the shell is then is a guess again.
+    left = row.startedAt < pass.startedAt - FAMILY_LOOKBACK_MS ? left : (reading.left ?? left);
+    if (window.end >= pass.startedAt) {
+      record(pass, row, window, reading);
+    }
+  }
+  apart.forEach((inner) => readShell(inner, pass));
 }
 
 /**
  * Classifies the work rows that ran during the turn, which began at
- * `startedAt`: rows that never ran (denied, waiting for approval) are left out,
- * and a row that recorded no end is taken to have run until `now`.
+ * `startedAt`, one thread's rows at a time (each thread has its own shell,
+ * which keeps its directory from row to row, and so does a delegation): rows
+ * that never ran (denied, waiting for approval) are left out, and a row that
+ * recorded no end is taken to have run until `now`. The rows before the turn
+ * only tell where the shell was.
  */
-export function classifyRows(rows: readonly TimelineRow[], startedAt: number, now: number): FamilyClaims {
-  const open: OpenRowEnds = { pending: now, unended: now };
-  const claims: FamilyClaims = { opaque: undefined, writes: [], names: [], tools: [], windows: [], history: false, stale: [] };
-  for (const row of walkRows(rows)) {
-    const window = row.kind === "work" ? rowWindow(row, open) : null;
-    if (row.kind !== "work" || window === null || window.end < startedAt) {
-      continue;
-    }
-    const reading = readRow(row);
-    claims.history ||= reading.history;
-    if (reading.opaque !== undefined && isStale(row, startedAt)) {
-      claims.stale.push(reading.opaque);
-      continue;
-    }
-    claims.opaque ??= reading.opaque;
-    claims.names.push(...reading.names);
-    if (reading.tool !== undefined && !isStale(row, startedAt)) {
-      claims.tools.push(reading.tool);
-    }
-    claims.writes.push(...reading.writes.map((write) => ({ ...write, cwd: reading.cwd })));
-    if (reading.runs) {
-      claims.windows.push(window);
-    }
-  }
+export function classifyRows(threads: ReadonlyArray<readonly TimelineRow[]>, startedAt: number, now: number): FamilyClaims {
+  const claims: FamilyClaims = { opaque: undefined, writes: [], scratch: [], names: [], tools: [], windows: [], history: false, stale: [] };
+  const readable = new Set(
+    threads.flatMap((rows) => [...walkRows(rows)].flatMap((row) => (row.kind === "work" ? [row.threadId] : []))),
+  );
+  const pass: Pass = { claims, startedAt, open: { pending: now, unended: now }, readable };
+  threads.forEach((rows) => readShell(rows, pass));
   return claims;
 }
 
@@ -180,57 +295,96 @@ export async function familyClaims(input: FamilyInput): Promise<{ claims: Family
   if (!kin.complete) {
     return { reason: "a thread this one spawned or owns could not be read in full" };
   }
-  return { claims: classifyRows([...own, ...kin.rows], startedAt, now), kin };
+  return { claims: classifyRows([own, ...kin.threads], startedAt, now), kin };
 }
 
 /** Whether a tool's argument string names a changed path: it is the path, or ends in `/` and the path (an absolute path to it). */
 const namesPath = (name: string, path: string) =>
   name === path || name === `./${path}` || (name.length > path.length && name.endsWith(`/${path}`));
 
-/** Where a command's relative tokens resolve: its own cwd, else the checkout root; null once a `cd` left somewhere that is not the root. */
-function baseOf(cwd: string | null, steps: readonly DirectoryStep[], root: string): string | null {
-  let dir: string | null = cwd === null || cwd === "" ? root : cwd.startsWith("/") ? cwd : `${root}/${cwd}`;
-  for (const { name, target } of steps) {
-    dir = name === "popd" ? null : movedTo(dir, target, root);
-  }
-  return dir;
+/** A write target resolved against where its shell was. */
+interface Located {
+  token: string;
+  /** The path relative to the checkout; null when it is outside it. */
+  target: string | null;
+  tree: boolean;
+  /** The token is relative and its base is a guess, so any path that ends in it counts too. */
+  loose: boolean;
 }
 
-/** A write target as a path relative to the checkout: "" for the checkout itself, null outside it. */
-function repoRelative(token: string, base: string, root: string): string | null {
-  const segments = segmentsOf(token.startsWith("/") ? token : `${base}/${token}`);
-  const rootSegments = segmentsOf(root);
-  return rootSegments.every((segment, at) => segments[at] === segment) ? segments.slice(rootSegments.length).join("/") : null;
-}
-
-/** Whether a path is a claimed target, lies under it (a directory), or a glob matches it or a directory above it. */
-function claimsPath(target: string, path: string): boolean {
-  if (target === "") {
+/** Whether a located target claims a path: as resolved, or (loose) by a run of the path's last segments. */
+function reaches(located: Located, path: string, tree: boolean): boolean {
+  if (located.target !== null && claimsPath(located.target, path, tree)) {
     return true;
   }
-  if (!isGlob(target)) {
-    return path === target || path.startsWith(`${target}/`);
+  if (!located.loose) {
+    return false;
   }
-  const matches = globMatcher(target);
   const segments = path.split("/");
-  return segments.some((_segment, at) => matches(segments.slice(0, at + 1).join("/")));
+  const token = segmentsOf(located.token).join("/");
+  return segments.some((_segment, at) => claimsPath(token, segments.slice(at).join("/"), tree));
 }
 
 interface Resolution {
   /** The candidates the family's tool rows and targeted commands claim. */
   claimed: Set<string>;
+  /** The candidates its targeted commands (not its tool rows' names) claim. */
+  written: Set<string>;
   /** Why the writes could not be resolved, which makes the turn a sweep. */
   sweep: string | undefined;
 }
 
 /**
+ * The candidates one command writes: each token as the path itself, or with
+ * everything beneath it for a tree. A move's destination is a tree too unless
+ * every source is a changed file itself: a source that no changed path equals
+ * is a directory, or something nothing knows (it was made by this turn's
+ * file-change rows, or by a command, and moved), and its files are now at the
+ * destination.
+ */
+function writtenBy(write: RowWrite, where: { dir: string; loose: boolean }, root: string, candidates: readonly string[]): string[] {
+  const located = write.tokens.map((token): Located => ({
+    token,
+    target: repoRelative(token, where.dir, root),
+    tree: write.trees.includes(token),
+    loose: where.loose && !token.startsWith("/"),
+  }));
+  const moved = write.moves && located.some((target) => target.tree && !candidates.some((path) => reaches(target, path, false)));
+  return candidates.filter((path) => located.some((target) => reaches(target, path, target.tree || moved)));
+}
+
+/** The first tool row that is not read-only, names no changed path and was not read as a command: it could have written anything. */
+function unlistedTool(tools: readonly ToolUse[], candidates: readonly string[]): ToolUse | undefined {
+  return tools.find(({ names, shell }) => !shell && !candidates.some((path) => names.some((name) => namesPath(name, path))));
+}
+
+/** Adds the candidates `writes` claim to `written`; why they cannot be resolved, which makes the turn a sweep, or undefined. */
+function resolveWrites(writes: readonly RowWrite[], root: string, candidates: readonly string[], written: Set<string>): string | undefined {
+  for (const write of writes) {
+    const where = shellDirectory(write, root);
+    if (where === null) {
+      return "a command wrote after a cd that left the checkout root";
+    }
+    if (write.tokens.some(isUnresolved)) {
+      return "a command wrote to scratch space, where the checkout lies, through a path it builds";
+    }
+    writtenBy(write, where, root, candidates).forEach((path) => written.add(path));
+  }
+  return undefined;
+}
+
+/**
  * Which of `candidates` (paths relative to the checkout) the family claims:
- * those a tool row's argument names, and those a targeted command writes, a
- * directory it names claiming everything under it. A tool that is not read-only,
- * names no changed path and was not read as a command could have written
- * anything, so it is a sweep, naming the tool. The checkout root is read
- * only when a command wrote something by name; it is a sweep when it is
- * unknown, or when a command wrote after a `cd` that did not return to the root.
+ * those a tool row's argument names, and those a targeted command writes (see
+ * `writtenBy`). A relative token whose directory is a guess, because nothing
+ * says where the shell was or it is not under the checkout, claims every
+ * candidate that ends in it. A tool that is not read-only, names no changed
+ * path and was not read as a command could have written anything, so it is a
+ * sweep, naming the tool. The checkout root is read only when a command wrote
+ * something by name or to scratch space; it is a sweep when it is unknown and
+ * something was named, when a command wrote after a `cd` that did not return
+ * to the root, and when a checkout in scratch space is written through a path
+ * built from a variable.
  */
 export async function resolveClaims(
   bb: BbPluginApi,
@@ -239,30 +393,23 @@ export async function resolveClaims(
   candidates: readonly string[],
 ): Promise<Resolution> {
   const claimed = new Set(candidates.filter((path) => family.names.some((name) => namesPath(name, path))));
-  const unlisted = family.tools.find(
-    ({ names, shell }) => !shell && !candidates.some((path) => names.some((name) => namesPath(name, path))),
-  );
+  const written = new Set<string>();
+  const resolution = (sweep?: string): Resolution => ({ claimed: new Set([...claimed, ...written]), written, sweep });
+  const unlisted = unlistedTool(family.tools, candidates);
   if (unlisted !== undefined && candidates.length > 0) {
-    return { claimed, sweep: `the ${unlisted.tool} tool named no changed path` };
+    return resolution(`the ${unlisted.tool} tool named no changed path`);
   }
-  if (family.writes.length === 0 || candidates.length === 0) {
-    return { claimed, sweep: undefined };
+  if ((family.writes.length === 0 && family.scratch.length === 0) || candidates.length === 0) {
+    return resolution();
   }
   const root = await checkoutPath(bb, environmentId);
   if (root === null) {
-    return { claimed, sweep: "the checkout path is unknown" };
+    return resolution(family.writes.length === 0 ? undefined : "the checkout path is unknown");
   }
   const base = root.replace(/\/+$/u, "");
-  for (const { tokens, steps, cwd } of family.writes) {
-    const dir = baseOf(cwd, steps, base);
-    if (dir === null) {
-      return { claimed, sweep: "a command wrote after a cd that left the checkout root" };
-    }
-    for (const target of tokens.flatMap((token) => repoRelative(token, dir, base) ?? [])) {
-      candidates.filter((path) => claimsPath(target, path)).forEach((path) => claimed.add(path));
-    }
-  }
-  return { claimed, sweep: undefined };
+  // A path in scratch space is the checkout's only when the checkout lies there.
+  const writes = [...family.writes, ...(isScratch(base) ? family.scratch : [])];
+  return resolution(resolveWrites(writes, base, candidates, written));
 }
 
 /** A commit made during the turn, as `turnChangedPaths` reads it. */

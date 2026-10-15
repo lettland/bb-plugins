@@ -37,6 +37,26 @@ const edit = (path: string, over: Record<string, unknown> = {}) => ({
   change: { path, movePath: null },
   ...over,
 });
+const tool = (toolArgs: unknown, over: Record<string, unknown> = {}) => ({
+  ...base,
+  workKind: "tool",
+  approvalStatus: null,
+  toolName: "apply",
+  toolArgs,
+  ...over,
+});
+const delegation = (childRows: unknown[], over: Record<string, unknown> = {}) => ({
+  ...base,
+  workKind: "delegation",
+  callId: "c1",
+  toolName: "Agent",
+  childRef: null,
+  childRows,
+  ...over,
+});
+/** A command row of a shell that records no directory, as Claude Code's do, started at `startedAt`. */
+const at = (text: string, startedAt: number, over: Record<string, unknown> = {}) =>
+  command(text, { cwd: "", startedAt, createdAt: startedAt, completedAt: startedAt + 100, ...over });
 const one = (...rows: unknown[]): Pages => [{ rows }];
 
 interface Options {
@@ -189,6 +209,25 @@ describe("sweep attribution", () => {
     expect(JSON.stringify(infos)).not.toContain(LEAK);
   });
 
+  it("logs the program of an opaque command, never one of its arguments", async () => {
+    const { infos } = await attribute({
+      uncommitted: external,
+      timelines: { self: one(command("diff <(git show HEAD:lib/mine.ts) lib/mine.ts"), command(`./scripts/run.sh lib/mine.ts ${LEAK}`)) },
+    });
+    expect(claims(infos)).toEqual(["auto-review: attributing the turn's changes by sweep: (process substitution) ran, and the files it writes cannot be listed"]);
+    expect(JSON.stringify(infos)).not.toContain("mine.ts");
+    const second = await attribute({ uncommitted: external, timelines: { self: one(command(`./scripts/run.sh lib/mine.ts ${LEAK}`)) } });
+    expect(claims(second.infos)).toEqual(["auto-review: attributing the turn's changes by sweep: run.sh ran, and the files it writes cannot be listed"]);
+  });
+
+  it("sweeps for a tool whose script field or other string runs something opaque, though it names a changed path", async () => {
+    for (const args of [{ file: "lib/mine.ts", script: "npm run codegen" }, { file: "lib/mine.ts", note: "npx prisma generate" }, { command: ["bash", "-lc", "npm run codegen"] }]) {
+      const { result, infos } = await attribute({ uncommitted: external, timelines: { self: one(tool(args)) } });
+      expect(result.mode).toBe("sweep");
+      expect(claims(infos)[0]).toMatch(/by sweep: (?:npm|prisma) ran, and the files it writes cannot be listed$/u);
+    }
+  });
+
   it("takes a child's opaque run as the turn's too", async () => {
     const { result } = await attribute({ uncommitted: external, timelines: { "kid-1": one(command("npm run build")) } });
     expect(result.mode).toBe("sweep");
@@ -230,6 +269,21 @@ describe("sweep attribution", () => {
   it("sweeps for a write after a cd that did not return to the checkout root", async () => {
     const { result } = await attribute({ uncommitted: external, timelines: { self: one(command("cd lib && rm mine.ts")) } });
     expect(result.mode).toBe("sweep");
+  });
+
+  it("sweeps for a delegation that shows nothing of what its subagent ran, with no git row of the thread's own", async () => {
+    const { result, infos } = await attribute({ uncommitted: external, timelines: { self: one(delegation([])) } });
+    expect(result.mode).toBe("sweep");
+    expect([...result.paths].sort()).toEqual(external);
+    expect(claims(infos)).toEqual(["auto-review: attributing the turn's changes by sweep: delegation ran, and the files it writes cannot be listed"]);
+  });
+
+  it("claims by what a delegation's nested rows ran when it shows them", async () => {
+    const { result } = await attribute({
+      uncommitted: external,
+      timelines: { self: one(delegation([command("cat lib/ide.ts"), command("sed -i '' 's/a/b/' lib/mine.ts")])) },
+    });
+    expect(result).toMatchObject({ mode: "exact", paths: ["lib/mine.ts"], unclaimed: ["lib/ide.ts"] });
   });
 
   it("sweeps when the turn start time is unknown", async () => {
@@ -275,12 +329,23 @@ describe("commits", () => {
     expect(JSON.stringify(infos)).not.toContain(LEAK);
   });
 
-  it("keeps a commit authored while an opaque command ran, in sweep mode too", async () => {
-    const { result } = await attribute({
+  it("keeps every commit in a sweep, whenever it was authored: an opaque script can make one that keeps an old author date", async () => {
+    const { result, infos } = await attribute({
       timelines: { self: one(command("npm run build", { startedAt: 24_000, completedAt: 26_000 })) },
+      commits: [commit("c1", 25_000), commit("c2", 12_000, ["lib/other.ts"]), commit("c3", 30_000, ["lib/late.ts"])],
+    });
+    expect(result).toMatchObject({ mode: "sweep", commits: ["c1", "c2", "c3"] });
+    expect([...result.committedPaths].sort()).toEqual(["lib/c.ts", "lib/late.ts", "lib/other.ts"]);
+    expect(infos.some((line) => line.includes("left out of the review"))).toBe(false);
+  });
+
+  it("drops a commit authored outside every window only in exact mode", async () => {
+    const { result, infos } = await attribute({
+      timelines: { self: one(command("cat lib/c.ts"), tool({ path: "lib/c.ts" }, { startedAt: 24_000, completedAt: 26_000 })) },
       commits: [commit("c1", 25_000), commit("c2", 30_000, ["lib/other.ts"])],
     });
-    expect(result).toMatchObject({ mode: "sweep", commits: ["c1"], committedPaths: ["lib/c.ts"] });
+    expect(result).toMatchObject({ mode: "exact", commits: ["c1"] });
+    expect(claims(infos)).toEqual(["auto-review: commit c2 left out of the review: the family ran no git that writes history, and no command or tool of theirs was running then"]);
   });
 
   it("keeps a commit with no author date or unread paths, and one touching a claimed path", async () => {
@@ -289,5 +354,100 @@ describe("commits", () => {
       commits: [commit("c1", null), commit("c2", 30_000, null), commit("c3", 31_000, ["lib/claimed.ts"]), commit("c4", 32_000)],
     });
     expect(result.commits).toEqual(["c1", "c2", "c3"]);
+  });
+});
+
+describe("a thread's shell keeps its directory between rows", () => {
+  const external = ["lib/ide.ts", "lib/mine.ts"];
+
+  it("does not drop a write made after a cd in an earlier row: it is a sweep, and the file is kept", async () => {
+    const { result, infos } = await attribute({
+      uncommitted: ["sub/a.ts", "lib/ide.ts"],
+      timelines: { self: one(at("cd sub", 20_000), at("sed -i s/a/b/ a.ts", 21_000)) },
+    });
+    expect(result.mode).toBe("sweep");
+    expect([...result.paths].sort()).toEqual(["lib/ide.ts", "sub/a.ts"]);
+    expect(claims(infos)[0]).toMatch(/cd/u);
+  });
+
+  it("carries a cd made in an earlier turn", async () => {
+    const { result } = await attribute({
+      uncommitted: external,
+      timelines: { self: one(at("cd lib", 2_000), at("rm mine.ts", 21_000)) },
+    });
+    expect(result.mode).toBe("sweep");
+  });
+
+  it("claims what ends in a relative path when no cwd and no cd says where the shell was, and nothing else", async () => {
+    const { result } = await attribute({
+      uncommitted: external,
+      timelines: { self: one(at("sed -i '' 's/a/b/' mine.ts", 20_000)) },
+    });
+    expect(result).toMatchObject({ mode: "exact", paths: ["lib/mine.ts"], unclaimed: ["lib/ide.ts"] });
+  });
+
+  it("claims by the end of the path when the cwd is absolute and not under the checkout", async () => {
+    const { result } = await attribute({
+      uncommitted: external,
+      timelines: { self: one(at("rm mine.ts", 20_000, { cwd: "/elsewhere/repo/lib" })) },
+    });
+    expect(result).toMatchObject({ mode: "exact", paths: ["lib/mine.ts"], unclaimed: ["lib/ide.ts"] });
+  });
+
+  it("claims a write to a checkout that lies in scratch space, and ignores scratch writes elsewhere", async () => {
+    const root = "/private/var/folders/ab/cd/T/repo";
+    const { result } = await attribute({
+      root,
+      uncommitted: external,
+      timelines: { self: one(command(`echo x > ${root}/lib/mine.ts && echo y > /tmp/ide.ts`)) },
+    });
+    expect(result).toMatchObject({ mode: "exact", paths: ["lib/mine.ts"], unclaimed: ["lib/ide.ts"] });
+  });
+});
+
+describe("a directory moved by a command", () => {
+  it("claims the destination's files when the source directory was made by the thread's file-change rows", async () => {
+    const { result } = await attribute({
+      uncommitted: ["src/feature/a.ts", "src/feature/deep/b.ts", "lib/ide.ts"],
+      timelines: { self: one(edit("tmpdir/a.ts"), edit("tmpdir/deep/b.ts"), command("mv tmpdir src/feature")) },
+    });
+    expect(result).toMatchObject({ mode: "exact", unclaimed: ["lib/ide.ts"] });
+    expect([...result.paths].sort()).toEqual(["src/feature/a.ts", "src/feature/deep/b.ts", "tmpdir/a.ts", "tmpdir/deep/b.ts"]);
+  });
+
+  it("claims the destination's files when nothing knows the source", async () => {
+    const { result } = await attribute({
+      uncommitted: ["src/feature/a.ts", "lib/ide.ts"],
+      timelines: { self: one(command("mv tmpdir src/feature")) },
+    });
+    expect(result).toMatchObject({ mode: "exact", paths: ["src/feature/a.ts"], unclaimed: ["lib/ide.ts"] });
+  });
+});
+
+describe("a path a sibling changed through its own tools", () => {
+  const siblingEdit = { "sib-1": one(edit("src/b.ts")) };
+  const uncommitted = ["src/b.ts", "lib/ide.ts"];
+
+  it("is not claimed when this thread's tool row only names it", async () => {
+    const { result } = await attribute({ uncommitted, timelines: { self: one(tool({ path: "src/b.ts" })), ...siblingEdit } });
+    expect(result).toMatchObject({ mode: "exact", paths: [] });
+    expect([...result.unclaimed].sort()).toEqual(["lib/ide.ts", "src/b.ts"]);
+  });
+
+  it("is claimed when this thread's own targeted command writes it", async () => {
+    const { result } = await attribute({ uncommitted, timelines: { self: one(command("sed -i '' 's/a/b/' src/b.ts")), ...siblingEdit } });
+    expect(result).toMatchObject({ mode: "exact", paths: ["src/b.ts"], unclaimed: ["lib/ide.ts"] });
+  });
+
+  it("is claimed when a child's file-change row names it, or this thread's own", async () => {
+    const kidEdits = await attribute({ uncommitted, timelines: { "kid-1": one(edit("src/b.ts")), ...siblingEdit } });
+    expect(kidEdits.result).toMatchObject({ mode: "exact", paths: ["src/b.ts"] });
+    const ownEdits = await attribute({ uncommitted, timelines: { self: one(edit("src/b.ts")), ...siblingEdit } });
+    expect(ownEdits.result).toMatchObject({ mode: "exact", paths: ["src/b.ts"] });
+  });
+
+  it("is still claimed when no sibling changed it", async () => {
+    const { result } = await attribute({ uncommitted, timelines: { self: one(tool({ path: "src/b.ts" })), "sib-1": one(edit("src/other.ts")) } });
+    expect(result.paths).toEqual(["src/b.ts"]);
   });
 });
