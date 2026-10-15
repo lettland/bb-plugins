@@ -142,6 +142,8 @@ describe("PLAN_GATE_KEYS", () => {
       "planReviewEntryId",
       "planDenied",
       "planReviewDeliveredSeq",
+      "planReviewArmedSeq",
+      "planReviewRedone",
     ]);
   });
 });
@@ -152,6 +154,7 @@ describe("PRESENT_PLAN_KEYS", () => {
       "presentPlanArmedAt",
       "presentPlanArmedPath",
       "presentPlanArmedSeq",
+      "presentPlanRedone",
     ]);
   });
 });

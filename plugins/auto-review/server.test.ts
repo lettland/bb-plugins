@@ -13,11 +13,13 @@ import {
   PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
   PLAN_HOLD_ANSWER,
   PRESENT_PLAN_APPROVED_MESSAGE,
+  PRESENT_PLAN_INCOMPLETE_MESSAGE,
   PRESENT_PLAN_INVALID_PATH_MESSAGE,
   PRESENT_PLAN_OFF_MESSAGE,
+  presentPlanRedoMessage,
   PRESENT_PLAN_REVIEWED_MESSAGE,
 } from "./src/prompt.js";
-import { EVENT_PAGE_MAX } from "./src/plan.js";
+import { EVENT_PAGE_MAX, PLAN_EVIDENCE_PAGE_CAP } from "./src/plan.js";
 import {
   PLAN_DENY_ANSWER_WINDOW_MS,
   REVIEW_CONTINUATION_CAP_MS,
@@ -116,7 +118,14 @@ interface TurnRequest {
 
 interface ItemStartedEvent {
   seq: number;
-  item: { type: string; tool?: string; server?: string; parentToolCallId?: string };
+  item: {
+    type: string;
+    tool?: string;
+    server?: string;
+    parentToolCallId?: string;
+    status?: string;
+    arguments?: Record<string, unknown>;
+  };
 }
 
 interface TreeFile {
@@ -3002,10 +3011,15 @@ describe("auto-review plugin", () => {
       return host;
     }
 
-    /** Hold the first plan and dispatch its review, as core does once the deny settles. */
+    /** Core dispatches the queued review once the deny settles. */
+    async function dispatchQueued(host: Host) {
+      await host.harness.behavior.emitThreadEvent("message.dispatched", { entry: queueEntry() });
+    }
+
+    /** Hold the first plan and dispatch its review. */
     async function holdAndDispatch(host: Host) {
       await emitPlan(host);
-      await host.harness.behavior.emitThreadEvent("message.dispatched", { entry: queueEntry() });
+      await dispatchQueued(host);
     }
 
     it("holds the first presentation and tells the agent the project auto-approves", async () => {
@@ -3331,6 +3345,333 @@ describe("auto-review plugin", () => {
       expect(host.resolutions).toEqual([DENY]);
       await host.harness.dispose();
     });
+
+    describe("the review-code load check", () => {
+      const DEVKIT = { enabled: true, status: "running", cliCommand: { name: "devkit" } };
+      /** The agent's own load, as the claude-code and codex rows carry it. */
+      const LOAD = {
+        type: "toolCall",
+        tool: "devkit_load_skill",
+        server: "bb",
+        status: "completed",
+        arguments: { slug: "review-code" },
+      };
+      const SUBAGENT = { type: "toolCall", tool: "Agent", status: "completed" };
+      const redoDeny = (interactionId: string) => ({
+        threadId: THREAD_ID,
+        interactionId,
+        resolution: { decision: "deny" },
+      });
+      const approve = (interactionId: string) => ({
+        threadId: THREAD_ID,
+        interactionId,
+        resolution: { decision: "allow_once", grantedPermissions: null },
+      });
+
+      async function devkitHost(options: HostOptions = {}, autoApprove = true) {
+        return hostWith({ plugins: [DEVKIT], queuedRows: [{ id: "qm-1" }], ...options }, autoApprove);
+      }
+
+      /** A host whose options a test can still change once the first round is over. */
+      async function mutableHost() {
+        const options: HostOptions = { sendDelivery: "queued", plugins: [DEVKIT], queuedRows: [{ id: "qm-1" }] };
+        const host = createHost(options);
+        await plugin(host.bb);
+        await host.harness.runCli(["auto-approve", "on", "--project", "project-1"]);
+        return { options, host };
+      }
+
+      /** The incident: the agent ran two subagent calls and never loaded the skill. */
+      async function missedRound(host: Host) {
+        await holdAndDispatch(host);
+        host.completeItem({ seq: 101, item: SUBAGENT });
+        host.completeItem({ seq: 102, item: { ...READ, parentToolCallId: "toolu-agent", status: "completed" } });
+        host.completeItem({ seq: 103, item: SUBAGENT });
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      }
+
+      it("sends a plan back once, with the redo prompt, when the agent never loaded the skill", async () => {
+        const host = await devkitHost();
+        await missedRound(host);
+        expect(host.resolutions).toEqual([DENY, redoDeny("pint-2")]);
+        expect(host.sends).toHaveLength(2);
+        expect(promptText(host, 1)).toMatch(/could not see `review-code` loaded in this thread/);
+        expect(promptText(host, 1)).toMatch(/\(b\) First, if `\$BB_THREAD_STORAGE` is unset/);
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "fired", reason: "plan-review-redo" });
+        expect(host.metadata.planReviewRedone).toBe(true);
+        expect(host.metadata.planReviewEntryId).toBe("qm-1");
+        expect(host.metadata.planReviewDeliveredSeq).toBeUndefined();
+        expect(host.metadata.planReviewArmedSeq).toBe(100);
+        expect(typeof host.metadata.planReviewArmedAt).toBe("number");
+        await host.harness.dispose();
+      });
+
+      it("holds a plan re-presented while the redo is still queued, without a second redo", async () => {
+        const host = await devkitHost();
+        await missedRound(host);
+        await emitPlan(host, planInteraction("# Plan v3", "pint-3"));
+        expect(host.resolutions).toEqual([DENY, redoDeny("pint-2"), redoDeny("pint-3")]);
+        expect(host.sends).toHaveLength(2);
+        expect(host.metadata.planReviewRedone).toBe(true);
+        expect(await lastFireOf(host)).toMatchObject({ reason: "plan-review-redo" });
+        await host.harness.dispose();
+      });
+
+      it("releases a second miss without an auto-approve, even though tool work happened, and says so", async () => {
+        const host = await devkitHost();
+        await missedRound(host);
+        await dispatchQueued(host);
+        host.completeItem({ seq: 104, item: { ...READ, status: "completed" } });
+        await emitPlan(host, planInteraction("# Plan v3", "pint-3"));
+        expect(host.resolutions).toEqual([DENY, redoDeny("pint-2")]);
+        expect(host.sends).toHaveLength(2);
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-review-incomplete" });
+        expect(
+          warnings(host).some(
+            (message) =>
+              message.includes("released without a complete calibrated review") &&
+              message.includes(THREAD_ID) &&
+              message.includes("p.md") &&
+              !message.includes("/home/u"),
+          ),
+        ).toBe(true);
+        expect(host.metadata.planReviewArmedAt).toBeUndefined();
+        expect(host.metadata.planReviewRedone).toBeUndefined();
+        expect(host.metadata.planReviewArmedSeq).toBeUndefined();
+        await host.harness.dispose();
+      });
+
+      it("auto-approves once the redo loaded the skill", async () => {
+        const host = await devkitHost();
+        await missedRound(host);
+        // The redo is armed later than the first round: a load before that cursor is not its own.
+        host.setMaxSeq(110);
+        await dispatchQueued(host);
+        expect(host.metadata.planReviewDeliveredSeq).toBe(110);
+        host.completeItem({ seq: 111, item: LOAD });
+        host.completeItem({ seq: 112, item: { ...READ, status: "completed" } });
+        await emitPlan(host, planInteraction("# Plan v3", "pint-3"));
+        expect(host.resolutions).toEqual([DENY, redoDeny("pint-2"), approve("pint-3")]);
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "fired", reason: "plan-approved" });
+        await host.harness.dispose();
+      });
+
+      it("takes the redo's cursor from before the send, so a load before the late delivery cursor counts", async () => {
+        const host = await devkitHost();
+        host.setMaxSeq(90);
+        await emitPlan(host);
+        expect(host.metadata.planReviewArmedSeq).toBe(90);
+        host.completeItem({ seq: 95, item: LOAD });
+        host.setMaxSeq(100);
+        await dispatchQueued(host);
+        expect(host.metadata.planReviewDeliveredSeq).toBe(100);
+        host.completeItem({ seq: 101, item: { ...READ, status: "completed" } });
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions).toEqual([DENY, approve("pint-2")]);
+        await host.harness.dispose();
+      });
+
+      it("counts a load in the turn the review was dispatched as, after the agent ended its own", async () => {
+        const host = await devkitHost();
+        await emitPlan(host);
+        // The agent ended its turn on the deny; the queued review starts a new one.
+        host.completeTurn(101);
+        host.setMaxSeq(105);
+        await dispatchQueued(host);
+        host.completeItem({ seq: 106, item: LOAD });
+        host.completeItem({ seq: 107, item: { ...READ, status: "completed" } });
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions).toEqual([DENY, approve("pint-2")]);
+        expect(host.sends).toHaveLength(1);
+        await host.harness.dispose();
+      });
+
+      it("counts a load from an earlier turn than the re-presentation, without approving it", async () => {
+        const host = await devkitHost();
+        await holdAndDispatch(host);
+        // Review child threads ran; bb woke the agent in a later turn to re-present.
+        host.completeItem({ seq: 101, item: LOAD });
+        host.completeTurn(102);
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions).toEqual([DENY]);
+        expect(host.sends).toHaveLength(1);
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+        await host.harness.dispose();
+      });
+
+      it("does not count a subagent's load, a failed one, or another slug", async () => {
+        for (const item of [
+          { ...LOAD, parentToolCallId: "toolu-agent" },
+          { ...LOAD, status: "failed" },
+          { ...LOAD, arguments: { slug: "typescript" } },
+        ]) {
+          const host = await devkitHost();
+          await holdAndDispatch(host);
+          host.completeItem({ seq: 101, item });
+          await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+          expect(host.resolutions).toEqual([DENY, redoDeny("pint-2")]);
+          await host.harness.dispose();
+        }
+      });
+
+      it("never redoes or approves when the check cannot be made, and says it could not verify", async () => {
+        const unknowns: Array<[string, HostOptions, ((host: Host) => void) | undefined]> = [
+          ["a plugin lookup error", { plugins: "throws" }, undefined],
+          ["unreadable events", { completedEventsThrow: true }, undefined],
+          ["no recorded cursor", {}, (host) => delete host.metadata.planReviewArmedSeq],
+          [
+            "an agent load with no arguments",
+            {},
+            (host) => host.completeItem({ seq: 104, item: { ...LOAD, arguments: undefined } }),
+          ],
+        ];
+        for (const [label, options, tweak] of unknowns) {
+          const host = await devkitHost(options);
+          await holdAndDispatch(host);
+          tweak?.(host);
+          host.completeItem({ seq: 105, item: { ...READ, status: "completed" } });
+          await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+          expect(host.sends, label).toHaveLength(1);
+          expect(host.resolutions, label).toEqual([DENY]);
+          expect(await lastFireOf(host), label).toMatchObject({
+            outcome: "stood-down",
+            reason: "plan-review-unverified",
+          });
+          expect(
+            warnings(host).some((message) => message.includes("cannot be verified") || message.includes("could not verify")),
+            label,
+          ).toBe(true);
+          expect(host.metadata.planReviewArmedAt, label).toBeUndefined();
+          await host.harness.dispose();
+        }
+      });
+
+      it("only withholds the auto-approve when the turn events cannot be read, not the redo", async () => {
+        const host = await devkitHost({ turnEventsThrow: true });
+        await holdAndDispatch(host);
+        host.completeItem({ seq: 101, item: LOAD });
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions).toEqual([DENY]);
+        expect(host.sends).toHaveLength(1);
+        expect(await lastFireOf(host)).toMatchObject({ reason: "plan-reviewed" });
+        await host.harness.dispose();
+      });
+
+      it("is unknown, not missing, once the page cap is reached on subagent rows", async () => {
+        const host = await devkitHost();
+        await holdAndDispatch(host);
+        for (let seq = 101; seq <= 100 + EVENT_PAGE_MAX * PLAN_EVIDENCE_PAGE_CAP + 1; seq += 1) {
+          host.completeItem({ seq, item: { ...SUBAGENT, parentToolCallId: "toolu-explore" } });
+        }
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions).toEqual([DENY]);
+        expect(await lastFireOf(host)).toMatchObject({ reason: "plan-review-unverified" });
+        await host.harness.dispose();
+      });
+
+      it("is unchanged in self mode and in auto mode without a running devkit", async () => {
+        const self = await devkitHost();
+        await self.harness.setSettings({ enabled: true, reviewMode: "self" });
+        await holdAndDispatch(self);
+        self.completeItem({ seq: 101, item: { ...READ, status: "completed" } });
+        await emitPlan(self, planInteraction("# Plan v2", "pint-2"));
+        expect(self.resolutions).toEqual([DENY, approve("pint-2")]);
+        expect(self.sends).toHaveLength(1);
+        await self.harness.dispose();
+
+        const absent = await devkitHost({ plugins: [] });
+        await holdAndDispatch(absent);
+        absent.completeItem({ seq: 101, item: { ...READ, status: "completed" } });
+        await emitPlan(absent, planInteraction("# Plan v2", "pint-2"));
+        expect(absent.resolutions).toEqual([DENY, approve("pint-2")]);
+        expect(absent.sends).toHaveLength(1);
+        await absent.harness.dispose();
+      });
+
+      it("requires the load in devkit mode whatever the plugin list says", async () => {
+        const host = await devkitHost({ plugins: [] });
+        await host.harness.setSettings({ enabled: true, reviewMode: "devkit" });
+        await holdAndDispatch(host);
+        host.completeItem({ seq: 101, item: { ...READ, status: "completed" } });
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions).toEqual([DENY, redoDeny("pint-2")]);
+        await host.harness.dispose();
+      });
+
+      it("redoes a missed plan even when the project does not auto-approve", async () => {
+        const host = await devkitHost({}, false);
+        await missedRound(host);
+        expect(host.resolutions).toEqual([DENY, redoDeny("pint-2")]);
+        expect(promptText(host, 1)).not.toMatch(/auto-approves/);
+        await dispatchQueued(host);
+        await emitPlan(host, planInteraction("# Plan v3", "pint-3"));
+        expect(await lastFireOf(host)).toMatchObject({ reason: "plan-review-incomplete" });
+        await host.harness.dispose();
+      });
+
+      it("never checks or redoes an expired arm", async () => {
+        const host = await devkitHost();
+        await emitPlan(host);
+        host.metadata.planReviewArmedAt = Date.now() - STALE_WINDOW_MS - 1_000;
+        host.setQueuedRows([]);
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions).toEqual([DENY]);
+        expect(host.sends).toHaveLength(1);
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+        await host.harness.dispose();
+      });
+
+      it("starts a new plan's cycle without the last cycle's redo flag", async () => {
+        const host = await devkitHost();
+        host.metadata.planReviewRedone = true;
+        host.metadata.planReviewArmedAt = Date.now() - STALE_WINDOW_MS - 1_000;
+        await holdAndDispatch(host);
+        expect(host.metadata.planReviewRedone).toBeUndefined();
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions).toEqual([DENY, redoDeny("pint-2")]);
+        await host.harness.dispose();
+      });
+
+      describe("when the redo itself fails", () => {
+        it("leaves the plan with the user when the redo cannot be sent", async () => {
+          const { options, host } = await mutableHost();
+          await holdAndDispatch(host);
+          options.sendThrows = true;
+          await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+          expect(host.resolutions).toEqual([DENY]);
+          expect(warnings(host).some((message) => message.includes("failed to queue the plan review"))).toBe(true);
+          expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "send-failed" });
+          expect(host.metadata.planReviewArmedAt).toBeUndefined();
+          expect(host.metadata.planReviewRedone).toBeUndefined();
+          await host.harness.dispose();
+        });
+
+        it("withdraws the queued redo and leaves the plan with the user when it cannot be denied", async () => {
+          const { options, host } = await mutableHost();
+          await holdAndDispatch(host);
+          options.resolveThrows = true;
+          await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+          expect(host.sends).toHaveLength(2);
+          expect(host.deletedQueued).toEqual(["qm-1"]);
+          expect(warnings(host).some((message) => message.includes("could not hold the plan for review"))).toBe(true);
+          expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "send-failed" });
+          expect(host.metadata.planReviewArmedAt).toBeUndefined();
+          expect(host.metadata.planReviewRedone).toBeUndefined();
+          await host.harness.dispose();
+        });
+
+        it("clears the gate, and records nothing more, when the queued redo is cancelled", async () => {
+          const host = await devkitHost();
+          await missedRound(host);
+          await host.harness.behavior.emitThreadEvent("message.cancelled", { entry: queueEntry() });
+          expect(host.metadata.planReviewArmedAt).toBeUndefined();
+          expect(host.metadata.planReviewRedone).toBeUndefined();
+          expect(host.metadata.planReviewEntryId).toBeUndefined();
+          expect(await lastFireOf(host)).toMatchObject({ reason: "plan-review-redo" });
+          await host.harness.dispose();
+        });
+      });
+    });
   });
 
   describe("PresentPlan", () => {
@@ -3413,8 +3754,8 @@ describe("auto-review plugin", () => {
     describe("auto-approve", () => {
       const path = { planFilePath: "docs/plans/p.md" };
 
-      async function armed(autoApprove = true) {
-        const host = createHost();
+      async function armed(autoApprove = true, options: HostOptions = {}) {
+        const host = createHost(options);
         await plugin(host.bb);
         if (autoApprove) {
           await host.harness.runCli(["auto-approve", "on", "--project", "project-1"]);
@@ -3531,6 +3872,124 @@ describe("auto-review plugin", () => {
         expect(result).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
         expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
         await host.harness.dispose();
+      });
+
+      describe("the review-code load check", () => {
+        const DEVKIT = { enabled: true, status: "running", cliCommand: { name: "devkit" } };
+        const LOAD = {
+          type: "toolCall",
+          tool: "devkit_load_skill",
+          server: "bb",
+          status: "completed",
+          arguments: { slug: "review-code" },
+        };
+
+        /** `armed` for a thread whose devkit plugin runs, so `review-code` must be loaded. */
+        const devkitArmed = (autoApprove = false, options: HostOptions = {}) =>
+          armed(autoApprove, { plugins: [DEVKIT], ...options });
+
+        it("sends a plan back once when the skill was never loaded, staying armed with a fresh cursor", async () => {
+          const host = await devkitArmed();
+          host.completeItem({ seq: 101, item: { type: "toolCall", tool: "Read", status: "completed" } });
+          host.setMaxSeq(110);
+          const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
+          expect(result).toBe(presentPlanRedoMessage("auto"));
+          expect(host.metadata.presentPlanRedone).toBe(true);
+          expect(host.metadata.presentPlanArmedSeq).toBe(110);
+          expect(host.metadata.presentPlanArmedPath).toBe("docs/plans/p.md");
+          expect(await lastFireOf(host)).toMatchObject({ outcome: "fired", reason: "plan-review-redo" });
+          await host.harness.dispose();
+        });
+
+        it("releases a second miss with the incomplete message, and never approves it", async () => {
+          const host = await devkitArmed(true);
+          host.completeItem({ seq: 101, item: { type: "toolCall", tool: "Read", status: "completed" } });
+          await host.harness.callAgentTool("PresentPlan", path, ctx);
+          host.completeItem({ seq: 102, item: { type: "toolCall", tool: "Read", status: "completed" } });
+          const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
+          expect(result).toBe(PRESENT_PLAN_INCOMPLETE_MESSAGE);
+          expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-review-incomplete" });
+          expect(host.metadata.presentPlanArmedAt).toBeUndefined();
+          expect(host.metadata.presentPlanRedone).toBeUndefined();
+          expect(
+            warnings(host).some(
+              (message) =>
+                message.includes("released without a complete calibrated review") &&
+                message.includes("p.md") &&
+                !message.includes("docs/plans"),
+            ),
+          ).toBe(true);
+          await host.harness.dispose();
+        });
+
+        it("approves once the redo loaded the skill", async () => {
+          const host = await devkitArmed(true);
+          host.setMaxSeq(110);
+          await host.harness.callAgentTool("PresentPlan", path, ctx);
+          host.completeItem({ seq: 111, item: LOAD });
+          host.completeItem({ seq: 112, item: { type: "toolCall", tool: "Read", status: "completed" } });
+          const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
+          expect(result).toBe(PRESENT_PLAN_APPROVED_MESSAGE);
+          await host.harness.dispose();
+        });
+
+        it("keeps the plain reviewed message when the agent loaded the skill and the project does not auto-approve", async () => {
+          const host = await devkitArmed();
+          host.completeItem({ seq: 101, item: LOAD });
+          const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
+          expect(result).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+          expect(await lastFireOf(host)).toMatchObject({ reason: "plan-reviewed" });
+          await host.harness.dispose();
+        });
+
+        it("does not count a subagent's load", async () => {
+          const host = await devkitArmed();
+          host.completeItem({ seq: 101, item: { ...LOAD, parentToolCallId: "toolu-agent" } });
+          expect(await host.harness.callAgentTool("PresentPlan", path, ctx)).toBe(presentPlanRedoMessage("auto"));
+          await host.harness.dispose();
+        });
+
+        it("releases as reviewed, without approving, when the check cannot be made", async () => {
+          for (const options of [{ plugins: "throws" as const }, { completedEventsThrow: true }]) {
+            const host = await devkitArmed(true, options);
+            host.completeItem({ seq: 101, item: { type: "toolCall", tool: "Read", status: "completed" } });
+            const result = await host.harness.callAgentTool("PresentPlan", path, ctx);
+            expect(result).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+            expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-review-unverified" });
+            expect(host.metadata.presentPlanArmedAt).toBeUndefined();
+            await host.harness.dispose();
+          }
+          const noCursor = await devkitArmed(true);
+          delete noCursor.metadata.presentPlanArmedSeq;
+          expect(await noCursor.harness.callAgentTool("PresentPlan", path, ctx)).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+          expect(await lastFireOf(noCursor)).toMatchObject({ reason: "plan-review-unverified" });
+          await noCursor.harness.dispose();
+        });
+
+        it("is unchanged in self mode and in auto mode without a running devkit", async () => {
+          const self = await devkitArmed(true);
+          await self.harness.setSettings({ enabled: true, reviewMode: "self" });
+          self.completeItem({ seq: 101, item: { type: "toolCall", tool: "Read", status: "completed" } });
+          expect(await self.harness.callAgentTool("PresentPlan", path, ctx)).toBe(PRESENT_PLAN_APPROVED_MESSAGE);
+          await self.harness.dispose();
+
+          const absent = await devkitArmed(true, { plugins: [] });
+          absent.completeItem({ seq: 101, item: { type: "toolCall", tool: "Read", status: "completed" } });
+          expect(await absent.harness.callAgentTool("PresentPlan", path, ctx)).toBe(PRESENT_PLAN_APPROVED_MESSAGE);
+          await absent.harness.dispose();
+        });
+
+        it("clears a stale redo flag when a new arm starts, so the new plan still gets its redo", async () => {
+          const host = await devkitArmed();
+          host.metadata.presentPlanRedone = true;
+          host.metadata.presentPlanArmedAt = Date.now() - STALE_WINDOW_MS - 1_000;
+          // The expired arm is not a release: this call arms a fresh review.
+          const first = await host.harness.callAgentTool("PresentPlan", path, ctx);
+          expect(first).toContain("Nobody rejected it");
+          expect(host.metadata.presentPlanRedone).toBeUndefined();
+          expect(await host.harness.callAgentTool("PresentPlan", path, ctx)).toBe(presentPlanRedoMessage("auto"));
+          await host.harness.dispose();
+        });
       });
     });
 

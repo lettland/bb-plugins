@@ -100,6 +100,15 @@ export const threadStateSchema = z.object({
    */
   planReviewDeliveredSeq: z.number().int().nonnegative().optional(),
   /**
+   * The timeline cursor captured before the plan review was sent, which is
+   * where the check that the agent loaded `review-code` starts reading.
+   * `planReviewDeliveredSeq` deliberately lands late and would hide a load the
+   * review's own prompt triggered.
+   */
+  planReviewArmedSeq: z.number().int().nonnegative().optional(),
+  /** Set once the plan was sent back for a full review after `review-code` was never loaded; a second miss releases it. */
+  planReviewRedone: z.literal(true).optional(),
+  /**
    * Set when the provider-agnostic `PresentPlan` tool armed a plan review for
    * this thread; the next `PresentPlan` call on a fresh arm FOR THE SAME PATH
    * releases it and clears this key. Mirrors `planReviewArmedAt`'s
@@ -114,6 +123,8 @@ export const threadStateSchema = z.object({
   presentPlanArmedPath: z.string().optional(),
   /** The timeline cursor when `PresentPlan` armed; auto-approve looks for review work after it. */
   presentPlanArmedSeq: z.number().int().nonnegative().optional(),
+  /** `planReviewRedone` for `PresentPlan`: the one redo this arm has used. */
+  presentPlanRedone: z.literal(true).optional(),
 });
 export type ThreadState = z.infer<typeof threadStateSchema>;
 
@@ -196,6 +207,8 @@ export const PLAN_GATE_KEYS: readonly string[] = [
   "planReviewEntryId",
   "planDenied",
   "planReviewDeliveredSeq",
+  "planReviewArmedSeq",
+  "planReviewRedone",
 ];
 
 /** `PresentPlan`'s own keys, cleared by `bb auto-review reset` alongside `PLAN_GATE_KEYS`. */
@@ -203,6 +216,7 @@ export const PRESENT_PLAN_KEYS: readonly string[] = [
   "presentPlanArmedAt",
   "presentPlanArmedPath",
   "presentPlanArmedSeq",
+  "presentPlanRedone",
 ];
 
 /** How long a `user_question` can still count as the agent's reaction to a plan deny. */

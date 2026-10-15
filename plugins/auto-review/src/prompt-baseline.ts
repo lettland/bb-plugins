@@ -12,12 +12,12 @@ export const PLAN_BASELINE_DIR = "$BB_THREAD_STORAGE/auto-review/plan";
 const CODE_BASELINE_DIR = "$BB_THREAD_STORAGE/auto-review/code";
 
 /** The check comes first: nothing is created or written until the storage is known to be the agent's own. */
-const NO_BASELINE_RULE =
+export const NO_BASELINE_RULE =
   "First, if `$BB_THREAD_STORAGE` is unset, or `$BB_THREAD_STORAGE/auto-review` or its `plan`/`code` subdirectory is a symlink or not owned by you, there is no baseline: review everything and write no copies.";
 
 const DELTA_SCOPE_REFERENCE = 'devkit_load_skill({ reference: "review-delta-scope" })';
 
-const hashCommand = (path: string): string =>
+export const hashCommand = (path: string): string =>
   `\`printf '%s' "${path}" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-64\` (if the result is not 64 hex characters, there is no baseline: review everything and write no copies)`;
 
 /** The one phrase for a finding that blocks promotion, presenting and committing. */
@@ -45,7 +45,9 @@ export function planDeltaRule(withReference: boolean): string {
  * The review reads the old `.copy` for its delta, and devkit's review applies its
  * own fixes inside step 1, so the content it reads is parked as `.pending` first.
  */
-export const PLAN_PENDING = `${NO_BASELINE_RULE} Otherwise, before the review starts, run ${makeDirs("plan")} and copy the plan file as it stands now to \`<hash>.pending\` in ${PLAN_BASELINE_DIR}, where \`<hash>\` is ${hashCommand("<the plan's absolute path>")} ${SAFE_WRITE}; the review reads the older \`.copy\` for its delta, so leave that in place.`;
+export const PLAN_PARK_PENDING = `Otherwise, before the review starts, run ${makeDirs("plan")} and copy the plan file as it stands now to \`<hash>.pending\` in ${PLAN_BASELINE_DIR}, where \`<hash>\` is ${hashCommand("<the plan's absolute path>")} ${SAFE_WRITE}; the review reads the older \`.copy\` for its delta, so leave that in place.`;
+
+export const PLAN_PENDING = `${NO_BASELINE_RULE} ${PLAN_PARK_PENDING}`;
 
 /** The end of step 2: the pending copy becomes the baseline only when the review ended clean. */
 const PLAN_PROMOTE = `After the review and its fixes are done, promote the baseline only if the review completed and no ${BLOCKER} is still open: move the plan's \`.pending\` copy over its \`.copy\` in ${PLAN_BASELINE_DIR} and update its \`manifest.tsv\` row, so the next cycle reviews only what changed since (this cycle's fixes included). Otherwise delete the \`.pending\` copy, so the next cycle reviews the whole plan. If the review found a secret in the plan, delete the plan's copies.`;

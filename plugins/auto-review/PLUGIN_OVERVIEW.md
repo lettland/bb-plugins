@@ -83,6 +83,12 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   thread context, not a security boundary); the agent mentions that the approval may have
   come from auto-review rather than from the user. A turn that ended since the review was
   delivered (a `turn/completed` event) voids the evidence.
+- In `devkit` mode, and in `auto` mode while the devkit plugin runs, both plan paths also check
+  that the agent itself loaded `review-code` after the review was sent (an anti-shortcut check,
+  not proof a review ran; a turn ending does not void it, unlike the auto-approve proof). A plan
+  whose review never loaded it is sent back once for a full re-review (reason `plan-review-redo`);
+  a second miss is released without an auto-approve (`plan-review-incomplete`), and a check that
+  cannot be made releases it without a redo or an auto-approve (`plan-review-unverified`).
 - The review turn ends by calling the `ReportReview` agent tool (offered to every top-level,
   non-plugin thread on every provider, whatever the global switch says; inert outside a review)
   with an outcome (`committed`, `merged`, `uncommitted`, `blocked`, `no-changes`), a summary and

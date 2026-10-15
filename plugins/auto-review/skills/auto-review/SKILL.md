@@ -153,9 +153,48 @@ with, so the change applies from the next session start.
 Every plan is reviewed, commit plans included: there is no marker, flag or environment
 variable that waves a plan through. `disable` turns plan review off along with code
 review, on both paths; `reset` also clears a native gate left armed by a review
-that never re-presented its plan, a pending plan-hold answer, and a `PresentPlan` arm left
-behind the same way — each kept in its own set of keys, so resetting one path never
-disturbs state the other path owns.
+that never re-presented its plan (its arm-time cursor and redo flag included), a pending
+plan-hold answer, and a `PresentPlan` arm left behind the same way (its redo flag included) —
+each kept in its own set of keys, so resetting one path never disturbs state the other path
+owns.
+
+### The review-code check
+
+In `devkit` mode, and in `auto` mode while the devkit plugin is running (it serves `bb devkit`),
+both plan paths check at release time that the agent itself loaded `review-code`
+(`devkit_load_skill({ slug: "review-code" })`, not a subagent's load) after the review was sent,
+in whatever turn (the review may be dispatched as a new turn, or the agent woken in a later one
+by its review child threads); the cursor is the one captured before the send, so a load the
+review prompt triggered counts. Unlike the auto-approve proof below, a turn ending does not void it. It is an anti-shortcut check against running the review from memory,
+not proof that a review ran: it does not look at how many reviewers were used. `self` mode and
+`auto` without a running devkit check nothing.
+
+- Loaded: as before (auto-approve is allowed when the other evidence holds).
+- Never loaded: the plan is sent back **once**, auto-approve or not (reason `plan-review-redo`,
+  outcome `fired`). The agent is told to load the skill again, delete the plan's baseline and
+  review the whole plan. Native gate: the plan is denied again with the redo prompt;
+  `PresentPlan`: the call returns the redo instructions and the arm stays, with a fresh clock
+  and cursor. If the agent presents again without having run the calibrated review it is
+  to put `> auto-review: the calibrated review did not run for this plan.` as the first line of
+  the plan text and say so in its summary.
+- Still never loaded after the redo: the plan is released with no auto-approve (reason
+  `plan-review-incomplete`, outcome `stood-down`), and the plugin log carries a warn line with
+  the thread id and the plan file's name. On `PresentPlan` the agent is told to say the plan was
+  released without a complete calibrated review. On the native gate the only disclosure that
+  reaches the approval dialog is the line above, in the plan text.
+- Unknown (the plugin list, the events or the cursor could not be read, an agent load recorded
+  no arguments, or the scan reached its page cap): no redo and no auto-approve (reason
+  `plan-review-unverified`, outcome `stood-down`, plus a warn line). The review may well have
+  run.
+
+An expired arm is never checked. A redo whose send or deny fails, or whose queued review is
+cancelled, leaves the plan with the user as any failed hold does (reason `send-failed`, or
+nothing for a cancel), without the disclosure line. The stale window is still 30 minutes: a
+review (child threads) that runs longer re-presents into a new cycle, which finds an empty delta,
+loads the skill and passes, so the cost is one extra short cycle, not a loop. Upgrading: in
+`devkit` and `auto` (with devkit) modes every plan whose review never loaded `review-code` now
+gets one redo, auto-approve or not, and with auto-approve on such a plan is no longer approved
+automatically. Set the review mode to `self` to opt out.
 
 ### Auto-approve
 
@@ -177,9 +216,11 @@ What counts as a completed review cycle:
   a steered message reaches the model only after a tool result, so that is the proof the
   review was in front of it. Whether a turn ended comes from the event log: bb emits
   `turn/completed` only when a turn really ends, never when it steers a queued message into
-  a running one. The plan is then resolved `allow_once` (reason `plan-approved`, also
+  a running one, and (where the *review-code check* above applies) the agent loaded
+  `review-code`. The plan is then resolved `allow_once` (reason `plan-approved`, also
   logged).
-- `PresentPlan`: a tool call (other than the gate's own) completed between the first and
+- `PresentPlan`: the agent loaded `review-code` (where the *review-code check* applies), a
+  tool call (other than the gate's own) completed between the first and
   second call, and the second call then returns an explicit "approved automatically" result
   (reason `plan-approved`). A subagent's call counts here, since the review may run in one;
   a turn that ended in between (`turn/completed`) does not. This catches an accidental
@@ -188,7 +229,8 @@ What counts as a completed review cycle:
   performs the review.
 
 Everything else still goes to the user, as with the option off: no proof the review ran
-(including an events read that failed), a turn that ended since the review was delivered
+(including an events read that failed), a plan whose review `review-code` check came back
+missing or unknown (reasons `plan-review-incomplete`, `plan-review-unverified`), a turn that ended since the review was delivered
 (a stale arm must never approve a later plan; this holds even when the idle event was
 missed), `plan-hold-expired`, a provider that offers no `allow_once`,
 or a failed approval (reason `plan-reviewed`).
@@ -296,6 +338,8 @@ All commands accept `--json`.
   the thread can spawn children (otherwise provider subagents, or sequentially in the same
   thread); `self` mode and the no-devkit case in `auto` still review in this thread. A full
   calibrated review costs about six sessions on the provider (five lenses plus closure).
+  In `devkit` and `auto` (with devkit) modes the plan gate also checks that the agent loaded
+  `review-code` (see *The review-code check*); `self` mode checks nothing.
 
 Every code review also runs `bb aislop scan` while the aislop plugin is installed and
 running; with it missing or disabled, the review prompt leaves the step out. The scan
@@ -415,6 +459,14 @@ thread, so the turn's review and commit are never dropped by it.
 - `disabled` — disabled globally or for this project.
 - `plan-approved` — a plan that completed the review cycle was approved automatically
   (project opted in with `auto-approve on`). Paired with outcome `fired`.
+- `plan-review-redo` — the plan's review never loaded `review-code`, so the plan was sent back
+  once for a full review (see *The review-code check*). Paired with outcome `fired`. Nothing to do.
+- `plan-review-incomplete` — the redo's review missed it too; the plan was released to the user
+  without an auto-approve. Paired with outcome `stood-down`. Check the plan yourself before
+  approving it: the calibrated review did not run. The plugin log names the thread and the plan file.
+- `plan-review-unverified` — whether `review-code` was loaded could not be told (plugin list,
+  event log or cursor unreadable, or too many rows to scan); no redo and no auto-approve. Paired
+  with outcome `stood-down`. The review may have run; read the plan if the project relies on it.
 - `skipped` — legacy: only on records stored before the per-thread skip flag was removed.
 - `commit-plan` — legacy: only on records stored before the commit-plan marker was removed.
 - `send-failed` — injecting the review turn failed; the latch was cleared.

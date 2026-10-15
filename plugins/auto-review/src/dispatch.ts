@@ -19,24 +19,54 @@ import { addReview, removeReview } from "./reviews.js";
 import { resetToIdlePatch, writeState, type ThreadState } from "./state.js";
 
 /**
+ * Whether a running plugin serves the `bb <command>` CLI command, or null when
+ * the plugin list could not be read (logged with `onError`, which says what is
+ * lost without the answer).
+ */
+async function pluginServesCommand(
+  bb: BbPluginApi,
+  command: string,
+  onError: string,
+): Promise<boolean | null> {
+  try {
+    const { plugins } = await bb.sdk.plugins.list();
+    return plugins.some(
+      (entry) => entry.enabled && entry.status === "running" && entry.cliCommand?.name === command,
+    );
+  } catch (error) {
+    bb.log.warn(`${onError}: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+/**
  * Whether a running plugin serves `bb aislop`. The review only asks for the scan
  * then, so a missing or disabled aislop plugin never shows up as a failed step;
  * a failed lookup counts as absent and never blocks the review itself.
  */
 export async function aislopScanAvailable(bb: BbPluginApi): Promise<boolean> {
-  try {
-    const { plugins } = await bb.sdk.plugins.list();
-    return plugins.some(
-      (entry) => entry.enabled && entry.status === "running" && entry.cliCommand?.name === "aislop",
-    );
-  } catch (error) {
-    bb.log.warn(
-      `auto-review: could not list plugins, leaving the aislop scan out of this review: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return false;
-  }
+  return (
+    (await pluginServesCommand(
+      bb,
+      "aislop",
+      "auto-review: could not list plugins, leaving the aislop scan out of this review",
+    )) === true
+  );
+}
+
+/**
+ * Whether the devkit plugin is running (it registers the `bb devkit` command).
+ * Unlike `aislopScanAvailable`, a failed lookup is its own answer, never
+ * "absent": a plan review is only checked against `review-code` when devkit
+ * is there, so guessing either way would redo or approve on a guess.
+ */
+export async function devkitRunning(bb: BbPluginApi): Promise<"running" | "absent" | "unknown"> {
+  const serves = await pluginServesCommand(
+    bb,
+    "devkit",
+    "auto-review: could not list plugins to tell whether devkit is running; the plan review cannot be verified",
+  );
+  return serves === null ? "unknown" : serves ? "running" : "absent";
 }
 
 export interface DispatchInput {

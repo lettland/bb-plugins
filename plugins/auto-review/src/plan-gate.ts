@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import type { PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
 import { effectiveConfig, readProjectConfig } from "./config.js";
 import {
@@ -7,19 +8,22 @@ import {
   type GateThreadLike,
   type ReviewContext,
 } from "./context.js";
-import { captureSinceSeq } from "./detect.js";
+import { captureSinceSeq, tryCaptureSinceSeq } from "./detect.js";
 import { passesThreadGate, planGateServes } from "./gate.js";
 import {
   EVENT_PAGE_MAX,
   isImmediateReactionToDeny,
   planApprovalOf,
   planGateAction,
+  planReleaseReason,
+  planSkillCheck,
   reviewRanSince,
   userQuestionOf,
+  warnPlanUnreviewed,
   type PendingUserQuestion,
   type PlanApproval,
 } from "./plan.js";
-import { buildPlanReviewPrompt, PLAN_HOLD_ANSWER } from "./prompt.js";
+import { buildPlanReviewPrompt, buildPlanReviewRedoPrompt, PLAN_HOLD_ANSWER } from "./prompt.js";
 import { REPORT_REVIEW_TOOL_NAME } from "./report-tool.js";
 import {
   PLAN_GATE_KEYS,
@@ -80,22 +84,49 @@ export async function gatePlan(
     { planReviewArmedAt: Date.now() },
     PLAN_GATE_KEYS.filter((key) => key !== "planReviewArmedAt"),
   );
+  const prompt = buildPlanReviewPrompt({
+    reviewMode: config.reviewMode,
+    planFilePath: approval.planFilePath,
+    autoApprove: config.autoApprovePlans,
+  });
+  if (await armReview(ctx, thread, approval, prompt)) {
+    await recordFire(ctx, thread.projectId, thread.id, "fired", "plan-review");
+  }
+}
+
+/**
+ * Queue a review turn and deny the plan so it lands, for the first
+ * presentation and for a redo alike. The cursor the `review-code` check reads
+ * from is captured before the send, while the held approval keeps the agent
+ * from running tools, so nothing earlier can match; the delivery cursor lands
+ * later on purpose and would hide a load the prompt itself triggered. Returns
+ * whether the plan is held: false means it is left with the user and the gate
+ * is disarmed.
+ */
+async function armReview(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  approval: PlanApproval,
+  prompt: string,
+): Promise<boolean> {
+  const { bb } = ctx;
+  const armedSeq = await tryCaptureSinceSeq(
+    bb,
+    thread.id,
+    `the plan review in ${thread.id}; the plan will not be auto-approved or sent back for review-code`,
+  );
+  await writeState(
+    bb,
+    thread.id,
+    armedSeq === undefined ? {} : { planReviewArmedSeq: armedSeq },
+    armedSeq === undefined ? ["planReviewArmedSeq"] : undefined,
+  );
   let queuedMessageId: string | null = null;
   try {
     const result = await bb.sdk.threads.send({
       threadId: thread.id,
       mode: "auto",
-      input: [
-        {
-          type: "text",
-          text: buildPlanReviewPrompt({
-            reviewMode: config.reviewMode,
-            planFilePath: approval.planFilePath,
-            autoApprove: config.autoApprovePlans,
-          }),
-          mentions: [],
-        },
-      ],
+      input: [{ type: "text", text: prompt, mentions: [] }],
     });
     if (result.delivery === "queued") {
       queuedMessageId = result.queuedMessage.id;
@@ -114,11 +145,9 @@ export async function gatePlan(
     );
     await writeState(bb, thread.id, {}, [...PLAN_GATE_KEYS]);
     await recordFire(ctx, thread.projectId, thread.id, "stood-down", "send-failed");
-    return;
+    return false;
   }
-  if (await denyPlan(ctx, thread, approval, queuedMessageId)) {
-    await recordFire(ctx, thread.projectId, thread.id, "fired", "plan-review");
-  }
+  return denyPlan(ctx, thread, approval, queuedMessageId);
 }
 
 /** Records where the plan review reached the agent; failing to means the plan is never auto-approved. */
@@ -138,14 +167,21 @@ async function markReviewDelivered(ctx: ReviewContext, threadId: string): Promis
 }
 
 /**
- * The reviewed plan comes back: disarm the gate, then approve it for the user
- * only when the project opted in AND everything shows the review cycle
- * completed — the review was delivered, the arm is fresh, and the agent
- * completed a tool call of its own after delivery (which is when a steered
- * message reaches the model) with no turn ending since, so a stale arm from a
- * review turn that never re-presented through the gate cannot approve a later
- * plan. Anything less leaves the plan with the user, exactly as with the
- * option off.
+ * The reviewed plan comes back. When the plan review should have loaded
+ * `review-code` and the agent never did (`planSkillCheck`), the plan goes back
+ * once for a full review instead; the second miss, or an unreadable check,
+ * releases it without an auto-approve. Otherwise disarm the gate, then approve
+ * it for the user only when the project opted in AND everything shows the
+ * review cycle completed — the skill was loaded, the review was delivered, the
+ * arm is fresh, and the agent completed a tool call of its own after delivery
+ * (which is when a steered message reaches the model) with no turn ending
+ * since, so a stale arm from a review turn that never re-presented through the
+ * gate cannot approve a later plan. Anything less leaves the plan with the
+ * user, exactly as with the option off.
+ *
+ * The redo is decided from `state` before the gate's keys are cleared, which
+ * would erase `planReviewRedone`. An expired arm is never checked or redone:
+ * nothing ties its review to this plan.
  */
 async function releaseReviewedPlan(
   ctx: ReviewContext,
@@ -155,39 +191,93 @@ async function releaseReviewedPlan(
   config: EffectiveConfig,
 ): Promise<void> {
   const { bb } = ctx;
+  const expired = planHoldExpired(state, Date.now());
+  const check = expired
+    ? "loaded"
+    : await planSkillCheck(bb, thread.id, config.reviewMode, state.planReviewArmedSeq);
+  if (check === "missing" && state.planReviewRedone !== true) {
+    await redoPlanReview(ctx, thread, approval, config);
+    return;
+  }
   await writeState(bb, thread.id, {}, [...PLAN_GATE_KEYS]);
   const { planReviewDeliveredSeq } = state;
   if (
+    check === "loaded" &&
     config.autoApprovePlans &&
     approval.canApprove &&
     planReviewDeliveredSeq !== undefined &&
-    !planHoldExpired(state, Date.now()) &&
-    (await reviewRanSince(bb, thread.id, planReviewDeliveredSeq, NATIVE_GATE_TOOLS, false))
+    !expired &&
+    (await reviewRanSince(bb, thread.id, planReviewDeliveredSeq, NATIVE_GATE_TOOLS, false)) &&
+    (await approvePlan(ctx, thread, approval))
   ) {
-    let approved = false;
-    try {
-      await bb.sdk.threads.interactions.resolve({
-        threadId: thread.id,
-        interactionId: approval.interactionId,
-        resolution: { decision: "allow_once", grantedPermissions: null },
-      });
-      approved = true;
-    } catch (error) {
-      bb.log.warn(
-        `auto-review: could not auto-approve the reviewed plan in ${thread.id}; leaving it for the user: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-    if (approved) {
-      await recordFire(ctx, thread.projectId, thread.id, "fired", "plan-approved");
-      bb.log.info(
-        `auto-review: auto-approved the reviewed plan ${approval.interactionId} in thread ${thread.id}`,
-      );
-      return;
-    }
+    return;
   }
-  await recordFire(ctx, thread.projectId, thread.id, "stood-down", "plan-reviewed");
+  if (check !== "loaded") {
+    warnPlanUnreviewed(
+      bb,
+      thread.id,
+      approval.planFilePath === null ? approval.interactionId : basename(approval.planFilePath),
+      check,
+    );
+  }
+  await recordFire(ctx, thread.projectId, thread.id, "stood-down", planReleaseReason(check));
+}
+
+/** Resolve the reviewed plan `allow_once`; false (logged) leaves it with the user. */
+async function approvePlan(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  approval: PlanApproval,
+): Promise<boolean> {
+  const { bb } = ctx;
+  try {
+    await bb.sdk.threads.interactions.resolve({
+      threadId: thread.id,
+      interactionId: approval.interactionId,
+      resolution: { decision: "allow_once", grantedPermissions: null },
+    });
+  } catch (error) {
+    bb.log.warn(
+      `auto-review: could not auto-approve the reviewed plan in ${thread.id}; leaving it for the user: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return false;
+  }
+  await recordFire(ctx, thread.projectId, thread.id, "fired", "plan-approved");
+  bb.log.info(
+    `auto-review: auto-approved the reviewed plan ${approval.interactionId} in thread ${thread.id}`,
+  );
+  return true;
+}
+
+/**
+ * Send a plan back for a full review: re-arm the gate with a fresh clock and
+ * cursor, mark the cycle as redone so the next release cannot redo again, and
+ * drop the first round's queued id, delivery cursor and deny cursor so none of
+ * them stands in for the redo's.
+ */
+async function redoPlanReview(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  approval: PlanApproval,
+  config: EffectiveConfig,
+): Promise<void> {
+  const { bb } = ctx;
+  await writeState(
+    bb,
+    thread.id,
+    { planReviewArmedAt: Date.now(), planReviewRedone: true },
+    ["planReviewEntryId", "planReviewDeliveredSeq", "planDenied"],
+  );
+  const prompt = buildPlanReviewRedoPrompt({
+    reviewMode: config.reviewMode,
+    planFilePath: approval.planFilePath,
+    autoApprove: config.autoApprovePlans,
+  });
+  if (await armReview(ctx, thread, approval, prompt)) {
+    await recordFire(ctx, thread.projectId, thread.id, "fired", "plan-review-redo");
+  }
 }
 
 /**

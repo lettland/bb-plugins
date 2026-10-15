@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { commitScanHead, committedSinceHead } from "./dispatch.js";
+import { commitScanHead, committedSinceHead, devkitRunning } from "./dispatch.js";
 import { buildReviewPrompt, renderScope } from "./prompt.js";
 import type { ThreadState } from "./state.js";
 
@@ -80,5 +80,46 @@ describe("a turn that made only another thread's commits", () => {
     const pulled = { paths: ["a.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: ["abcdef1"] };
     expect(committedSinceHead(pulled, state)).toBeNull();
     expect(commitScanHead(pulled, state)).toBeNull();
+  });
+});
+
+describe("devkitRunning", () => {
+  type Entry = { enabled: boolean; status: string; cliCommand: { name: string } | null };
+  function pluginsBb(plugins: Entry[] | "throws") {
+    const warnings: string[] = [];
+    const bb = {
+      log: { warn: (message: string) => warnings.push(message) },
+      sdk: {
+        plugins: {
+          list: async () => {
+            if (plugins === "throws") {
+              throw new Error("plugin list unavailable");
+            }
+            return { plugins };
+          },
+        },
+      },
+    };
+    return { bb: bb as never, warnings };
+  }
+  const devkit: Entry = { enabled: true, status: "running", cliCommand: { name: "devkit" } };
+
+  it("is running for an enabled, running plugin that serves `bb devkit`", async () => {
+    expect(await devkitRunning(pluginsBb([devkit]).bb)).toBe("running");
+  });
+
+  it("is absent when no such plugin is enabled and running", async () => {
+    expect(await devkitRunning(pluginsBb([]).bb)).toBe("absent");
+    expect(await devkitRunning(pluginsBb([{ ...devkit, enabled: false }]).bb)).toBe("absent");
+    expect(await devkitRunning(pluginsBb([{ ...devkit, status: "stopped" }]).bb)).toBe("absent");
+    expect(await devkitRunning(pluginsBb([{ ...devkit, cliCommand: null }]).bb)).toBe("absent");
+    expect(await devkitRunning(pluginsBb([{ ...devkit, cliCommand: { name: "aislop" } }]).bb)).toBe("absent");
+  });
+
+  it("is unknown, with a warning, when the lookup fails", async () => {
+    const { bb, warnings } = pluginsBb("throws");
+    expect(await devkitRunning(bb)).toBe("unknown");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("could not list plugins");
   });
 });

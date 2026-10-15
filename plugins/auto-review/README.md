@@ -27,6 +27,27 @@ plan approved automatically once it has completed the review cycle; anything the
 cannot show was reviewed still goes to the user. The agent mentions that the approval may
 have come from auto-review rather than from the user.
 
+In `devkit` mode, and in `auto` mode while the devkit plugin is running, the plan gate also
+checks that the agent itself loaded `review-code` (`devkit_load_skill`) after the review was
+sent, in whatever turn. It is an anti-shortcut check against running the review
+from memory, not proof that a review ran: it does not count reviewers. A plan whose review
+never loaded the skill is sent back once for a full re-review (its baseline is cleared, so
+the whole plan is reviewed; reason `plan-review-redo`), whether or not the project
+auto-approves. If the second round misses too, the plan is released to the user without an
+auto-approve (`plan-review-incomplete`; the log names the thread and the plan file) and the
+agent is told to say so; on Claude Code the only disclosure that reaches the approval dialog
+is the first line the agent was asked to put in the plan text (`> auto-review: the calibrated
+review did not run for this plan.`). When the check cannot be made (the plugin list, the
+event log or the timeline cursor is unreadable, or more rows than the scan reads came
+first) the plan is released with no auto-approve and no redo (`plan-review-unverified`).
+`self` mode, and `auto` without a running devkit, check nothing. If the redo cannot be sent,
+or is cancelled, the plan stays with the user as for any failed hold, with no disclosure
+line. A review that runs past the 30-minute stale window re-presents into a new cycle,
+which finds an empty delta, loads the skill and passes: one extra short cycle, not a loop.
+Upgrading: in `devkit` and `auto` (with devkit) modes every plan whose review never loaded
+`review-code` now gets one redo, auto-approve or not, and with auto-approve on such a plan
+is no longer approved automatically. Set the review mode to `self` to opt out.
+
 It ships enabled (opt-out).
 
 ## How it works

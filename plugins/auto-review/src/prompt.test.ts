@@ -2,15 +2,19 @@ import { describe, expect, it } from "vitest";
 import {
   AUTO_REVIEW_MARKER,
   buildPlanReviewPrompt,
+  buildPlanReviewRedoPrompt,
   buildPresentPlanReviewPrompt,
   buildReviewPrompt,
   MAX_SCOPE_ENTRIES,
   PLAN_FIRST_INSTRUCTIONS,
   PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
   PLAN_HOLD_ANSWER,
+  PLAN_REVIEW_SKIPPED_LINE,
   PRESENT_PLAN_APPROVED_MESSAGE,
+  PRESENT_PLAN_INCOMPLETE_MESSAGE,
   PRESENT_PLAN_INVALID_PATH_MESSAGE,
   PRESENT_PLAN_OFF_MESSAGE,
+  presentPlanRedoMessage,
   PRESENT_PLAN_REVIEWED_MESSAGE,
   renderScope,
 } from "./prompt.js";
@@ -1079,5 +1083,136 @@ describe("PLAN_HOLD_ANSWER", () => {
     expect(PLAN_HOLD_ANSWER).toMatch(/did not reject this plan and has not seen it/);
     expect(PLAN_HOLD_ANSWER).toMatch(/Do not ask the user what to change/);
     expect(PLAN_HOLD_ANSWER).toMatch(/ask it again/);
+  });
+});
+
+describe("the rules for running devkit's review", () => {
+  const RULES = /With devkit's review: load it now, in this thread, before any review work \(the baseline\/delta check included\), even if you ran it earlier in this session, and never run the review from memory\. Its initial review runs five lenses \(senior-dev, senior-qa, security, end-user, compliance\) as five separate reviewers, never combined into one worker, each started as a bb child thread \(`bb thread spawn`, titled `review: <lens>`\)\. Fall back only in the skill's own tier order, and only per lens after a real failure or when child threads are not available here\./;
+  const CHECK = "auto-review checks that `review-code` was loaded in this thread before the plan goes on.";
+  const code = (reviewMode: "auto" | "devkit" | "self", committedSince: string | null = null) =>
+    buildReviewPrompt({
+      decision: { commit: true, merge: false },
+      reviewMode,
+      scope: renderScope(["a.ts"]),
+      committedSince,
+    });
+  const plans = (reviewMode: "auto" | "devkit" | "self") => [
+    buildPlanReviewPrompt({ reviewMode, planFilePath: "/p/plan.md", autoApprove: false }),
+    buildPresentPlanReviewPrompt({ reviewMode, planFilePath: "docs/plans/p.md" }),
+  ];
+
+  it("is in the code review prompts of devkit and auto mode, committed or not", () => {
+    for (const mode of ["devkit", "auto"] as const) {
+      expect(code(mode)).toMatch(RULES);
+      expect(code(mode, "0123abcd")).toMatch(RULES);
+    }
+  });
+
+  it("is in the plan review prompts of devkit and auto mode, with the note that auto-review checks it", () => {
+    for (const mode of ["devkit", "auto"] as const) {
+      for (const text of plans(mode)) {
+        expect(text).toMatch(RULES);
+        expect(text).toContain(CHECK);
+      }
+    }
+  });
+
+  it("is in no prompt of self mode", () => {
+    expect(code("self")).not.toMatch(/five separate reviewers|never run the review from memory/);
+    for (const text of plans("self")) {
+      expect(text).not.toMatch(/five separate reviewers|never run the review from memory/);
+      expect(text).not.toContain(CHECK);
+    }
+  });
+});
+
+describe("the plan redo prompts", () => {
+  const native = (reviewMode: "auto" | "devkit", planFilePath: string | null = "/p/plan.md") =>
+    buildPlanReviewRedoPrompt({ reviewMode, planFilePath, autoApprove: false });
+  const present = presentPlanRedoMessage("auto");
+
+  it("opens with the reason, then says nobody rejected the plan", () => {
+    for (const text of [native("auto"), present]) {
+      expect(text.startsWith(AUTO_REVIEW_MARKER)).toBe(true);
+      expect(text).toMatch(/auto-review could not see `review-code` loaded in this thread for the last review of this plan/);
+      expect(text).toMatch(/Nobody rejected the plan/);
+      expect(text).toMatch(/Do not ask the user what is wrong, and do not start implementing/);
+    }
+  });
+
+  it("orders load, baseline deletion, then a review of the whole plan", () => {
+    for (const text of [native("auto"), native("devkit"), present]) {
+      const load = text.indexOf("(a) Call `devkit_load_skill({ slug: \"review-code\" })` again");
+      const remove = text.indexOf("(b) First, if `$BB_THREAD_STORAGE` is unset");
+      const review = text.indexOf("(c) ");
+      expect(load).toBeGreaterThan(-1);
+      expect(remove).toBeGreaterThan(load);
+      expect(review).toBeGreaterThan(remove);
+      expect(text).toMatch(/delete the baseline of [^.]*from \$BB_THREAD_STORAGE\/auto-review\/plan: its `<hash>\.copy` and `<hash>\.pending` and its `manifest\.tsv` row/);
+      expect(text).toContain("`printf '%s' \"<the plan's absolute path>\" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-64`");
+      expect(text).toMatch(/Review the whole of [^.]*with the workflow you just loaded/);
+      expect(text).toContain("`full (no baseline)`");
+    }
+  });
+
+  it("keeps the follow-up steps of the first prompt", () => {
+    const text = native("auto");
+    expect(text).toMatch(/\n2\. Apply every valid finding/);
+    expect(text).toMatch(/\n3\. If you are no longer in plan mode/);
+    expect(text).toMatch(/\n5\. Stop\. Implement only after the user explicitly approves/);
+    expect(buildPlanReviewRedoPrompt({ reviewMode: "auto", planFilePath: "/p.md", autoApprove: true })).toMatch(
+      /This project auto-approves reviewed plans/,
+    );
+    expect(present).toMatch(/\n3\. If the review leaves a decision only the user can make[^]*call PresentPlan again with the same planFilePath/);
+  });
+
+  it("falls back to a self-review in auto mode and stops in devkit mode", () => {
+    expect(native("auto")).toMatch(/If the devkit_load_skill tool is not available to you, skip \(a\) and do a focused self-review of the plan from five angles/);
+    expect(present).toMatch(/If the devkit_load_skill tool is not available to you, skip \(a\) and do a focused self-review/);
+    expect(native("devkit")).toMatch(/If the devkit_load_skill tool is not available, STOP and report that the devkit review workflow is missing/);
+    expect(native("devkit")).not.toMatch(/skip \(a\)/);
+  });
+
+  it("keeps devkit mode's STOP in the PresentPlan redo, with no self-review escape", () => {
+    const devkit = presentPlanRedoMessage("devkit");
+    expect(devkit).toMatch(/If the devkit_load_skill tool is not available, STOP and report that the devkit review workflow is missing; do not fall back to a self-review/);
+    expect(devkit).not.toMatch(/skip \(a\)|self-review of the plan from five angles/);
+    expect(devkit).toContain(PLAN_REVIEW_SKIPPED_LINE);
+  });
+
+  it("requires the disclosure line inside the plan text whenever the calibrated review did not run", () => {
+    for (const text of [native("auto"), native("devkit"), present]) {
+      expect(text).toContain(`make the first line of the plan text itself \`${PLAN_REVIEW_SKIPPED_LINE}\` and say the same in your summary`);
+    }
+    expect(PLAN_REVIEW_SKIPPED_LINE).toBe("> auto-review: the calibrated review did not run for this plan.");
+  });
+
+  it("names the file saved in the first round when the provider gave no safe path", () => {
+    for (const planFilePath of [null, "/p/bad name.md"]) {
+      const text = native("auto", planFilePath);
+      expect(text).toMatch(/1\. The plan file is the one you saved the plan to in the first round/);
+      expect(text).not.toContain("auto-review-plan (data");
+    }
+    expect(native("auto")).toContain("/p/plan.md");
+  });
+
+  it("carries the review rules, so a redo is not another shortcut", () => {
+    for (const text of [native("auto"), present]) {
+      expect(text).toMatch(/five separate reviewers, never combined into one worker/);
+    }
+  });
+});
+
+describe("PRESENT_PLAN_INCOMPLETE_MESSAGE", () => {
+  it("tells the agent to say the plan was released without a complete calibrated review", () => {
+    expect(PRESENT_PLAN_INCOMPLETE_MESSAGE.startsWith(AUTO_REVIEW_MARKER)).toBe(true);
+    expect(PRESENT_PLAN_INCOMPLETE_MESSAGE).toMatch(/released without a complete calibrated review/);
+    expect(PRESENT_PLAN_INCOMPLETE_MESSAGE).toMatch(/This result is not the user's approval/);
+    expect(PRESENT_PLAN_INCOMPLETE_MESSAGE).toMatch(/delete that plan's copy from \$BB_THREAD_STORAGE\/auto-review\/plan/);
+  });
+
+  it("never says the plan was reviewed", () => {
+    expect(PRESENT_PLAN_INCOMPLETE_MESSAGE).not.toMatch(/Plan reviewed/);
+    expect(PRESENT_PLAN_INCOMPLETE_MESSAGE).not.toMatch(/approved automatically/);
   });
 });

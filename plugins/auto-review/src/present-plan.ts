@@ -7,17 +7,19 @@ import type {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { effectiveConfig, readProjectConfig } from "./config.js";
-import { recordFire, type ReviewContext } from "./context.js";
+import { recordFire, type EffectiveConfig, type ReviewContext } from "./context.js";
 import { tryCaptureSinceSeq } from "./detect.js";
 import { PLAN_GATE_PROVIDER_ID } from "./gate.js";
-import { reviewRanSince } from "./plan.js";
+import { planReleaseReason, planSkillCheck, reviewRanSince, warnPlanUnreviewed } from "./plan.js";
 import {
   buildPresentPlanReviewPrompt,
   PLAN_FIRST_INSTRUCTIONS,
   PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
   PRESENT_PLAN_APPROVED_MESSAGE,
+  PRESENT_PLAN_INCOMPLETE_MESSAGE,
   PRESENT_PLAN_INVALID_PATH_MESSAGE,
   PRESENT_PLAN_OFF_MESSAGE,
+  presentPlanRedoMessage,
   PRESENT_PLAN_REVIEWED_MESSAGE,
   SCOPE_PATH_ALLOW,
 } from "./prompt.js";
@@ -28,6 +30,7 @@ import {
   readState,
   withThreadLock,
   writeState,
+  type ThreadState,
 } from "./state.js";
 
 /** The provider-agnostic plan-review tool every served thread gets (see `configure` below). */
@@ -56,6 +59,59 @@ function captureArmedSeq(review: ReviewContext, threadId: string): Promise<numbe
   );
 }
 
+/**
+ * The second call for an armed plan. A plan whose review never loaded
+ * `review-code` (`planSkillCheck`) is sent back once instead, staying armed
+ * with a fresh clock and cursor; it is decided from `state` before the keys
+ * are cleared, which would erase `presentPlanRedone`. Otherwise it is released:
+ * approved only when the skill was loaded and a tool call completed in between,
+ * which cannot show a deliberate skip. A subagent's call counts: the review may
+ * run in one.
+ */
+async function releasePlan(
+  review: ReviewContext,
+  ctx: PluginAgentToolContext,
+  state: ThreadState,
+  config: EffectiveConfig,
+  planFilePath: string,
+): Promise<PluginAgentToolResult> {
+  const { bb } = review;
+  const check = await planSkillCheck(bb, ctx.threadId, config.reviewMode, state.presentPlanArmedSeq);
+  if (check === "missing" && state.presentPlanRedone !== true) {
+    const redoSeq = await captureArmedSeq(review, ctx.threadId);
+    await writeState(
+      bb,
+      ctx.threadId,
+      {
+        presentPlanArmedAt: Date.now(),
+        presentPlanRedone: true,
+        ...(redoSeq === undefined ? {} : { presentPlanArmedSeq: redoSeq }),
+      },
+      redoSeq === undefined ? ["presentPlanArmedSeq"] : undefined,
+    );
+    await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-review-redo");
+    return presentPlanRedoMessage(config.reviewMode);
+  }
+  await writeState(bb, ctx.threadId, {}, [...PRESENT_PLAN_KEYS]);
+  if (
+    check === "loaded" &&
+    config.autoApprovePlans &&
+    state.presentPlanArmedSeq !== undefined &&
+    (await reviewRanSince(bb, ctx.threadId, state.presentPlanArmedSeq, PRESENT_PLAN_GATE_TOOLS, true))
+  ) {
+    await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-approved");
+    bb.log.info(
+      `auto-review: auto-approved the reviewed plan ${basename(planFilePath)} in thread ${ctx.threadId}`,
+    );
+    return PRESENT_PLAN_APPROVED_MESSAGE;
+  }
+  if (check !== "loaded") {
+    warnPlanUnreviewed(bb, ctx.threadId, basename(planFilePath), check);
+  }
+  await recordFire(review, ctx.projectId, ctx.threadId, "stood-down", planReleaseReason(check));
+  return check === "missing" ? PRESENT_PLAN_INCOMPLETE_MESSAGE : PRESENT_PLAN_REVIEWED_MESSAGE;
+}
+
 /** `PresentPlan`'s `execute`: the first call for a plan arms its review, the second releases it. */
 async function presentPlan(
   review: ReviewContext,
@@ -78,29 +134,7 @@ async function presentPlan(
     }
     const now = Date.now();
     if (presentPlanArmed(state, planFilePath, now)) {
-      await writeState(bb, ctx.threadId, {}, [...PRESENT_PLAN_KEYS]);
-      // A completed tool call between the two calls is the evidence the
-      // agent worked on the review; it cannot show a deliberate skip. A
-      // subagent's call counts: the review may run in one.
-      if (
-        config.autoApprovePlans &&
-        state.presentPlanArmedSeq !== undefined &&
-        (await reviewRanSince(
-          bb,
-          ctx.threadId,
-          state.presentPlanArmedSeq,
-          PRESENT_PLAN_GATE_TOOLS,
-          true,
-        ))
-      ) {
-        await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-approved");
-        bb.log.info(
-          `auto-review: auto-approved the reviewed plan ${basename(planFilePath)} in thread ${ctx.threadId}`,
-        );
-        return PRESENT_PLAN_APPROVED_MESSAGE;
-      }
-      await recordFire(review, ctx.projectId, ctx.threadId, "stood-down", "plan-reviewed");
-      return PRESENT_PLAN_REVIEWED_MESSAGE;
+      return releasePlan(review, ctx, state, config, planFilePath);
     }
     const armedSeq = await captureArmedSeq(review, ctx.threadId);
     await writeState(
@@ -111,7 +145,8 @@ async function presentPlan(
         presentPlanArmedPath: planFilePath,
         ...(armedSeq === undefined ? {} : { presentPlanArmedSeq: armedSeq }),
       },
-      armedSeq === undefined ? ["presentPlanArmedSeq"] : undefined,
+      // A redo flag left by an expired arm must not skip this plan's redo.
+      armedSeq === undefined ? ["presentPlanRedone", "presentPlanArmedSeq"] : ["presentPlanRedone"],
     );
     await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-review");
     return buildPresentPlanReviewPrompt({

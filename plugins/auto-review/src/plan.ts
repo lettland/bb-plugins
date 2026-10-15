@@ -1,4 +1,6 @@
 import type { BbPluginApi, PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
+import { devkitRunning } from "./dispatch.js";
+import type { ReviewMode } from "./prompt.js";
 import { planHoldExpired, type ThreadState } from "./state.js";
 
 type PendingInteraction = PluginThreadEventPayloads["interaction.pending"]["interaction"];
@@ -187,6 +189,153 @@ export async function reviewRanSince(
     );
     return false;
   }
+}
+
+/** Pages of completed items `reviewSkillLoaded` reads before it gives up; a subagent's rows fill pages too and cannot be filtered out of the query. */
+export const PLAN_EVIDENCE_PAGE_CAP = 20;
+
+export type SkillLoad = "loaded" | "missing" | "unknown";
+
+/**
+ * "loaded" for the first completed `review-code` load the agent made itself in
+ * a page of completed items, "unknown" for an agent load that records no
+ * arguments, or null when there is none.
+ */
+function skillLoadIn(events: readonly ThreadEventRow[]): "loaded" | "unknown" | null {
+  for (const event of events) {
+    if (event.type !== "item/completed") {
+      continue;
+    }
+    const { item } = event.data;
+    if (
+      item.type !== "toolCall" ||
+      item.tool !== "devkit_load_skill" ||
+      item.parentToolCallId !== undefined ||
+      item.status !== "completed"
+    ) {
+      continue;
+    }
+    if (item.arguments === undefined) {
+      return "unknown";
+    }
+    if (item.arguments.slug === "review-code") {
+      return "loaded";
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether the agent's completed `review-code` load is in the log after the
+ * cursor: "missing" once every row was read without one, "unknown" for a load
+ * with no arguments or a log longer than the page cap reads. Completed items
+ * are paged oldest first, stopping at the first match.
+ */
+async function firstSkillLoad(
+  bb: BbPluginApi,
+  threadId: string,
+  sinceSeq: number,
+): Promise<SkillLoad> {
+  let afterSeq = sinceSeq;
+  for (let page = 0; page < PLAN_EVIDENCE_PAGE_CAP; page += 1) {
+    const events = await bb.sdk.threads.events.list({
+      threadId,
+      afterSeq: String(afterSeq),
+      types: ["item/completed"],
+      order: "asc",
+      limit: String(EVENT_PAGE_MAX),
+    });
+    const found = skillLoadIn(events);
+    const last = events.at(-1);
+    if (found !== null) {
+      return found;
+    }
+    if (last === undefined || events.length < EVENT_PAGE_MAX) {
+      return "missing";
+    }
+    afterSeq = last.seq;
+  }
+  return "unknown";
+}
+
+/**
+ * Whether the agent itself loaded `review-code` since the cursor: an
+ * anti-shortcut check, not proof the review ran. A load that failed, one by a
+ * subagent (`parentToolCallId` set), another slug or a reference does not
+ * count; `server` is not checked, so a relabel never turns every plan into a
+ * redo. Unlike `reviewRanSince` it ignores turn ends: the review may be
+ * dispatched as a new turn after the agent ended its own, or the agent may be
+ * woken in a later turn by the child threads it started, and any of those
+ * loads is the one this check wants. A read error, no cursor, an agent load
+ * that records no arguments, or the page cap reached without a match is
+ * "unknown", never "missing": only reading every row and finding none says the
+ * skill was skipped.
+ */
+export async function reviewSkillLoaded(
+  bb: BbPluginApi,
+  threadId: string,
+  sinceSeq: number | undefined,
+): Promise<SkillLoad> {
+  if (sinceSeq === undefined) {
+    return "unknown";
+  }
+  return firstSkillLoad(bb, threadId, sinceSeq).catch((error: unknown): SkillLoad => {
+    bb.log.warn(
+      `auto-review: could not read events to check review-code was loaded in ${threadId}; the plan review cannot be verified: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return "unknown";
+  });
+}
+
+/**
+ * `reviewSkillLoaded` where the plan review runs devkit's `review-code`: in
+ * `devkit` mode, and in `auto` mode while the devkit plugin is running. Where
+ * it is not required (`self`, `auto` with devkit absent) the result is
+ * "loaded", so those plans behave as before; a failed plugin lookup is
+ * "unknown".
+ */
+export async function planSkillCheck(
+  bb: BbPluginApi,
+  threadId: string,
+  reviewMode: ReviewMode,
+  armedSeq: number | undefined,
+): Promise<SkillLoad> {
+  if (reviewMode === "self") {
+    return "loaded";
+  }
+  if (reviewMode === "auto") {
+    const devkit = await devkitRunning(bb);
+    if (devkit !== "running") {
+      return devkit === "absent" ? "loaded" : "unknown";
+    }
+  }
+  return reviewSkillLoaded(bb, threadId, armedSeq);
+}
+
+/** The fire reason of a plan released after its `review-code` check: "plan-reviewed" unless the check came back missing or unknown. */
+export function planReleaseReason(
+  check: SkillLoad,
+): "plan-reviewed" | "plan-review-incomplete" | "plan-review-unverified" {
+  if (check === "missing") {
+    return "plan-review-incomplete";
+  }
+  return check === "unknown" ? "plan-review-unverified" : "plan-reviewed";
+}
+
+/** The durable record of a plan released without an auto-approve for want of a verified review; `fire` records only the last one. */
+export function warnPlanUnreviewed(
+  bb: BbPluginApi,
+  threadId: string,
+  planName: string,
+  check: "missing" | "unknown",
+): void {
+  bb.log.warn(
+    check === "missing"
+      ? `auto-review: plan ${planName} in thread ${threadId} was released without a complete calibrated review: review-code was not loaded after the redo; check the plan yourself before approving`
+      : `auto-review: could not verify that review-code was loaded for plan ${planName} in thread ${threadId}; released without auto-approval`,
+  );
 }
 
 export type PlanGateAction = "review" | "hold" | "release";
