@@ -18,11 +18,11 @@ const DIRECTORY_PAST_CUT = new RegExp(
   "u",
 );
 const GIT_LOCATION_PAST_CUT = new RegExp(`${COMMAND_POSITION}${EXPORT_GIT_LOCATION}`, "u");
-const DIRECTORY_CHANGERS: ReadonlySet<string> = new Set(["cd", "pushd", "popd"]);
+export const DIRECTORY_CHANGERS: ReadonlySet<string> = new Set(["cd", "pushd", "popd"]);
 const INTERPRETER = /^(?:python[\d.]*|node|ruby|perl)$/u;
 /** `sed -i` and `--in-place`; for perl a short-flag cluster with `i` (`-pi`, `-i.bak`, `-0pi`) that does not start with `-M`, `-m`, `-I` or `-x`. */
-const SED_IN_PLACE = /^-(?:[A-Za-z]*i|-in-place)/u;
-const PERL_IN_PLACE = /^-(?![MmIx-])[A-Za-z0-9]*i/u;
+export const SED_IN_PLACE = /^-(?:[A-Za-z]*i|-in-place)/u;
+export const PERL_IN_PLACE = /^-(?![MmIx-])[A-Za-z0-9]*i/u;
 /** An assignment that points git at another repository or index, so its paths no longer resolve against the shell's. */
 const GIT_LOCATION = /^GIT_(?:DIR|WORK_TREE|INDEX_FILE)=/u;
 
@@ -32,10 +32,10 @@ const checkoutBound = (token: string) => token !== "" && !/^(?:~|\/dev\/|\/tmp\/
 /** A target the sibling side can resolve: no variables, expansions or braces. */
 const usable = (token: string) => checkoutBound(token) && !/[$`{}]/u.test(token);
 
-const plain = (args: readonly Word[]) => args.filter(({ text }) => !text.startsWith("-")).map(({ text }) => text);
+export const plain = (args: readonly Word[]) => args.filter(({ text }) => !text.startsWith("-")).map(({ text }) => text);
 
 /** The files `sed -i` or `perl -i` edits: the plain arguments left once the script is set aside. */
-function inPlaceTargets(name: string, args: readonly Word[]): string[] {
+export function inPlaceTargets(name: string, args: readonly Word[]): string[] {
   if (!args.some(({ text }) => (name === "sed" ? SED_IN_PLACE : PERL_IN_PLACE).test(text))) {
     return [];
   }
@@ -57,7 +57,7 @@ function inPlaceTargets(name: string, args: readonly Word[]): string[] {
   return scripted ? files : files.slice(1);
 }
 
-function gitTargets(args: readonly Word[]): string[] {
+export function gitTargets(args: readonly Word[]): string[] {
   const git = gitCommand(args);
   if (git === null || git.relocated) {
     return [];
@@ -170,7 +170,7 @@ const movesGit = (text: string) =>
   lexCommands(text, SIBLING_TEXT_LIMIT).some(exportsGitLocation) || hiddenPastCut(text, GIT_LOCATION_PAST_CUT);
 
 /** Collapses `.` and `..` in an absolute path into its segments. */
-function segmentsOf(path: string): string[] {
+export function segmentsOf(path: string): string[] {
   const segments: string[] = [];
   for (const segment of path.split("/")) {
     if (segment === "..") {
@@ -211,7 +211,7 @@ function namedCandidates(path: string, candidates: readonly string[], wanted: Re
 }
 
 /** Where a `cd` or `pushd` to `target` leaves a shell that was at `dir`: the checkout root, or null for anywhere else or anywhere unknown. */
-function movedTo(dir: string | null, target: string | undefined, root: string): string | null {
+export function movedTo(dir: string | null, target: string | undefined, root: string): string | null {
   if (target === undefined || /^[-~]|[$`{}]/u.test(target) || (dir === null && !target.startsWith("/"))) {
     return null;
   }

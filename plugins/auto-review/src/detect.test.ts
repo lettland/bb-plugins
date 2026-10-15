@@ -1037,7 +1037,7 @@ describe("workspace capture edge cases", () => {
         workspace: ws({ workingTree: { files: [tracked("shell.ts")] } }),
         threadEntries: [],
       });
-      expect(paths).toEqual({ paths: ["own.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [] });
+      expect(paths).toEqual({ paths: ["own.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [], mode: "exact", unclaimed: [] });
       expect(diffFileCalls).toEqual([]);
     });
 
@@ -1104,6 +1104,8 @@ describe("workspace capture edge cases", () => {
         committedPaths: ["own.ts", "shell.ts"],
         foreignCommits: [],
         upstreamCommits: [],
+        mode: "exact",
+        unclaimed: [],
       });
     });
 
@@ -1169,6 +1171,20 @@ describe("workspace capture edge cases", () => {
       createdAt: 15_000,
       startedAt: 15_000,
       change: { path, movePath: null },
+    });
+    // A thread that makes a commit has run git; this one did at the start of the turn, outside every commit's window, so that the cases below, which are about who made a commit, start from a thread that could have.
+    const startOfTurnGit = command("git commit -q -m x", { startedAt: 10_000, createdAt: 10_000, completedAt: 10_050 });
+    // A tool call that names a path, at the start of the turn: the family claims that path without touching any commit's window.
+    const names = (path: string) => ({
+      kind: "work",
+      workKind: "tool",
+      status: "completed",
+      approvalStatus: null,
+      createdAt: 10_100,
+      startedAt: 10_100,
+      completedAt: 10_150,
+      toolName: "apply",
+      toolArgs: { path },
     });
     const commit = (sha: string, paths: string[] | null, authoredAt: number | null = 20_500) => ({
       sha,
@@ -1254,7 +1270,7 @@ describe("workspace capture edge cases", () => {
             if (rows instanceof Error) {
               throw rows;
             }
-            return page(rows ?? []);
+            return page([...(rows ?? []), ...(threadId === "thr_self" ? [startOfTurnGit] : [])]);
           }),
       });
       const result = await turnChangedPaths(bb, {
@@ -1269,7 +1285,7 @@ describe("workspace capture edge cases", () => {
         }),
         threadEntries: (options.entries ?? [self, sibling]) as never,
       });
-      return { result, warnings, infos, timelineCalls, remoteCalls };
+      return { result, warnings, infos: infos.filter((line) => !/attributing the turn|left out of the review/u.test(line)), timelineCalls, remoteCalls };
     }
 
     const siblingRuns = (row: unknown) => ({ thr_sibling: [row] });
@@ -1287,6 +1303,8 @@ describe("workspace capture edge cases", () => {
         committedPaths: [],
         foreignCommits: [foreign("c1"), foreign("c2")],
         upstreamCommits: [],
+        mode: "exact",
+        unclaimed: [],
       });
       expect(infos).toEqual([
         "auto-review: commit c1 was made by thread thr_sibling during the turn; left to that thread",
@@ -1346,6 +1364,8 @@ describe("workspace capture edge cases", () => {
         committedPaths: ["src/own.ts", "src/a.ts"],
         foreignCommits: [],
         upstreamCommits: [],
+        mode: "exact",
+        unclaimed: [],
       });
     });
 
@@ -1366,7 +1386,7 @@ describe("workspace capture edge cases", () => {
 
     it("splits own and foreign commits and keeps a path still changed uncommitted", async () => {
       const { result, infos } = await attribute({
-        timelines: { thr_self: [edit("src/own.ts")], thr_sibling: [command(gitCommit)] },
+        timelines: { thr_self: [edit("src/own.ts"), names("src/b.ts")], thr_sibling: [command(gitCommit)] },
         commits: [commit("mine", ["src/own.ts"], 30_000), commit("theirs", ["src/a.ts", "src/b.ts"])],
         uncommitted: ["src/b.ts"],
       });
@@ -1376,6 +1396,8 @@ describe("workspace capture edge cases", () => {
         committedPaths: ["src/own.ts"],
         foreignCommits: [foreign("theirs")],
         upstreamCommits: [],
+        mode: "exact",
+        unclaimed: [],
       });
       expect(infos).toHaveLength(1);
     });
@@ -1392,6 +1414,8 @@ describe("workspace capture edge cases", () => {
         committedPaths: [],
         foreignCommits: [foreign("theirs")],
         upstreamCommits: [],
+        mode: "exact",
+        unclaimed: [],
       });
     });
 
@@ -1427,6 +1451,8 @@ describe("workspace capture edge cases", () => {
           committedPaths: [],
           foreignCommits: [],
           upstreamCommits: ["u1", "u2"],
+          mode: "sweep",
+          unclaimed: [],
         });
         expect(infos).toEqual([
           "auto-review: commit u1 came from origin/dev; not this turn's",
@@ -1618,6 +1644,8 @@ describe("workspace capture edge cases", () => {
           committedPaths: ["lib/shared.ts"],
           foreignCommits: [],
           upstreamCommits: ["u1"],
+          mode: "exact",
+          unclaimed: [],
         });
       });
 
@@ -1696,6 +1724,8 @@ describe("workspace capture edge cases", () => {
           committedPaths: [],
           foreignCommits: [],
           upstreamCommits: ["u1"],
+          mode: "exact",
+          unclaimed: [],
         });
       });
 
@@ -1745,6 +1775,7 @@ describe("workspace capture edge cases", () => {
 
       it("keeps a path in scope through the thread's own edit when an upstream commit touched it too", async () => {
         const { result } = await attribute({
+          timelines: { thr_self: [names("lib/shared.ts")] },
           commits: [commit("u1", ["lib/shared.ts"], 20_000)],
           upstream: ["u1"],
           uncommitted: ["lib/shared.ts"],
@@ -1755,6 +1786,8 @@ describe("workspace capture edge cases", () => {
           committedPaths: [],
           foreignCommits: [],
           upstreamCommits: ["u1"],
+          mode: "exact",
+          unclaimed: [],
         });
       });
     });
@@ -1944,7 +1977,8 @@ describe("workspace capture edge cases", () => {
           timelines: siblingGit,
           commits: [commit("c1", ["src/a.ts"], 40_000)],
         });
-        expect(timelineCalls.map((call) => call.threadId)).toEqual(["thr_self", "thr_sibling"]);
+        // The foreign check reads the sibling alone; this thread and its child are read only afterwards, for the commit rule.
+        expect(timelineCalls.map((call) => call.threadId)).toEqual(["thr_self", "thr_sibling", "thr_self", "thr_child"]);
       });
 
       it("treats a sibling that cannot be read as having made no commit", async () => {

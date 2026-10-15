@@ -85,7 +85,7 @@ export interface RowText {
 const MAX_ARGUMENT_DEPTH = 32;
 
 /** The strings anywhere in a tool's arguments, which are what the tool acts on: its string values and its object keys (`{files: {"src/a.ts": "…"}}`). */
-function leafStrings(value: unknown, depth = 0): string[] {
+export function leafStrings(value: unknown, depth = 0): string[] {
   if (typeof value === "string") {
     return [value];
   }

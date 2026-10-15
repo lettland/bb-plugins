@@ -156,6 +156,11 @@ function fileChangeRow(path: string, sourceSeqStart = 150): unknown {
   };
 }
 
+/** A shell command whose writes cannot be listed (a codegen script), run for the whole turn: what the cases that expect a path no row names to be reviewed assume the thread did. */
+function shellRow(command = "npm run generate"): unknown {
+  return { kind: "work", workKind: "command", status: "completed", approvalStatus: null, command, cwd: "/w", startedAt: 0, completedAt: 9_000_000_000_000 };
+}
+
 /**
  * The merge base `status` reports. On the mainline there is none unless the
  * caller names a ref to compare from; then it is the commits made after it.
@@ -835,6 +840,32 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
+  it("stands down on unclaimed-changes when the tree changes but nothing of the thread's made it", async () => {
+    const host = createHost({ authoredRows: [], workingTreeFiles: [] });
+    await plugin(host.bb);
+    await emitActive(host);
+    host.setWorkingTree([{ path: "ide/edit.ts", status: "??", content: "x" }]);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({
+      outcome: "stood-down",
+      reason: "unclaimed-changes",
+      scopePaths: [],
+      unclaimedCount: 1,
+    });
+    await host.harness.dispose();
+  });
+
+  it("stands down on no-authorship, not unclaimed-changes, when nothing changed at all", async () => {
+    const host = createHost({ authoredRows: [], workingTreeFiles: [] });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-authorship" });
+    expect(await lastFire(host)).not.toHaveProperty("unclaimedCount");
+    await host.harness.dispose();
+  });
+
   it("stands down when the authored path is no longer changed", async () => {
     const host = createHost({ workingTreeFiles: [{ path: "unrelated.ts" }] });
     await plugin(host.bb);
@@ -850,7 +881,7 @@ describe("auto-review plugin", () => {
   }
 
   it("reviews a file a shell command created, though no timeline row records it", async () => {
-    const host = createHost({ authoredRows: [], workingTreeFiles: [] });
+    const host = createHost({ authoredRows: [shellRow()], workingTreeFiles: [] });
     await plugin(host.bb);
     await emitActive(host);
     host.setWorkingTree([{ path: "gen/out.ts", status: "??", content: "x" }]);
@@ -864,7 +895,7 @@ describe("auto-review plugin", () => {
   });
 
   it("ignores untracked harness output that appears during the turn", async () => {
-    const host = createHost({ authoredRows: [], workingTreeFiles: [] });
+    const host = createHost({ authoredRows: [shellRow()], workingTreeFiles: [] });
     await plugin(host.bb);
     await emitActive(host);
     host.setWorkingTree([
@@ -881,7 +912,7 @@ describe("auto-review plugin", () => {
 
   it("reviews a file dirty before the turn whose content a shell command changed", async () => {
     const host = createHost({
-      authoredRows: [],
+      authoredRows: [shellRow()],
       workingTreeFiles: [{ path: "src/a.ts", content: "old" }],
     });
     await plugin(host.bb);
@@ -1110,7 +1141,7 @@ describe("auto-review plugin", () => {
   });
 
   it("reviews files the turn committed from the shell", async () => {
-    const host = createHost({ authoredRows: [], workingTreeFiles: [] });
+    const host = createHost({ authoredRows: [shellRow()], workingTreeFiles: [] });
     await plugin(host.bb);
     await emitActive(host);
     host.commit("c1", ["src/committed.ts"]);
@@ -1185,7 +1216,7 @@ describe("auto-review plugin", () => {
   });
 
   it("reviews a changed replay on master while ignoring new upstream commits", async () => {
-    const host = createHost({ onMainline: true, authoredRows: [], workingTreeFiles: [] });
+    const host = createHost({ onMainline: true, authoredRows: [shellRow()], workingTreeFiles: [] });
     host.commit("old", ["src/a.ts"]);
     await plugin(host.bb);
     await emitActive(host);
@@ -1202,7 +1233,7 @@ describe("auto-review plugin", () => {
   });
 
   it("reviews a new commit after an unchanged replay on master", async () => {
-    const host = createHost({ onMainline: true, authoredRows: [], workingTreeFiles: [] });
+    const host = createHost({ onMainline: true, authoredRows: [shellRow()], workingTreeFiles: [] });
     host.commit("old", ["src/a.ts"]);
     await plugin(host.bb);
     await emitActive(host);
@@ -1223,7 +1254,7 @@ describe("auto-review plugin", () => {
     const host = createHost({
       headSha: "old",
       initialCommits: [{ sha: "old", paths: ["src/a.ts"], patch: "-old\n+new\n" }],
-      authoredRows: [],
+      authoredRows: [shellRow()],
       workingTreeFiles: [],
     });
     await plugin(host.bb);
@@ -1273,7 +1304,7 @@ describe("auto-review plugin", () => {
 
   it("leaves a sibling's tool edit made during the turn to the sibling", async () => {
     const host = createHost({
-      authoredRows: [],
+      authoredRows: [shellRow()],
       workingTreeFiles: [],
       envThreads: [
         { id: THREAD_ID, status: "idle" },
@@ -1637,7 +1668,7 @@ describe("auto-review plugin", () => {
     });
 
     it("starts clean when a user's request was queued behind the review turn, and reviews only that turn", async () => {
-      const host = createHost({ authoredRows: [], workingTreeFiles: [] });
+      const host = createHost({ authoredRows: [shellRow()], workingTreeFiles: [] });
       await plugin(host.bb);
       await delivered(host);
       await emitActive(host);
@@ -1880,7 +1911,7 @@ describe("auto-review plugin", () => {
 
   it("fires the deferred review from the wake-up turn, scope including what the child wrote, keeping the cursor", async () => {
     const host = createHost({
-      authoredRows: [],
+      authoredRows: [shellRow()],
       workingTreeFiles: [],
       envThreads: [
         { id: THREAD_ID, status: "idle" },
@@ -1916,7 +1947,7 @@ describe("auto-review plugin", () => {
 
   it("parks as sibling-active once a held child ends while another thread's review is in flight, then fires once that review ends", async () => {
     const host = createHost({
-      authoredRows: [],
+      authoredRows: [shellRow()],
       workingTreeFiles: [],
       envThreads: [
         { id: THREAD_ID, status: "idle" },
@@ -1962,7 +1993,7 @@ describe("auto-review plugin", () => {
 
   it("fires the wake-up turn even though a held child was manually stopped", async () => {
     const host = createHost({
-      authoredRows: [],
+      authoredRows: [shellRow()],
       workingTreeFiles: [],
       envThreads: [
         { id: THREAD_ID, status: "idle" },
@@ -2028,7 +2059,7 @@ describe("auto-review plugin", () => {
 
   it("keeps a child-held turn deferred through a sweep while the child runs, then fires once it idles", async () => {
     const host = createHost({
-      authoredRows: [],
+      authoredRows: [shellRow()],
       workingTreeFiles: [],
       envThreads: [
         { id: THREAD_ID, status: "idle" },

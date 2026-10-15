@@ -10,6 +10,7 @@ import {
   readProjectConfig,
   writeProjectConfig,
   type GlobalDefaults,
+  type LastFire,
 } from "./config.js";
 import { setAutoApprove } from "./cli-auto-approve.js";
 import { reviewStatusView, showFindings } from "./cli-findings.js";
@@ -71,6 +72,16 @@ function threadError(threadId: string, wantsJson: boolean): PluginCliResult {
   return wantsJson
     ? { exitCode: 1, stdout: `${JSON.stringify({ ok: false, threadId, error: message }, null, 2)}\n` }
     : { exitCode: 1, stderr: `${message}\n` };
+}
+
+/** The last fire for `status`: its outcome, reason and time, and how many changes stood unclaimed by the thread's family, when it counted any. */
+function lastFireLine(lastFire: LastFire | null): string {
+  if (lastFire === null) {
+    return "never";
+  }
+  const unclaimed =
+    lastFire.unclaimedCount === undefined ? "" : `, ${lastFire.unclaimedCount} change(s) not made by this thread's family`;
+  return `${lastFire.outcome} (${lastFire.reason}) at ${new Date(lastFire.at).toISOString()}${unclaimed}`;
 }
 
 /** What releases a deferred turn, for `status`. */
@@ -348,10 +359,7 @@ export function registerAutoReviewCli(
         if (wantsJson) {
           return json(payload);
         }
-        const lastFireText =
-          lastFire === null
-            ? "never"
-            : `${lastFire.outcome} (${lastFire.reason}) at ${new Date(lastFire.at).toISOString()}`;
+        const lastFireText = lastFireLine(lastFire);
         // A parked turn is the one phase a user is likely to see and not
         // recognise, so spell out how long it has waited and what happens next
         // rather than printing a bare word.

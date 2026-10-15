@@ -6,7 +6,7 @@ import { mapLimit, HASH_CONCURRENCY } from "./detect-limit.js";
 
 import { commitPaths, novelCommits, remoteReachableShas, remoteRef, turnCommits } from "./detect-commits.js";
 
-import { pathsLeftToSiblings } from "./detect-sibling-credit.js";
+import { claimedChanges } from "./detect-attribute.js";
 
 import {
   authoredPathsFromRows,
@@ -128,7 +128,14 @@ export interface TurnChanges {
   foreignCommits: ForeignCommit[];
   /** Commits that arrived with the remote base during the turn, merged by someone else; not the turn's work. */
   upstreamCommits: string[];
+  /** `exact` claims only the changes this thread's family made or named; `sweep` takes every unattributed change, as when something ran whose writes cannot be listed. */
+  mode: "exact" | "sweep";
+  /** Uncommitted changes nothing of the family claimed; they are never in `paths`. */
+  unclaimed: string[];
 }
+
+/** What a review needs of a turn's changes: how they were attributed (`mode`, `unclaimed`) is left out. */
+export type TurnScope = Omit<TurnChanges, "mode" | "unclaimed">;
 
 interface ForeignInput {
   bb: BbPluginApi;
@@ -340,15 +347,19 @@ async function readSiblings(
 
 /**
  * Every path this turn changed. The thread's own `file-change` rows always
- * count. On top of them, whatever the working tree shows changed since turn
- * start counts too — edits from shell commands, scripts and commits leave no
- * such row — except paths a sibling thread in the same checkout changed
- * through its own tools during the turn, and commits it made with git, which
- * are the sibling's to review. So are uncommitted paths a sibling's shell
- * command wrote to by name, when nothing of this thread's family (this thread
- * and its kin) names them and nothing about the turn's evidence is in doubt.
- * Commits that merely arrived with the remote base are no one's to review
- * here, and their paths do not count either.
+ * count. On top of them, the working tree's changes since turn start count
+ * (edits from shell commands, scripts and commits leave no such row) when this
+ * thread's family (itself, its bb children and owned threads) made them. That
+ * is exact when everything the family ran was read-only or named what it wrote:
+ * then only the paths it named count, and the other changes come back as
+ * `unclaimed`. When the family ran something whose writes cannot be listed, or
+ * its evidence cannot be read in full, every change counts instead, except
+ * paths a sibling thread in the same checkout changed through its own tools
+ * during the turn, and commits it made with git, which are the sibling's to
+ * review. So are uncommitted paths a sibling's shell command wrote to by name,
+ * when nothing of the family names them. Commits that merely arrived with the
+ * remote base are no one's to review here, and their paths do not count either;
+ * nor do commits nothing of the family could have made (see `claimOwnChanges`).
  */
 export async function turnChangedPaths(
   bb: BbPluginApi,
@@ -358,14 +369,13 @@ export async function turnChangedPaths(
   const ownRows = await turnTimeline(bb, threadId, turnStart.sinceSeq);
   const own = authoredPathsFromRows(ownRows.rows, turnStart.sinceSeq);
   if (turnStart.tree === undefined) {
-    return { paths: own, commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [] };
+    return { paths: own, commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [], mode: "exact", unclaimed: [] };
   }
   const ownSet = new Set(own);
   const harnessOutput = new Set(
     workspace.workingTree.files.filter(isHarnessOutput).map((file) => file.path),
   );
   const fetched = await treeChangedPaths(bb, environmentId, turnStart.tree, workspace, turnStart.startedAt);
-  const { startedAt } = turnStart;
   const now = Date.now();
   const upstream = await withoutUpstream({ bb, input, now, ownRows, ownPaths: ownSet }, fetched);
   const { tree } = upstream;
@@ -377,36 +387,17 @@ export async function turnChangedPaths(
     unattributed(tree.paths).length > 0,
     upstream.kin,
   );
-  const foreignShas = new Set(foreignCommits.map(({ sha }) => sha));
-  const kept = tree.commitChanges.filter(({ sha }) => !foreignShas.has(sha));
-  const keptPaths = [...new Set(kept.flatMap(({ paths }) => paths ?? []))];
-  const ours = (path: string) => ownSet.has(path) || !sibling?.paths.has(path);
-  const committed = new Set(keptPaths);
-  const credited =
-    startedAt === undefined || sibling === undefined
-      ? new Map<string, string>()
-      : await pathsLeftToSiblings({
-          bb,
-          threadId,
-          environmentId,
-          threadEntries: input.threadEntries,
-          startedAt,
-          now,
-          ownRowsTruncated: ownRows.truncated,
-          sibling,
-          kin,
-          candidates: unattributed(tree.uncommittedPaths).filter((path) => ours(path) && !committed.has(path)),
-        });
-  return {
-    paths: [
-      ...own,
-      ...unattributed([...new Set([...tree.uncommittedPaths, ...keptPaths])]).filter(
-        (path) => ours(path) && !credited.has(path),
-      ),
-    ],
-    commits: kept.map(({ sha }) => sha),
-    committedPaths: keptPaths.filter(ours),
+  return claimedChanges({
+    bb,
+    input,
+    now,
+    ownRows,
+    own,
+    tree,
+    sibling,
     foreignCommits,
     upstreamCommits: upstream.shas,
-  };
+    kin,
+    unattributed,
+  });
 }

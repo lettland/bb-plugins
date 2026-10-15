@@ -57,6 +57,7 @@ export async function recordFire(
     base: extra.base ?? null,
     isWorktree: extra.isWorktree ?? false,
     scopePaths: extra.scopePaths ?? [],
+    ...(extra.unclaimedCount === undefined ? {} : { unclaimedCount: extra.unclaimedCount }),
   };
   await writeLastFire(bb, projectId, threadId, fire);
 }

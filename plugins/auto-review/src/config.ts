@@ -12,6 +12,7 @@ export const FIRE_REASONS = [
   "fired",
   "deferred",
   "no-authorship",
+  "unclaimed-changes",
   "empty-scope",
   "no-turn-start",
   "user-stopped",
@@ -52,6 +53,8 @@ export const lastFireSchema = z.object({
   base: z.string().nullable(),
   isWorktree: z.boolean(),
   scopePaths: z.array(z.string()),
+  /** How many changes stood unclaimed by the thread's family; a count, never the paths. */
+  unclaimedCount: z.number().int().nonnegative().optional(),
 });
 export type LastFire = z.infer<typeof lastFireSchema>;
 

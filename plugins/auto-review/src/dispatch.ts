@@ -9,7 +9,7 @@ import {
 import { decide } from "./decide.js";
 import { deferTurn, providerReviewInFlight } from "./deferral.js";
 import { removeDeferral } from "./deferrals.js";
-import type { TurnChanges } from "./detect.js";
+import type { TurnScope } from "./detect.js";
 import { readFindings, recordUnreported } from "./findings-store.js";
 import { openFindingsForPrompt } from "./findings.js";
 import { buildReviewPrompt, renderScope } from "./prompt.js";
@@ -78,7 +78,7 @@ export interface DispatchInput {
   base: string;
   isWorktree: boolean;
   scope: string[];
-  turn: TurnChanges;
+  turn: TurnScope;
 }
 
 function turnStartHeadIf(condition: boolean, state: ThreadState): string | null {
@@ -90,7 +90,7 @@ function turnStartHeadIf(condition: boolean, state: ThreadState): string | null 
  * made none. A pathless merge from a pull is already dropped from `commits`; a
  * commit whose paths could not be read still sets the range.
  */
-export function committedSinceHead(turn: TurnChanges, state: ThreadState): string | null {
+export function committedSinceHead(turn: TurnScope, state: ThreadState): string | null {
   return turnStartHeadIf(turn.commits.length > 0, state);
 }
 
@@ -101,7 +101,7 @@ export function committedSinceHead(turn: TurnChanges, state: ThreadState): strin
  * commits arrived with the remote base, which scans nothing, as pulled commits
  * always did.
  */
-export function commitScanHead(turn: TurnChanges, state: ThreadState): string | null {
+export function commitScanHead(turn: TurnScope, state: ThreadState): string | null {
   return turnStartHeadIf(turn.commits.length > 0 || turn.foreignCommits.length > 0, state);
 }
 

@@ -9,6 +9,7 @@ import { MAX_PROMPT_FINDINGS } from "./findings-schema.js";
 import { withThreadLock } from "./state.js";
 import {
   defineAutoReviewSettings,
+  lastFireSchema,
   type GlobalDefaults,
   type LastFire,
 } from "./config.js";
@@ -849,6 +850,20 @@ describe("auto-review cli: status", () => {
       const payload = await host.run(["status", THREAD_ID, "--json"]);
       expect(parse(payload.stdout)).toMatchObject({
         lastFire: { outcome: "stood-down", reason: "commit-plan" },
+      });
+    });
+  });
+
+  it("shows the count of changes the thread's family did not make, from a stored last fire that parses through the schema", async () => {
+    await withHost({}, async (host) => {
+      const stored = lastFire({ outcome: "stood-down", reason: "unclaimed-changes", scopePaths: [], unclaimedCount: 3 });
+      expect(lastFireSchema.safeParse(stored).success).toBe(true);
+      await host.kv.set(`lastfire:${PROJECT_ID}:${THREAD_ID}`, stored);
+      const text = await host.run(["status", THREAD_ID]);
+      expect(text.stdout).toContain("lastFire: stood-down (unclaimed-changes) at 2026-01-02T03:04:05.000Z, 3 change(s) not made by this thread's family\n");
+      const payload = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(payload.stdout)).toMatchObject({
+        lastFire: { outcome: "stood-down", reason: "unclaimed-changes", unclaimedCount: 3 },
       });
     });
   });

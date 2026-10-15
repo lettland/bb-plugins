@@ -22,7 +22,7 @@ const REWRITING_GIT: ReadonlySet<string> = new Set([
 ]);
 /** Git that changes only the paths it names. */
 const PATH_WRITING_GIT: ReadonlySet<string> = new Set(["rm", "mv"]);
-const PACKAGE_MANAGERS: ReadonlySet<string> = new Set(["npm", "pnpm", "yarn", "bun"]);
+export const PACKAGE_MANAGERS: ReadonlySet<string> = new Set(["npm", "pnpm", "yarn", "bun"]);
 const PACKAGE_CHANGES: ReadonlySet<string> = new Set([
   "install", "i", "add", "remove", "rm", "update", "up", "upgrade", "uninstall",
 ]);
@@ -100,7 +100,7 @@ function gitRewritesTree(sub: string, rest: readonly Word[]): boolean {
 }
 
 /** Whether a command is given a fixer flag; a package manager's `-w` selects a workspace and fixes nothing. */
-const hasFixerFlag = ({ name, args }: Parsed) =>
+export const hasFixerFlag = ({ name, args }: Parsed) =>
   args.some(({ text }) => FIXER_FLAGS.has(text) && !(text === "-w" && PACKAGE_MANAGERS.has(name)));
 
 /** A fixer flag with no path to apply it to, outside a reader and git: it fixes the whole tree. */

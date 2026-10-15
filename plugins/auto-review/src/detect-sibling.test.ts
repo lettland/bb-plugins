@@ -183,6 +183,8 @@ describe("turnChangedPaths and a sibling's shell edits", () => {
   const creditable = ["lib/a.test.ts", "lib/new.ts", "lib/b.ts", "lib/react/a.test.tsx", "lib/react/b.test.tsx"];
   const remaining = ["lib/c.ts", "lib/mine.ts", "package.json"];
   const kidRuns = [command("npm test"), command("npx jest lib/react"), command("git status")];
+  // Writes nobody can list, so the turn is a sweep, as the cases that test a sibling's credit expect.
+  const build = command("npm run build");
 
   async function attribute(options: {
     timelines?: Record<string, Page[] | Error>;
@@ -193,7 +195,7 @@ describe("turnChangedPaths and a sibling's shell edits", () => {
     commit?: { sha: string; paths: string[] };
   }) {
     const { bb, infos, environmentGets } = fakeBb(
-      { self: one(edit("lib/own.ts")), "sib-1": one(...incident), "kid-1": one(...kidRuns), ...options.timelines },
+      { self: one(edit("lib/own.ts")), "sib-1": one(...incident), "kid-1": one(...kidRuns, build), ...options.timelines },
       { ...options.environment, commit: options.commit },
     );
     const files = (options.uncommitted ?? [...creditable, ...remaining]).map((path) => ({
@@ -258,7 +260,16 @@ describe("turnChangedPaths and a sibling's shell edits", () => {
     });
 
     it("(h) by a matching glob", async () => {
-      expect(await keeps({ "kid-1": one(command("wc -l lib/*.ts")) })).toBe(true);
+      // `npm run build` writes files nobody can list, so the turn is a sweep and the glob still decides.
+      expect(await keeps({ "kid-1": one(command("wc -l lib/*.ts"), command("npm run build")) })).toBe(true);
+    });
+
+    it("exactly, a child that only ran tests (jest included) and git status claims nothing", async () => {
+      expect(await keeps({ "kid-1": one(...kidRuns) })).toBe(false);
+    });
+
+    it("(h) exactly, a read-only command over a glob claims nothing", async () => {
+      expect(await keeps({ "kid-1": one(command("wc -l lib/*.ts")) })).toBe(false);
     });
 
     it("(f) by a writing command over its directory, not a test run over it", async () => {
@@ -319,7 +330,12 @@ describe("turnChangedPaths and a sibling's shell edits", () => {
     });
 
     it("by a denied command", async () => {
-      expect(await keeps({ "kid-1": one(command("cat lib/b.ts", { approvalStatus: "denied" })) })).toBe(true);
+      const denied = command("cat lib/b.ts", { approvalStatus: "denied" });
+      expect(await keeps({ "kid-1": one(denied, command("npm run build")) })).toBe(true);
+    });
+
+    it("exactly, a denied command never ran and claims nothing", async () => {
+      expect(await keeps({ "kid-1": one(command("cat lib/b.ts", { approvalStatus: "denied" })) })).toBe(false);
     });
 
     it.each(["git checkout .", "git stash pop", "npm install"])("by `%s`", async (family) => {
@@ -335,9 +351,9 @@ describe("turnChangedPaths and a sibling's shell edits", () => {
     it("by a row still running that began a page before the lookback's first page", async () => {
       const running = command("cat lib/b.ts", { status: "pending", completedAt: null, startedAt: 10_000 - 20 * 60_000, createdAt: 10_000 - 20 * 60_000 });
       const recent = command("true", { startedAt: 10_000 - 5 * 60_000, createdAt: 10_000 - 5 * 60_000, completedAt: 10_000 - 4 * 60_000 });
-      const paged = [{ rows: kidRuns }, { rows: [recent] }, { rows: [running] }];
+      const paged = [{ rows: [...kidRuns, build] }, { rows: [recent] }, { rows: [running] }];
       expect(await keeps({ "kid-1": paged })).toBe(true);
-      expect(await keeps({ "kid-1": [{ rows: kidRuns }, { rows: [recent] }] })).toBe(false);
+      expect(await keeps({ "kid-1": [{ rows: [...kidRuns, build] }, { rows: [recent] }] })).toBe(false);
     });
   });
 

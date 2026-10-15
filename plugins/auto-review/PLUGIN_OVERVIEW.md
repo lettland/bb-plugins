@@ -9,6 +9,11 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
 ## How it works
 
 - Fires on `thread.idle` for top-level, git-branch, user coding threads only.
+- Claims only the thread's own changes (itself plus its bb children and owned threads). In
+  exact mode, when everything the family ran was read-only or named every file it wrote, only
+  the files it named count and the rest stands down as `unclaimed-changes`; when it ran
+  something whose writes cannot be listed (a build, codegen, a script, an unknown command) the
+  turn is a sweep, as described next. See the README for the classes and the commit rule.
 - Attributes work to the turn however it was made: the thread's own `file-change` rows
   after the turn's start cursor, plus whatever the working tree shows changed since the
   turn started (a fingerprint per uncommitted path and the commits ahead of the base,

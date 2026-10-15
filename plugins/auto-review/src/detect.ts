@@ -22,6 +22,7 @@ export type {
   TreeChanges,
   TurnChangeInput,
   TurnChanges,
+  TurnScope,
 } from "./detect-turn.js";
 export {
   computeScope,

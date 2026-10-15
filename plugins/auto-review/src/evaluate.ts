@@ -225,7 +225,10 @@ async function reviewScope(
     threadEntries,
   });
   if (turn.paths.length === 0) {
-    await standDown(ctx, thread, state, "no-authorship");
+    // Changes none of this thread's family made are not its to review; nothing changed at all is no authorship.
+    await (turn.unclaimed.length > 0
+      ? standDown(ctx, thread, state, "unclaimed-changes", { unclaimedCount: turn.unclaimed.length })
+      : standDown(ctx, thread, state, "no-authorship"));
     return null;
   }
   const scope = computeScope(

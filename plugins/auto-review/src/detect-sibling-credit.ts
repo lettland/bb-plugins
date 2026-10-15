@@ -24,7 +24,7 @@ interface CreditInput {
 /** The most paths one log line names. */
 const LOG_LINE_PATHS = 20;
 
-async function checkoutPath(bb: BbPluginApi, environmentId: string): Promise<string | null> {
+export async function checkoutPath(bb: BbPluginApi, environmentId: string): Promise<string | null> {
   try {
     const { path } = await bb.sdk.environments.get({ environmentId });
     return path === null || path === "" ? null : path;
