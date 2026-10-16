@@ -65,6 +65,19 @@ describe("buildReviewPrompt", () => {
     expect(text).toMatch(/Never use `git add -A`/);
   });
 
+  it("tells an agent that made no edits to stand down before step 1", () => {
+    const text = buildReviewPrompt({
+      decision: { commit: true, merge: false },
+      reviewMode: "auto",
+      scope: baseScope,
+    });
+    const guard = text.indexOf("neither you nor a child thread or subagent you spawned made any file edits or commits");
+    expect(guard).toBeGreaterThan(-1);
+    expect(text).toContain("`no-changes`");
+    expect(guard).toBeLessThan(text.indexOf("\n1. "));
+    expect(text).not.toContain("You changed files during your last turn");
+  });
+
   it("marks the scope list as data, not instructions", () => {
     const text = buildReviewPrompt({
       decision: { commit: true, merge: false },
