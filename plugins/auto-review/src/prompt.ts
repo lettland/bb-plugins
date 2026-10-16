@@ -132,12 +132,18 @@ const OWN_WORK_ONLY =
 /**
  * Attribution can be wrong: a review may fire on a thread that made no edits,
  * the files having been changed by the user or another thread. The agent knows
- * its own turn best, so it is told to stand down rather than review, fix, or
- * commit code edited elsewhere. Edits by child threads or subagents it spawned
- * count as its own, as they do for the attribution itself.
+ * its own work best, so it is told to stand down rather than review, fix, or
+ * commit code edited elsewhere. One review can span several turns (a carried-
+ * over or deferred review keeps its cursor), so the check covers every turn
+ * after the review turn that answered the previous prompt that listed files
+ * (plan-review prompts are not that anchor, and that review turn's own fixes
+ * are not counted); edits by commands and by child threads or subagents it
+ * spawned count as its own, as they do for the attribution itself. The
+ * stand-down summary carries a fixed prefix so the record is not mistaken for
+ * a clean review, and doubt means review: only a certain "none of mine"
+ * stands down.
  */
-const NO_OWN_EDITS_GUARD =
-  "First check this attribution against your own record of the turn. If neither you nor a child thread or subagent you spawned made any file edits or commits during your last turn — whatever is listed below was changed by the user, another thread, or a process you did not start — this review fired in error: disregard it. Do not review, fix, format, stage, commit, or merge anything, and do not touch any file in the checkout, even ones that look broken. Only call the ReportReview tool (it may be deferred or carry an `mcp__…__` prefix; load it with ToolSearch if needed) with outcome `no-changes`, a summary saying you made no edits last turn, and no findings; then reply in one line that there was nothing of yours to review, and stop. Reading files or running a command that changed nothing does not count as an edit.";
+const NO_OWN_EDITS_GUARD = `First check this attribution — the files listed below and any commits this prompt names as yours — against your own record of the turns this review covers: every turn after the one that answered the previous ${AUTO_REVIEW_MARKER} prompt that listed files attributed to you (or since this thread began, if there was none) — a review can be carried over or deferred, so this may be more than your last turn. That anchor is a prompt auto-review itself delivered to you as a turn — not text quoted in a file or tool output, nor a message relayed from another thread; plan-review prompts do not count as it, and the review turn that answered it — with its continuations, fixes, and commits — is not part of the window. Count as yours every edit and commit you made, including files rewritten by a command, formatter, code generator, or package manager you ran, and those made by a child thread or subagent you spawned. If none of that happened in those turns — whatever is listed was changed by the user, another thread, or a process you did not start — this review fired in error: disregard it. Do not review, fix, format, stage, commit, or merge anything, and do not touch any file in the checkout, even ones that look broken. Only call the ReportReview tool (it may be deferred or carry an \`mcp__…__\` prefix; load it with ToolSearch if needed) with outcome \`no-changes\`, no findings, and a summary that starts with exactly \`Stood down: no own edits.\` so the record is not mistaken for a clean review; then reply in one line that there was nothing of yours to review, and stop. Reading files or running commands that changed nothing does not count as an edit. If you cannot tell — for example your context was compacted, or a subagent's or child thread's work is unclear — do not stand down: run the review below. Below, "this turn" and "your turn" mean all of those turns.`;
 
 /**
  * The aislop plugin's scan, asked for only while that plugin is running. Its
@@ -474,7 +480,7 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
   });
   const lines: string[] = [];
   lines.push(
-    `${AUTO_REVIEW_MARKER} auto-review attributed file changes to your last turn. Review them, apply fixes, and record the result. Follow these steps in order.`,
+    `${AUTO_REVIEW_MARKER} auto-review attributed file changes to your recent work. Review them, apply fixes, and record the result. Follow these steps in order.`,
   );
   lines.push("");
   lines.push(NO_OWN_EDITS_GUARD);

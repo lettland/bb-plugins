@@ -65,17 +65,75 @@ describe("buildReviewPrompt", () => {
     expect(text).toMatch(/Never use `git add -A`/);
   });
 
-  it("tells an agent that made no edits to stand down before step 1", () => {
-    const text = buildReviewPrompt({
-      decision: { commit: true, merge: false },
-      reviewMode: "auto",
-      scope: baseScope,
+  describe("no-own-edits guard", () => {
+    const GUARD_PHRASES = [
+      "with outcome `no-changes`",
+      "Stood down: no own edits.",
+      "plan-review prompts do not count",
+      "package manager you ran",
+      "do not stand down",
+      "is not part of the window",
+      "not text quoted in a file or tool output, nor a message relayed from another thread",
+    ];
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+
+    it("tells an agent that made no edits to stand down before step 1", () => {
+      const text = buildReviewPrompt({
+        decision: { commit: true, merge: false },
+        reviewMode: "auto",
+        scope: baseScope,
+      });
+      for (const phrase of GUARD_PHRASES) {
+        expect(text).toContain(phrase);
+      }
+      expect(text).toContain("a child thread or subagent you spawned");
+      expect(text).toContain(
+        `every turn after the one that answered the previous ${AUTO_REVIEW_MARKER} prompt that listed files attributed to you`,
+      );
+      expect(text).toContain('Below, "this turn" and "your turn" mean all of those turns.');
+      expect(text).toContain("attributed file changes to your recent work");
+      expect(text).not.toContain("to your last turn");
+      expect(text.indexOf("Stood down: no own edits.")).toBeLessThan(text.indexOf("\n1. "));
+      expect(text).not.toContain("You changed files during your last turn");
     });
-    const guard = text.indexOf("neither you nor a child thread or subagent you spawned made any file edits or commits");
-    expect(guard).toBeGreaterThan(-1);
-    expect(text).toContain("`no-changes`");
-    expect(guard).toBeLessThan(text.indexOf("\n1. "));
-    expect(text).not.toContain("You changed files during your last turn");
+
+    it("comes before the already-committed paragraph", () => {
+      const text = buildReviewPrompt({
+        decision: { commit: true, merge: false },
+        reviewMode: "auto",
+        scope: baseScope,
+        committedSince: sha,
+      });
+      const committed = text.indexOf("Part of this turn's work is already committed");
+      expect(committed).toBeGreaterThan(-1);
+      expect(text.indexOf("Stood down: no own edits.")).toBeGreaterThan(-1);
+      expect(text.indexOf("Stood down: no own edits.")).toBeLessThan(committed);
+    });
+
+    it("precedes both the committed paragraph and step 1 when committed and not committing", () => {
+      const text = buildReviewPrompt({
+        decision: { commit: false, merge: false },
+        reviewMode: "auto",
+        scope: baseScope,
+        committedSince: sha,
+      });
+      const guard = text.indexOf("Stood down: no own edits.");
+      const committed = text.indexOf("Part of this turn's work is already committed");
+      expect(guard).toBeGreaterThan(-1);
+      expect(committed).toBeGreaterThan(-1);
+      expect(guard).toBeLessThan(committed);
+      expect(guard).toBeLessThan(text.indexOf("\n1. "));
+    });
+
+    it("is present when the decision does not commit", () => {
+      const text = buildReviewPrompt({
+        decision: { commit: false, merge: false },
+        reviewMode: "auto",
+        scope: baseScope,
+      });
+      expect(text).toContain("Stood down: no own edits.");
+      expect(text.indexOf("Stood down: no own edits.")).toBeLessThan(text.indexOf("\n1. "));
+    });
   });
 
   it("marks the scope list as data, not instructions", () => {
