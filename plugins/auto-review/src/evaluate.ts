@@ -96,11 +96,11 @@ async function userTurnQueued(ctx: ReviewContext, threadId: string): Promise<boo
 }
 
 /**
- * Fold this turn's review into the user's next turn instead of firing it
- * alongside their message. The cursor is kept, so the review that fires once
- * the thread goes idle with nothing of theirs waiting covers every turn since.
+ * Leaves the thread idle with its turn cursor kept and the turn undecided, so
+ * the next `thread.active` keeps the earlier cursor and the review that
+ * eventually fires covers this turn's work too. A parked turn is unparked.
  */
-async function carryOver(ctx: ReviewContext, thread: GateThreadLike, state: ThreadState): Promise<void> {
+async function keepCursor(ctx: ReviewContext, thread: GateThreadLike, state: ThreadState): Promise<void> {
   const { bb } = ctx;
   await writeState(bb, thread.id, { phase: "idle" }, [
     "deferredSince",
@@ -110,6 +110,15 @@ async function carryOver(ctx: ReviewContext, thread: GateThreadLike, state: Thre
   if (state.phase === "deferred") {
     await removeDeferral(bb, thread.id);
   }
+}
+
+/**
+ * Fold this turn's review into the user's next turn instead of firing it
+ * alongside their message. The cursor is kept, so the review that fires once
+ * the thread goes idle with nothing of theirs waiting covers every turn since.
+ */
+async function carryOver(ctx: ReviewContext, thread: GateThreadLike, state: ThreadState): Promise<void> {
+  await keepCursor(ctx, thread, state);
   await recordFire(ctx, thread.projectId, thread.id, "deferred", "user-queued");
 }
 
@@ -198,8 +207,10 @@ async function deferredBehindOthers(
 
 /**
  * One code review per user message: once a review was sent, only a turn the user
- * started after it earns another. Wake-ups (child or background-task completions,
- * the review's own fix commits) never do. A failed lookup reviews as before.
+ * started earns another. Wake-ups and tasks other threads tell this one (child or
+ * background-task completions, the review's own fix commits) never do. The cursor
+ * and turn stay open, so their work is carried into the review the next user
+ * message earns. A failed lookup reviews as before.
  */
 async function alreadyReviewed(
   ctx: ReviewContext,
@@ -222,7 +233,8 @@ async function alreadyReviewed(
     );
     return false;
   }
-  await standDown(ctx, thread, state, "already-reviewed");
+  await keepCursor(ctx, thread, state);
+  await recordFire(ctx, thread.projectId, thread.id, "stood-down", "already-reviewed");
   return true;
 }
 

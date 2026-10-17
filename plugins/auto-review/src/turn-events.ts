@@ -153,7 +153,8 @@ export async function onMessageCancelled(
       state.pendingEntryId === entry.id
     ) {
       const { set, remove } = resetToIdlePatch();
-      await writeState(bb, entry.threadId, set, remove);
+      // A review that never reached the agent does not count against the next one.
+      await writeState(bb, entry.threadId, set, [...remove, "lastCodeReviewSeq"]);
       await removeReview(bb, entry.threadId);
       await recordCancelledReview(bb, entry.threadId, state);
       return true;

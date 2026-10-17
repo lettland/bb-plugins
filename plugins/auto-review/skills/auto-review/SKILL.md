@@ -429,9 +429,11 @@ thread, so the turn's review and commit are never dropped by it.
   bb wakes it once the last of them has ended, or the 5-minute sweep if that wake-up is
   missed. Not a skip — nothing is lost.
 - `already-reviewed` — a code review was already sent for this thread and the user has not
-  written since. Wake-up turns (child or background-task completions, the review's own fix
-  commits) never earn another review; the user's next message does. `bb auto-review reset`
-  lifts it.
+  written since. Wake-up turns (child or background-task completions) and tasks other threads
+  tell it never earn another review. Work from wake-ups after the review ends (including review
+  fixes committed in one) is carried into the next user-earned review; fixes made inside the
+  review turn or its continuation are covered by that review itself. `bb auto-review reset` or
+  a user stop drops the carried cursor, and reset also lifts the rule.
 - `no-authorship` — the turn changed no files: no tool edit, and nothing in the working
   tree (a new, rewritten or deleted path, or one in a commit the turn made — on a branch or
   straight onto the mainline) changed since the turn started. Edits made through shell commands count. Untracked

@@ -64,6 +64,59 @@ export async function stoppedByUser(
   );
 }
 
+/** The most events one `threads.events.list` page may request; the server rejects a larger `limit`. */
+export const EVENT_PAGE_MAX = 100;
+/** Bounds the walk through a thread with a very long run of turn requests: 50 pages of 100. */
+const TURN_REQUEST_MAX_PAGES = 50;
+
+type TurnRequestData = Extract<
+  Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["events"]["list"]>>[number],
+  { type: "client/turn/requested" }
+>["data"];
+
+/**
+ * The seq of the first turn request after the cursor that `counts` accepts, or
+ * null when there is none. The event log is paged, so a long run of wake-up
+ * requests could push the one that counts past the first page; this walks the
+ * pages, oldest first, and throws if the walk hits its cap rather than answer
+ * "none" for a log it did not finish reading.
+ */
+async function firstTurnRequestSince(
+  bb: BbPluginApi,
+  threadId: string,
+  sinceSeq: number,
+  counts: (data: TurnRequestData) => boolean | Promise<boolean>,
+): Promise<number | null> {
+  let afterSeq = sinceSeq;
+  for (let page = 0; page < TURN_REQUEST_MAX_PAGES; page += 1) {
+    const events = await bb.sdk.threads.events.list({
+      threadId,
+      afterSeq: String(afterSeq),
+      types: ["client/turn/requested"],
+      order: "asc",
+      limit: String(EVENT_PAGE_MAX),
+    });
+    for (const event of events) {
+      if (event.type === "client/turn/requested" && (await counts(event.data))) {
+        return event.seq;
+      }
+    }
+    const last = events.at(-1);
+    if (last === undefined || events.length < EVENT_PAGE_MAX) {
+      return null;
+    }
+    afterSeq = last.seq;
+  }
+  throw new Error(`more than ${TURN_REQUEST_MAX_PAGES * EVENT_PAGE_MAX} turn requests since seq ${sinceSeq}`);
+}
+
+function isUserRequest(data: TurnRequestData): boolean {
+  return (
+    data.initiator === "user" &&
+    !data.input.some((part) => part.type === "text" && part.text.startsWith(AUTO_REVIEW_MARKER))
+  );
+}
+
 /**
  * The seq of the first turn request the user made after the cursor, or null
  * when there is none. Turns auto-review sent itself carry the user's initiator
@@ -74,25 +127,7 @@ export async function firstUserTurnSince(
   threadId: string,
   sinceSeq: number,
 ): Promise<number | null> {
-  const events = await bb.sdk.threads.events.list({
-    threadId,
-    afterSeq: String(sinceSeq),
-    types: ["client/turn/requested"],
-  });
-  let first: number | null = null;
-  for (const event of events) {
-    if (
-      event.type === "client/turn/requested" &&
-      event.data.initiator === "user" &&
-      !event.data.input.some(
-        (part) => part.type === "text" && part.text.startsWith(AUTO_REVIEW_MARKER),
-      ) &&
-      (first === null || event.seq < first)
-    ) {
-      first = event.seq;
-    }
-  }
-  return first;
+  return firstTurnRequestSince(bb, threadId, sinceSeq, isUserRequest);
 }
 
 /** The timeline endpoint's own ceiling; asking for more is rejected with a 400. */

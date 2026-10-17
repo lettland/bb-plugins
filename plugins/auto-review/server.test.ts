@@ -4728,6 +4728,7 @@ describe("auto-review plugin: one code review per user message", () => {
     expect(host.sends).toHaveLength(1);
     await emitIdle(host);
     expect(host.metadata.phase).toBe("idle");
+    host.setMaxSeq(110);
     await emitActive(host);
     host.setWorkingTree([{ path: "src/b.ts" }]);
     host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts")]);
@@ -4753,8 +4754,29 @@ describe("auto-review plugin: one code review per user message", () => {
     await host.harness.dispose();
   });
 
+  it("does not keep it when the queued review is cancelled before it reached the agent", async () => {
+    const host = createHost({ sendDelivery: "queued" });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.metadata.phase).toBe("pending-dispatch");
+    expect(host.metadata.lastCodeReviewSeq).toBe(100);
+    await host.harness.behavior.emitThreadEvent("message.cancelled", { entry: queueEntry() });
+    expect(host.metadata.phase).toBe("idle");
+    expect(host.metadata.lastCodeReviewSeq).toBeUndefined();
+
+    // The review never ran, so a later idle with edits still earns one.
+    host.setMaxSeq(110);
+    await emitActive(host);
+    host.setWorkingTree([{ path: "src/b.ts" }]);
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts")]);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(2);
+    await host.harness.dispose();
+  });
+
   it("stands down on a wake-up turn that committed the review's fixes, even with files changed", async () => {
-    const host = await wakeUpAfterReview();
+    const host = await wakeUpAfterReview({ onMainline: true, headSha: "0123abc" });
     host.requestTurn({ seq: 120, initiator: "system", text: "child-1 finished" });
     host.commit("fix1", ["src/b.ts"]);
     host.setMaxSeq(130);
@@ -4762,6 +4784,54 @@ describe("auto-review plugin: one code review per user message", () => {
     expect(host.sends).toHaveLength(1);
     expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "already-reviewed" });
     expect(host.metadata.lastCodeReviewSeq).toBe(100);
+
+    // The fix commit is carried: the review the user's next message earns covers it.
+    const headAtWakeUp = (host.metadata.turnStart as { tree: { headSha: string } }).tree.headSha;
+    host.requestTurn({ seq: 140, initiator: "user", text: "thanks, now c" });
+    host.setMaxSeq(150);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(2);
+    expect(promptText(host, 1)).toContain(`${headAtWakeUp}..HEAD`);
+    expect(promptText(host, 1)).toContain("src/b.ts");
+    await host.harness.dispose();
+  });
+
+  it("carries a wake-up's work into the review the user's next message earns", async () => {
+    const host = await wakeUpAfterReview();
+    await emitIdle(host);
+    expect(await lastFire(host)).toMatchObject({ reason: "already-reviewed" });
+    expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 110 });
+    expect(host.metadata.turnDecided).toBeUndefined();
+
+    // A second wake-up keeps the earliest cursor.
+    host.setMaxSeq(120);
+    await emitActive(host);
+    expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 110 });
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 110 });
+
+    host.requestTurn({ seq: 125, initiator: "user", text: "now do c" });
+    host.setMaxSeq(130);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(2);
+    expect(promptText(host, 1)).toContain("src/b.ts");
+    await host.harness.dispose();
+  });
+
+  it("unparks a deferred turn on the stand-down without dropping its cursor", async () => {
+    const host = await wakeUpAfterReview();
+    await park(host, THREAD_ID);
+    Object.assign(host.metadata, { turnStart: { sinceSeq: 110 }, lastCodeReviewSeq: 100 });
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(host.metadata.phase).toBe("idle");
+    expect(host.metadata.deferredSince).toBeUndefined();
+    expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 110 });
+    expect(await host.bb.storage.kv.get(`deferral:${THREAD_ID}`)).toBeFalsy();
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "already-reviewed" });
     await host.harness.dispose();
   });
 
@@ -4775,6 +4845,18 @@ describe("auto-review plugin: one code review per user message", () => {
     await host.harness.dispose();
   });
 
+  it("finds the user's message behind more wake-ups than one page of events holds", async () => {
+    const host = await wakeUpAfterReview();
+    for (let seq = 101; seq <= 230; seq += 1) {
+      host.requestTurn({ seq, initiator: "system", text: `wake ${seq}` });
+    }
+    host.requestTurn({ seq: 240, initiator: "user", text: "finally" });
+    host.setMaxSeq(250);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(2);
+    await host.harness.dispose();
+  });
+
   it("does not count a turn auto-review sent itself as the user writing", async () => {
     const host = await wakeUpAfterReview();
     host.requestTurn({ seq: 120, initiator: "user", text: `${AUTO_REVIEW_MARKER} review your work` });
@@ -4785,8 +4867,42 @@ describe("auto-review plugin: one code review per user message", () => {
     await host.harness.dispose();
   });
 
-  it("reviews anyway, with a warning, when the user turns cannot be read", async () => {
+  it("lets a user turn that lands during the review's own continuation through", async () => {
+    const host = createHost();
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.metadata.phase).toBe("awaiting-review");
+    host.requestTurn({ seq: 120, initiator: "user", text: "also do b" });
+    host.setMaxSeq(130);
+    await emitActive(host);
+    host.setWorkingTree([{ path: "src/b.ts" }]);
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts")]);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(2);
+    expect(host.metadata.lastCodeReviewSeq).toBe(130);
+    await host.harness.dispose();
+  });
+
+  it("reviews anyway, with a warning, when the turn requests cannot be read", async () => {
     const host = await wakeUpAfterReview({ turnRequestsThrow: true });
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(2);
+    expect(
+      host.harness.logEntries.some(
+        (entry) => entry.level === "warn" && entry.message.includes("whether the user wrote since the last review"),
+      ),
+    ).toBe(true);
+    await host.harness.dispose();
+  });
+
+  it("reviews anyway when the user turns cannot be read to the end, past the page cap", async () => {
+    const host = await wakeUpAfterReview();
+    // 50 full pages of wake-up requests and no user message among them.
+    for (let seq = 101; seq <= 100 + 50 * EVENT_PAGE_MAX + 1; seq += 1) {
+      host.requestTurn({ seq, initiator: "system", text: `wake ${seq}` });
+    }
+    host.setMaxSeq(6_000);
     await emitIdle(host);
     expect(host.sends).toHaveLength(2);
     expect(

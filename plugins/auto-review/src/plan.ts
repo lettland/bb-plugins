@@ -1,5 +1,6 @@
 import type { BbPluginApi, PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
 import { devkitRunning } from "./dispatch.js";
+import { EVENT_PAGE_MAX } from "./detect-timeline.js";
 import type { ReviewMode } from "./prompt.js";
 import { planHoldExpired, type ThreadState } from "./state.js";
 
@@ -138,8 +139,7 @@ export function reviewReachedAgent(
   );
 }
 
-/** The most events one `threads.events.list` page may request; the server rejects a larger `limit`. */
-export const EVENT_PAGE_MAX = 100;
+export { EVENT_PAGE_MAX };
 
 /**
  * `reviewReachedAgent` over the thread's events since a cursor. The event log
