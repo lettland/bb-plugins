@@ -502,7 +502,7 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
   });
   const lines: string[] = [];
   lines.push(
-    `${AUTO_REVIEW_MARKER} auto-review attributed file changes to your recent work. Review them, apply fixes, and record the result. Follow these steps in order.`,
+    `${AUTO_REVIEW_MARKER} auto-review attributed file changes to your recent work. Review them, apply fixes, and record the result. Follow these steps in order. If a tool call is interrupted or rejected at the moment a \`[bb system]\` message arrives (for example a child thread's result while you wait on reviewers), that is bb delivering the message, not the user asking you to stop: read it and keep following these steps.`,
   );
   lines.push("");
   lines.push(NO_OWN_EDITS_GUARD);

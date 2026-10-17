@@ -93,6 +93,7 @@ describe("buildReviewPrompt", () => {
       );
       expect(text).toContain('Below, "this turn" and "your turn" mean all of those turns.');
       expect(text).toContain("attributed file changes to your recent work");
+      expect(text).toContain("that is bb delivering the message, not the user asking you to stop");
       expect(text).not.toContain("to your last turn");
       expect(text.indexOf("Stood down: no own edits.")).toBeLessThan(text.indexOf("\n1. "));
       expect(text).not.toContain("You changed files during your last turn");
