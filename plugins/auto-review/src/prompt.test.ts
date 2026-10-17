@@ -93,7 +93,6 @@ describe("buildReviewPrompt", () => {
       );
       expect(text).toContain('Below, "this turn" and "your turn" mean all of those turns.');
       expect(text).toContain("attributed file changes to your recent work");
-      expect(text).toContain("that is bb delivering the message, not the user asking you to stop");
       expect(text).not.toContain("to your last turn");
       expect(text.indexOf("Stood down: no own edits.")).toBeLessThan(text.indexOf("\n1. "));
       expect(text).not.toContain("You changed files during your last turn");
@@ -1385,5 +1384,40 @@ describe("no prompt asks the agent to manage review baselines in its shell", () 
         }
       }
     }
+  });
+});
+
+describe("the steer-interruption note", () => {
+  const NOTE_PHRASES = [
+    "`[bb system]` message to you as a turn",
+    "that is bb delivering the message, not the user asking you to stop",
+    "re-run it if you still need its result",
+    "a stop or refusal that comes with the user's own words is still the user's",
+    "your provider (Claude Code, for example)",
+    "did not already take effect",
+  ];
+  const DISCLOSURE = "Whenever you present the plan again without having run the calibrated review";
+  const planInput = { reviewMode: "auto", planFilePath: "/p/plan.md", autoApprove: false } as const;
+  const prompts: Record<string, string> = {
+    buildReviewPrompt: buildReviewPrompt({
+      decision: { commit: true, merge: false },
+      reviewMode: "auto",
+      scope: renderScope(["src/a.ts"]),
+    }),
+    buildPlanReviewPrompt: buildPlanReviewPrompt(planInput),
+    buildPlanReviewRedoPrompt: buildPlanReviewRedoPrompt(planInput),
+    buildPresentPlanReviewPrompt: buildPresentPlanReviewPrompt({ reviewMode: "auto", planFilePath: "docs/plans/p.md" }),
+    presentPlanRedoMessage: presentPlanRedoMessage("auto"),
+  };
+
+  it.each(Object.entries(prompts))("is in %s", (_name, text) => {
+    for (const phrase of NOTE_PHRASES) {
+      expect(text).toContain(phrase);
+    }
+  });
+
+  it.each(["buildPlanReviewRedoPrompt", "presentPlanRedoMessage"])("%s keeps the disclosure after the note", (name) => {
+    const text = prompts[name] as string;
+    expect(text.indexOf(DISCLOSURE)).toBeGreaterThan(text.indexOf(NOTE_PHRASES[3] as string));
   });
 });
