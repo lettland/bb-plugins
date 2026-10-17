@@ -1,8 +1,9 @@
 import type { PluginAgentToolContext, PluginAgentToolResult } from "@get-bb/plugin-sdk";
+import { recordCodeReport } from "./baseline-store.js";
 import { queuedRowExists, type ReviewContext } from "./context.js";
 import { reviewReportSchema, type ReviewReport } from "./findings-schema.js";
 import { readFindings, writeFindings } from "./findings-store.js";
-import { mergeReport } from "./findings.js";
+import { mergeReport, openChains } from "./findings.js";
 import { AUTO_REVIEW_MARKER } from "./prompt.js";
 import { deliveredPatch } from "./review-outcome.js";
 import { readState, withThreadLock, writeState } from "./state.js";
@@ -65,6 +66,12 @@ export async function reportReview(
       Date.now(),
     );
     await writeFindings(bb, ctx.threadId, merged.store);
+    await recordCodeReport(
+      bb,
+      ctx.threadId,
+      report,
+      report.outcome === "blocked" || openChains(merged.store).some((chain) => chain.severity === "blocker"),
+    );
     return ackText(report, merged.counts, merged.ignored);
   });
 }
@@ -73,7 +80,7 @@ export function registerReportTool(review: ReviewContext): void {
   review.bb.agents.registerTool({
     name: REPORT_REVIEW_TOOL_NAME,
     description:
-      `Only call this when an ${AUTO_REVIEW_MARKER} prompt asks you to. A finding's key is lowercase [a-z0-9._:/-] (for example src-foo-ts:null-check) and its file a repo-relative path without spaces (the nearest file for a finding that is not about one). Describe secrets by location and type, never by value.`,
+      `Only call this when an ${AUTO_REVIEW_MARKER} prompt asks you to. A finding's key is lowercase [a-z0-9._:/-] (for example src-foo-ts:null-check) and its file a repo-relative path without spaces (the nearest file for a finding that is not about one). Set \`security: true\` on a finding about a secret, credential or other security issue. Describe secrets by location and type, never by value.`,
     presentation: {
       label: { pending: "Reporting review", completed: "Reported review" },
     },

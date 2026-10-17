@@ -34,15 +34,18 @@ plan is complete or unclear, it stops and reports done. In the protected-mainlin
 case it does not auto-continue.
 
 Reviews that leave HEAD where it was (the protected-mainline and over-400-files no-commit
-cases) are delta-scoped: after the first review, the files it read are copied into the thread's
-private storage (bb's per-thread storage, `~/.bb/thread-storage/<thread id>/auto-review/code`;
-each is parked as `.pending` before the review and promoted over its `.copy` after the review and
-its fixes, only when the review completed with no Blocker or security Concern open), and later
-reviews cover only what changed since — every changed line, deletions included — per devkit's
-`review-delta-scope`. A file with no copy, or a stale one, gets the full review; earlier open
-findings are still re-checked, and secret checks are never narrowed. The final reply states the
-scope: `delta vs baseline` or `full (no baseline)`. To force a full review, delete that
-`auto-review` directory or ask the agent to. Commit-path reviews are unchanged.
+cases) are delta-scoped: the plugin keeps a private copy of the files the last clean review read
+(in its own per-thread storage, not the agent's shell), compares it with the files at dispatch,
+and embeds each file's delta as a diff in the review prompt, so the review covers only what
+changed since — every changed line, deletions included. The agent runs no command for this. A
+copy is valid only while HEAD is still the commit it was taken at; a file with no valid copy,
+one over 256 KB, or a delta over the size budget gets the full review, and earlier open findings
+are still re-checked and secret checks are never narrowed. What the review read is promoted to
+the copy only when the review completed with no Blocker or security Concern open (flag a finding
+about a secret or other security issue with `security: true` in `ReportReview`: it ends that
+file's copy). The final reply states the scope: `delta vs baseline` or `full (no baseline)`.
+`bb auto-review reset` does not clear baselines; deleting the thread does. Commit-path reviews
+are unchanged.
 
 It ships **enabled** (opt-out).
 
@@ -60,13 +63,13 @@ after its next tool result (Claude Code hands a steered message to the model onl
 for a moment the agent has only the bare deny to go on. The agent reviews the plan file
 (devkit's calibrated review in `plan` scope, or a self-review, per the review mode), applies
 every valid finding to the plan, and presents it again. Plan reviews are delta-scoped too: the
-plan as reviewed is parked as `.pending` in the thread's `auto-review/plan` storage
-(`~/.bb/thread-storage/<thread id>/auto-review/plan`) before the review and promoted over its
-`.copy` after the review and its fixes (only when the review completed with no Blocker or
-security Concern open), so the next cycle reviews only what changed since (an empty delta skips
-the review), and the reply states `delta vs baseline` or `full (no baseline)`. Approval clears
-the plan's copy; delete the thread's `auto-review` storage directory, or ask the agent to, to
-force a full review. A Blocker or security Concern still open after the review (and its closure
+plugin keeps the plan as reviewed (per thread and plan file, in its own storage) and promotes it
+when the plan comes back after a review that ran, with no Blocker open in the thread's findings,
+so the next cycle embeds only what changed since in the prompt as a diff (an unchanged plan skips
+the review), and the reply states `delta vs baseline` or `full (no baseline)`. The agent copies
+and deletes nothing. A plan with no baseline, a delta over 40 KB, or a plan file the plugin
+cannot read gets the full review. An auto-approval clears the plan's baseline, as does the redo
+below and deleting the thread. A Blocker or security Concern still open after the review (and its closure
 rounds, if any) is never presented or auto-approved: the agent hands the plan and the open
 findings to the user. The review turn carries the thread's
 permission mode and can take the agent out of plan mode, where Claude Code's ExitPlanMode
@@ -171,7 +174,7 @@ not proof that a review ran: it does not look at how many reviewers were used. `
 
 - Loaded: as before (auto-approve is allowed when the other evidence holds).
 - Never loaded: the plan is sent back **once**, auto-approve or not (reason `plan-review-redo`,
-  outcome `fired`). The agent is told to load the skill again, delete the plan's baseline and
+  outcome `fired`). The plugin drops the plan's baseline and the agent is told to load the skill again and
   review the whole plan. Native gate: the plan is denied again with the redo prompt;
   `PresentPlan`: the call returns the redo instructions and the arm stays, with a fresh clock
   and cursor. If the agent presents again without having run the calibrated review it is
@@ -261,7 +264,9 @@ and type, never by value.
   `findings[]` (`key`, `title`, `file`, `line?`, `severity` `blocker|high|medium|low`, `status`
   `open|fixed|false-positive`, `reason?`, required for a false positive). A `key` is lowercase
   `[a-z0-9._:/-]` (for example `src-foo-ts:null-check`); `file` is a repo-relative path without
-  spaces (the nearest file for a finding that is not about one).
+  spaces (the nearest file for a finding that is not about one), and `security?` (set it for a
+  secret, credential or other security issue: it ends the file's review baseline, and an open one
+  keeps the review's reads from becoming the next baseline).
 - Findings persist per thread as **chains** under their `key` (up to 100 per thread; settled
   chains are evicted first). The next review is told the open chains and recently dismissed
   false positives (up to 15) and should reuse their keys; an open chain outside the files of

@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import type {
   PluginAgentConfiguration,
@@ -6,6 +7,7 @@ import type {
   PluginAgentToolResult,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { clearPlanBaseline, planScope, settlePlanBaseline, stagePlanPending } from "./baseline-store.js";
 import { effectiveConfig, readProjectConfig } from "./config.js";
 import { recordFire, type EffectiveConfig, type ReviewContext } from "./context.js";
 import { tryCaptureSinceSeq } from "./detect.js";
@@ -50,6 +52,15 @@ const PRESENT_PLAN_GATE_TOOLS = [
   "AskUserQuestion",
 ];
 
+/** The plan file's text, or null when it cannot be read (the plan then has no baseline). */
+async function readPlanFile(planFilePath: string): Promise<string | null> {
+  try {
+    return await readFile(planFilePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
 /** The cursor auto-approve counts the review's tool work from; undefined means the plan is never auto-approved. */
 function captureArmedSeq(review: ReviewContext, threadId: string): Promise<number | undefined> {
   return tryCaptureSinceSeq(
@@ -90,15 +101,19 @@ async function releasePlan(
       redoSeq === undefined ? ["presentPlanArmedSeq"] : undefined,
     );
     await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-review-redo");
+    // The redo reviews the whole plan: its baseline goes, and the plan as it stands is staged afresh.
+    await clearPlanBaseline(bb, ctx.threadId, planFilePath);
+    await stagePlanPending(bb, ctx.threadId, planFilePath, await readPlanFile(planFilePath), Date.now());
     return presentPlanRedoMessage(config.reviewMode);
   }
   await writeState(bb, ctx.threadId, {}, [...PRESENT_PLAN_KEYS]);
-  if (
+  const reviewRan =
     check === "loaded" &&
-    config.autoApprovePlans &&
     state.presentPlanArmedSeq !== undefined &&
-    (await reviewRanSince(bb, ctx.threadId, state.presentPlanArmedSeq, PRESENT_PLAN_GATE_TOOLS, true))
-  ) {
+    (await reviewRanSince(bb, ctx.threadId, state.presentPlanArmedSeq, PRESENT_PLAN_GATE_TOOLS, true));
+  await settlePlanBaseline(bb, ctx.threadId, planFilePath, reviewRan);
+  if (reviewRan && config.autoApprovePlans) {
+    await clearPlanBaseline(bb, ctx.threadId, planFilePath);
     await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-approved");
     bb.log.info(
       `auto-review: auto-approved the reviewed plan ${basename(planFilePath)} in thread ${ctx.threadId}`,
@@ -149,10 +164,14 @@ async function presentPlan(
       armedSeq === undefined ? ["presentPlanRedone", "presentPlanArmedSeq"] : ["presentPlanRedone"],
     );
     await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-review");
-    return buildPresentPlanReviewPrompt({
+    const content = await readPlanFile(planFilePath);
+    const prompt = buildPresentPlanReviewPrompt({
       reviewMode: config.reviewMode,
       planFilePath,
+      baseline: await planScope(bb, ctx.threadId, planFilePath, content, now),
     });
+    await stagePlanPending(bb, ctx.threadId, planFilePath, content, now);
+    return prompt;
   });
 }
 

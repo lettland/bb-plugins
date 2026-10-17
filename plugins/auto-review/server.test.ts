@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createFakePluginHost,
@@ -3453,7 +3456,7 @@ describe("auto-review plugin", () => {
         expect(host.resolutions).toEqual([DENY, redoDeny("pint-2")]);
         expect(host.sends).toHaveLength(2);
         expect(promptText(host, 1)).toMatch(/could not see `review-code` loaded in this thread/);
-        expect(promptText(host, 1)).toMatch(/\(b\) First, if `\$BB_THREAD_STORAGE` is unset/);
+        expect(promptText(host, 1)).toMatch(/\(b\) Review the whole of /);
         expect(await lastFireOf(host)).toMatchObject({ outcome: "fired", reason: "plan-review-redo" });
         expect(host.metadata.planReviewRedone).toBe(true);
         expect(host.metadata.planReviewEntryId).toBe("qm-1");
@@ -4918,5 +4921,325 @@ describe("auto-review plugin: one code review per user message", () => {
     expect((await host.harness.runCli(["reset", THREAD_ID])).exitCode).toBe(0);
     expect(host.metadata.lastCodeReviewSeq).toBeUndefined();
     await host.harness.dispose();
+  });
+});
+
+describe("auto-review plugin: review baselines", () => {
+  const READ = { type: "toolCall", tool: "Read" };
+  const V1 = "# Plan\n\nstep 1\nstep 2\n";
+  const V2 = "# Plan\n\nstep 1\nstep 2b\n";
+  const FORBIDDEN = /BB_THREAD_STORAGE|shasum|sha256sum|mkdir|manifest\.tsv|\.pending|no-index/;
+
+  async function planRecord(host: Host) {
+    const [key] = await host.bb.storage.kv.list("baseline:plan:");
+    return key === undefined
+      ? null
+      : ((await host.bb.storage.kv.get(key)) as { copy?: { content: string }; pending?: { content: string } });
+  }
+
+  async function nativeHost(options: HostOptions = {}, autoApprove = false) {
+    const host = createHost({ sendDelivery: "queued", ...options });
+    await plugin(host.bb);
+    if (autoApprove) {
+      await host.harness.runCli(["auto-approve", "on", "--project", "project-1"]);
+    }
+    return host;
+  }
+
+  /** The plan is held, its review dispatched, the agent works, and the revised plan comes back. */
+  async function reviewedCycle(host: Host, plan: string, ids: [string, string], work = true) {
+    await emitPlan(host, planInteraction(plan, ids[0]));
+    await host.harness.behavior.emitThreadEvent("message.dispatched", { entry: queueEntry() });
+    if (work) {
+      host.completeItem({ seq: 101, item: READ });
+    }
+    await emitPlan(host, planInteraction(`${plan}\nreviewed\n`, ids[1]));
+  }
+
+  describe("plan gate (ExitPlanMode)", () => {
+    it("reviews the first presentation in full and stages it as pending", async () => {
+      const host = await nativeHost();
+      await emitPlan(host, planInteraction(V1, "pint-1"));
+      expect(promptText(host)).toContain("`full (no baseline)`");
+      expect(await planRecord(host)).toEqual({ pending: { content: V1, at: expect.any(Number) } });
+      await host.harness.dispose();
+    });
+
+    it("promotes the pending text once the review ran, then embeds only the delta next cycle", async () => {
+      const host = await nativeHost();
+      await reviewedCycle(host, V1, ["pint-1", "pint-2"]);
+      expect(await planRecord(host)).toEqual({ copy: { content: V1, at: expect.any(Number) } });
+
+      await emitPlan(host, planInteraction(V2, "pint-3"));
+      const second = promptText(host, 1);
+      expect(second).toContain("```diff");
+      expect(second).toContain("-step 2\n+step 2b");
+      expect(second).toContain("`delta vs baseline`");
+      expect(second).not.toMatch(FORBIDDEN);
+      expect((await planRecord(host))?.pending?.content).toBe(V2);
+      expect((await planRecord(host))?.copy?.content).toBe(V1);
+      await host.harness.dispose();
+    });
+
+    it("skips the review when the plan is unchanged since its last reviewed cycle", async () => {
+      const host = await nativeHost();
+      await reviewedCycle(host, V1, ["pint-1", "pint-2"]);
+      await emitPlan(host, planInteraction(V1, "pint-3"));
+      expect(promptText(host, 1)).toContain("the plan is unchanged since its previous review");
+      expect(promptText(host, 1)).not.toContain("```diff");
+      await host.harness.dispose();
+    });
+
+    it("does not promote when the agent never worked on the review", async () => {
+      const host = await nativeHost();
+      await reviewedCycle(host, V1, ["pint-1", "pint-2"], false);
+      expect(await planRecord(host)).toBeNull();
+      await emitPlan(host, planInteraction(V2, "pint-3"));
+      expect(promptText(host, 1)).toContain("`full (no baseline)`");
+      await host.harness.dispose();
+    });
+
+    it("does not promote while a Blocker is open in the thread's findings", async () => {
+      const host = await nativeHost();
+      await host.bb.storage.kv.set(`findings:${THREAD_ID}`, {
+        chains: {
+          k: {
+            key: "k", title: "t", file: "src/a.ts", severity: "blocker", status: "open", firstSeenAt: 1,
+            lastSeenAt: 1, raisedCount: 1, dismissCount: 0, reRaised: false, lastReviewId: 1,
+          },
+        },
+        incidents: [],
+      });
+      await reviewedCycle(host, V1, ["pint-1", "pint-2"]);
+      expect(await planRecord(host)).toBeNull();
+      await host.harness.dispose();
+    });
+
+    it("clears the baseline when the plan is auto-approved", async () => {
+      const host = await nativeHost({}, true);
+      await reviewedCycle(host, V1, ["pint-1", "pint-2"]);
+      expect(host.resolutions.at(-1)).toMatchObject({ resolution: { decision: "allow_once" } });
+      expect(await planRecord(host)).toBeNull();
+      await host.harness.dispose();
+    });
+
+    it("has no baseline for a plan without a file path", async () => {
+      const host = await nativeHost();
+      await reviewedCycle(host, V1, ["pint-1", "pint-2"]);
+      await host.harness.behavior.emitThreadEvent("interaction.pending", {
+        thread: thread(),
+        interaction: planInteraction(V2, "pint-3", null),
+      } as never);
+      expect(promptText(host, 1)).toContain("`full (no baseline)`");
+      await host.harness.dispose();
+    });
+
+    it("clears the baseline of a plan sent back for a full review and stages the redone plan", async () => {
+      const DEVKIT = { enabled: true, status: "running", cliCommand: { name: "devkit" } };
+      const LOAD = {
+        type: "toolCall", tool: "devkit_load_skill", server: "bb", status: "completed",
+        arguments: { slug: "review-code" },
+      };
+      const host = await nativeHost({ plugins: [DEVKIT], queuedRows: [{ id: "qm-1" }] });
+      await emitPlan(host, planInteraction(V1, "pint-1"));
+      await host.harness.behavior.emitThreadEvent("message.dispatched", { entry: queueEntry() });
+      host.completeItem({ seq: 101, item: LOAD });
+      host.completeItem({ seq: 102, item: READ });
+      await emitPlan(host, planInteraction(V1, "pint-2"));
+      expect((await planRecord(host))?.copy?.content).toBe(V1);
+
+      host.setMaxSeq(200);
+      await emitPlan(host, planInteraction(V2, "pint-3"));
+      expect(promptText(host, 1)).toContain("```diff");
+      await host.harness.behavior.emitThreadEvent("message.dispatched", { entry: queueEntry() });
+      host.completeItem({ seq: 201, item: { type: "toolCall", tool: "Agent", status: "completed" } });
+      await emitPlan(host, planInteraction("# Plan v4\n", "pint-4"));
+      const redo = promptText(host, 2);
+      expect(redo).toContain("could not see `review-code` loaded in this thread");
+      expect(redo).toContain("(b) Review the whole of ");
+      expect(redo).not.toContain("```diff");
+      expect(redo).not.toMatch(FORBIDDEN);
+      expect(await planRecord(host)).toEqual({ pending: { content: "# Plan v4\n", at: expect.any(Number) } });
+      await host.harness.dispose();
+    });
+
+    it("deletes every baseline of a deleted thread, and keeps them on archive", async () => {
+      const host = await nativeHost();
+      await reviewedCycle(host, V1, ["pint-1", "pint-2"]);
+      await host.bb.storage.kv.set(`baseline:code:${THREAD_ID}`, { copies: {} });
+      await host.harness.behavior.emitThreadEvent("thread.archived", { thread: thread() } as never);
+      expect(await host.bb.storage.kv.list("baseline:")).toHaveLength(2);
+      await host.harness.behavior.emitThreadEvent("thread.deleted", { thread: thread() } as never);
+      expect(await host.bb.storage.kv.list("baseline:")).toEqual([]);
+      await host.harness.dispose();
+    });
+  });
+
+  describe("PresentPlan", () => {
+    const ctx = { threadId: THREAD_ID, projectId: "project-1" };
+    let dir: string;
+    let file: string;
+
+    const present = (host: Host, path = file) => host.harness.callAgentTool("PresentPlan", { planFilePath: path }, ctx);
+
+    async function presentHost(autoApprove = false) {
+      dir = mkdtempSync(join(tmpdir(), "ar-plan-"));
+      file = join(dir, "plan.md");
+      writeFileSync(file, V1);
+      const host = createHost();
+      await plugin(host.bb);
+      if (autoApprove) {
+        await host.harness.runCli(["auto-approve", "on", "--project", "project-1"]);
+      }
+      return host;
+    }
+
+    it("reads the plan file, promotes it after a reviewed cycle, then embeds the delta", async () => {
+      const host = await presentHost();
+      expect(await present(host)).toContain("`full (no baseline)`");
+      expect((await planRecord(host))?.pending?.content).toBe(V1);
+      host.completeItem({ seq: 101, item: READ });
+      writeFileSync(file, `${V1}fixed by the review\n`);
+      expect(await present(host)).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+      expect(await planRecord(host)).toEqual({ copy: { content: V1, at: expect.any(Number) } });
+
+      writeFileSync(file, V2);
+      const result = await present(host);
+      expect(result).toContain("```diff");
+      expect(result).toContain("-step 2\n+step 2b");
+      expect(result).not.toMatch(FORBIDDEN);
+      rmSync(dir, { recursive: true, force: true });
+      await host.harness.dispose();
+    });
+
+    it("clears the baseline once the plan is approved automatically", async () => {
+      const host = await presentHost(true);
+      await present(host);
+      host.completeItem({ seq: 101, item: READ });
+      expect(await present(host)).toBe(PRESENT_PLAN_APPROVED_MESSAGE);
+      expect(await planRecord(host)).toBeNull();
+      rmSync(dir, { recursive: true, force: true });
+      await host.harness.dispose();
+    });
+
+    it("keeps no baseline for a plan file it cannot read", async () => {
+      const host = await presentHost();
+      expect(await present(host, "docs/plans/missing.md")).toContain("`full (no baseline)`");
+      host.completeItem({ seq: 101, item: READ });
+      await present(host, "docs/plans/missing.md");
+      expect(await planRecord(host)).toBeNull();
+      rmSync(dir, { recursive: true, force: true });
+      await host.harness.dispose();
+    });
+  });
+
+  describe("no-commit code reviews", () => {
+    const codeRecord = async (host: Host) =>
+      (await host.bb.storage.kv.get(`baseline:code:${THREAD_ID}`)) as {
+        copies: Record<string, { content: string; headSha: string }>;
+        pending?: { headSha: string; files: Record<string, string | null> };
+      } | null;
+
+    async function protectedHost(content: string) {
+      const host = createHost({
+        worktree: false,
+        headSha: "head-0",
+        workingTreeFiles: [{ path: "src/a.ts", content }],
+      });
+      await plugin(host.bb);
+      // Only "trunk" is a personal mainline here, so this checkout's review never commits.
+      await host.bb.storage.kv.set("project:project-1", { mergeEligibleMainlines: ["trunk"] });
+      return host;
+    }
+
+    async function reviewTurn(host: Host, activations = 1) {
+      for (let i = 0; i < activations; i += 1) {
+        await emitActive(host);
+      }
+      await emitIdle(host);
+    }
+
+    const reportClean = (host: Host, input: Record<string, unknown> = {}) =>
+      host.harness.callAgentTool(
+        "ReportReview",
+        { outcome: "uncommitted", summary: "reviewed", findings: [], ...input },
+        { threadId: THREAD_ID, projectId: "project-1" },
+      );
+
+    it("reviews in full the first time, stages the file, and promotes it when the review ends clean", async () => {
+      const host = await protectedHost("one\ntwo\n");
+      await reviewTurn(host, 2);
+      const first = promptText(host);
+      expect(first).toContain("Do NOT commit");
+      expect(first).toContain("Review baseline: none of the files in scope has one");
+      expect(first).not.toMatch(FORBIDDEN);
+      expect((await codeRecord(host))?.pending).toMatchObject({ headSha: "head-0", files: { "src/a.ts": "one\ntwo\n" } });
+
+      await reportClean(host);
+      await emitIdle(host);
+      expect(host.metadata.phase ?? "idle").toBe("idle");
+      expect(await codeRecord(host)).toEqual({
+        copies: { "src/a.ts": { content: "one\ntwo\n", headSha: "head-0", at: expect.any(Number) } },
+      });
+      await host.harness.dispose();
+    });
+
+    it("embeds the delta in the next review, and drops the pending file when the review left a Blocker", async () => {
+      const host = await protectedHost("one\ntwo\n");
+      await reviewTurn(host, 2);
+      await reportClean(host);
+      await emitIdle(host);
+
+      host.setWorkingTree([{ path: "src/a.ts", content: "one\nTWO\n" }]);
+      host.requestTurn({ seq: 120, initiator: "user", text: "next" });
+      host.setMaxSeq(130);
+      await reviewTurn(host);
+      expect(host.sends).toHaveLength(2);
+      const second = promptText(host, 1);
+      expect(second).toContain("`src/a.ts`\n```diff");
+      expect(second).toContain("-two\n+TWO");
+      expect(second).not.toMatch(FORBIDDEN);
+
+      await reportClean(host, {
+        outcome: "blocked",
+        findings: [{ key: "b", title: "t", file: "src/a.ts", severity: "blocker", status: "open" }],
+      });
+      await emitIdle(host);
+      const record = await codeRecord(host);
+      expect(record?.pending).toBeUndefined();
+      expect(record?.copies["src/a.ts"]?.content).toBe("one\ntwo\n");
+      await host.harness.dispose();
+    });
+
+    it("ends a file's baseline when the report flags a security finding on it", async () => {
+      const host = await protectedHost("one\ntwo\n");
+      await reviewTurn(host, 2);
+      await reportClean(host);
+      await emitIdle(host);
+
+      host.setWorkingTree([{ path: "src/a.ts", content: "one\nTWO\n" }]);
+      host.requestTurn({ seq: 120, initiator: "user", text: "next" });
+      host.setMaxSeq(130);
+      await reviewTurn(host);
+      await reportClean(host, {
+        findings: [{ key: "s", title: "secret removed", file: "src/a.ts", severity: "high", status: "fixed", security: true }],
+      });
+      await emitIdle(host);
+      expect(await codeRecord(host)).toEqual({ copies: {} });
+      await host.harness.dispose();
+    });
+
+    it("leaves a review that commits without a baseline and clears what an earlier review staged", async () => {
+      const host = createHost({ headSha: "head-0", workingTreeFiles: [{ path: "src/a.ts", content: "one\n" }] });
+      await plugin(host.bb);
+      await host.bb.storage.kv.set(`baseline:code:${THREAD_ID}`, {
+        copies: {},
+        pending: { headSha: "head-0", at: 1, files: { "src/a.ts": "stale\n" } },
+      });
+      await reviewTurn(host, 2);
+      expect(promptText(host)).not.toContain("Review baseline");
+      expect((await codeRecord(host))?.pending).toBeUndefined();
+      await host.harness.dispose();
+    });
   });
 });

@@ -1,4 +1,5 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { settleCodeBaseline } from "./baseline-store.js";
 import { stoppedByUser, tryCaptureSinceSeq } from "./detect.js";
 import { readFindings, recordUnreported } from "./findings-store.js";
 import { reviewRecorded } from "./findings.js";
@@ -76,6 +77,8 @@ export async function recordUnfinishedReview(
       }`,
     );
   }
+  // The review is over, reported or not: its baseline is promoted or dropped.
+  await settleCodeBaseline(bb, threadId, Date.now());
 }
 
 async function recordUnfinished(

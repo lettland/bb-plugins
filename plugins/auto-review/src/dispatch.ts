@@ -1,4 +1,5 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { prepareCodeBaseline } from "./baseline-store.js";
 import {
   recordFire,
   type EffectiveConfig,
@@ -9,10 +10,10 @@ import {
 import { decide } from "./decide.js";
 import { deferTurn, providerReviewInFlight } from "./deferral.js";
 import { removeDeferral } from "./deferrals.js";
-import { tryCaptureSinceSeq, type TurnScope } from "./detect.js";
+import { fetchWorkspace, tryCaptureSinceSeq, type TurnScope } from "./detect.js";
 import { readFindings, recordUnreported } from "./findings-store.js";
 import { openFindingsForPrompt } from "./findings.js";
-import { buildReviewPrompt, renderScope } from "./prompt.js";
+import { buildReviewPrompt, isNoCommit, renderScope } from "./prompt.js";
 import { withProviderLock } from "./provider-lock.js";
 import { deliveredPatch } from "./review-outcome.js";
 import { addReview, removeReview } from "./reviews.js";
@@ -120,6 +121,28 @@ async function codeReviewCursor(bb: BbPluginApi, threadId: string): Promise<{ la
   return lastCodeReviewSeq === undefined ? {} : { lastCodeReviewSeq };
 }
 
+/**
+ * The deltas of a no-commit review (see `prepareCodeBaseline`). A review that
+ * commits needs none, but still ends the pending content an earlier review left.
+ */
+async function codeBaselineFor(
+  bb: BbPluginApi,
+  threadId: string,
+  environmentId: string,
+  decision: ReturnType<typeof decide>,
+  rendered: ReturnType<typeof renderScope>,
+) {
+  const noCommit = isNoCommit(decision, rendered);
+  const workspace = noCommit ? await fetchWorkspace(bb, environmentId).catch(() => null) : null;
+  return prepareCodeBaseline(bb, {
+    threadId,
+    environmentId,
+    paths: noCommit ? rendered.listed : [],
+    workspace,
+    now: Date.now(),
+  });
+}
+
 async function sendReview(
   ctx: ReviewContext,
   thread: GateThreadLike,
@@ -200,10 +223,12 @@ export async function dispatchReview(
     }
 
     const prior = openFindingsForPrompt(await readFindings(ctx.bb, thread.id), Date.now());
+    const rendered = renderScope(scope);
     const prompt = buildReviewPrompt({
       decision,
       reviewMode: config.reviewMode,
-      scope: renderScope(scope),
+      scope: rendered,
+      codeBaseline: await codeBaselineFor(ctx.bb, thread.id, environmentId, decision, rendered),
       committedSince: committedSinceHead(turn, state),
       commitScanFrom: commitScanHead(turn, state),
       foreignCommits: turn.foreignCommits.map(({ sha }) => sha),

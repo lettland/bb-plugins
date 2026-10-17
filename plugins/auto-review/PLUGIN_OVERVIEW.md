@@ -71,9 +71,17 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   turn commits, it judges from the thread's plan whether work remains and continues any
   genuinely-unfinished planned work instead of halting mid-plan (never inventing work).
 - Later reviews are delta-scoped: plan reviews, and no-commit code reviews (protected
-  mainline, over-400-files), snapshot what they read under `$BB_THREAD_STORAGE/auto-review/`
-  and review only what changed since (prompt text only; devkit's `review-delta-scope`). The reply
-  states `delta vs baseline` or `full (no baseline)`; approval clears a plan's copy.
+  mainline, over-400-files), review only what changed since the last clean review. The plugin
+  keeps those baselines itself (plugin KV, per thread: `baseline:plan:<thread>:<sha256(path)>`,
+  `baseline:code:<thread>`), computes each delta with `diff` (jsdiff) and embeds it in the prompt
+  as a ```diff block, so the agent runs no shell command for it. Arming a review stages what it
+  reads as `pending`; a review that ran and left no open Blocker (plan) or Blocker/security
+  Concern (code) promotes it, else it is dropped. A code copy is valid only while HEAD is still
+  the sha it was taken at; a finding flagged `security` on a file ends that file's baseline;
+  files over 256 KB, more than 200 files, and deltas over 40 KB (plan) / 80 KB (code, total) fall
+  back to a full review; records untouched for 7 days are dropped. The reply states
+  `delta vs baseline` or `full (no baseline)`; an auto-approval, a redo and a thread deletion
+  clear a plan's baseline.
 - Reviews plans too, on every provider, through two paths kept strictly separate by
   provider capability so one plan is never reviewed twice. On Claude Code, whose
   ExitPlanMode routes to a real `interaction.pending` with `subject.kind: "plan"` the

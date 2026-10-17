@@ -1,4 +1,5 @@
 import type { ReviewContext } from "./context.js";
+import { deleteBaselines } from "./baseline-store.js";
 import { removeDeferral } from "./deferrals.js";
 import { deleteFindings } from "./findings-store.js";
 import { recordUnfinishedReview } from "./review-outcome.js";
@@ -36,6 +37,7 @@ export function unlatch(
     await removeReview(bb, threadId);
     if (deleted) {
       await deleteFindings(bb, threadId);
+      await deleteBaselines(bb, threadId);
     }
   });
 }

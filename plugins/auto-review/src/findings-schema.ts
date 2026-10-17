@@ -59,6 +59,8 @@ export const reportedFindingSchema = z
     severity: z.enum(FINDING_SEVERITIES),
     status: z.enum(FINDING_STATUSES),
     reason: cleanText(300).optional(),
+    /** A secret, credential or other security issue: it ends the file's review baseline. */
+    security: z.boolean().optional(),
   })
   .refine(
     (finding) =>

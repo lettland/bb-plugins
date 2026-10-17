@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import type { PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
+import { clearPlanBaseline, planScope, settlePlanBaseline, stagePlanPending } from "./baseline-store.js";
 import { effectiveConfig, readProjectConfig } from "./config.js";
 import {
   queuedRowExists,
@@ -84,12 +85,15 @@ export async function gatePlan(
     { planReviewArmedAt: Date.now() },
     PLAN_GATE_KEYS.filter((key) => key !== "planReviewArmedAt"),
   );
+  const now = Date.now();
   const prompt = buildPlanReviewPrompt({
     reviewMode: config.reviewMode,
     planFilePath: approval.planFilePath,
     autoApprove: config.autoApprovePlans,
+    baseline: await planScope(bb, thread.id, approval.planFilePath, approval.plan, now),
   });
   if (await armReview(ctx, thread, approval, prompt)) {
+    await stagePlanPending(bb, thread.id, approval.planFilePath, approval.plan, now);
     await recordFire(ctx, thread.projectId, thread.id, "fired", "plan-review");
   }
 }
@@ -201,15 +205,14 @@ async function releaseReviewedPlan(
   }
   await writeState(bb, thread.id, {}, [...PLAN_GATE_KEYS]);
   const { planReviewDeliveredSeq } = state;
-  if (
+  const reviewRan =
     check === "loaded" &&
-    config.autoApprovePlans &&
-    approval.canApprove &&
     planReviewDeliveredSeq !== undefined &&
     !expired &&
-    (await reviewRanSince(bb, thread.id, planReviewDeliveredSeq, NATIVE_GATE_TOOLS, false)) &&
-    (await approvePlan(ctx, thread, approval))
-  ) {
+    (await reviewRanSince(bb, thread.id, planReviewDeliveredSeq, NATIVE_GATE_TOOLS, false));
+  await settlePlanBaseline(bb, thread.id, approval.planFilePath, reviewRan);
+  if (reviewRan && config.autoApprovePlans && approval.canApprove && (await approvePlan(ctx, thread, approval))) {
+    await clearPlanBaseline(bb, thread.id, approval.planFilePath);
     return;
   }
   if (check !== "loaded") {
@@ -270,12 +273,15 @@ async function redoPlanReview(
     { planReviewArmedAt: Date.now(), planReviewRedone: true },
     ["planReviewEntryId", "planReviewDeliveredSeq", "planDenied"],
   );
+  // The redo reviews the whole plan: its baseline goes before the prompt is built.
+  await clearPlanBaseline(bb, thread.id, approval.planFilePath);
   const prompt = buildPlanReviewRedoPrompt({
     reviewMode: config.reviewMode,
     planFilePath: approval.planFilePath,
     autoApprove: config.autoApprovePlans,
   });
   if (await armReview(ctx, thread, approval, prompt)) {
+    await stagePlanPending(bb, thread.id, approval.planFilePath, approval.plan, Date.now());
     await recordFire(ctx, thread.projectId, thread.id, "fired", "plan-review-redo");
   }
 }
