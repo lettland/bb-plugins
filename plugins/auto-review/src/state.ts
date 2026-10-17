@@ -76,6 +76,12 @@ export const threadStateSchema = z.object({
   /** The timeline cursor at that moment; a stop after it ended the review. */
   reviewDeliveredSeq: z.number().int().nonnegative().optional(),
   /**
+   * The timeline cursor when the last code review was sent. No further code
+   * review fires until the user sends a turn of their own after it. Durable:
+   * not a latch key, so an idle reset keeps it; only `bb auto-review reset` clears it.
+   */
+  lastCodeReviewSeq: z.number().int().nonnegative().optional(),
+  /**
    * Set when a plan's first presentation was held back for review; the next
    * presentation (the reviewed plan) is released to the user and clears it.
    * Deliberately not a latch key: an idle reset must not re-arm plan review

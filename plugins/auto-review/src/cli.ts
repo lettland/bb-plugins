@@ -281,6 +281,8 @@ export function registerAutoReviewCli(
             await recordUnfinishedReview(bb, threadId, before, "stopped");
             await writeState(bb, threadId, { phase: "idle" }, [
               ...LATCH_KEYS,
+              // The escape hatch also lifts the one-review-per-user-message rule.
+              "lastCodeReviewSeq",
               // Leftover from the removed per-thread skip flag.
               "skip",
               ...PLAN_GATE_KEYS,

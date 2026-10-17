@@ -4493,6 +4493,7 @@ describe("auto-review plugin: review reports", () => {
       await emitIdle(host);
       const done = JSON.parse((await host.harness.runCli(["status", THREAD_ID, "--json"])).stdout);
       expect(done).toMatchObject({ reviewResult: { status: "merged" }, openFindings: 1 });
+      host.requestTurn({ seq: 120, initiator: "user", text: "now b" });
       await emitActive(host);
       host.setWorkingTree([{ path: "src/b.ts" }]);
       host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts")]);
@@ -4508,6 +4509,7 @@ describe("auto-review plugin: review reports", () => {
       const host = await reviewing();
       await emitIdle(host);
       await tick();
+      host.requestTurn({ seq: 120, initiator: "user", text: "now b" });
       await emitActive(host);
       host.setWorkingTree([{ path: "src/b.ts" }]);
       host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts")]);
@@ -4592,6 +4594,7 @@ describe("auto-review plugin: review reports", () => {
       await emitIdle(host);
 
       await tick();
+      host.requestTurn({ seq: 120, initiator: "user", text: "now b" });
       await emitActive(host);
       host.setWorkingTree([{ path: "src/b.ts" }]);
       host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts")]);
@@ -4707,5 +4710,97 @@ describe("auto-review plugin: review reports", () => {
       await host.harness.dispose();
       await host2.harness.dispose();
     });
+  });
+});
+
+describe("auto-review plugin: one code review per user message", () => {
+  async function lastFire(host: Host) {
+    const status = await host.harness.runCli(["status", THREAD_ID, "--json"]);
+    return JSON.parse(status.stdout).lastFire as Record<string, unknown> | null;
+  }
+
+  /** A first review that has run its course, then a wake-up turn that changed more files. */
+  async function wakeUpAfterReview(options: HostOptions = {}) {
+    const host = createHost(options);
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    await emitIdle(host);
+    expect(host.metadata.phase).toBe("idle");
+    await emitActive(host);
+    host.setWorkingTree([{ path: "src/b.ts" }]);
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts")]);
+    return host;
+  }
+
+  it("records the timeline cursor when the review is sent", async () => {
+    const host = createHost();
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.metadata.lastCodeReviewSeq).toBe(100);
+    await host.harness.dispose();
+  });
+
+  it("does not record it when the review cannot be sent", async () => {
+    const host = createHost({ sendThrows: true });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.metadata.phase).toBe("idle");
+    expect(host.metadata.lastCodeReviewSeq).toBeUndefined();
+    await host.harness.dispose();
+  });
+
+  it("stands down on a wake-up turn that committed the review's fixes, even with files changed", async () => {
+    const host = await wakeUpAfterReview();
+    host.requestTurn({ seq: 120, initiator: "system", text: "child-1 finished" });
+    host.commit("fix1", ["src/b.ts"]);
+    host.setMaxSeq(130);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "already-reviewed" });
+    expect(host.metadata.lastCodeReviewSeq).toBe(100);
+    await host.harness.dispose();
+  });
+
+  it("reviews again once the user has written after the last review", async () => {
+    const host = await wakeUpAfterReview();
+    host.requestTurn({ seq: 120, initiator: "user", text: "now do b" });
+    host.setMaxSeq(130);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(2);
+    expect(host.metadata.lastCodeReviewSeq).toBe(130);
+    await host.harness.dispose();
+  });
+
+  it("does not count a turn auto-review sent itself as the user writing", async () => {
+    const host = await wakeUpAfterReview();
+    host.requestTurn({ seq: 120, initiator: "user", text: `${AUTO_REVIEW_MARKER} review your work` });
+    host.setMaxSeq(130);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({ reason: "already-reviewed" });
+    await host.harness.dispose();
+  });
+
+  it("reviews anyway, with a warning, when the user turns cannot be read", async () => {
+    const host = await wakeUpAfterReview({ turnRequestsThrow: true });
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(2);
+    expect(
+      host.harness.logEntries.some(
+        (entry) => entry.level === "warn" && entry.message.includes("whether the user wrote since the last review"),
+      ),
+    ).toBe(true);
+    await host.harness.dispose();
+  });
+
+  it("is lifted by bb auto-review reset", async () => {
+    const host = await wakeUpAfterReview();
+    expect((await host.harness.runCli(["reset", THREAD_ID])).exitCode).toBe(0);
+    expect(host.metadata.lastCodeReviewSeq).toBeUndefined();
+    await host.harness.dispose();
   });
 });

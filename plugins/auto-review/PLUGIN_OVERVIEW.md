@@ -9,6 +9,8 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
 ## How it works
 
 - Fires on `thread.idle` for top-level, git-branch, user coding threads only.
+- At most one code review per user message: after one is sent, only a turn you start yourself
+  earns another. Wake-ups and the review's own fix commits stand down as `already-reviewed`.
 - Claims only the thread's own changes (itself plus its bb children and owned threads). In
   exact mode, when everything the family ran was read-only or named every file it wrote, only
   the files it named count and the rest stands down as `unclaimed-changes`; when it ran

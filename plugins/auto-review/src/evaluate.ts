@@ -18,6 +18,7 @@ import {
   computeScope,
   dirtyOrAheadPaths,
   fetchWorkspace,
+  firstUserTurnSince,
   isBranchCheckout,
   mainlineBase,
   runningChildIds,
@@ -195,6 +196,36 @@ async function deferredBehindOthers(
   return false;
 }
 
+/**
+ * One code review per user message: once a review was sent, only a turn the user
+ * started after it earns another. Wake-ups (child or background-task completions,
+ * the review's own fix commits) never do. A failed lookup reviews as before.
+ */
+async function alreadyReviewed(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  state: ThreadState,
+): Promise<boolean> {
+  const { bb } = ctx;
+  if (state.lastCodeReviewSeq === undefined) {
+    return false;
+  }
+  try {
+    if ((await firstUserTurnSince(bb, thread.id, state.lastCodeReviewSeq)) !== null) {
+      return false;
+    }
+  } catch (error) {
+    bb.log.warn(
+      `auto-review: could not read whether the user wrote since the last review of ${thread.id}; reviewing anyway: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return false;
+  }
+  await standDown(ctx, thread, state, "already-reviewed");
+  return true;
+}
+
 interface ReviewScope {
   turn: TurnChanges;
   scope: string[];
@@ -276,6 +307,9 @@ export async function evaluate(
 
   const workspace = await branchWorkspace(ctx, thread, state, environmentId);
   if (workspace === null) {
+    return;
+  }
+  if (await alreadyReviewed(ctx, thread, state)) {
     return;
   }
   if (await deferredBehindOthers(ctx, thread, state, environmentId)) {

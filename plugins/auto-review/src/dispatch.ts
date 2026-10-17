@@ -9,7 +9,7 @@ import {
 import { decide } from "./decide.js";
 import { deferTurn, providerReviewInFlight } from "./deferral.js";
 import { removeDeferral } from "./deferrals.js";
-import type { TurnScope } from "./detect.js";
+import { tryCaptureSinceSeq, type TurnScope } from "./detect.js";
 import { readFindings, recordUnreported } from "./findings-store.js";
 import { openFindingsForPrompt } from "./findings.js";
 import { buildReviewPrompt, renderScope } from "./prompt.js";
@@ -107,6 +107,19 @@ export function commitScanHead(turn: TurnScope, state: ThreadState): string | nu
   return turnStartHeadIf(turn.commits.length > 0 || turn.foreignCommits.length > 0, state);
 }
 
+/**
+ * The cursor `lastCodeReviewSeq` records, taken before the send so the review's
+ * own turn request lands after it. Empty when the cursor could not be read.
+ */
+async function codeReviewCursor(bb: BbPluginApi, threadId: string): Promise<{ lastCodeReviewSeq?: number }> {
+  const lastCodeReviewSeq = await tryCaptureSinceSeq(
+    bb,
+    threadId,
+    `the code review sent to ${threadId}; without it a later idle may review again before the user writes`,
+  );
+  return lastCodeReviewSeq === undefined ? {} : { lastCodeReviewSeq };
+}
+
 async function sendReview(
   ctx: ReviewContext,
   thread: GateThreadLike,
@@ -115,10 +128,11 @@ async function sendReview(
 ): Promise<void> {
   const { bb } = ctx;
   const dispatchedAt = Date.now();
+  const cursor = await codeReviewCursor(bb, thread.id);
   await writeState(
     bb,
     thread.id,
-    { phase: "awaiting-review", dispatchedAt },
+    { phase: "awaiting-review", dispatchedAt, ...cursor },
     ["pendingEntryId", "deferredSince", "heldBy"],
   );
   await addReview(bb, { threadId: thread.id, providerId: thread.providerId });
@@ -137,7 +151,8 @@ async function sendReview(
       }`,
     );
     const { set, remove } = resetToIdlePatch();
-    await writeState(bb, thread.id, set, remove);
+    // A review that never reached the agent does not count against the next one.
+    await writeState(bb, thread.id, set, [...remove, "lastCodeReviewSeq"]);
     await removeReview(bb, thread.id);
     await recordUnreported(bb, thread.id, {
       reviewId: dispatchedAt,

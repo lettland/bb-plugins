@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
   isStale,
+  LATCH_KEYS,
   PLAN_DENY_ANSWER_WINDOW_MS,
   PLAN_GATE_KEYS,
   planDenyFresh,
@@ -113,6 +114,12 @@ describe("resetToIdlePatch", () => {
       "reviewDeliveredAt",
       "reviewDeliveredSeq",
     ]);
+  });
+
+  it("keeps the last code review's cursor", () => {
+    expect(resetToIdlePatch().remove).not.toContain("lastCodeReviewSeq");
+    expect(LATCH_KEYS).not.toContain("lastCodeReviewSeq");
+    expect(threadStateSchema.parse({ lastCodeReviewSeq: 7 }).lastCodeReviewSeq).toBe(7);
   });
 });
 

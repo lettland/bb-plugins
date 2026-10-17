@@ -53,6 +53,11 @@ It ships enabled (opt-out).
 ## How it works
 
 - Fires on `thread.idle` for top-level, git-branch, user coding threads.
+- At most one code review per user message. Once a review is sent, no further code review fires
+  for the thread until you send a new message of your own. Wake-up turns (child thread or
+  background-task completions, bb system messages), worker completions and the review's own fix
+  commits never trigger another; they stand down as `already-reviewed`. Plan reviews are
+  separate and do not count. `bb auto-review reset` lifts the rule.
 - Claims only this thread's own changes. Own means this thread plus the bb children and
   owned threads it spawned, transitively. An edit made outside them (your IDE, a formatter or
   watcher, a commit nobody of the family made) neither triggers nor widens a review. Text
