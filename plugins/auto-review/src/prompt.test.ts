@@ -1388,12 +1388,23 @@ describe("no prompt asks the agent to manage review baselines in its shell", () 
 });
 
 describe("the steer-interruption note", () => {
+  const USER_STOP_PHRASE = "a stop or refusal that comes with the user's own words is still the user's";
   const NOTE_PHRASES = [
-    "After you start the reviewer threads, do not block in a shell wait or poll loop for them (no `bb thread wait`, no sleep loop): end your turn; bb delivers each reviewer's result as a new turn, and you then continue these steps.",
+    "When review-code's reviewers run as bb child threads, this replaces its Wait step",
+    "no `bb thread wait`, no sleep loop",
+    "continue these steps only once every reviewer has finished, been stopped, or been reported stuck",
+    "`bb thread interactions list <id> --json` for a pending approval",
+    "handle a failed or stuck one as the skill says",
+    "any message the user sends now ends the review",
+    "Finish any lens that fell through to a subagent or to this thread first",
+    "tell the user in one line how many reviewers are still running",
+    "`bb thread show <id> --json` for an `error` status",
+    "check the bb child-thread reviewers still running the same way",
+    "wait on that one with the skill's own polling instead",
     "`[bb system]` message to you as a turn",
     "that is bb delivering the message, not the user asking you to stop",
     "re-run it if you still need its result",
-    "a stop or refusal that comes with the user's own words is still the user's",
+    USER_STOP_PHRASE,
     "your provider (Claude Code, for example)",
     "did not already take effect",
   ];
@@ -1419,6 +1430,7 @@ describe("the steer-interruption note", () => {
 
   it.each(["buildPlanReviewRedoPrompt", "presentPlanRedoMessage"])("%s keeps the disclosure after the note", (name) => {
     const text = prompts[name] as string;
-    expect(text.indexOf(DISCLOSURE)).toBeGreaterThan(text.indexOf(NOTE_PHRASES[4] as string));
+    expect(text.indexOf(USER_STOP_PHRASE)).toBeGreaterThan(-1);
+    expect(text.indexOf(DISCLOSURE)).toBeGreaterThan(text.indexOf(USER_STOP_PHRASE));
   });
 });
