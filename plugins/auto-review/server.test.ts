@@ -22,6 +22,7 @@ import {
   presentPlanRedoMessage,
   PRESENT_PLAN_REVIEWED_MESSAGE,
 } from "./src/prompt.js";
+import { MAX_HASHED_FILES } from "./src/detect.js";
 import { EVENT_PAGE_MAX, PLAN_EVIDENCE_PAGE_CAP } from "./src/plan.js";
 import {
   PLAN_DENY_ANSWER_WINDOW_MS,
@@ -73,6 +74,8 @@ interface HostOptions {
   envThreads?: EnvThread[];
   authoringThreads?: string[];
   getThrowsFor?: string[];
+  /** Makes every `threads.get` fail while it returns true. */
+  getThrowsWhen?: () => boolean;
   /** Threads whose `get` fails the way a missing thread does (`code: "thread_not_found"`, from the HTTP API's 404). */
   notFoundFor?: string[];
   /** Threads whose `get` fails with a "not found" message that is not a 404 (a version-skewed host, a missing binary). */
@@ -119,6 +122,10 @@ interface TurnRequest {
   seq: number;
   initiator: "user" | "agent" | "system";
   text: string;
+  /** The request joins the turn already running instead of starting one. */
+  steer?: boolean;
+  /** An `auto` request that expects a running turn: it steers that turn if active, else starts one. */
+  auto?: boolean;
 }
 
 interface ItemStartedEvent {
@@ -233,7 +240,9 @@ function createHost(options: HostOptions = {}) {
   ];
   let maxSeq = 100;
   let timelineThrows = false;
+  let timelineReadsLeft: number | undefined;
   let statusThrows = false;
+  let onStatusRead: (() => void) | undefined;
   let queuedRows = options.queuedRows ?? [];
   let interrupts: Record<string, InterruptEvent[]> = {};
   let itemEvents: Record<string, ItemStartedEvent[]> = {};
@@ -275,6 +284,9 @@ function createHost(options: HostOptions = {}) {
         return { ...target };
       },
       get: async (args: { threadId: string }) => {
+        if (options.getThrowsWhen?.() === true) {
+          throw new Error("status read unavailable");
+        }
         if (options.getThrowsFor?.includes(args.threadId) === true) {
           throw new Error(`thread ${args.threadId} is gone`);
         }
@@ -308,6 +320,12 @@ function createHost(options: HostOptions = {}) {
       timeline: async (args: { threadId: string; segmentLimit?: string }) => {
         if (timelineThrows) {
           throw new Error("timeline unavailable");
+        }
+        if (timelineReadsLeft !== undefined) {
+          timelineReadsLeft -= 1;
+          if (timelineReadsLeft === 0) {
+            throw new Error("timeline unavailable");
+          }
         }
         timelineLimits.push(args.segmentLimit);
         if (options.reviewLandsBeforeLock === true && hostRef !== null) {
@@ -403,6 +421,12 @@ function createHost(options: HostOptions = {}) {
                   type: "client/turn/requested",
                   data: {
                     initiator: request.initiator,
+                    target:
+                      request.steer === true
+                        ? { kind: "steer", expectedTurnId: null }
+                        : request.auto === true
+                          ? { kind: "auto", expectedTurnId: "turn-1" }
+                          : { kind: "new-turn" },
                     input: [{ type: "text", text: request.text, mentions: [] }],
                   },
                 })),
@@ -509,6 +533,11 @@ function createHost(options: HostOptions = {}) {
     },
     environments: {
       status: async (args: { mergeBaseBranch?: string }) => {
+        if (onStatusRead !== undefined) {
+          const landing = onStatusRead;
+          onStatusRead = undefined;
+          landing();
+        }
         if (statusThrows) {
           throw new Error("status unavailable");
         }
@@ -594,6 +623,14 @@ function createHost(options: HostOptions = {}) {
     /** From now on, reading the timeline fails. */
     setTimelineThrows: (next: boolean) => {
       timelineThrows = next;
+    },
+    /** The `read`th timeline read from now fails, once; the others succeed. */
+    failTimelineRead: (read: number) => {
+      timelineReadsLeft = read;
+    },
+    /** Runs once at the next environment status read: something that lands while the gate is deciding. */
+    onNextStatusRead: (landing: () => void) => {
+      onStatusRead = landing;
     },
     /** From now on, reading the environment status fails. */
     setStatusThrows: (next: boolean) => {
@@ -5530,6 +5567,61 @@ describe("auto-review plugin: no new work", () => {
       await host.harness.dispose();
     });
 
+    it("records nothing when a wake-up is running after a carried user turn, so the wake-up's idle sees that turn's shell edit", async () => {
+      const host = await carriedBehindQueue();
+      // The carried user turn generates `src/b.ts` through a shell command: a tree change, no file-change row.
+      host.requestTurn({ seq: 170, initiator: "user", text: "also generate b" });
+      host.setMaxSeq(175);
+      await emitActive(host);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), shellRow()]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/b.ts" }]);
+      host.setEnvThreads(busyThread);
+      host.requestTurn({ seq: 190, initiator: "system", text: "child-1 finished" });
+      host.setMaxSeq(200);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+      expect(host.metadata.lastIdle).toBeUndefined();
+
+      host.setEnvThreads(idleThread);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts", "src/b.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("records nothing when a wake-up is running after a steer inside the finished turn", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await emitActive(host);
+      host.requestTurn({ seq: 120, initiator: "user", text: "also do a" });
+      host.setMaxSeq(200);
+      host.setEnvThreads(busyThread);
+      host.requestTurn({ seq: 160, initiator: "system", text: "child-1 finished" });
+      await emitActive(host);
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ reason: "user-queued" });
+      expect(host.metadata.lastIdle).toBeUndefined();
+      await host.harness.dispose();
+    });
+
+    it("records nothing when a wake-up requested as a system auto request is running after a carried user turn", async () => {
+      const host = await carriedBehindQueue();
+      host.requestTurn({ seq: 170, initiator: "user", text: "also generate b" });
+      host.setMaxSeq(175);
+      await emitActive(host);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), shellRow()]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/b.ts" }]);
+      host.setEnvThreads(busyThread);
+      host.requestTurn({ seq: 190, initiator: "system", text: "child-1 finished", auto: true });
+      host.setMaxSeq(200);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+      expect(host.metadata.lastIdle).toBeUndefined();
+      await host.harness.dispose();
+    });
+
     it("records nothing when the running turn is not the user's", async () => {
       const host = createHost();
       await plugin(host.bb);
@@ -5903,6 +5995,134 @@ describe("auto-review plugin: no new work", () => {
     });
   });
 
+  describe("a deferral decided while the next turn is already running", () => {
+    it("fires at the release when the running turn is a wake-up that follows a carried user turn", async () => {
+      const host = await carriedBehindQueue();
+      host.requestTurn({ seq: 170, initiator: "user", text: "also generate b" });
+      host.setMaxSeq(175);
+      await emitActive(host);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), shellRow()]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/b.ts" }]);
+      // A rival review lands and a wake-up starts while the idle is being decided.
+      host.onNextStatusRead(() => {
+        host.armReviewBeforeLock();
+        host.setEnvThreads(busyThread);
+        host.requestTurn({ seq: 190, initiator: "system", text: "child-1 finished" });
+        host.setMaxSeq(200);
+      });
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "sibling-active" });
+      expect(host.metadata.lastIdle).toBeUndefined();
+
+      endReview(host, "rival");
+      host.setEnvThreads(idleThread);
+      await emitIdle(host, "rival");
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts", "src/b.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("fires at the release when the running turn is a wake-up requested as a system auto request after a carried user turn", async () => {
+      const host = await carriedBehindQueue();
+      host.requestTurn({ seq: 170, initiator: "user", text: "also generate b" });
+      host.setMaxSeq(175);
+      await emitActive(host);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), shellRow()]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/b.ts" }]);
+      host.onNextStatusRead(() => {
+        host.armReviewBeforeLock();
+        host.setEnvThreads(busyThread);
+        host.requestTurn({ seq: 190, initiator: "system", text: "child-1 finished", auto: true });
+        host.setMaxSeq(200);
+      });
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "sibling-active" });
+      expect(host.metadata.lastIdle).toBeUndefined();
+
+      endReview(host, "rival");
+      host.setEnvThreads(idleThread);
+      await emitIdle(host, "rival");
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts", "src/b.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("anchors a user steer into a running wake-up at the wake-up's start, so its earlier edits count", async () => {
+      const host = await carriedBehindQueue();
+      await userTurn(host, 170);
+      host.onNextStatusRead(() => {
+        host.setEnvThreads(busyThread);
+        host.requestTurn({ seq: 190, initiator: "system", text: "child-1 finished" });
+        host.requestTurn({ seq: 195, initiator: "user", text: "and keep going", steer: true });
+        host.setMaxSeq(200);
+      });
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 189 });
+
+      // The wake-up edited before the steer landed; that edit is not absorbed.
+      host.setEnvThreads(idleThread);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 192)]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
+      host.setMaxSeq(210);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
+      await host.harness.dispose();
+    });
+
+    it("anchors a user auto request that expects the running wake-up at the wake-up's start, like a steer", async () => {
+      const host = await carriedBehindQueue();
+      await userTurn(host, 170);
+      host.onNextStatusRead(() => {
+        host.setEnvThreads(busyThread);
+        host.requestTurn({ seq: 190, initiator: "system", text: "child-1 finished" });
+        host.requestTurn({ seq: 195, initiator: "user", text: "and keep going", auto: true });
+        host.setMaxSeq(200);
+      });
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 189 });
+      await host.harness.dispose();
+    });
+
+    it("records nothing at an already-reviewed idle when another wake-up is already running", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      await emitIdle(host);
+      host.setMaxSeq(110);
+      await emitActive(host);
+      host.setWorkingTree([{ path: "src/b.ts" }]);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts", 115)]);
+      host.onNextStatusRead(() => {
+        host.setEnvThreads(busyThread);
+        host.requestTurn({ seq: 130, initiator: "system", text: "task finished" });
+        host.setMaxSeq(140);
+      });
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ reason: "already-reviewed" });
+      expect(host.metadata.lastIdle).toBeUndefined();
+      await host.harness.dispose();
+    });
+
+    it("anchors the snapshot of a no-new-work idle on the user's turn that is running", async () => {
+      const host = await carriedBehindQueue();
+      await userTurn(host, 170);
+      host.onNextStatusRead(() => {
+        host.setEnvThreads(busyThread);
+        host.requestTurn({ seq: 190, initiator: "user", text: "another question" });
+        host.setMaxSeq(200);
+      });
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 189 });
+      await host.harness.dispose();
+    });
+  });
+
   describe("the snapshot", () => {
     it("is cleared by bb auto-review reset", async () => {
       const host = await carriedBehindQueue();
@@ -5951,6 +6171,29 @@ describe("auto-review plugin: no new work", () => {
       await host.harness.dispose();
     });
 
+    it("removes the snapshot of a no-new-work idle whose status read fails, and reviews the next edit turn", async () => {
+      let failing = false;
+      const host: Host = await carriedBehindQueue({ getThrowsWhen: () => failing });
+      await userTurn(host, 170);
+      host.onNextStatusRead(() => {
+        failing = true;
+      });
+      await emitIdle(host);
+      failing = false;
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+      expect(host.metadata.lastIdle).toBeUndefined();
+      expect(warned(host, "could not read the status")).toBe(true);
+
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 190)]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
+      host.setMaxSeq(200);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
+      await host.harness.dispose();
+    });
+
     it("records nothing, and reviews as before, when the cursor cannot be read after an already-reviewed stand-down", async () => {
       const host = createHost();
       await plugin(host.bb);
@@ -5990,6 +6233,133 @@ describe("auto-review plugin: no new work", () => {
       await emitIdle(host);
       expect(host.sends).toHaveLength(1);
       await host.harness.dispose();
+    });
+
+    it("removes the carried snapshot, and fires at the release, when the status read fails after parking", async () => {
+      let failing = false;
+      const host: Host = await carriedBehindQueue({
+        getThrowsWhen: () => failing && host.metadata.phase === "deferred",
+      });
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 160 });
+      await startReview(host, SIBLING_ID);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/b.ts", 170)]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/b.ts" }]);
+      host.setMaxSeq(180);
+      await emitActive(host);
+      failing = true;
+      await emitIdle(host);
+      failing = false;
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "sibling-active" });
+      expect(host.metadata.lastIdle).toBeUndefined();
+      expect(warned(host, "could not read the status")).toBe(true);
+
+      endReview(host, SIBLING_ID);
+      await emitIdle(host, SIBLING_ID);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts", "src/b.ts"] });
+      await host.harness.dispose();
+    });
+
+    describe("when the carried snapshot hashed only part of the tree", () => {
+      const crowd = (count: number) =>
+        Array.from({ length: count }, (_, index) => ({ path: `gen/file-${index}.ts`, content: `v${index}` }));
+      const anchor = { path: "src/a.ts", content: "a" };
+      const informed = (host: Host, text: string) =>
+        host.harness.logEntries.some((entry) => entry.level === "info" && entry.message.includes(text));
+
+      it("reviews a question turn that ran a shell command, whose same-size edit to an unhashed file reads as no change", async () => {
+        const files = [anchor, ...crowd(MAX_HASHED_FILES)];
+        const host = await carriedBehindQueue({ workingTreeFiles: files });
+        expect(host.metadata.lastIdle).toBeDefined();
+        host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), shellRow()]);
+        host.setWorkingTree([...files.slice(0, -1), { path: `gen/file-${MAX_HASHED_FILES - 1}.ts`, content: "edited" }]);
+        await userTurn(host, 170);
+        await emitIdle(host);
+        expect(host.sends).toHaveLength(1);
+        expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts"] });
+        expect(informed(host, "could not rule out a hidden edit")).toBe(true);
+        await host.harness.dispose();
+      });
+
+      it("stands down on a question turn that ran no command", async () => {
+        const host = await carriedBehindQueue({ workingTreeFiles: [anchor, ...crowd(MAX_HASHED_FILES)] });
+        await userTurn(host, 170);
+        await emitIdle(host);
+        expect(host.sends).toHaveLength(0);
+        expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+        await host.harness.dispose();
+      });
+
+      it("stands down on a question turn whose only command finished before the snapshot", async () => {
+        const host = await carriedBehindQueue({ workingTreeFiles: [anchor, ...crowd(MAX_HASHED_FILES)] });
+        host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), { ...(shellRow() as object), startedAt: 0, completedAt: 1 }]);
+        await userTurn(host, 170);
+        await emitIdle(host);
+        expect(host.sends).toHaveLength(0);
+        expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+        await host.harness.dispose();
+      });
+
+      it("checks a tree of exactly the hash budget as usual, even after a shell command", async () => {
+        const host = await carriedBehindQueue({ workingTreeFiles: [anchor, ...crowd(MAX_HASHED_FILES - 1)] });
+        host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), shellRow()]);
+        await userTurn(host, 170);
+        await emitIdle(host);
+        expect(host.sends).toHaveLength(0);
+        expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+        await host.harness.dispose();
+      });
+
+      it("reviews a small tree after a shell command when a file's content could not be read", async () => {
+        const host = await carriedBehindQueue({ workingTreeFiles: [{ path: "src/a.ts" }, ...crowd(3)] });
+        host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), shellRow()]);
+        await userTurn(host, 170);
+        await emitIdle(host);
+        expect(host.sends).toHaveLength(1);
+        expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
+        await host.harness.dispose();
+      });
+
+      it("stands down on a question turn after a shell command when the only unhashed entry is a deletion", async () => {
+        const host = await carriedBehindQueue({ workingTreeFiles: [anchor, { path: "src/gone.ts", status: "D" }] });
+        host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), shellRow()]);
+        await userTurn(host, 170);
+        await emitIdle(host);
+        expect(host.sends).toHaveLength(0);
+        expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+        expect(informed(host, "could not rule out a hidden edit")).toBe(false);
+        await host.harness.dispose();
+      });
+
+      it("stands down on a small tree with an unreadable file when no command ran", async () => {
+        const host = await carriedBehindQueue({ workingTreeFiles: [{ path: "src/a.ts" }, ...crowd(3)] });
+        await userTurn(host, 170);
+        await emitIdle(host);
+        expect(host.sends).toHaveLength(0);
+        expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+        await host.harness.dispose();
+      });
+
+      it("reviews when the family's evidence cannot be read", async () => {
+        const host = await carriedBehindQueue({ workingTreeFiles: [anchor, ...crowd(MAX_HASHED_FILES)] });
+        await userTurn(host, 170);
+        // The gate reads the turn's changes first, then the family's evidence.
+        host.failTimelineRead(2);
+        await emitIdle(host);
+        expect(host.sends).toHaveLength(1);
+        expect(informed(host, "could not rule out a hidden edit")).toBe(true);
+        await host.harness.dispose();
+      });
+
+      it("reviews when the snapshot recorded no start time", async () => {
+        const host = await carriedBehindQueue({ workingTreeFiles: [anchor, ...crowd(MAX_HASHED_FILES)] });
+        Object.assign(host.metadata, { lastIdle: { ...(host.metadata.lastIdle as object), startedAt: undefined } });
+        await userTurn(host, 170);
+        await emitIdle(host);
+        expect(host.sends).toHaveLength(1);
+        expect(informed(host, "could not rule out a hidden edit")).toBe(true);
+        await host.harness.dispose();
+      });
     });
 
     it("fires a release whose user-request lookup throws", async () => {

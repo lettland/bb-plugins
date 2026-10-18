@@ -16,10 +16,15 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   or its continuation are covered by that review itself. `bb auto-review reset` or a stop by you
   drops the carried cursor.
 - Fires only at the end of work: a turn that changed nothing since the last idle that kept the
-  carried cursor (a question, a reply to a steer or after a stop, a CI status check) stands down
-  as `no-new-work`. The carried work waits for the next turn that changes something; nothing
-  reviews it if none comes, and `bb auto-review reset` discards it. After a question has stood
-  down, a later wake-up that commits fires the review, because your message is still unspent.
+  carried cursor (a question, a reply to a steer, a CI status check) stands down as
+  `no-new-work`. A question after a stop starts a fresh window and stands down as `no-authorship`,
+  since a stop drops the carried window (a reply that edits fires normally). The carried work
+  waits for the next turn that changes something; nothing reviews it if none comes, and
+  `bb auto-review reset` discards it. After a question has stood down, a later wake-up that
+  commits fires the review, because your message is still unspent. A turn that ran a command that
+  can write files (or anything whose writes can't be read) in a tree of more than 200 uncommitted
+  files, or with a file whose content could not be read, reviews, since a same-size edit to such
+  a file cannot be seen.
   Carried work that was pushed meanwhile drops out of scope (only dirty or ahead paths are
   reviewed).
 - Claims only the thread's own changes (itself plus its bb children and owned threads). In

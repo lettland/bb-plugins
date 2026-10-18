@@ -2,8 +2,8 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { GateThreadLike } from "./context.js";
 import {
   captureTree,
-  lastUserTurnSince,
   tryCaptureSinceSeq,
+  userTurnRunningSince,
   type AvailableWorkspace,
 } from "./detect.js";
 import { isBusyStatus } from "./gate.js";
@@ -13,10 +13,13 @@ interface LastIdleOptions {
   /** The workspace the caller already fetched; read afresh when absent. */
   workspace?: AvailableWorkspace;
   /**
-   * For a snapshot taken while the user's next turn is already running: anchors
-   * the cursor one before the latest user turn request after this seq, so that
-   * turn counts as new in the gate and its own edits are not absorbed. No such
-   * request means the running turn is not the user's, and nothing is recorded.
+   * For a snapshot taken while the next turn is already running: anchors the
+   * cursor one before the request that started that turn (the latest after this
+   * seq that is not a steer) when the turn is the user's, so it counts as new in
+   * the gate and its own edits are not absorbed. A turn is the user's when its
+   * start request or a steer into it is; otherwise nothing is recorded. The
+   * anchor can still absorb the running turn's earliest shell edits, made before
+   * the snapshot; that only delays a review, since the cursor is kept.
    */
   userTurnAfter?: number;
 }
@@ -30,18 +33,18 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** One before the user's latest turn request after `userTurnAfter`; null when there is none or it cannot be read. */
+/** One before the request that started the running turn after `userTurnAfter` when that turn is the user's; null when it is not or cannot be read. */
 async function anchoredCursor(
   bb: BbPluginApi,
   threadId: string,
   userTurnAfter: number,
 ): Promise<number | null> {
   try {
-    const seq = await lastUserTurnSince(bb, threadId, userTurnAfter);
+    const seq = await userTurnRunningSince(bb, threadId, userTurnAfter);
     return seq === null ? null : seq - 1;
   } catch (error) {
     bb.log.warn(
-      `auto-review: could not read the user's latest turn request of ${threadId}; the next turn is not checked for new work: ${describe(error)}`,
+      `auto-review: could not read the latest turn request of ${threadId}; the next turn is not checked for new work: ${describe(error)}`,
     );
     return null;
   }
@@ -97,20 +100,31 @@ export async function refreshLastIdle(
 }
 
 /**
- * `refreshLastIdle` for a turn parked behind others. A turn that started while
- * the park was being decided (a reply of the user's landing in that gap) is
- * anchored, so its idle is judged as a turn of its own and not as the park's
- * release.
+ * `refreshLastIdle` for a snapshot taken from an idle that does not know
+ * whether the next turn is running. A turn that started by then is anchored, so
+ * its idle is judged as a turn of its own and not as a park's release. A user
+ * request that lands before the thread reports busy is put before the cursor;
+ * for a parked turn, that question's idle counts as a release and reviews.
+ * Fails open: a status read that fails removes the record.
  */
-export async function refreshParkedIdle(
+export async function refreshIdleSnapshot(
   bb: BbPluginApi,
   thread: GateThreadLike,
   state: ThreadState,
   workspace?: AvailableWorkspace,
 ): Promise<void> {
-  const { status } = await bb.sdk.threads.get({ threadId: thread.id });
+  let busy: boolean;
+  try {
+    busy = isBusyStatus((await bb.sdk.threads.get({ threadId: thread.id })).status);
+  } catch (error) {
+    bb.log.warn(
+      `auto-review: could not read the status of ${thread.id} for its idle snapshot; the next turn is not checked for new work: ${describe(error)}`,
+    );
+    await writeState(bb, thread.id, {}, ["lastIdle"]);
+    return;
+  }
   await refreshLastIdle(bb, thread, {
     ...(workspace === undefined ? {} : { workspace }),
-    ...(isBusyStatus(status) ? { userTurnAfter: lastIdleFloor(state) } : {}),
+    ...(busy ? { userTurnAfter: lastIdleFloor(state) } : {}),
   });
 }

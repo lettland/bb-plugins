@@ -135,13 +135,42 @@ export async function firstUserTurnSince(
   return turnRequestSince(bb, threadId, sinceSeq, isUserRequest);
 }
 
-/** `firstUserTurnSince` for the latest request instead of the earliest. */
-export async function lastUserTurnSince(
+/**
+ * The seq of the request that started the turn running now, when that turn is
+ * the user's: the latest request after the cursor that is not a steer, the
+ * user's own or with a steer of the user's after it. Null when there is no such
+ * request or the turn is neither. A steer joins the running turn, so it never
+ * names the turn's start; nor does an `auto` request of the user's that expects
+ * a turn (it steers that turn if it is active, else starts one), which reads as
+ * a steer so the anchor stays at the earlier start. A non-user `auto` request is
+ * bb's own wake-up in the same shape, and starts a turn once the expected one
+ * has ended, so it reads as a turn start.
+ */
+export async function userTurnRunningSince(
   bb: BbPluginApi,
   threadId: string,
   sinceSeq: number,
 ): Promise<number | null> {
-  return turnRequestSince(bb, threadId, sinceSeq, isUserRequest, true);
+  let users = false;
+  const seq = await turnRequestSince(
+    bb,
+    threadId,
+    sinceSeq,
+    (data) => {
+      const user = isUserRequest(data);
+      if (
+        data.target.kind === "steer" ||
+        (user && data.target.kind === "auto" && data.target.expectedTurnId !== null)
+      ) {
+        users ||= user;
+        return false;
+      }
+      users = user;
+      return true;
+    },
+    true,
+  );
+  return users ? seq : null;
 }
 
 /** The timeline endpoint's own ceiling; asking for more is rejected with a 400. */

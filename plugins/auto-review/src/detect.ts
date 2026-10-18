@@ -5,15 +5,16 @@ export {
   authoredPathsFromRows,
   captureSinceSeq,
   firstUserTurnSince,
-  lastUserTurnSince,
   siblingAuthoredPaths,
   stoppedByUser,
   tryCaptureSinceSeq,
+  userTurnRunningSince,
 } from "./detect-timeline.js";
 export { runningChildIds, spawnedDescendantIds } from "./detect-children.js";
 export {
   captureTree,
   fingerprintsMatch,
+  hasUnhashedEntries,
   MAX_HASHED_FILES,
   snapshotTree,
 } from "./detect-tree.js";

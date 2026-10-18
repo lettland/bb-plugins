@@ -63,13 +63,17 @@ It ships enabled (opt-out).
   `bb auto-review reset` drops the carried cursor, and reset also lifts the rule. Plan reviews
   are separate and do not count.
 - Fires only at the end of work: a turn that changed nothing since the last idle that kept the
-  carried cursor never fires. A question, a reply to a steer, a reply after a stop or a turn
-  that only reads CI status stands down as `no-new-work`, and the carried work stays carried.
+  carried cursor never fires. A question, a reply to a steer or a turn that only reads CI
+  status stands down as `no-new-work`, and the carried work stays carried.
   It waits for the next turn that changes something, and nothing reviews it if no such turn
   comes; `bb auto-review reset` discards it. After a question has stood down as `no-new-work`,
   a later wake-up that commits fires the review, because your message is still unspent. Carried
   work that was pushed in the meantime drops out of scope, since only dirty or ahead paths are
-  reviewed. A stop by you still drops the carried window.
+  reviewed. A stop by you still drops the carried window: a question after a stop starts a fresh
+  window and stands down as `no-authorship` (a reply that edits fires normally). A turn that ran
+  a command that can write files (or anything whose writes can't be read) in a tree of more than
+  200 uncommitted files, or with a file whose content could not be read, reviews, since a
+  same-size edit to such a file cannot be seen.
 - Claims only this thread's own changes. Own means this thread plus the bb children and
   owned threads it spawned, transitively. An edit made outside them (your IDE, a formatter or
   watcher, a commit nobody of the family made) neither triggers nor widens a review. Text

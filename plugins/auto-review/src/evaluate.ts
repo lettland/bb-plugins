@@ -19,6 +19,7 @@ import {
   dirtyOrAheadPaths,
   fetchWorkspace,
   firstUserTurnSince,
+  hasUnhashedEntries,
   isBranchCheckout,
   mainlineBase,
   runningChildIds,
@@ -27,10 +28,11 @@ import {
   type AvailableWorkspace,
   type TurnChanges,
 } from "./detect.js";
+import { familyClaims } from "./detect-claim.js";
 import type { ThreadListEntry } from "./detect-workspace.js";
 import { dispatchReview } from "./dispatch.js";
 import { isBusyStatus, selfIsWorktree } from "./gate.js";
-import { lastIdleFloor, refreshLastIdle, refreshParkedIdle } from "./last-idle.js";
+import { lastIdleFloor, refreshIdleSnapshot, refreshLastIdle } from "./last-idle.js";
 import {
   reviewContinuationPending,
   userTurnSinceDelivery,
@@ -212,7 +214,7 @@ async function deferredBehindOthers(
       reason: "children-active",
       heldBy: runningChildren,
     });
-    await refreshParkedIdle(ctx.bb, thread, state, workspace);
+    await refreshIdleSnapshot(ctx.bb, thread, state, workspace);
     return true;
   }
 
@@ -223,7 +225,7 @@ async function deferredBehindOthers(
   // never do.
   if (await providerReviewInFlight(ctx, thread.providerId, thread.id)) {
     await deferTurn(ctx, thread, state, environmentId, { reason: "sibling-active" });
-    await refreshParkedIdle(ctx.bb, thread, state, workspace);
+    await refreshIdleSnapshot(ctx.bb, thread, state, workspace);
     return true;
   }
   return false;
@@ -259,7 +261,7 @@ async function alreadyReviewed(
     return false;
   }
   await keepCursor(ctx, thread, state);
-  await refreshLastIdle(bb, thread, { workspace });
+  await refreshIdleSnapshot(bb, thread, state, workspace);
   await recordFire(ctx, thread.projectId, thread.id, "stood-down", "already-reviewed");
   return true;
 }
@@ -291,6 +293,59 @@ async function releasedFromPark(
 }
 
 /**
+ * Whether the family ran anything since `startedAt` that could have written a
+ * file without a `file-change` row, or its evidence cannot be read in full.
+ * Any doubt says yes.
+ */
+async function familyMayHaveWritten(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  startedAt: number,
+  threadEntries: readonly ThreadListEntry[],
+): Promise<boolean> {
+  const read = await familyClaims({
+    bb: ctx.bb,
+    threadId: thread.id,
+    threadEntries,
+    startedAt,
+    now: Date.now(),
+    ownRowsTruncated: false,
+    kin: undefined,
+  });
+  if ("reason" in read) {
+    return true;
+  }
+  const { opaque, writes, scratch, tools, history } = read.claims;
+  return opaque !== undefined || writes.length > 0 || scratch.length > 0 || tools.length > 0 || history;
+}
+
+/**
+ * Whether a shell edit could hide from a snapshot that did not hash every
+ * file: a same-size edit to a file with no hash reads as no change, and only
+ * something the family ran since the snapshot can have made it. A snapshot that
+ * hashed every file has no such edit.
+ */
+async function hiddenShellEdit(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  lastIdle: TurnStart,
+  threadEntries: readonly ThreadListEntry[],
+): Promise<boolean> {
+  if (lastIdle.tree === undefined || !hasUnhashedEntries(lastIdle.tree)) {
+    return false;
+  }
+  const hidden =
+    lastIdle.startedAt === undefined ||
+    (await familyMayHaveWritten(ctx, thread, lastIdle.startedAt, threadEntries));
+  if (hidden) {
+    ctx.bb.log.info(
+      `auto-review: the carried snapshot of ${thread.id} could not rule out a hidden edit to a file it did not hash; not standing down as no-new-work`,
+    );
+  }
+  return hidden;
+}
+
+/**
  * A review fires only at the end of work: a turn that added nothing to the
  * carried cursor since the last idle that kept it (a question, a reply to a
  * steer, a status check) never fires. The carried work waits for the next turn
@@ -316,11 +371,11 @@ async function noNewWork(
     workspace,
     threadEntries,
   });
-  if (turn.paths.length > 0) {
+  if (turn.paths.length > 0 || (await hiddenShellEdit(ctx, thread, lastIdle, threadEntries))) {
     return false;
   }
   await keepCursor(ctx, thread, state);
-  await refreshLastIdle(ctx.bb, thread, { workspace });
+  await refreshIdleSnapshot(ctx.bb, thread, state, workspace);
   await recordFire(ctx, thread.projectId, thread.id, "stood-down", "no-new-work");
   return true;
 }

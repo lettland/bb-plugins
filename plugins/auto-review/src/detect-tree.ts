@@ -19,6 +19,18 @@ import type {
 /** Content-hash at most this many uncommitted files; the rest compare by line stats alone. */
 export const MAX_HASHED_FILES = 200;
 
+/**
+ * Whether a snapshot holds a file that is not a deletion yet carries no content
+ * hash (past the hash limit, or its content could not be read), so it compares
+ * by line stats alone.
+ */
+export function hasUnhashedEntries(tree: TreeSnapshot): boolean {
+  return Object.values(tree.files).some((fingerprint) => {
+    const [stat = "", hash = ""] = fingerprint.split("|");
+    return hash === "" && !stat.startsWith("D:");
+  });
+}
+
 export function statPart(file: WorkingTreeFile): string {
   return `${file.status}:${file.insertions ?? "-"}:${file.deletions ?? "-"}`;
 }

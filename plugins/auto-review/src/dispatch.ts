@@ -13,7 +13,7 @@ import { removeDeferral } from "./deferrals.js";
 import { fetchWorkspace, tryCaptureSinceSeq, type AvailableWorkspace, type TurnScope } from "./detect.js";
 import { readFindings, recordUnreported } from "./findings-store.js";
 import { openFindingsForPrompt } from "./findings.js";
-import { refreshParkedIdle } from "./last-idle.js";
+import { refreshIdleSnapshot } from "./last-idle.js";
 import { buildReviewPrompt, isNoCommit, renderScope } from "./prompt.js";
 import { withProviderLock } from "./provider-lock.js";
 import { deliveredPatch } from "./review-outcome.js";
@@ -246,6 +246,6 @@ export async function dispatchReview(
   });
   // Hashing the tree stays out of the provider lock so it does not serialise other dispatches.
   if (deferred) {
-    await refreshParkedIdle(ctx.bb, thread, state, workspace);
+    await refreshIdleSnapshot(ctx.bb, thread, state, workspace);
   }
 }

@@ -446,12 +446,17 @@ thread, so the turn's review and commit are never dropped by it.
   on the next turn that changes something; `bb auto-review reset` discards it (and also lifts
   the rule), and a user stop drops the carried cursor.
 - `no-new-work` — the turn changed nothing since the last idle that kept the carried cursor:
-  a question, a reply to a steer or after a stop, a CI status check, a pull or rebase with
-  nothing of the thread's own new. Carried work stays carried and waits for the next turn that
-  changes something; nothing reviews it if none comes, and `bb auto-review reset` discards it.
+  a question, a reply to a steer, a CI status check, a pull or rebase with nothing of the
+  thread's own new. A question after a stop is not one of these: a stop drops the carried window,
+  so that question starts a fresh one and stands down as `no-authorship` (a reply that edits
+  fires normally). Carried work stays carried and waits for the next turn that changes
+  something; nothing reviews it if none comes, and `bb auto-review reset` discards it.
   After a question stood down this way, a later wake-up that commits fires the review, because
   the user's message is still unspent. Carried work that was pushed in the meantime drops out of
-  scope (only dirty or ahead paths are reviewed). A parked turn's release is exempt and fires.
+  scope (only dirty or ahead paths are reviewed). A parked turn's release is exempt and fires, and
+  so is a turn that ran a command that can write files (or anything whose writes can't be read) in
+  a tree of more than 200 uncommitted files, or with a file whose content could not be read (a
+  same-size edit to such a file cannot be seen).
 - `no-authorship` — the turn changed no files: no tool edit, and nothing in the working
   tree (a new, rewritten or deleted path, or one in a commit the turn made — on a branch or
   straight onto the mainline) changed since the turn started. Edits made through shell commands count. Untracked
@@ -499,7 +504,8 @@ thread, so the turn's review and commit are never dropped by it.
 - `status-unavailable` — the environment's git status could not be read.
 
 Outcomes are `fired`, `deferred` (parked, runs at its release unless a question of the user's
-turns it into carried work) and `stood-down` (will not run).
+turns it into carried work) and `stood-down` (this turn's review will not run; `already-reviewed`
+and `no-new-work` keep the carried cursor, so the work waits for a later turn).
 
 (A thread that is not a top-level user coding thread is filtered out before evaluation and
 records no last-fire entry.)
