@@ -1,6 +1,6 @@
 import type { BbPluginApi, PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
 import { devkitRunning } from "./dispatch.js";
-import { EVENT_PAGE_MAX } from "./detect-timeline.js";
+import { EVENT_PAGE_MAX } from "./detect-events.js";
 import type { ReviewMode } from "./prompt.js";
 import { planHoldExpired, type ThreadState } from "./state.js";
 

@@ -3,13 +3,15 @@ export {
   AUTHORSHIP_SEGMENT_LIMIT,
   authoredPaths,
   authoredPathsFromRows,
+  siblingAuthoredPaths,
+} from "./detect-timeline.js";
+export {
   captureSinceSeq,
   firstUserTurnSince,
-  siblingAuthoredPaths,
   stoppedByUser,
   tryCaptureSinceSeq,
   userTurnRunningSince,
-} from "./detect-timeline.js";
+} from "./detect-events.js";
 export { runningChildIds, spawnedDescendantIds } from "./detect-children.js";
 export {
   captureTree,
