@@ -15,6 +15,13 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   in one) is carried into the review your next message earns; fixes made inside the review turn
   or its continuation are covered by that review itself. `bb auto-review reset` or a stop by you
   drops the carried cursor.
+- Fires only at the end of work: a turn that changed nothing since the last idle that kept the
+  carried cursor (a question, a reply to a steer or after a stop, a CI status check) stands down
+  as `no-new-work`. The carried work waits for the next turn that changes something; nothing
+  reviews it if none comes, and `bb auto-review reset` discards it. After a question has stood
+  down, a later wake-up that commits fires the review, because your message is still unspent.
+  Carried work that was pushed meanwhile drops out of scope (only dirty or ahead paths are
+  reviewed).
 - Claims only the thread's own changes (itself plus its bb children and owned threads). In
   exact mode, when everything the family ran was read-only or named every file it wrote, only
   the files it named count and the rest stands down as `unclaimed-changes`; when it ran
@@ -59,13 +66,16 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   has its review queued or running is deferred, not dropped — never because another thread
   is merely active (other than a spawned child, above), never behind a different provider,
   never behind the thread itself. The turn-start cursor is kept and the full review fires
-  when the blocking review ends, one deferred turn per provider released per review end.
+  when the blocking review ends, one deferred turn per provider released per review end. A
+  question sent while the turn is parked does not fire it: the parked work becomes carried
+  work for the next turn that changes something.
   In-flight reviews and parked turns are indexed in plugin storage, and parked turns are
   swept every 5 minutes, so a release whose event was missed still happens.
 - Yields to the user: a turn ending with a user message queued (or its turn already
   started) is carried, not reviewed — its cursor is kept, and the review fires at the
-  first idle with nothing of the user's waiting, covering every turn since. Scheduled,
-  failed, agent and plugin rows do not count.
+  first idle of a turn that changes something with nothing of the user's waiting, covering
+  every turn since. A queued question changes nothing, so it leaves the work carried.
+  Scheduled, failed, agent and plugin rows do not count.
 - Injects one review-and-commit turn into the same thread, guarded by a per-thread
   latch (persisted in plugin metadata) so it never reviews its own review turn. When that
   turn commits, it judges from the thread's plan whether work remains and continues any

@@ -75,19 +75,21 @@ type TurnRequestData = Extract<
 >["data"];
 
 /**
- * The seq of the first turn request after the cursor that `counts` accepts, or
- * null when there is none. The event log is paged, so a long run of wake-up
- * requests could push the one that counts past the first page; this walks the
- * pages, oldest first, and throws if the walk hits its cap rather than answer
- * "none" for a log it did not finish reading.
+ * The seq of the first (or, with `latest`, the last) turn request after the
+ * cursor that `counts` accepts, or null when there is none. The event log is
+ * paged, so a long run of wake-up requests could push the one that counts past
+ * the first page; this walks the pages, oldest first, and throws if the walk
+ * hits its cap rather than answer "none" for a log it did not finish reading.
  */
-async function firstTurnRequestSince(
+async function turnRequestSince(
   bb: BbPluginApi,
   threadId: string,
   sinceSeq: number,
   counts: (data: TurnRequestData) => boolean | Promise<boolean>,
+  latest = false,
 ): Promise<number | null> {
   let afterSeq = sinceSeq;
+  let found: number | null = null;
   for (let page = 0; page < TURN_REQUEST_MAX_PAGES; page += 1) {
     const events = await bb.sdk.threads.events.list({
       threadId,
@@ -98,12 +100,15 @@ async function firstTurnRequestSince(
     });
     for (const event of events) {
       if (event.type === "client/turn/requested" && (await counts(event.data))) {
-        return event.seq;
+        if (!latest) {
+          return event.seq;
+        }
+        found = event.seq;
       }
     }
     const last = events.at(-1);
     if (last === undefined || events.length < EVENT_PAGE_MAX) {
-      return null;
+      return found;
     }
     afterSeq = last.seq;
   }
@@ -127,7 +132,16 @@ export async function firstUserTurnSince(
   threadId: string,
   sinceSeq: number,
 ): Promise<number | null> {
-  return firstTurnRequestSince(bb, threadId, sinceSeq, isUserRequest);
+  return turnRequestSince(bb, threadId, sinceSeq, isUserRequest);
+}
+
+/** `firstUserTurnSince` for the latest request instead of the earliest. */
+export async function lastUserTurnSince(
+  bb: BbPluginApi,
+  threadId: string,
+  sinceSeq: number,
+): Promise<number | null> {
+  return turnRequestSince(bb, threadId, sinceSeq, isUserRequest, true);
 }
 
 /** The timeline endpoint's own ceiling; asking for more is rejected with a 400. */

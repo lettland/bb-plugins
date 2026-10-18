@@ -650,8 +650,9 @@ describe("auto-review cli: reset", () => {
       const message =
         `thread ${THREAD_ID} has a deferred turn; its review runs when the hold clears — ` +
         `reset would drop it. Check \`bb auto-review status ${THREAD_ID}\`; if the hold never ` +
-        "clears, stop or archive the holding child thread, or send the thread another message " +
-        "(a new turn re-checks the deferred one and reviews it).";
+        "clears, stop or archive the holding child thread, or send the thread another message: " +
+        "its turn re-checks the hold, and once the hold has cleared, a turn that changes something " +
+        "reviews the parked work (a question leaves it carried).";
 
       const text = await host.run(["reset", THREAD_ID]);
       expect(text.exitCode).toBe(2);

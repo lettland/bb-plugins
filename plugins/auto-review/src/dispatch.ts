@@ -10,9 +10,10 @@ import {
 import { decide } from "./decide.js";
 import { deferTurn, providerReviewInFlight } from "./deferral.js";
 import { removeDeferral } from "./deferrals.js";
-import { fetchWorkspace, tryCaptureSinceSeq, type TurnScope } from "./detect.js";
+import { fetchWorkspace, tryCaptureSinceSeq, type AvailableWorkspace, type TurnScope } from "./detect.js";
 import { readFindings, recordUnreported } from "./findings-store.js";
 import { openFindingsForPrompt } from "./findings.js";
+import { refreshParkedIdle } from "./last-idle.js";
 import { buildReviewPrompt, isNoCommit, renderScope } from "./prompt.js";
 import { withProviderLock } from "./provider-lock.js";
 import { deliveredPatch } from "./review-outcome.js";
@@ -74,6 +75,8 @@ export interface DispatchInput {
   thread: GateThreadLike;
   state: ThreadState;
   environmentId: string;
+  /** The workspace the turn was scoped from, reused for the snapshot a deferral records. */
+  workspace: AvailableWorkspace;
   config: EffectiveConfig;
   decision: ReturnType<typeof decide>;
   base: string;
@@ -204,7 +207,7 @@ export async function dispatchReview(
   ctx: ReviewContext,
   input: DispatchInput,
 ): Promise<void> {
-  const { thread, state, environmentId, config, decision, base, isWorktree, scope, turn, unclaimedCount } = input;
+  const { thread, state, environmentId, workspace, config, decision, base, isWorktree, scope, turn, unclaimedCount } = input;
   const extra: FireExtra = {
     commit: decision.commit,
     merge: decision.merge,
@@ -213,13 +216,13 @@ export async function dispatchReview(
     scopePaths: scope,
     ...(unclaimedCount === undefined ? {} : { unclaimedCount }),
   };
-  await withProviderLock(thread.providerId, async () => {
+  const deferred = await withProviderLock(thread.providerId, async () => {
     if (await providerReviewInFlight(ctx, thread.providerId, thread.id)) {
       await deferTurn(ctx, thread, state, environmentId, {
         reason: "sibling-active",
         extra,
       });
-      return;
+      return true;
     }
 
     const prior = openFindingsForPrompt(await readFindings(ctx.bb, thread.id), Date.now());
@@ -239,5 +242,10 @@ export async function dispatchReview(
       priorFindingsOmitted: prior.omitted,
     });
     await sendReview(ctx, thread, prompt, extra);
+    return false;
   });
+  // Hashing the tree stays out of the provider lock so it does not serialise other dispatches.
+  if (deferred) {
+    await refreshParkedIdle(ctx.bb, thread, state, workspace);
+  }
 }

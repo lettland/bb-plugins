@@ -5,6 +5,7 @@ export {
   authoredPathsFromRows,
   captureSinceSeq,
   firstUserTurnSince,
+  lastUserTurnSince,
   siblingAuthoredPaths,
   stoppedByUser,
   tryCaptureSinceSeq,

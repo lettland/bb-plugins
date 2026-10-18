@@ -118,9 +118,10 @@ export async function snapshotTree(
 export async function captureTree(
   bb: BbPluginApi,
   environmentId: string,
+  fetched?: AvailableWorkspace,
 ): Promise<TreeSnapshot | undefined> {
   try {
-    const workspace = await fetchWorkspace(bb, environmentId);
+    const workspace = fetched ?? (await fetchWorkspace(bb, environmentId));
     return workspace === null
       ? undefined
       : await snapshotTree(bb, environmentId, workspace);

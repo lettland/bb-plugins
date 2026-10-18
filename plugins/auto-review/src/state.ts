@@ -66,6 +66,12 @@ export const threadStateSchema = z.object({
    */
   turnDecided: z.literal(true).optional(),
   /**
+   * The cursor, time and tree at the last idle that kept the turn cursor
+   * without firing a review. A later idle that changed nothing since it stands
+   * down instead of reviewing the carried work.
+   */
+  lastIdle: turnStartSchema.optional(),
+  /**
    * When the review prompt actually reached the agent (immediate delivery, the
    * queued row's dispatch, or the idle-time promotion of a dispatched row). It
    * is the review's id: a `ReportReview` call is accepted only against it, and
@@ -202,6 +208,7 @@ export const LATCH_KEYS: readonly string[] = [
   "dispatchedAt",
   "deferredSince",
   "turnDecided",
+  "lastIdle",
   "heldBy",
   "reviewDeliveredAt",
   "reviewDeliveredSeq",

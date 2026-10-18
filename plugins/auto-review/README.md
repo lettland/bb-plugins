@@ -62,6 +62,14 @@ It ships enabled (opt-out).
   review turn or its continuation are covered by that review itself. A stop by you or
   `bb auto-review reset` drops the carried cursor, and reset also lifts the rule. Plan reviews
   are separate and do not count.
+- Fires only at the end of work: a turn that changed nothing since the last idle that kept the
+  carried cursor never fires. A question, a reply to a steer, a reply after a stop or a turn
+  that only reads CI status stands down as `no-new-work`, and the carried work stays carried.
+  It waits for the next turn that changes something, and nothing reviews it if no such turn
+  comes; `bb auto-review reset` discards it. After a question has stood down as `no-new-work`,
+  a later wake-up that commits fires the review, because your message is still unspent. Carried
+  work that was pushed in the meantime drops out of scope, since only dirty or ahead paths are
+  reviewed. A stop by you still drops the carried window.
 - Claims only this thread's own changes. Own means this thread plus the bb children and
   owned threads it spawned, transitively. An edit made outside them (your IDE, a formatter or
   watcher, a commit nobody of the family made) neither triggers nor widens a review. Text
@@ -355,10 +363,13 @@ It ships enabled (opt-out).
   the hold ends one idle early and that wake-up turn's fixes get one more review.
 - Runs one review at a time per provider across all projects, since those reviews share
   the provider's usage limits. A turn ending behind another review is deferred, not
-  dropped, and fires when the blocking review ends.
+  dropped, and fires when the blocking review ends. A question you send while the turn is
+  parked does not fire it: the parked work becomes carried work, and the next turn that
+  changes something reviews it.
 - Never fires alongside a message you queued. If a user message is waiting when the turn
-  ends (or its turn has already started), the review is carried into that turn and fires
-  once the thread goes idle with nothing of yours queued, covering every turn since.
+  ends (or its turn has already started), the review is carried into that turn. It fires
+  once a turn that changes something ends with nothing of yours queued, covering every turn
+  since; if your message only asks a question, the work stays carried (`no-new-work`).
 - Commits only a complete, working change. The review turn gets the full list of files the
   turn authored, checks that nothing the staged change depends on is left out, and runs the
   project's typecheck/build and tests. If the work is unfinished, broken, or could only be
@@ -414,7 +425,7 @@ All commands accept `--json`.
 | `bb auto-review disable [--global \| --project <id>]` | Turn it off, same scoping |
 | `bb auto-review auto-approve <on\|off> --project <id>` | Approve reviewed plans automatically for one project (off by default); `--project` is required and must exist, and `on` is refused from inside a bb thread (an accident guard, not a security boundary) |
 | `bb auto-review findings [thread-id] [--clear]` | List what a thread's reviews reported (finding chains, flagging high/blocker ones dismissed more than once, and incidents). `--clear` drops the chains only; it is refused inside a bb thread and needs an explicit thread id |
-| `bb auto-review reset <thread-id>` | Clear a wedged loop-guard latch on an idle thread; refused while the thread is running or holds a `deferred` turn (its review runs when the hold clears) |
+| `bb auto-review reset <thread-id>` | Clear a wedged loop-guard latch on an idle thread, and discard its carried work; refused while the thread is running or holds a `deferred` turn (its review runs when the hold clears) |
 
 The agent-hooks plugin's `review-plan-before-exit.sh` reads `planGate` from
 `bb auto-review status --json` and stands down where it is true, so a plan is reviewed

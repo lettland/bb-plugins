@@ -403,7 +403,10 @@ not. When a turn ends while another thread on the same provider — in any proje
 auto-review queued or running, auto-review **defers** that turn rather than skipping it:
 the turn-start cursor is kept, and the review fires — in full — as soon as the blocking
 review ends. If the thread takes another turn while deferred, the earlier cursor is carried
-forward, so one review covers both turns. A thread is never deferred behind itself.
+forward, so one review covers both turns. A thread is never deferred behind itself. A parked
+turn fires at its release (the blocking review ending, the child's wake-up, or the sweep). A
+question sent while it is parked does not fire it: the parked work becomes carried work, and
+the next turn that changes something reviews it.
 
 Deferred turns held by a provider review are released one at a time per provider: when a
 review ends (its thread goes idle, fails, is archived or deleted, or its queued review is
@@ -427,18 +430,28 @@ thread, so the turn's review and commit are never dropped by it.
 
 - `fired` — a review was injected.
 - `sibling-active` — another thread on the same provider (in any project) has its
-  auto-review running. Paired with outcome `deferred`, this turn is parked and will be
-  reviewed as soon as that review ends. Not a skip — nothing is lost.
+  auto-review running. Paired with outcome `deferred`, this turn is parked and is reviewed
+  as soon as that review ends, unless a question of the user's lands first (then the work is
+  carried, see `no-new-work`). Not a skip — nothing is lost.
 - `children-active` — a thread this thread spawned as a child, in any turn, directly or
   transitively, is still running. Paired with outcome `deferred`, this turn is parked until
   bb wakes it once the last of them has ended, or the 5-minute sweep if that wake-up is
-  missed. Not a skip — nothing is lost.
+  missed, and it is reviewed then even if it was a question over carried work. Not a skip —
+  nothing is lost.
 - `already-reviewed` — a code review was already sent for this thread and the user has not
   written since. Wake-up turns (child or background-task completions) and tasks other threads
   tell it never earn another review. Work from wake-ups after the review ends (including review
   fixes committed in one) is carried into the next user-earned review; fixes made inside the
-  review turn or its continuation are covered by that review itself. `bb auto-review reset` or
-  a user stop drops the carried cursor, and reset also lifts the rule.
+  review turn or its continuation are covered by that review itself. The carried review fires
+  on the next turn that changes something; `bb auto-review reset` discards it (and also lifts
+  the rule), and a user stop drops the carried cursor.
+- `no-new-work` — the turn changed nothing since the last idle that kept the carried cursor:
+  a question, a reply to a steer or after a stop, a CI status check, a pull or rebase with
+  nothing of the thread's own new. Carried work stays carried and waits for the next turn that
+  changes something; nothing reviews it if none comes, and `bb auto-review reset` discards it.
+  After a question stood down this way, a later wake-up that commits fires the review, because
+  the user's message is still unspent. Carried work that was pushed in the meantime drops out of
+  scope (only dirty or ahead paths are reviewed). A parked turn's release is exempt and fires.
 - `no-authorship` — the turn changed no files: no tool edit, and nothing in the working
   tree (a new, rewritten or deleted path, or one in a commit the turn made — on a branch or
   straight onto the mainline) changed since the turn started. Edits made through shell commands count. Untracked
@@ -463,8 +476,9 @@ thread, so the turn's review and commit are never dropped by it.
 - `user-queued` — the turn ended with a message of the user's already queued (or its turn
   already started). Paired with outcome `deferred`: no review fires next to their message;
   the turn-start cursor is carried into that next turn, and the review fires at the first
-  idle with nothing of the user's queued, covering every turn since. A scheduled or failed
-  row, or one an agent or plugin queued, does not count.
+  idle of a turn that changes something with nothing of the user's queued, covering every
+  turn since. A queued question changes nothing (`no-new-work`) and leaves the work carried.
+  A scheduled or failed row, or one an agent or plugin queued, does not count.
   A turn's cursor is only replaced once an idle has decided that turn, so this holds even
   when the next turn's start reaches the plugin before the finished turn's idle.
 - `disabled` — disabled globally or for this project.
@@ -484,7 +498,8 @@ thread, so the turn's review and commit are never dropped by it.
 - `not-a-branch` — the checkout is not on a git branch (detached/unborn/unknown).
 - `status-unavailable` — the environment's git status could not be read.
 
-Outcomes are `fired`, `deferred` (parked, will still run) and `stood-down` (will not run).
+Outcomes are `fired`, `deferred` (parked, runs at its release unless a question of the user's
+turns it into carried work) and `stood-down` (will not run).
 
 (A thread that is not a top-level user coding thread is filtered out before evaluation and
 records no last-fire entry.)

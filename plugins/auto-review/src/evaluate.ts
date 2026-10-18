@@ -27,8 +27,10 @@ import {
   type AvailableWorkspace,
   type TurnChanges,
 } from "./detect.js";
+import type { ThreadListEntry } from "./detect-workspace.js";
 import { dispatchReview } from "./dispatch.js";
 import { isBusyStatus, selfIsWorktree } from "./gate.js";
+import { lastIdleFloor, refreshLastIdle, refreshParkedIdle } from "./last-idle.js";
 import {
   reviewContinuationPending,
   userTurnSinceDelivery,
@@ -74,25 +76,31 @@ async function standDown(
 /**
  * Whether the user's next turn is already lined up: a message they queued
  * during this turn, or a turn already started because core drained the queue
- * before this idle was handled. Scheduled and failed rows do not count.
+ * before this idle was handled (`busy`). Scheduled and failed rows do not count.
  */
-async function userTurnQueued(ctx: ReviewContext, threadId: string): Promise<boolean> {
+async function userTurnQueued(
+  ctx: ReviewContext,
+  threadId: string,
+): Promise<{ busy: boolean; queued: boolean }> {
   const { bb } = ctx;
   const now = Date.now();
   const [{ status }, rows] = await Promise.all([
     bb.sdk.threads.get({ threadId }),
     bb.sdk.threads.queuedMessages.list({ threadId }),
   ]);
-  return (
-    isBusyStatus(status) ||
-    rows.some(
-      (row) =>
-        row.initiator === "user" &&
-        row.origin !== "plugin" &&
-        row.failureReason === null &&
-        (row.sendAt === null || row.sendAt <= now),
-    )
-  );
+  const busy = isBusyStatus(status);
+  return {
+    busy,
+    queued:
+      busy ||
+      rows.some(
+        (row) =>
+          row.initiator === "user" &&
+          row.origin !== "plugin" &&
+          row.failureReason === null &&
+          (row.sendAt === null || row.sendAt <= now),
+      ),
+  };
 }
 
 /**
@@ -115,10 +123,22 @@ async function keepCursor(ctx: ReviewContext, thread: GateThreadLike, state: Thr
 /**
  * Fold this turn's review into the user's next turn instead of firing it
  * alongside their message. The cursor is kept, so the review that fires once
- * the thread goes idle with nothing of theirs waiting covers every turn since.
+ * that turn, or a later one, changes something covers every turn since. When
+ * the user's turn is already running (`busy`), the snapshot is anchored on its
+ * request, so its own edits still count as new.
  */
-async function carryOver(ctx: ReviewContext, thread: GateThreadLike, state: ThreadState): Promise<void> {
+async function carryOver(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  state: ThreadState,
+  busy: boolean,
+): Promise<void> {
   await keepCursor(ctx, thread, state);
+  await refreshLastIdle(
+    ctx.bb,
+    thread,
+    busy ? { userTurnAfter: lastIdleFloor(state) } : {},
+  );
   await recordFire(ctx, thread.projectId, thread.id, "deferred", "user-queued");
 }
 
@@ -149,8 +169,9 @@ async function eligibleTurnStart(
     await standDown(ctx, thread, state, "user-stopped");
     return null;
   }
-  if (await userTurnQueued(ctx, thread.id)) {
-    await carryOver(ctx, thread, state);
+  const { busy, queued } = await userTurnQueued(ctx, thread.id);
+  if (queued) {
+    await carryOver(ctx, thread, state, busy);
     return null;
   }
   return state.turnStart;
@@ -180,6 +201,7 @@ async function deferredBehindOthers(
   thread: GateThreadLike,
   state: ThreadState,
   environmentId: string,
+  workspace: AvailableWorkspace,
 ): Promise<boolean> {
   // A spawned child still running will wake this thread when it ends, and
   // that wake-up turn is where the supervisor acts on the child's result —
@@ -190,6 +212,7 @@ async function deferredBehindOthers(
       reason: "children-active",
       heldBy: runningChildren,
     });
+    await refreshParkedIdle(ctx.bb, thread, state, workspace);
     return true;
   }
 
@@ -200,6 +223,7 @@ async function deferredBehindOthers(
   // never do.
   if (await providerReviewInFlight(ctx, thread.providerId, thread.id)) {
     await deferTurn(ctx, thread, state, environmentId, { reason: "sibling-active" });
+    await refreshParkedIdle(ctx.bb, thread, state, workspace);
     return true;
   }
   return false;
@@ -216,6 +240,7 @@ async function alreadyReviewed(
   ctx: ReviewContext,
   thread: GateThreadLike,
   state: ThreadState,
+  workspace: AvailableWorkspace,
 ): Promise<boolean> {
   const { bb } = ctx;
   if (state.lastCodeReviewSeq === undefined) {
@@ -234,7 +259,69 @@ async function alreadyReviewed(
     return false;
   }
   await keepCursor(ctx, thread, state);
+  await refreshLastIdle(bb, thread, { workspace });
   await recordFire(ctx, thread.projectId, thread.id, "stood-down", "already-reviewed");
+  return true;
+}
+
+/**
+ * Whether a parked turn is being released rather than re-run by a user turn:
+ * no user request came after the snapshot taken when it was parked. A failed
+ * lookup counts as a release, so the gate is skipped and the turn reviews.
+ */
+async function releasedFromPark(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  state: ThreadState,
+  lastIdle: TurnStart,
+): Promise<boolean> {
+  if (state.phase !== "deferred") {
+    return false;
+  }
+  try {
+    return (await firstUserTurnSince(ctx.bb, thread.id, lastIdle.sinceSeq)) === null;
+  } catch (error) {
+    ctx.bb.log.warn(
+      `auto-review: could not read whether the user wrote since ${thread.id} was parked; reviewing anyway: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return true;
+  }
+}
+
+/**
+ * A review fires only at the end of work: a turn that added nothing to the
+ * carried cursor since the last idle that kept it (a question, a reply to a
+ * steer, a status check) never fires. The carried work waits for the next turn
+ * that changes something; a parked turn's release is exempt. Never `standDown`:
+ * in the `deferred` phase it would reset the turn and drop the carried work.
+ */
+async function noNewWork(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  state: ThreadState,
+  environmentId: string,
+  workspace: AvailableWorkspace,
+  threadEntries: readonly ThreadListEntry[],
+): Promise<boolean> {
+  const { lastIdle } = state;
+  if (lastIdle?.tree === undefined || (await releasedFromPark(ctx, thread, state, lastIdle))) {
+    return false;
+  }
+  const turn = await turnChangedPaths(ctx.bb, {
+    threadId: thread.id,
+    environmentId,
+    turnStart: lastIdle,
+    workspace,
+    threadEntries,
+  });
+  if (turn.paths.length > 0) {
+    return false;
+  }
+  await keepCursor(ctx, thread, state);
+  await refreshLastIdle(ctx.bb, thread, { workspace });
+  await recordFire(ctx, thread.projectId, thread.id, "stood-down", "no-new-work");
   return true;
 }
 
@@ -252,12 +339,9 @@ async function reviewScope(
   turnStart: TurnStart,
   environmentId: string,
   workspace: AvailableWorkspace,
+  threadEntries: readonly ThreadListEntry[],
 ): Promise<ReviewScope | null> {
   const { bb } = ctx;
-  const threadEntries = await bb.sdk.threads.list({
-    environmentId,
-    includeHidden: true,
-  });
   const isWorktree = selfIsWorktree(threadEntries, thread.id);
 
   const turn = await turnChangedPaths(bb, {
@@ -321,13 +405,20 @@ export async function evaluate(
   if (workspace === null) {
     return;
   }
-  if (await alreadyReviewed(ctx, thread, state)) {
+  if (await alreadyReviewed(ctx, thread, state, workspace)) {
     return;
   }
-  if (await deferredBehindOthers(ctx, thread, state, environmentId)) {
+  if (await deferredBehindOthers(ctx, thread, state, environmentId, workspace)) {
     return;
   }
-  const reviewed = await reviewScope(ctx, thread, state, turnStart, environmentId, workspace);
+  const threadEntries = await bb.sdk.threads.list({
+    environmentId,
+    includeHidden: true,
+  });
+  if (await noNewWork(ctx, thread, state, environmentId, workspace, threadEntries)) {
+    return;
+  }
+  const reviewed = await reviewScope(ctx, thread, state, turnStart, environmentId, workspace, threadEntries);
   if (reviewed === null) {
     return;
   }
@@ -343,6 +434,7 @@ export async function evaluate(
     thread,
     state,
     environmentId,
+    workspace,
     config,
     decision,
     base,

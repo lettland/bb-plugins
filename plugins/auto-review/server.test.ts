@@ -94,6 +94,8 @@ interface HostOptions {
   deleteQueuedThrows?: boolean;
   /** Listing a thread's spawned children (`threads.list` with a parent) fails. */
   childListThrows?: boolean;
+  /** Runs once, at the start of the first child listing: something that lands while a decision is in flight. */
+  onChildList?: () => void;
   /** The environment status read reports the workspace unavailable. */
   statusUnavailable?: boolean;
   checkoutKind?: string;
@@ -230,6 +232,8 @@ function createHost(options: HostOptions = {}) {
     { id: THREAD_ID, status: "idle" },
   ];
   let maxSeq = 100;
+  let timelineThrows = false;
+  let statusThrows = false;
   let queuedRows = options.queuedRows ?? [];
   let interrupts: Record<string, InterruptEvent[]> = {};
   let itemEvents: Record<string, ItemStartedEvent[]> = {};
@@ -302,6 +306,9 @@ function createHost(options: HostOptions = {}) {
       // Only the authoring threads changed anything; a sibling that changed
       // nothing stands down on no-authorship rather than firing its own review.
       timeline: async (args: { threadId: string; segmentLimit?: string }) => {
+        if (timelineThrows) {
+          throw new Error("timeline unavailable");
+        }
         timelineLimits.push(args.segmentLimit);
         if (options.reviewLandsBeforeLock === true && hostRef !== null) {
           options.reviewLandsBeforeLock = false;
@@ -431,6 +438,11 @@ function createHost(options: HostOptions = {}) {
         if (options.childListThrows === true && args?.parentThreadId !== undefined) {
           throw new Error("threads.list unavailable");
         }
+        if (args?.parentThreadId !== undefined && options.onChildList !== undefined) {
+          const landing = options.onChildList;
+          options.onChildList = undefined;
+          landing();
+        }
         const rows = envThreads.map((entry) => ({
           parentThreadId: null,
           lifecycleOwnerThreadId: null,
@@ -496,8 +508,11 @@ function createHost(options: HostOptions = {}) {
       },
     },
     environments: {
-      status: async (args: { mergeBaseBranch?: string }) =>
-        options.statusUnavailable === true
+      status: async (args: { mergeBaseBranch?: string }) => {
+        if (statusThrows) {
+          throw new Error("status unavailable");
+        }
+        return options.statusUnavailable === true
           ? { outcome: "unavailable" }
           : ({
               outcome: "available",
@@ -524,7 +539,8 @@ function createHost(options: HostOptions = {}) {
                   options.newestFirstCommits,
                 ),
               },
-          }),
+          });
+      },
       diffFile: async (args: { path: string }) => {
         const file = workingTreeFiles.find((entry) => entry.path === args.path);
         if (file?.content === undefined) {
@@ -574,6 +590,14 @@ function createHost(options: HostOptions = {}) {
     },
     setMaxSeq: (next: number) => {
       maxSeq = next;
+    },
+    /** From now on, reading the timeline fails. */
+    setTimelineThrows: (next: boolean) => {
+      timelineThrows = next;
+    },
+    /** From now on, reading the environment status fails. */
+    setStatusThrows: (next: boolean) => {
+      statusThrows = next;
     },
     /** Record a `system/thread/interrupted` event on a thread (default: the thread itself). */
     interrupt: (event: InterruptEvent, threadId: string = THREAD_ID) => {
@@ -981,27 +1005,40 @@ describe("auto-review plugin", () => {
     };
   }
 
-  it("folds the review into the user's queued next turn", async () => {
+  it("carries the review through the user's queued next turn until a turn changes something", async () => {
     const host = createHost({ queuedRows: [userRow()] });
     await plugin(host.bb);
     await emitActive(host);
+    host.setMaxSeq(150);
     await emitIdle(host);
     expect(host.sends).toHaveLength(0);
     expect(host.metadata.turnDecided).toBeUndefined();
+    expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 150 });
     expect(await lastFire(host)).toMatchObject({
       outcome: "deferred",
       reason: "user-queued",
     });
 
     // Core dispatches the user's message; that turn keeps the first cursor.
+    // It edits nothing, so the carried review keeps waiting.
     host.setQueuedRows([]);
     host.setMaxSeq(200);
     await emitActive(host);
     expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 100 });
     await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(host.metadata.turnDecided).toBeUndefined();
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+
+    // A third turn that edits fires the review.
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/b.ts", 210)]);
+    host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/b.ts" }]);
+    host.setMaxSeq(220);
+    await emitActive(host);
+    await emitIdle(host);
     expect(host.sends).toHaveLength(1);
     expect(host.metadata.turnDecided).toBe(true);
-    expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
+    expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts", "src/b.ts"] });
     await host.harness.dispose();
   });
 
@@ -1048,13 +1085,25 @@ describe("auto-review plugin", () => {
     // thread.active reaches the plugin before the finished turn's idle.
     host.setMaxSeq(200);
     host.setEnvThreads([{ id: THREAD_ID, status: "active" }]);
+    host.requestTurn({ seq: 160, initiator: "user", text: "and now a question" });
     await emitActive(host);
     expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 100 });
     await emitIdle(host);
     expect(host.sends).toHaveLength(0);
     expect(await lastFire(host)).toMatchObject({ reason: "user-queued" });
+    // Anchored just before the running turn's request.
+    expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 159 });
 
+    // The running turn only asks a question, so the carried review keeps waiting.
     host.setEnvThreads([{ id: THREAD_ID, status: "idle" }]);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+
+    // The next turn edits, and the review covers the carried turn's file as well.
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts", 210)]);
+    host.setMaxSeq(220);
+    await emitActive(host);
     await emitIdle(host);
     expect(host.sends).toHaveLength(1);
     expect(await lastFire(host)).toMatchObject({
@@ -4782,45 +4831,69 @@ describe("auto-review plugin: one code review per user message", () => {
     const host = await wakeUpAfterReview({ onMainline: true, headSha: "0123abc" });
     host.requestTurn({ seq: 120, initiator: "system", text: "child-1 finished" });
     host.commit("fix1", ["src/b.ts"]);
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts", 115)]);
     host.setMaxSeq(130);
     await emitIdle(host);
     expect(host.sends).toHaveLength(1);
     expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "already-reviewed" });
     expect(host.metadata.lastCodeReviewSeq).toBe(100);
 
-    // The fix commit is carried: the review the user's next message earns covers it.
+    // The user's closing message changes nothing, so the fix commit stays carried.
     const headAtWakeUp = (host.metadata.turnStart as { tree: { headSha: string } }).tree.headSha;
     host.requestTurn({ seq: 140, initiator: "user", text: "thanks, now c" });
     host.setMaxSeq(150);
     await emitActive(host);
     await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+
+    // The turn that does change something earns the review, covering the fix commit too.
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts", 115), fileChangeRow("src/c.ts", 160)]);
+    host.setWorkingTree([{ path: "src/b.ts" }, { path: "src/c.ts" }]);
+    host.setMaxSeq(170);
+    await emitActive(host);
+    await emitIdle(host);
     expect(host.sends).toHaveLength(2);
     expect(promptText(host, 1)).toContain(`${headAtWakeUp}..HEAD`);
     expect(promptText(host, 1)).toContain("src/b.ts");
+    expect(promptText(host, 1)).toContain("src/c.ts");
     await host.harness.dispose();
   });
 
-  it("carries a wake-up's work into the review the user's next message earns", async () => {
+  it("carries a wake-up's work into the review of the next turn that changes something", async () => {
     const host = await wakeUpAfterReview();
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts", 115)]);
+    host.setMaxSeq(118);
     await emitIdle(host);
     expect(await lastFire(host)).toMatchObject({ reason: "already-reviewed" });
     expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 110 });
     expect(host.metadata.turnDecided).toBeUndefined();
 
-    // A second wake-up keeps the earliest cursor.
+    // A second wake-up keeps the earliest cursor; it stands down as already-reviewed too.
     host.setMaxSeq(120);
     await emitActive(host);
     expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 110 });
     await emitIdle(host);
     expect(host.sends).toHaveLength(1);
     expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 110 });
+    expect(await lastFire(host)).toMatchObject({ reason: "already-reviewed" });
 
+    // The user's message changes nothing: the carried work keeps waiting.
     host.requestTurn({ seq: 125, initiator: "user", text: "now do c" });
     host.setMaxSeq(130);
     await emitActive(host);
     await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts", 115), fileChangeRow("src/c.ts", 140)]);
+    host.setWorkingTree([{ path: "src/b.ts" }, { path: "src/c.ts" }]);
+    host.setMaxSeq(150);
+    await emitActive(host);
+    await emitIdle(host);
     expect(host.sends).toHaveLength(2);
     expect(promptText(host, 1)).toContain("src/b.ts");
+    expect(promptText(host, 1)).toContain("src/c.ts");
     await host.harness.dispose();
   });
 
@@ -5239,6 +5312,699 @@ describe("auto-review plugin: review baselines", () => {
       await reviewTurn(host, 2);
       expect(promptText(host)).not.toContain("Review baseline");
       expect((await codeRecord(host))?.pending).toBeUndefined();
+      await host.harness.dispose();
+    });
+  });
+});
+
+describe("auto-review plugin: no new work", () => {
+  const userMessage = (id = "user-msg"): QueuedRow => ({
+    id,
+    initiator: "user",
+    origin: "app",
+    failureReason: null,
+    sendAt: null,
+  });
+  const idleThread: EnvThread[] = [{ id: THREAD_ID, status: "idle" }];
+  const busyThread: EnvThread[] = [{ id: THREAD_ID, status: "active" }];
+  const withChild = (child: string, thread = "idle"): EnvThread[] => [
+    { id: THREAD_ID, status: thread },
+    { id: "child-1", status: child, parentThreadId: THREAD_ID },
+  ];
+
+  async function lastFire(host: Host): Promise<Record<string, unknown>> {
+    const status = await host.harness.runCli(["status", THREAD_ID, "--json"]);
+    return JSON.parse(status.stdout).lastFire;
+  }
+
+  const warned = (host: Host, text: string) =>
+    host.harness.logEntries.some((entry) => entry.level === "warn" && entry.message.includes(text));
+
+  /** The user's message starts a turn: its request, then the turn's start. */
+  async function userTurn(host: Host, seq: number, text = "a question") {
+    host.requestTurn({ seq, initiator: "user", text });
+    host.setMaxSeq(seq + 5);
+    await emitActive(host);
+  }
+
+  /** `src/a.ts` edited at seq 150 in a turn that ends with the user's message queued: carried, snapshot at seq 160. */
+  async function carriedBehindQueue(options: HostOptions = {}) {
+    const host = createHost({ queuedRows: [userMessage()], ...options });
+    await plugin(host.bb);
+    await emitActive(host);
+    host.setMaxSeq(160);
+    await emitIdle(host);
+    expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+    host.setQueuedRows([]);
+    return host;
+  }
+
+  /** A review sent and finished, then a wake-up that edited `src/b.ts` and stood down as already-reviewed: carried, snapshot at seq 130. */
+  async function carriedAfterReview(options: HostOptions = {}) {
+    const host = createHost(options);
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    await emitIdle(host);
+    host.setMaxSeq(110);
+    await emitActive(host);
+    host.setWorkingTree([{ path: "src/b.ts" }]);
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts", 115)]);
+    host.setMaxSeq(130);
+    await emitIdle(host);
+    expect(await lastFire(host)).toMatchObject({ reason: "already-reviewed" });
+    expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 130 });
+    return host;
+  }
+
+  it("stands down on a turn that only pushes and reads CI status after wake-ups committed the work", async () => {
+    const host = await carriedAfterReview();
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts", 115), shellRow("git push && gh run list")]);
+    await userTurn(host, 140, "New run finished?");
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+    expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 110 });
+    expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 145 });
+
+    // The carried work is still owed to the next turn that changes something.
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts", 115), fileChangeRow("src/c.ts", 160)]);
+    host.setWorkingTree([{ path: "src/b.ts" }, { path: "src/c.ts" }]);
+    host.setMaxSeq(170);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(2);
+    await host.harness.dispose();
+  });
+
+  it("carries through a queued question and a question after it, then reviews the turn that edits", async () => {
+    const host = await carriedBehindQueue();
+    expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 160 });
+
+    // A question that has another message queued behind it is carried again.
+    host.setQueuedRows([userMessage("u2")]);
+    host.setMaxSeq(200);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+    expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 200 });
+
+    host.setQueuedRows([]);
+    host.setMaxSeq(210);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 220)]);
+    host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
+    host.setMaxSeq(230);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts", "src/c.ts"] });
+    await host.harness.dispose();
+  });
+
+  describe("when the user's next turn is already running", () => {
+    /** Turn A edited `src/a.ts` at seq 150; the user's question (request at seq 160) is already running when A's idle arrives. */
+    async function runningBehind(options: HostOptions = {}) {
+      const host = createHost(options);
+      await plugin(host.bb);
+      await emitActive(host);
+      host.setMaxSeq(200);
+      host.setEnvThreads(busyThread);
+      host.requestTurn({ seq: 160, initiator: "user", text: "a question" });
+      await emitActive(host);
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+      return host;
+    }
+
+    it("stands down when the running turn is a question", async () => {
+      const host = await runningBehind();
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 159 });
+      host.setEnvThreads(idleThread);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(0);
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+      await host.harness.dispose();
+    });
+
+    it("fires with both turns' paths when the running turn edits through a tool", async () => {
+      const host = await runningBehind();
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/b.ts", 170)]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/b.ts" }]);
+      host.setEnvThreads(idleThread);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts", "src/b.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("anchors on the user's latest request, not on a steer inside the finished turn", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await emitActive(host);
+      // The user steered the finished turn at 120; the agent edited after it, at 150.
+      host.requestTurn({ seq: 120, initiator: "user", text: "also do a" });
+      host.setMaxSeq(200);
+      host.setEnvThreads(busyThread);
+      host.requestTurn({ seq: 160, initiator: "user", text: "a question" });
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 159 });
+      host.setEnvThreads(idleThread);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(0);
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+      await host.harness.dispose();
+    });
+
+    it("anchors after an earlier carried user turn's edits", async () => {
+      const host = await carriedBehindQueue();
+      // That user turn edits `src/b.ts` at 180; the next question is already running when its idle arrives.
+      host.requestTurn({ seq: 170, initiator: "user", text: "also do b" });
+      host.setMaxSeq(175);
+      await emitActive(host);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/b.ts", 180)]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/b.ts" }]);
+      host.setEnvThreads(busyThread);
+      host.requestTurn({ seq: 190, initiator: "user", text: "and a question" });
+      host.setMaxSeq(200);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 189 });
+      host.setEnvThreads(idleThread);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(0);
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+      await host.harness.dispose();
+    });
+
+    it("records nothing, and reviews as before, when the user's request cannot be read", async () => {
+      const host = await runningBehind({ turnRequestsThrow: true });
+      expect(host.metadata.lastIdle).toBeUndefined();
+      expect(warned(host, "latest turn request")).toBe(true);
+      host.setEnvThreads(idleThread);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      await host.harness.dispose();
+    });
+
+    it("finds the user's latest request behind more wake-ups than one page of events holds", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await emitActive(host);
+      for (let seq = 101; seq <= 230; seq += 1) {
+        host.requestTurn({ seq, initiator: "system", text: `wake ${seq}` });
+      }
+      host.requestTurn({ seq: 240, initiator: "user", text: "first" });
+      host.requestTurn({ seq: 245, initiator: "user", text: "latest" });
+      host.setMaxSeq(250);
+      host.setEnvThreads(busyThread);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 244 });
+      await host.harness.dispose();
+    });
+
+    it("records nothing when the running turn is not the user's", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await emitActive(host);
+      host.setMaxSeq(200);
+      host.setEnvThreads(busyThread);
+      host.requestTurn({ seq: 160, initiator: "system", text: "child-1 finished" });
+      await emitActive(host);
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ reason: "user-queued" });
+      expect(host.metadata.lastIdle).toBeUndefined();
+      await host.harness.dispose();
+    });
+  });
+
+  it("stands down on a steer into a carried wake-up turn when no edits follow", async () => {
+    const host = await carriedAfterReview();
+    host.setMaxSeq(135);
+    await emitActive(host);
+    host.requestTurn({ seq: 140, initiator: "user", text: "and what about c?" });
+    host.setMaxSeq(150);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+    await host.harness.dispose();
+  });
+
+  it("stands down on a steer as no-authorship when no cursor is carried", async () => {
+    const host = createHost({ authoredRows: [], workingTreeFiles: [] });
+    await plugin(host.bb);
+    await emitActive(host);
+    host.requestTurn({ seq: 120, initiator: "user", text: "and what about c?" });
+    await emitIdle(host);
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-authorship" });
+    await host.harness.dispose();
+  });
+
+  it("counts only the thread's own changes in the gate, and keeps the carried cursor", async () => {
+    const host = await carriedBehindQueue({ workingTreeFiles: [] });
+    // An edit nothing of the thread's made (the IDE) appears during the question's turn: unclaimed, so not new work.
+    host.setWorkingTree([{ path: "ide/edit.ts", status: "??", content: "x" }]);
+    await userTurn(host, 170);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work", scopePaths: [] });
+    expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 100 });
+
+    // The thread's own edit counts, and the review names exactly the paths it owns.
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 190)]);
+    host.setWorkingTree([
+      { path: "src/a.ts" },
+      { path: "src/c.ts" },
+      { path: "ide/edit.ts", status: "??", content: "x" },
+    ]);
+    host.setMaxSeq(200);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({
+      outcome: "fired",
+      scopePaths: ["src/a.ts", "src/c.ts"],
+      unclaimedCount: 1,
+    });
+    await host.harness.dispose();
+  });
+
+  it("does not count a pull or a rebase of replayed commits as new work", async () => {
+    const originals = Array.from({ length: 3 }, (_, index) => ({
+      sha: `old-${index}`,
+      paths: [`src/file-${index}.ts`],
+    }));
+    const host = createHost({
+      onMainline: true,
+      authoredRows: [],
+      workingTreeFiles: [],
+      queuedRows: [userMessage()],
+    });
+    for (const commit of originals) {
+      host.commit(commit.sha, commit.paths);
+    }
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(await lastFire(host)).toMatchObject({ reason: "user-queued" });
+
+    host.setQueuedRows([]);
+    host.rebase([
+      { sha: "upstream-1", paths: ["src/upstream-1.ts"] },
+      ...originals.map((commit, index) => ({ ...commit, sha: `replayed-${index}` })),
+    ]);
+    await userTurn(host, 170, "please pull");
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+    await host.harness.dispose();
+  });
+
+  describe("two questions in a row", () => {
+    it("stands down on both, refreshing the snapshot, and the review covers the carried and the new paths", async () => {
+      const host = await carriedBehindQueue();
+      await userTurn(host, 170);
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ reason: "no-new-work" });
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 175 });
+      await userTurn(host, 190);
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ reason: "no-new-work" });
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 195 });
+      expect(host.sends).toHaveLength(0);
+
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 210)]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
+      host.setMaxSeq(220);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts", "src/c.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("stands down on a wake-up that changed nothing after a question stood down", async () => {
+      const host = await carriedBehindQueue();
+      await userTurn(host, 170);
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ reason: "no-new-work" });
+      host.requestTurn({ seq: 190, initiator: "system", text: "task finished" });
+      host.setMaxSeq(200);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(0);
+      expect(host.metadata.phase).toBe("idle");
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+      await host.harness.dispose();
+    });
+
+    it("lets a wake-up that commits fire the review after a question stood down", async () => {
+      const host = await carriedAfterReview();
+      await userTurn(host, 140);
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ reason: "no-new-work" });
+      host.requestTurn({ seq: 160, initiator: "system", text: "task finished" });
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts", 115), fileChangeRow("src/c.ts", 165)]);
+      host.setWorkingTree([{ path: "src/b.ts" }, { path: "src/c.ts" }]);
+      host.setMaxSeq(170);
+      await emitActive(host);
+      await emitIdle(host);
+      // The question's message is still unspent: the review it earned fires on the first turn that changes something.
+      expect(host.sends).toHaveLength(2);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/b.ts", "src/c.ts"] });
+      await host.harness.dispose();
+    });
+  });
+
+  describe("a parked turn", () => {
+    /** `src/a.ts` edited at 150; the turn ends at seq 160 while another thread's review runs: parked, snapshot at 160. */
+    async function parkedBehindSibling(options: HostOptions = {}) {
+      const host = createHost(options);
+      await plugin(host.bb);
+      await startReview(host, SIBLING_ID);
+      await emitActive(host);
+      host.setMaxSeq(160);
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "sibling-active" });
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 160 });
+      return host;
+    }
+
+    it("fires at the sibling's idle although a carried snapshot is in place", async () => {
+      const host = await carriedBehindQueue();
+      await startReview(host, SIBLING_ID);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/b.ts", 170)]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/b.ts" }]);
+      host.setMaxSeq(180);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "sibling-active" });
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 180 });
+
+      endReview(host, SIBLING_ID);
+      await emitIdle(host, SIBLING_ID);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts", "src/b.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("fires from a read-only child's wake-up for the work the parent did before parking", async () => {
+      const host = createHost({ envThreads: withChild("active") });
+      await plugin(host.bb);
+      await emitActive(host);
+      host.setMaxSeq(160);
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "children-active" });
+
+      host.setEnvThreads(withChild("idle"));
+      host.requestTurn({ seq: 170, initiator: "system", text: "child-1 finished" });
+      host.setMaxSeq(180);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("fires from the sweep for the work the parent did before parking", async () => {
+      const host = await parkedBehindSibling();
+      endReview(host, SIBLING_ID);
+      await host.harness.runSchedule("sweep-deferrals");
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("stands down on a question once the hold has cleared unnoticed, and the next edit reviews the parked paths", async () => {
+      const host = await parkedBehindSibling();
+      // The sibling's review ended with no idle event and no sweep.
+      endReview(host, SIBLING_ID);
+      await userTurn(host, 170);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(0);
+      expect(host.metadata.phase).toBe("idle");
+      expect(await host.bb.storage.kv.list("deferral:")).toEqual([]);
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 190)]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
+      host.setMaxSeq(200);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts", "src/c.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("re-parks on a question while the sibling's review still runs, and fires when it ends", async () => {
+      const host = await parkedBehindSibling();
+      await userTurn(host, 170);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(0);
+      expect(host.metadata.phase).toBe("deferred");
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "sibling-active" });
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 175 });
+
+      endReview(host, SIBLING_ID);
+      await emitIdle(host, SIBLING_ID);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("carries over during a release, and the question after it stands down", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await park(host, THREAD_ID);
+      host.setMaxSeq(160);
+      host.setQueuedRows([userMessage()]);
+      await host.harness.runSchedule("sweep-deferrals");
+      expect(host.sends).toHaveLength(0);
+      expect(host.metadata.phase).toBe("idle");
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 160 });
+
+      host.setQueuedRows([]);
+      await userTurn(host, 170);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(0);
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+      await host.harness.dispose();
+    });
+
+    it("parks a question that arrives while a child runs, and the child's wake-up fires", async () => {
+      const host = createHost({ envThreads: withChild("active") });
+      await plugin(host.bb);
+      await emitActive(host);
+      host.setMaxSeq(160);
+      await emitIdle(host);
+      await userTurn(host, 170);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(0);
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "children-active" });
+
+      host.setEnvThreads(withChild("idle"));
+      host.requestTurn({ seq: 190, initiator: "system", text: "child-1 finished" });
+      host.setMaxSeq(200);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("fires from a wake-up whose turn was running when the sweep took the parked turn", async () => {
+      const host = createHost({ authoredRows: [shellRow()], workingTreeFiles: [], envThreads: withChild("active") });
+      await plugin(host.bb);
+      await emitActive(host);
+      host.setMaxSeq(160);
+      await emitIdle(host);
+      await userTurn(host, 170);
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("deferred");
+
+      // The child wrote a file and ended; the sweep runs while the parent's wake-up turn is running.
+      host.setWorkingTree([{ path: "child.ts", content: "c" }]);
+      host.setEnvThreads(withChild("idle", "active"));
+      host.requestTurn({ seq: 190, initiator: "system", text: "child-1 finished" });
+      host.setMaxSeq(200);
+      await emitActive(host);
+      await host.harness.runSchedule("sweep-deferrals");
+      expect(host.sends).toHaveLength(0);
+      expect(host.metadata.lastIdle).toBeUndefined();
+
+      host.setEnvThreads(idleThread);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["child.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("stands down on a question after a dispatch-time deferral, and fires on its release", async () => {
+      const raced = async () => {
+        const host = createHost();
+        await plugin(host.bb);
+        await emitActive(host);
+        host.armReviewBeforeLock();
+        host.setMaxSeq(160);
+        await emitIdle(host);
+        expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "sibling-active" });
+        expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 160 });
+        return host;
+      };
+
+      const asked = await raced();
+      endReview(asked, "rival");
+      await userTurn(asked, 170);
+      await emitIdle(asked);
+      expect(asked.sends).toHaveLength(0);
+      expect(await lastFire(asked)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+      await asked.harness.dispose();
+
+      const released = await raced();
+      endReview(released, "rival");
+      await emitIdle(released, "rival");
+      expect(released.sends).toHaveLength(1);
+      expect(await lastFire(released)).toMatchObject({ outcome: "fired" });
+      await released.harness.dispose();
+    });
+
+    it("anchors a snapshot on the user's request that landed while the park was decided", async () => {
+      const host: Host = createHost({
+        envThreads: withChild("active"),
+        onChildList: () => {
+          host.requestTurn({ seq: 170, initiator: "user", text: "a question" });
+          host.setMaxSeq(180);
+          host.setEnvThreads(withChild("active", "active"));
+        },
+      });
+      await plugin(host.bb);
+      await emitActive(host);
+      host.setMaxSeq(160);
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "children-active" });
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 169 });
+
+      // The child ended unnoticed; the question's turn idles with the hold cleared.
+      host.setEnvThreads(withChild("idle"));
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(0);
+      expect(await host.bb.storage.kv.list("deferral:")).toEqual([]);
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-new-work" });
+      await host.harness.dispose();
+    });
+  });
+
+  describe("the snapshot", () => {
+    it("is cleared by bb auto-review reset", async () => {
+      const host = await carriedBehindQueue();
+      expect(host.metadata.lastIdle).toBeDefined();
+      expect((await host.harness.runCli(["reset", THREAD_ID])).exitCode).toBe(0);
+      expect(host.metadata.lastIdle).toBeUndefined();
+      await host.harness.dispose();
+    });
+
+    it("is cleared when a turn takes a fresh cursor", async () => {
+      const host = await carriedBehindQueue();
+      // The next turn's edits are no longer uncommitted: it stands down for good, snapshot untouched.
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 190)]);
+      host.setWorkingTree([]);
+      host.setMaxSeq(200);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "empty-scope" });
+      expect(host.metadata.lastIdle).toBeDefined();
+
+      host.setMaxSeq(210);
+      await emitActive(host);
+      expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 210 });
+      expect(host.metadata.lastIdle).toBeUndefined();
+      await host.harness.dispose();
+    });
+  });
+
+  describe("fails open", () => {
+    it("records nothing, and reviews as before, when the tree cannot be read while carrying over", async () => {
+      const host = createHost({ queuedRows: [userMessage()] });
+      await plugin(host.bb);
+      await emitActive(host);
+      host.setMaxSeq(160);
+      host.setStatusThrows(true);
+      await emitIdle(host);
+      host.setStatusThrows(false);
+      expect(await lastFire(host)).toMatchObject({ reason: "user-queued" });
+      expect(host.metadata.lastIdle).toBeUndefined();
+      expect(warned(host, "could not snapshot the working tree")).toBe(true);
+
+      host.setQueuedRows([]);
+      await userTurn(host, 170);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      await host.harness.dispose();
+    });
+
+    it("records nothing, and reviews as before, when the cursor cannot be read after an already-reviewed stand-down", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await emitActive(host);
+      await emitIdle(host);
+      await emitIdle(host);
+      host.setMaxSeq(110);
+      await emitActive(host);
+      host.setWorkingTree([{ path: "src/b.ts" }]);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts", 115)]);
+      host.setTimelineThrows(true);
+      await emitIdle(host);
+      host.setTimelineThrows(false);
+      expect(await lastFire(host)).toMatchObject({ reason: "already-reviewed" });
+      expect(host.metadata.lastIdle).toBeUndefined();
+
+      await userTurn(host, 140);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(2);
+      await host.harness.dispose();
+    });
+
+    it("records nothing, and fires on a question, when the cursor cannot be read while parking", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await startReview(host, SIBLING_ID);
+      await emitActive(host);
+      host.setTimelineThrows(true);
+      await emitIdle(host);
+      host.setTimelineThrows(false);
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "sibling-active" });
+      expect(host.metadata.lastIdle).toBeUndefined();
+
+      // The hold cleared unnoticed; without a snapshot the question's turn is reviewed as before.
+      endReview(host, SIBLING_ID);
+      await userTurn(host, 170);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      await host.harness.dispose();
+    });
+
+    it("fires a release whose user-request lookup throws", async () => {
+      const host = createHost({ turnRequestsThrow: true });
+      await plugin(host.bb);
+      await startReview(host, SIBLING_ID);
+      await emitActive(host);
+      host.setMaxSeq(160);
+      await emitIdle(host);
+      expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 160 });
+
+      endReview(host, SIBLING_ID);
+      await emitIdle(host, SIBLING_ID);
+      expect(host.sends).toHaveLength(1);
+      expect(warned(host, "wrote since")).toBe(true);
       await host.harness.dispose();
     });
   });

@@ -69,6 +69,15 @@ describe("threadStateSchema", () => {
     };
     expect(threadStateSchema.parse(state)).toEqual(state);
   });
+
+  it("round-trips the last idle's cursor, time and tree", () => {
+    const lastIdle = {
+      sinceSeq: 130,
+      startedAt: 1_000,
+      tree: { headSha: "abc", files: { "src/a.ts": "1|h" }, commits: [] },
+    };
+    expect(threadStateSchema.parse({ phase: "idle", lastIdle }).lastIdle).toEqual(lastIdle);
+  });
 });
 
 describe("isStale", () => {
@@ -110,10 +119,16 @@ describe("resetToIdlePatch", () => {
       "dispatchedAt",
       "deferredSince",
       "turnDecided",
+      "lastIdle",
       "heldBy",
       "reviewDeliveredAt",
       "reviewDeliveredSeq",
     ]);
+  });
+
+  it("clears the last idle's snapshot", () => {
+    expect(LATCH_KEYS).toContain("lastIdle");
+    expect(resetToIdlePatch().remove).toContain("lastIdle");
   });
 
   it("keeps the last code review's cursor", () => {

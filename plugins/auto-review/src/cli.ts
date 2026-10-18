@@ -274,7 +274,7 @@ export function registerAutoReviewCli(
               return {
                 refused: `thread ${threadId} has a deferred turn; its review runs when the hold clears — reset would drop it. ` +
                   `Check \`bb auto-review status ${threadId}\`; if the hold never clears, stop or archive the holding child thread, ` +
-                  "or send the thread another message (a new turn re-checks the deferred one and reviews it).",
+                  "or send the thread another message: its turn re-checks the hold, and once the hold has cleared, a turn that changes something reviews the parked work (a question leaves it carried).",
               };
             }
             // A review cut off by the reset must not leave the badge on the one before it.

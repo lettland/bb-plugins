@@ -53,7 +53,7 @@ export async function onThreadActive(
       bb,
       thread.id,
       { turnStart: { sinceSeq, startedAt, ...(tree === undefined ? {} : { tree }) } },
-      ["turnDecided"],
+      ["turnDecided", "lastIdle"],
     );
   });
 }
