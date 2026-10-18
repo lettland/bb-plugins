@@ -57,12 +57,14 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   touches none of the files that family edited with tools. Nothing is dropped as upstream,
   from either ref, when a family row since the turn start (or since the earliest such
   commit's author date, when that is earlier) may have pushed or moved a remote-tracking
-  ref, or a tool edited a file that holds one, so a backdated commit of its own that it
-  pushed stays with the thread; once the family has pushed, pulled older work stays in
-  review too. A push made through a script, an alias or a non-shell tool, or in an earlier
-  turn before a commit dated after it, is not detected. A commit someone made by hand in
-  the same checkout and pushed to the branch counts as upstream too, as on the mainline.
-  Only `origin/<branch>` is checked, not another configured upstream remote. A sibling's
+  ref (`push`, `update-ref`, `git remote add` or `rename`, a `fetch` with a refspec, and the
+  like), or a tool edited `refs/remotes/`, `packed-refs` or `.git/config`, so a backdated
+  commit of its own that it pushed stays with the thread; once the family has pushed,
+  pulled older work stays in review too. A push made through a script, an alias or a
+  non-shell tool, or a push in an earlier turn of a commit whose author date is later than
+  that push, is not detected. A commit someone made by hand in the same checkout and
+  pushed to the branch counts as upstream too, as on the mainline. Only `origin/<branch>`
+  is checked, not another configured upstream remote. A sibling's
   uncommitted shell edit, or a human's edit, made in the same checkout during the turn
   cannot be told apart and is claimed, and this thread's own shell edits (no tool row)
   swept into a sibling's `git add -A` commit are left to the sibling.

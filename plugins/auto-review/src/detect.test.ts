@@ -1621,13 +1621,13 @@ describe("workspace capture edge cases", () => {
           );
         });
 
-        it.each([".git/refs/remotes/origin/develop", ".git/packed-refs"])(
+        it.each([".git/refs/remotes/origin/develop", ".git/packed-refs", ".git/config"])(
           "drops no commit as upstream when a tool edited %s",
           async (path) => {
             const { result, infos } = await attribute({ ...options, timelines: { thr_self: [edit(path)] } });
             expect(result).toMatchObject({ commits: ["u1", "u2"], upstreamCommits: [] });
             expect(infos).toEqual([
-              "auto-review: not checking whether the turn's commits came from origin/master or origin/develop: the thread's family edited a file that holds remote-tracking refs",
+              `auto-review: not checking whether the turn's commits came from origin/master or origin/develop: the thread's family edited a file that holds remote-tracking refs or remotes: ${path} (thread thr_self)`,
             ]);
           },
         );
@@ -2292,6 +2292,11 @@ describe("mayMoveRemoteRef", () => {
     "git -c url.x.insteadOf=y fetch",
     "git config --global url.x.insteadOf y",
     "rm .git/packed-refs",
+    "git remote add origin .",
+    "git remote remove origin && git remote add origin .",
+    "git remote rename origin old",
+    "git fetch . HEAD:remotes/origin/develop",
+    "git branch -f x refs/remotes/origin/x",
   ])("matches %j", (text) => {
     expect(mayMoveRemoteRef(text)).toBe(true);
   });
@@ -2309,6 +2314,8 @@ describe("mayMoveRemoteRef", () => {
     "git fetch --all --prune",
     'rg "\\.push\\("',
     "git remote -v",
+    "git remote get-url origin",
+    "ls src/remotes/",
     "",
   ])("ignores %j", (text) => {
     expect(mayMoveRemoteRef(text)).toBe(false);

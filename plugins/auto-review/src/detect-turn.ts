@@ -228,11 +228,12 @@ function upstreamRefs(workspace: AvailableWorkspace): string[] {
  *
  * Nothing is dropped when a row of the family since the turn start, or since
  * that date when it is earlier, may have moved a remote-tracking ref
- * (`mayMoveRemoteRef`), or when a tool edited a file that holds one: a commit of
- * the thread's own, even backdated, would then be reachable from the remote and
- * look pulled. A push made through a script, an alias or a tool that is not a
- * shell row goes unseen, and so does one made in an earlier turn, before a
- * commit dated after it. Any doubt keeps a commit with the turn.
+ * (`mayMoveRemoteRef`), or when a tool edited a file that holds one (under
+ * `refs/remotes/`, `packed-refs`, `.git/config`): a commit of the thread's own,
+ * even backdated, would then be reachable from the remote and look pulled. A
+ * push made through a script, an alias or a tool that is not a shell row goes
+ * unseen, and so does a push in an earlier turn of a commit whose author date
+ * is later than that push. Any doubt keeps a commit with the turn.
  */
 async function upstreamCommitsOf(
   upstream: UpstreamInput,
@@ -304,8 +305,22 @@ async function upstreamCommitsOf(
       reusable,
     );
   }
-  if ([...familyPaths].some((path) => path.includes("refs/remotes/") || path.endsWith("packed-refs"))) {
-    return skip("the thread's family edited a file that holds remote-tracking refs", reusable);
+  const holdsRemotes = (path: string) =>
+    path.includes("refs/remotes/") || path.endsWith("packed-refs") || path.endsWith(".git/config");
+  const edited = new Set(
+    [
+      { id: input.threadId, paths: [...ownPaths, ...lookbackPaths] },
+      ...kin.threads.map((threadRows, at) => ({
+        id: kin.threadIds[at] ?? "",
+        paths: authoredPathsFromRows(threadRows, Number.NEGATIVE_INFINITY),
+      })),
+    ].flatMap(({ id, paths }) => paths.filter(holdsRemotes).map((path) => `${path} (thread ${id})`)),
+  );
+  if (edited.size > 0) {
+    return skip(
+      `the thread's family edited a file that holds remote-tracking refs or remotes: ${[...edited].join(", ")}`,
+      reusable,
+    );
   }
   const dropped = candidates.flatMap(({ sha, authoredAt, paths }) => {
     const ref = holder(sha);

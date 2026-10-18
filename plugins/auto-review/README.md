@@ -226,18 +226,19 @@ It ships enabled (opt-out).
   nothing is dropped as upstream, from either ref, and the log says so and names the
   thread(s): a commit of the thread's own, even backdated, would otherwise look pulled once
   pushed. Once the family has pushed, pulled older work stays in review too. The same
-  holds when a tool edited a file under `refs/remotes/` or `packed-refs`. The row matches
-  loosely, in shell text of any length: the word `push` (not after a `.`, so
-  `git stash push` counts and `.push(` does not), `update-ref`, `send-pack`, `set-url`,
-  `insteadOf`, `packed-refs`, `remotes/`, a `remote.<name>.url` key, `gh repo sync`, or a
-  `git fetch` with a refspec (`a:b`) or a local source (`.`, `./`, `$PWD`, `$(pwd)`); a row
-  that was denied or never ran does not count. A push made through a script, an alias or a tool
-  that is not a shell row, or in an earlier turn before a commit dated after it, is not
-  detected, so a deliberately backdated commit pushed that way can still be dropped. A
-  commit someone made by hand in the same checkout and pushed to the branch counts as
-  upstream too, as on the mainline. Only `origin/<branch>` is checked, not another
-  configured upstream remote. Uncommitted paths a sibling's shell command wrote to by name
-  during the turn (a
+  holds when a tool edited a file under `refs/remotes/`, `packed-refs` or `.git/config`;
+  the log names the file and the thread, never file content. The row matches loosely, in
+  shell text of any length: the word `push` (not after a `.`, so `git stash push` counts
+  and `.push(` does not), `update-ref`, `send-pack`, `set-url`, `insteadOf`, `packed-refs`,
+  `refs/remotes/`, `remotes/origin/`, a `remote.<name>.url` key, `git remote add` or
+  `rename`, `gh repo sync`, or a `git fetch` with a refspec (`a:b`) or a local source (`.`,
+  `./`, `$PWD`, `$(pwd)`); a row that was denied or never ran does not count. A push made
+  through a script, an alias or a tool that is not a shell row, or a push in an earlier
+  turn of a commit whose author date is later than that push, is not detected, so a
+  deliberately backdated commit pushed that way can still be dropped. A commit someone
+  made by hand in the same checkout and pushed to the branch counts as upstream too, as on
+  the mainline. Only `origin/<branch>` is checked, not another configured upstream remote.
+  Uncommitted paths a sibling's shell command wrote to by name during the turn (a
   redirect or `tee` target, the last argument of `cp`/`mv`/`install`, `rm`, `sed -i`, `perl -i`,
   `git checkout --` and `git restore` paths, and the paths in a `python`, `node`, `ruby` or `perl`
   script that writes a file) are left to it the same way, when no tool edit or kept commit of
