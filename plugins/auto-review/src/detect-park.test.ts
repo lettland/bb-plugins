@@ -60,7 +60,7 @@ interface Options {
   /** The thread's own timeline can be read this many times; the next read fails. */
   selfReads?: number;
   /** Rows the thread's timeline gains after this many reads of it. */
-  lateRows?: { reads: number; rows: unknown[] };
+  lateRows?: { threadId?: string; reads: number; rows: unknown[] };
   /** Untracked paths now. */
   untracked?: string[];
   /** The `aheadCount` every status answer reports, instead of the number of commits listed. */
@@ -78,6 +78,7 @@ async function released(options: Options = {}) {
   const statusCalls: Array<Record<string, unknown>> = [];
   const chain = options.chain ?? [];
   let selfReads = 0;
+  const reads = new Map<string, number>();
   const head = chain.at(-1)?.sha ?? "h0";
   const parkHead = "parkHead" in options ? options.parkHead : (chain[(options.parkedAfter ?? 0) - 1]?.sha ?? "h0");
   const live = {
@@ -144,7 +145,8 @@ async function released(options: Options = {}) {
           if (rows instanceof Error) {
             throw rows;
           }
-          if (threadId === "self" && options.lateRows !== undefined && selfReads > options.lateRows.reads) {
+          reads.set(threadId, (reads.get(threadId) ?? 0) + 1);
+          if (options.lateRows !== undefined && threadId === (options.lateRows.threadId ?? "self") && (reads.get(threadId) ?? 0) > options.lateRows.reads) {
             return { rows: [...rows, ...options.lateRows.rows], maxSeq: 0, timelinePage: { hasOlderRows: false, olderCursor: null } };
           }
           return { rows, maxSeq: 0, timelinePage: { hasOlderRows: false, olderCursor: null } };
@@ -155,7 +157,7 @@ async function released(options: Options = {}) {
   const turnTree = { headSha: "h0", files: options.turnFiles ?? {}, commits: [], ...options.turnCommits };
   // What the snapshots hold of the commits made before the park: on a branch the commits ahead, on the mainline the recent ones.
   const before = chain.slice(0, options.parkedAfter ?? 0).map(({ sha }) => sha);
-  const heldAtPark = options.mainline === true ? { commits: [], recentCommits: before.map(recent) } : { commits: before };
+  const heldAtPark = options.mainline === true ? { commits: [], recentCommits: [...before.map(recent), recent("h0")] } : { commits: before };
   const park =
     options.park === null
       ? undefined
@@ -306,13 +308,14 @@ describe("a turn released from a park", () => {
     });
 
     it.each([
-      ["mainline", true, { recentCommits: [recent("base1")] }],
-      ["branch", false, { commits: ["base1"] }],
+      ["mainline", true, { recentCommits: [recent("h0")] }],
+      ["branch", false, { commits: ["h0"] }],
     ])("a path of a commit made before the park that the turn's own list dropped, on a %s checkout", async (_name, mainline, turnCommits) => {
       // Its author date is older than the turn, as an amend's is, so the turn's list does not hold it.
       const { result, infos } = await released({
         mainline,
         turnCommits,
+        parkCommits: mainline ? undefined : { commits: ["h0", "c1"] },
         timelines: { self: [opaque] },
         parkedAfter: 1,
         chain: [{ sha: "c1", paths: ["lib/c1file.ts"], authoredAt: 5_000 }],
@@ -517,18 +520,19 @@ describe("a turn released from a park", () => {
       ["paused", task("paused", null)],
       ["finished after the park", task("completed", 31_000)],
       ["finished at an unknown time", task("failed", null)],
+      ["queued", task("queued", 12_000)],
     ])("when a workflow task was %s", async (_name, row) => {
       await unfiltered({ ...afterPark, timelines: { self: [opaque, row] } }, stillWrites);
     });
 
-    it("leaves the filter on for a workflow task that finished before the park", async () => {
-      const { result } = await released({ ...sweepOnly, ...afterPark, timelines: { self: [opaque, task("completed", 12_000)] } });
+    it.each(["completed", "failed", "killed", "stopped"])("leaves the filter on for a workflow task that was %s before the park", async (state) => {
+      const { result } = await released({ ...sweepOnly, ...afterPark, timelines: { self: [opaque, task(state, 12_000)] } });
       expect(result.parkedCommits).toEqual(["c1"]);
     });
 
     it.each([
       ["a tool that is not known to be read-only", rowAt({ workKind: "tool", approvalStatus: null, toolName: "apply", toolArgs: { path: "x" } }, 11_000)],
-      ["an extension call", rowAt({ workKind: "extension" }, 11_000)],
+      ["an extension call", rowAt({ workKind: "extension", callId: "call-1", extensionKind: "mcp/tool" }, 11_000)],
     ])("when the family ran %s", async (_name, row) => {
       await unfiltered({ ...afterPark, timelines: { self: [opaque, row] } }, stillWrites);
     });
@@ -557,16 +561,42 @@ describe("a turn released from a park", () => {
       );
     });
 
+    it.each([
+      ["a window", edit("lib/kid.ts", 40_000), "the thread's family was active since the park"],
+      ["a detached command", rowAt({ workKind: "command", approvalStatus: null, command: "docker compose up -d", cwd: "/w" }, 12_000), stillWrites],
+    ])("when a kin thread gained %s between the two quiet reads", async (_name, row, reason) => {
+      const kid = entry("kid", { parentThreadId: "self" });
+      await unfiltered(
+        { ...afterPark, entries: [self, kid], timelines: { self: [opaque], kid: [] }, lateRows: { threadId: "kid", reads: 1, rows: [row] } },
+        reason,
+      );
+    });
+
+    it("when the park snapshot's commit window does not reach back to the turn-start head", async () => {
+      // The turn started with no recent commits; the window at the park holds only a newer one, so a dropped commit may lie outside it.
+      await unfiltered(
+        {
+          ...afterPark,
+          mainline: true,
+          turnCommits: { recentCommits: [] },
+          parkCommits: { recentCommits: [recent("later")] },
+          parkedAfter: 1,
+          chain: [{ sha: "c1", paths: ["lib/new.ts"], authoredAt: 5_000 }],
+        },
+        "the commits made before the park cannot be told from the snapshots",
+      );
+    });
+
     it("when a commit made before the park that the turn's own list dropped has paths that could not be read", async () => {
       await unfiltered(
-        { ...afterPark, turnCommits: { commits: ["base1"] }, parkedAfter: 1, chain: [{ sha: "c1", paths: null, authoredAt: 5_000 }] },
+        { ...afterPark, turnCommits: { commits: ["h0"] }, parkCommits: { commits: ["h0", "c1"] }, parkedAfter: 1, chain: [{ sha: "c1", paths: null, authoredAt: 5_000 }] },
         "a commit made before the park has paths that could not be read",
       );
     });
 
     it.each([
       ["names none of them", { parkCommits: { commits: [] } }, "the commits made before the park cannot be told from the snapshots"],
-      ["names too many of them", { parkCommits: { commits: Array.from({ length: 21 }, (_, at) => `p${at}`) } }, "too many commits were made before the park to read"],
+      ["names too many of them", { parkCommits: { commits: ["h0", ...Array.from({ length: 21 }, (_, at) => `p${at}`)] } }, "too many commits were made before the park to read"],
     ] as Array<[string, Options, string]>)("when the park snapshot %s", async (_name, options, reason) => {
       await unfiltered(
         { ...afterPark, parkedAfter: 1, chain: [{ sha: "c1", paths: ["lib/new.ts"], authoredAt: 20_000 }], ...options },

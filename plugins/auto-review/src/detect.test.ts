@@ -2362,41 +2362,67 @@ describe("mayDetach", () => {
     "curl 'https://example.test/?a=1&b=2'",
     "docker compose up -d",
     "docker compose up --build --detach web",
+    "docker compose up --build",
     "docker run -d --name db postgres",
     "sudo /usr/bin/podman run -dit img",
     "docker-compose up -d",
+    "docker start x",
+    "docker compose restart",
+    "podman start x",
+    "bash -c \"docker compose up -d\"",
+    "sh -c 'tmux new -d x'",
+    "$(docker run -d x)",
+    "(docker run -d img)",
+    "echo `screen -dm x`",
     "tmux new-session -d -s dev 'npm run dev'",
     "tmux new -s dev",
-    "tmux send-keys -d x",
+    "tmux send-keys -t dev 'npm run dev' Enter",
+    "tmux ls",
     "screen -dmS dev ./serve.sh",
-    "screen -d -m ./serve.sh",
+    "screen -ls",
     "systemd-run --user ./job.sh",
+    "systemctl --user start x",
+    "service nginx start",
+    "brew services start redis",
     "pm2 start app.js",
     "launchctl load ~/Library/LaunchAgents/x.plist",
     "crontab -e",
     "at now + 1 minute",
     "cd /w && at 5pm",
+    "sudo at now",
+    "echo 'x' | (at now)",
+    "batch",
   ])("may leave %j running", (text) => {
     expect(mayDetach(text)).toBe(true);
   });
 
   it.each([
     "npm test && npm run build",
+    "npm test",
+    "cmd && other",
     "npm test 2>&1 | tail -n 5",
     "cmd >&2",
     "cmd &> out.log",
     "echo a \\& b",
     "git log --oneline",
+    "git status",
     "docker build -t app .",
-    "docker compose up --build",
+    "docker build .",
+    "docker ps",
     "docker run --rm img",
-    "tmux ls",
-    "screen -ls",
     "echo look at this",
     "cat attach.txt",
     "",
   ])("does not for %j", (text) => {
     expect(mayDetach(text)).toBe(false);
+  });
+
+  it("reads a long text in linear time", () => {
+    const started = performance.now();
+    expect(mayDetach("docker -x ".repeat(25_000))).toBe(false);
+    expect(mayDetach(`${"x ".repeat(100_000)}-${"a".repeat(100_000)}`)).toBe(false);
+    expect(mayDetach(`${"echo hi; ".repeat(20_000)}nohup x`)).toBe(true);
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 });
 

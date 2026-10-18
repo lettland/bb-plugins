@@ -466,16 +466,19 @@ thread, so the turn's review and commit are never dropped by it.
   commit the turn already touched stays with it. A commit that arrived while the turn waited
   still rides along in the turn's merge: it is only scanned for secrets, not reviewed.
   Nothing is left out after any activity of the thread or its children since the park (checked
-  again after the files are read), work that may still be writing (a lone `&`, `nohup`,
-  `setsid`, `disown`, `docker ... -d`, `tmux`, `screen`, `systemd-run`, `pm2`, `launchctl`,
-  `crontab`, `at`; a background agent; a harness background command or workflow task not
-  finished before the park; an extension call or a tool not known to be read-only), when HEAD
-  does not descend from the head at the park (an amend, a rebase, a reset), when the commit list
-  is capped, a commit's paths cannot be read or the commits made before the park cannot be told
-  from the snapshots, or after a failed read. A row opened more than 30 minutes before the turn
-  started is not seen, and neither is one the host has not yet recorded when the timelines are
-  read (a small race). Something committed while a turn waits is not reviewed by that turn: ask
-  in a later turn to have it reviewed.
+  again after the files are read), or work that may still be writing: a shell command that
+  mentions a lone `&`, `nohup`, `setsid`, `disown`, `daemon`, `systemd-run`, `systemctl`,
+  `service`, `launchctl`, `crontab`, `pm2`, `batch`, any `tmux` or `screen`, `brew services`,
+  `at` as a command, or `docker`, `podman` or `compose` with `-d`, `--detach`, `start`, `restart`
+  or `up` (even inside quotes or `$( )`); a background agent; a harness background command or a
+  workflow task not finished before the park; any extension (MCP) call or tool not known to be
+  read-only, since a tool can start a detached process the timeline cannot show. Nor is it left
+  out when HEAD does not descend from the head at the park (an amend, a rebase, a reset), when
+  the commit list is capped, a commit's paths cannot be read, or the park snapshot's commit lists
+  do not reach back to the turn-start head, or after a failed read. A row opened more than 30
+  minutes before the turn started is not seen, and neither is one the host has not yet recorded
+  when the timelines are read (a small race). Something committed while a turn waits is not
+  reviewed by that turn: ask in a later turn to have it reviewed.
 - `no-authorship` — the turn changed no files: no tool edit, and nothing in the working
   tree (a new, rewritten or deleted path, or one in a commit the turn made — on a branch or
   straight onto the mainline) changed since the turn started. Edits made through shell commands count. Untracked

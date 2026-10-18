@@ -218,17 +218,19 @@ It ships enabled (opt-out).
   `lastFire` and the log name the commits and up to five example paths. Something you commit
   while a turn waits is not reviewed by that turn: ask in a later turn to have it reviewed.
   Nothing is left out after any activity of the thread or its children since the park (checked
-  again after the files are read), work that may still be writing (a shell command that
-  backgrounds a process with a lone `&`, `nohup`, `setsid`, `disown`, `docker ... -d`, `tmux`,
-  `screen`, `systemd-run`, `pm2`, `launchctl`, `crontab` or `at`; a background agent; a
-  harness background command or workflow task that was not finished before the park; an
-  extension call or a tool not known to be read-only), when HEAD does not descend from the
-  head at the park (an amend, a rebase, a reset), when the turn's commit list is capped, a
-  commit's paths cannot be read, or the commits made before the park cannot be told from the
-  snapshots, or after a failed read. A turn parked again takes a new snapshot, so changes
-  between two parks stay with the turn. Limits: a row of the thread opened more than 30
-  minutes before the turn started is not seen, and a row the host has not yet recorded when
-  the timelines are read is not seen either (a small race).
+  again after the files are read), or work that may still be writing: a shell command that
+  mentions a lone `&`, `nohup`, `setsid`, `disown`, `daemon`, `systemd-run`, `systemctl`,
+  `service`, `launchctl`, `crontab`, `pm2`, `batch`, any `tmux` or `screen`, `brew services`,
+  `at` as a command, or `docker`, `podman` or `compose` with `-d`, `--detach`, `start`, `restart`
+  or `up` (even inside quotes or `$( )`); a background agent; a harness background command or a
+  workflow task not finished before the park; any extension (MCP) call or tool not known to be
+  read-only, since a tool can start a detached process the timeline cannot show. Nor is it left
+  out when HEAD does not descend from the head at the park (an amend, a rebase, a reset), when
+  the turn's commit list is capped, a commit's paths cannot be read, or the park snapshot's
+  commit lists do not reach back to the turn-start head, or after a failed read. A turn parked
+  again takes a new snapshot, so changes between two parks stay with the turn. Limits: a row of
+  the thread opened more than 30 minutes before the turn started is not seen, and a row the host
+  has not yet recorded when the timelines are read is not seen either (a small race).
 - Attributes work to the turn from the thread's own file-change rows plus a working-tree
   snapshot taken at turn start, so shell edits, generators and commits made during the
   turn all count in a sweep. Files another thread changed, files already dirty and left untouched,

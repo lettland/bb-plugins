@@ -33,6 +33,9 @@ import { headShaOf, isHarnessOutput } from "./detect-workspace.js";
 import type { AvailableWorkspace, TimelineRow } from "./detect-workspace.js";
 import type { TreeSnapshot } from "./state.js";
 
+/** The states a workflow task ends in; any other is unfinished. */
+const FINISHED_TASKS: readonly string[] = ["completed", "failed", "killed", "stopped"];
+
 /** What was left out of a turn as made while it was parked. */
 export interface ParkedOut {
   tree: TreeChanges;
@@ -89,17 +92,19 @@ async function commitsAfterPark(
 
 /**
  * Whether a row may write files the timeline does not show, or keep writing
- * after it returned: a background delegation, a workflow task that is not
- * finished or finished at or after the park (or at an unknown time), an
+ * after it returned: a background delegation, a workflow task that is not in a
+ * finished state or finished at or after the park (or at an unknown time), an
  * extension call, and a tool that is not known to be read-only (the same
- * classification the family's claims use).
+ * classification the family's claims use). The last two are deliberately
+ * conservative: a tool can start a detached process the timeline cannot show, so
+ * any write-capable tool or MCP call in the lookback turns the filtering off.
  */
 function mayStillWrite(row: WorkRow, parkedAt: number): boolean {
   switch (row.workKind) {
     case "delegation":
       return row.background;
     case "workflow":
-      return ["pending", "running", "paused"].includes(row.taskStatus) || row.completedAt === null || row.completedAt >= parkedAt;
+      return !FINISHED_TASKS.includes(row.taskStatus) || row.completedAt === null || row.completedAt >= parkedAt;
     case "extension":
       return true;
     case "tool":
@@ -159,8 +164,8 @@ async function quietKinPaths(
  * The paths of the commits made before the park that `fetched` does not list
  * (the turn's own list drops, say, a commit that kept an old author date), from
  * the park snapshot's commits that the turn-start snapshot did not hold, or why
- * they cannot be told: a head that moved with no such commit named, too many
- * of them, or paths that could not be read.
+ * they cannot be told: the snapshot's lists do not reach back to the turn-start
+ * head (when the heads differ), too many commits, or paths that could not be read.
  */
 async function unlistedParkPaths(
   bb: BbPluginApi,
@@ -170,10 +175,12 @@ async function unlistedParkPaths(
   listed: ReadonlySet<string>,
 ): Promise<string[] | string> {
   const known = new Set([...start.commits, ...(start.recentCommits ?? []).map(({ sha }) => sha)]);
-  const made = [...park.tree.commits, ...(park.tree.recentCommits ?? []).map(({ sha }) => sha)].filter((sha) => !known.has(sha));
-  if (made.length === 0 && park.tree.headSha !== start.headSha) {
+  const held = [...park.tree.commits, ...(park.tree.recentCommits ?? []).map(({ sha }) => sha)];
+  // The park snapshot's lists are only known to be whole when they reach back to the turn-start head (or that head is the park head).
+  if (park.tree.headSha !== start.headSha && (start.headSha === null || !held.includes(start.headSha))) {
     return "the commits made before the park cannot be told from the snapshots";
   }
+  const made = held.filter((sha) => !known.has(sha));
   const unlisted = [...new Set(made)].filter((sha) => !listed.has(sha));
   if (unlisted.length > MAX_NEW_COMMITS) {
     return "too many commits were made before the park to read";

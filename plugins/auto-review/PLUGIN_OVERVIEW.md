@@ -43,13 +43,17 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   already touched stays, and untracked harness output is never counted. When only such changes
   are left the turn stands down as `changed-while-parked`, scanning nothing, and something you
   commit while a turn waits is not reviewed by that turn. Nothing is left out after any family
-  activity since the park, work that may still be writing (a lone `&`, `nohup`, `setsid`,
-  `docker -d`, `tmux`, `screen`, `systemd-run`, `pm2`, `launchctl`, `crontab`, `at`, a background
-  agent or harness command, an unfinished workflow task, an extension call or a tool not known
-  to be read-only), a HEAD that does not descend from the park head, a capped commit list, or a
-  failed read; a row opened over 30 minutes before the turn started is not seen, and neither is
-  one the host has not yet recorded when the timelines are read. A turn parked again takes a new
-  snapshot.
+  activity since the park (checked again after the files are read) or work that may still be
+  writing: a shell command mentioning a lone `&`, `nohup`, `setsid`, `disown`, `daemon`,
+  `systemd-run`, `systemctl`, `service`, `launchctl`, `crontab`, `pm2`, `batch`, any `tmux` or
+  `screen`, `brew services`, `at` as a command, or `docker`/`podman`/`compose` with `-d`,
+  `--detach`, `start`, `restart` or `up`; a background agent or harness background command; an
+  unfinished workflow task; any extension (MCP) call or tool not known to be read-only (a tool
+  can start a detached process the timeline cannot show). Nor after a HEAD that does not
+  descend from the park head, a capped commit list, park-snapshot commit lists that do not reach
+  back to the turn-start head, or a failed read; a row opened over 30 minutes before the turn
+  started is not seen, and neither is one the host has not yet recorded when the timelines are
+  read. A turn parked again takes a new snapshot.
 - Attributes work to the turn however it was made: the thread's own `file-change` rows
   after the turn's start cursor, plus whatever the working tree shows changed since the
   turn started (a fingerprint per uncommitted path and the commits ahead of the base,
