@@ -151,25 +151,28 @@ const DETACH_WORDS =
   /(?<![<>&\\])&(?![>&])|\b(?:nohup|setsid|disown|daemon|coproc|systemd-run|systemctl|service|launchctl|crontab|pm2|tmux|screen|batch)\b|\bbrew\s+services\b/u;
 
 /**
- * `at` as a command word: at the start of a command, after a path separator,
- * `(`, a quote or a backtick, or after a word that runs its argument. Each
- * alternative is fixed, with one `\s*` before `at`, so the match is linear.
+ * `at` as a standalone word followed by a time or an option (`at now`, `at 10:00`,
+ * `at -f job`): it is the scheduler, not the English word. It is read from what
+ * follows it, so any wrapper before it (`sudo -u bob`, `timeout 5`, `TZ=UTC`)
+ * is covered. Fixed tokens around one `\s+`, so the match is linear.
  */
-const AT_COMMAND = /(?:^|[/(`'"]|\b(?:sudo|env|nice|time|exec|command|then|do|xargs)\b)\s*at\b/u;
+const AT_COMMAND = /(?:^|[\s/=({!"'`])at\s+(?:now|noon|midnight|teatime|tomorrow|today|\d|-[A-Za-z])/u;
 
 /**
- * A container program, and what starts or detaches one: `-d`-style flags,
- * `--detach`, `start`, `restart`, `up`. The first run of letters in a flag cannot
- * hold a `d`, so the flag can only match one way and cannot backtrack.
+ * A container program, and what starts or detaches one. A `-d`-style flag is
+ * its own pattern, because its text is not reported: the first run of letters in
+ * a flag cannot hold a `d`, so it can only match one way and cannot backtrack,
+ * and a trailing backslash (a line continuation) ends it. The fixed words are
+ * `--detach`, `start`, `restart` and `up`.
  */
 const CONTAINER_PROGRAM = /\b(?:docker|podman|nerdctl|compose)\b/u;
-const CONTAINER_START =
-  /(?:^|\s)(?:--detach(?=[=\s"'`)]|$)|-[A-Za-ce-z]*d[A-Za-z]*(?=[\s"'`)]|$))|\b(?:start|restart|up)\b/u;
+const CONTAINER_FLAG = /(?:^|\s)-[A-Za-ce-z]*d[A-Za-z]*(?=[\s"'`)\\]|$)/u;
+const CONTAINER_WORD = /(?:^|\s)--detach(?=[=\s"'`)\\]|$)|\b(?:start|restart|up)\b/u;
 
 /**
  * What in shell text may leave a process running after it returns, which could
- * still write files later: the matched word (`&`, `tmux`, `at`, `docker … -d`),
- * never any other part of the text; undefined when nothing does. Loose on
+ * still write files later: a fixed label or word (`&`, `tmux`, `at`, `docker … -d`,
+ * `docker … up`), never any other part of the text; undefined when nothing does. Loose on
  * purpose, like `mayMoveRemoteRef`, and never truncated: a miss would let a
  * later write be taken for someone else's, so false positives (`curl
  * "u?a=1&b=2"`, any `service` or `tmux` mention) only keep the work with the
@@ -187,15 +190,17 @@ export function detachedBy(text: string): string | undefined {
       return "at";
     }
     const program = CONTAINER_PROGRAM.exec(command);
-    const start = program === null ? null : CONTAINER_START.exec(command);
-    if (program !== null && start !== null) {
-      return `${program[0]} … ${start[0].trim()}`;
+    if (program === null) {
+      continue;
+    }
+    // A flag's own text can be anything letters (`-pSecret…`), so a flag is reported by a fixed label.
+    const word = CONTAINER_WORD.exec(command);
+    if (word !== null) {
+      return `${program[0]} … ${word[0].trim()}`;
+    }
+    if (CONTAINER_FLAG.test(command)) {
+      return `${program[0]} … -d`;
     }
   }
   return undefined;
-}
-
-/** Whether shell text may leave a process running after it returns; see `detachedBy`. */
-export function mayDetach(text: string): boolean {
-  return detachedBy(text) !== undefined;
 }

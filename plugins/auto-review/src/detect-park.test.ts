@@ -371,7 +371,7 @@ describe("a turn released from a park", () => {
       const { result, infos } = await released({ ...sweepOnly, ...options });
       expect(result).toMatchObject(noneParked);
       if (reason !== undefined) {
-        expect(infos.some((line) => line.startsWith(`auto-review: not leaving out what changed while the turn was parked: ${reason}`))).toBe(true);
+        expect(infos).toContain(`auto-review: not leaving out what changed while the turn was parked: ${reason}`);
       }
       return result;
     }
@@ -518,6 +518,13 @@ describe("a turn released from a park", () => {
       const { infos } = await released({ ...sweepOnly, ...afterPark, timelines: { self: [opaque, secret] } });
       expect(infos.join("\n")).toContain("thread self ran work that may have kept writing after it returned (tmux)");
       expect(infos.join("\n")).not.toContain("hunter2");
+    });
+
+    it("names a container flag by a fixed label, never by its text", async () => {
+      const exec = rowAt({ workKind: "command", approvalStatus: null, command: "docker exec db mysql -uroot -pSecretpassword", cwd: "/w" }, 11_000);
+      const { infos } = await released({ ...sweepOnly, ...afterPark, timelines: { self: [opaque, exec] } });
+      expect(infos.join("\n")).toContain("thread self ran work that may have kept writing after it returned (docker … -d)");
+      expect(infos.join("\n")).not.toContain("Secretpassword");
     });
 
     const stillWrites = "thread self ran work that may have kept writing after it returned";

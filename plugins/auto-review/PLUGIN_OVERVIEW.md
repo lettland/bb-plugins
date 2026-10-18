@@ -46,7 +46,7 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   activity since the park (checked again after the files are read) or work that may still be
   writing: a shell command mentioning a lone `&`, `nohup`, `setsid`, `disown`, `daemon`, `coproc`,
   `systemd-run`, `systemctl`, `service`, `launchctl`, `crontab`, `pm2`, `batch`, any `tmux` or
-  `screen`, `brew services`, `at` as a command, or `docker`/`podman`/`nerdctl`/`compose` with `-d`,
+  `screen`, `brew services`, `at` followed by a time or an option, or `docker`/`podman`/`nerdctl`/`compose` with `-d`,
   `--detach`, `start`, `restart` or `up`; a background agent or harness background command; an
   unfinished workflow task; any extension (MCP) call or tool not known to be read-only (a tool
   can start a detached process the timeline cannot show). Nor after a HEAD that does not

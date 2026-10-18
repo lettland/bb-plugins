@@ -17,7 +17,7 @@ import {
   turnChangedPaths,
   type AvailableWorkspace,
 } from "./detect.js";
-import { isHistoryWritingGit, mayDetach, mayMoveRemoteRef } from "./detect-shell.js";
+import { detachedBy, isHistoryWritingGit, mayMoveRemoteRef } from "./detect-shell.js";
 import { commitScanHead, committedSinceHead } from "./dispatch.js";
 import { buildReviewPrompt, renderScope } from "./prompt.js";
 import type { ThreadState } from "./state.js";
@@ -2350,7 +2350,7 @@ describe("mayMoveRemoteRef", () => {
   });
 });
 
-describe("mayDetach", () => {
+describe("detachedBy", () => {
   it.each([
     "npm run dev &",
     "npm run dev& echo started",
@@ -2396,13 +2396,25 @@ describe("mayDetach", () => {
     "env at now",
     "nice at now",
     "if x; then at now; fi",
-    "ls | xargs at",
     "docker run --detach=true x",
     "nerdctl run -d x",
     "nerdctl compose up",
     "coproc sleep 5",
+    "sudo -u bob at now",
+    "env -i at now",
+    "nice -n 5 at now",
+    "time -p at now",
+    "TZ=UTC at 10:00",
+    "doas at now",
+    "timeout 5 at now",
+    "{ at now; }",
+    "! at now",
+    "if at now; then x; fi",
+    "at -f job.sh 5pm",
+    "docker run -d\\\nimg",
+    "docker exec db mysql -uroot -pSecretpassword",
   ])("may leave %j running", (text) => {
-    expect(mayDetach(text)).toBe(true);
+    expect(detachedBy(text)).toBeDefined();
   });
 
   it.each([
@@ -2420,17 +2432,19 @@ describe("mayDetach", () => {
     "docker ps",
     "docker run --rm img",
     "echo look at this",
+    "xargs at",
+    "cat at",
     "cat attach.txt",
     "",
   ])("does not for %j", (text) => {
-    expect(mayDetach(text)).toBe(false);
+    expect(detachedBy(text)).toBeUndefined();
   });
 
   it("reads a long text in linear time", () => {
     const started = performance.now();
-    expect(mayDetach("docker -x ".repeat(25_000))).toBe(false);
-    expect(mayDetach(`${"x ".repeat(100_000)}-${"a".repeat(100_000)}`)).toBe(false);
-    expect(mayDetach(`${"echo hi; ".repeat(20_000)}nohup x`)).toBe(true);
+    expect(detachedBy("docker -x ".repeat(25_000))).toBeUndefined();
+    expect(detachedBy(`${"x ".repeat(100_000)}-${"a".repeat(100_000)}`)).toBeUndefined();
+    expect(detachedBy(`${"echo hi; ".repeat(20_000)}nohup x`)).toBeDefined();
     expect(performance.now() - started).toBeLessThan(1_000);
   });
 
@@ -2439,14 +2453,17 @@ describe("mayDetach", () => {
     ["a flag of d's that ends in a digit", `docker -${"d".repeat(50_000)}1`],
     ["a flag with no d", `docker -${"a".repeat(50_000)}`],
     ["sudo and a long run of blanks", `sudo${" ".repeat(50_000)}x`],
-    ["a quote and a long run of blanks", `(${" ".repeat(50_000)}x`],
+    ["a parenthesis and a long run of blanks", `(${" ".repeat(50_000)}x`],
+    ["a quote and a long run of blanks", `"${" ".repeat(50_000)}x`],
+    ["at and a long run of blanks", `at${" ".repeat(50_000)}x`],
+    ["a long run of equals signs before at", `${"=".repeat(50_000)} at`],
     ["a path separator and a long run of blanks", `/${" ".repeat(50_000)}x`],
     ["brew and a long run of blanks", `brew${" ".repeat(50_000)}x`],
     ["a long run of blanks", `${" ".repeat(50_000)}x`],
     ["a long run of lone dashes", `docker ${"- ".repeat(25_000)}`],
   ])("stays fast on %s", (_name, text) => {
     const started = performance.now();
-    expect(mayDetach(text)).toBe(false);
+    expect(detachedBy(text)).toBeUndefined();
     expect(performance.now() - started).toBeLessThan(2_000);
   });
 });
