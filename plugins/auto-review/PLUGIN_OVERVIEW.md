@@ -33,10 +33,9 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   something whose writes cannot be listed (a build, codegen, a script, an unknown command) the
   turn is a sweep, as described next. A sweep keeps every commit that is not a sibling's or
   upstream (pulled from the remote base or from the checkout branch's own remote-tracking
-  ref); only exact mode drops one nothing of the family could have made. A
-  thread's shell keeps its directory between rows, and a relative path whose directory is a
-  guess claims every changed path that ends in it. See the README for the classes and the
-  commit rule.
+  ref); only exact mode drops one nothing of the family could have made. A thread's shell
+  keeps its directory between rows, and a relative path whose directory is a guess claims
+  every changed path that ends in it. See the README for the classes and the commit rule.
 - Attributes work to the turn however it was made: the thread's own `file-change` rows
   after the turn's start cursor, plus whatever the working tree shows changed since the
   turn started (a fingerprint per uncommitted path and the commits ahead of the base,
@@ -55,14 +54,16 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   doubt keeps the commit with this thread. A commit that arrived with a pull is not this
   thread's work either: it is reachable from `origin/<mainline>` or from `origin/<the
   checkout's own branch>`, was authored outside every window of this thread's family, and
-  touches none of the files that family edited with tools. The own-branch ref is skipped when
-  the family ran `git push` during the window, so a backdated commit of its own that it pushed
-  stays with the thread. A commit someone made by hand in the same checkout and pushed to the
-  branch counts as upstream too, as on the mainline. Only `origin/<branch>` is checked, not
-  another configured upstream remote. A sibling's uncommitted shell edit, or a
-  human's edit, made in the same checkout during the turn cannot be told apart and is
-  claimed, and this thread's own shell edits (no tool row) swept into a sibling's
-  `git add -A` commit are left to the sibling.
+  touches none of the files that family edited with tools. The window reaches back to the
+  earliest such commit's author date. Nothing is dropped as upstream, from either ref, when
+  a family row in that window may have pushed or moved a remote-tracking ref, so a backdated
+  commit of its own that it pushed stays with the thread; a push made through a script, an
+  alias or a non-shell tool is not detected. A commit someone made by hand in the same
+  checkout and pushed to the branch counts as upstream too, as on the mainline. Only
+  `origin/<branch>` is checked, not another configured upstream remote. A sibling's
+  uncommitted shell edit, or a human's edit, made in the same checkout during the turn
+  cannot be told apart and is claimed, and this thread's own shell edits (no tool row)
+  swept into a sibling's `git add -A` commit are left to the sibling.
 - Chooses commit / merge from a branch policy keyed on the mainline name: a feature
   branch (name contains a `/`; a top-level branch such as `develop` is never merged)
   merges into a personal mainline (e.g. `master`) whether the thread runs in a

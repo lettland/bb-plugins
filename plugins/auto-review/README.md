@@ -221,10 +221,16 @@ It ships enabled (opt-out).
   reachable from `origin/<mainline>` or from the remote-tracking ref of the checkout's own
   branch (`origin/<branch>`), was authored outside every window of this thread's family, and
   touches none of the files that family edited with tools. The log names the ref that held
-  each such commit. The own-branch ref is skipped when the family ran `git push` during the
-  window (a backdated commit of its own that it pushed would otherwise look pulled), and the
-  log says so. A commit someone made by hand in the same checkout and pushed to the branch
-  counts as upstream too, as on the mainline. Only `origin/<branch>` is checked, not another
+  each such commit. The window reaches back to the earliest such commit's author date. If a
+  row of the family in that window may have pushed or moved a remote-tracking ref, nothing
+  is dropped as upstream, from either ref, and the log says so: a commit of the thread's
+  own, even backdated, would otherwise look pulled once pushed. The row matches loosely: the
+  word `push` (so `git stash push` counts too), `update-ref`, a `refs/remotes/` name,
+  `gh repo sync`, or a `git fetch` from `.`; a row that was denied or never ran does not
+  count. A push made through a script, an alias or a tool that is not a shell row is not
+  detected, so a deliberately backdated commit pushed that way can still be dropped. A
+  commit someone made by hand in the same checkout and pushed to the branch counts as
+  upstream too, as on the mainline. Only `origin/<branch>` is checked, not another
   configured upstream remote. Uncommitted paths a sibling's shell command wrote to by name
   during the turn (a
   redirect or `tee` target, the last argument of `cp`/`mv`/`install`, `rm`, `sed -i`, `perl -i`,

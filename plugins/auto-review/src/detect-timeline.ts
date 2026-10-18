@@ -2,7 +2,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
 import { rowTexts, rowWindow, shellText, walkRows } from "./detect-rows.js";
 import type { OpenRowEnds, RowText, TimeWindow, WorkRow } from "./detect-rows.js";
-import { isGitPush, isHistoryWritingGit } from "./detect-shell.js";
+import { isHistoryWritingGit, mayMoveRemoteRef } from "./detect-shell.js";
 import type {
   ThreadListEntry,
   TimelineResult,
@@ -164,9 +164,9 @@ function runsHistoryGit(row: WorkRow): boolean {
   return text !== null && isHistoryWritingGit(text);
 }
 
-function runsGitPush(row: WorkRow): boolean {
+function movesRemoteRef(row: WorkRow): boolean {
   const text = shellText(row);
-  return text !== null && isGitPush(text);
+  return text !== null && mayMoveRemoteRef(text);
 }
 
 /** The windows of the wanted rows that overlap the turn, which began at `startedAt`. */
@@ -201,9 +201,14 @@ export function ownWindows(
   return overlappingWindows(rows, startedAt, { pending: now, unended: now }, () => true);
 }
 
-/** Whether any of these rows ran `git push` while the turn, which began at `startedAt`, was under way. A row that never recorded an end is taken to be running until `now`. */
-export function ranGitPush(rows: readonly TimelineRow[], startedAt: number, now: number): boolean {
-  return overlappingWindows(rows, startedAt, { pending: now, unended: now }, runsGitPush).length > 0;
+/**
+ * Whether any of these rows ran shell that may have moved a remote-tracking
+ * ref between `since` and `now`. A row that never recorded an end is taken to
+ * be running until `now`; one that was denied or is waiting for approval never
+ * ran.
+ */
+export function mayHaveMovedRemoteRef(rows: readonly TimelineRow[], since: number, now: number): boolean {
+  return overlappingWindows(rows, since, { pending: now, unended: now }, movesRemoteRef).length > 0;
 }
 
 export interface SiblingEvidence {

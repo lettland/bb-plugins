@@ -3,6 +3,8 @@
  * on purpose — a lone `&`, subshells, `bash -c`, `env git`, `--git-dir <p>`
  * written as two words — because a miss only keeps a commit with this thread.
  * Extending the parser is unsafe only if it starts matching non-git text.
+ * `mayMoveRemoteRef` below is the opposite: loose on purpose, because a miss
+ * there would drop a commit of this thread's from its review.
  */
 
 /** Only this much of a command is scanned, so the cost stays linear in what a row carries. */
@@ -87,7 +89,17 @@ export function isHistoryWritingGit(text: string): boolean {
   return simpleCommands(text).some(writesHistory);
 }
 
-/** Whether shell text runs `git push`, which can make a local commit reachable from a remote-tracking ref. */
-export function isGitPush(text: string): boolean {
-  return simpleCommands(text).some((words) => gitSubcommand(words) === "push");
+/**
+ * Shell text that can move a remote-tracking ref, which would make a local
+ * commit look like pulled work: the word `push` anywhere (`git push`, inside a
+ * nested shell, behind `env` or a path to git), `update-ref`, a
+ * `refs/remotes/` name, `gh repo sync`, or a `git fetch` whose source is `.`.
+ * Not a parser: false positives (`git stash push`, `echo push`) only keep a
+ * commit in review, and a miss would drop one.
+ */
+const REMOTE_REF_MOVERS =
+  /\bpush\b|\bupdate-ref\b|refs\/remotes\/|\bgh\s+repo\s+sync\b|\bfetch\b[^;&|\n]*\s\.(?:\s|$)/u;
+
+export function mayMoveRemoteRef(text: string): boolean {
+  return REMOTE_REF_MOVERS.test(text);
 }

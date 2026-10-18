@@ -17,7 +17,7 @@ import {
   turnChangedPaths,
   type AvailableWorkspace,
 } from "./detect.js";
-import { isHistoryWritingGit } from "./detect-shell.js";
+import { isHistoryWritingGit, mayMoveRemoteRef } from "./detect-shell.js";
 import { commitScanHead, committedSinceHead } from "./dispatch.js";
 import { buildReviewPrompt, renderScope } from "./prompt.js";
 import type { ThreadState } from "./state.js";
@@ -1536,34 +1536,66 @@ describe("workspace capture edge cases", () => {
         expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
       });
 
-      describe("when the family pushed during the window", () => {
+      describe("when the family may have moved a remote-tracking ref", () => {
+        // u1 is held only by origin/develop, u2 only by origin/master; both were authored before the turn.
         const options = {
           branch: "develop",
           commits: [upstreamCommit("u1", 5_500), upstreamCommit("u2", 5_600)],
           upstream: ["u2"],
           ownRemote: ["u1"],
         };
-        const pushedBy = (thread: "thr_self" | "thr_child", text: string) => ({
-          entries: [self, child],
-          timelines: { [thread]: [rowAt(30_000, 30_500, text)] },
+        const since = new Date(5_500).toISOString();
+        const skipLine = (refs: string) =>
+          `auto-review: not checking whether the turn's commits came from ${refs}: the thread's family may have pushed or moved a remote-tracking ref since ${since}`;
+        const ran = (thread: "thr_self" | "thr_child" | "thr_sibling", text: string, over: Record<string, unknown> = {}) => ({
+          entries: [self, child, sibling],
+          timelines: { [thread]: [command(text, { createdAt: 30_000, startedAt: 30_000, completedAt: 30_500, ...over })] },
         });
 
         it.each([
-          ["the thread", "thr_self"],
-          ["a child thread", "thr_child"],
-        ] as const)("ignores the checkout's own remote-tracking ref when %s ran git push", async (_who, thread) => {
-          const { result, infos } = await attribute({ ...options, ...pushedBy(thread, "git push origin develop") });
-          // u1 is held only by origin/develop, which a push of the thread's own may have made it reach; u2 is the mainline's.
-          expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: ["u2"] });
-          expect(infos).toEqual([
-            "auto-review: not checking whether the turn's commits came from origin/develop: the thread's family ran git push",
-            "auto-review: commit u2 came from origin/master; not this turn's",
-          ]);
+          ["the thread pushed", "thr_self", "git push origin develop"],
+          ["a child thread pushed", "thr_child", "git push origin develop"],
+          ["the thread wrote the remote-tracking ref", "thr_self", "git update-ref refs/remotes/origin/develop HEAD"],
+        ] as const)("drops no commit as upstream when %s", async (_what, thread, text) => {
+          const { result, infos } = await attribute({ ...options, ...ran(thread, text) });
+          expect(result).toMatchObject({ commits: ["u1", "u2"], upstreamCommits: [] });
+          expect(infos).toEqual([skipLine("origin/master or origin/develop")]);
         });
 
-        it("still counts the own branch's ref when the family ran git that does not push", async () => {
-          const { result } = await attribute({ ...options, ...pushedBy("thr_self", "git pull origin develop") });
+        it("keeps a commit only the mainline holds, on a branch checkout, after a push", async () => {
+          const { result, infos } = await attribute({
+            ...options,
+            commits: [upstreamCommit("u2", 5_500)],
+            ...ran("thr_self", "git push origin develop"),
+          });
+          expect(result).toMatchObject({ commits: ["u2"], upstreamCommits: [] });
+          expect(infos).toEqual([skipLine("origin/master or origin/develop")]);
+        });
+
+        it("keeps a commit on the mainline checkout itself after a push", async () => {
+          const { result, infos } = await attribute({
+            base: "dev",
+            commits: [upstreamCommit("u1", 5_500)],
+            upstream: ["u1"],
+            ...ran("thr_self", "git push origin dev"),
+          });
+          expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+          expect(infos).toEqual([skipLine("origin/dev")]);
+        });
+
+        it.each([
+          ["git that does not push", ran("thr_self", "git pull origin develop")],
+          ["a push that ended before the earliest commit", ran("thr_self", "git push", { createdAt: 1_000, startedAt: 1_000, completedAt: 1_500 })],
+          ["a push of a sibling outside the family", ran("thr_sibling", "git push origin develop")],
+          ["a push that was denied", ran("thr_self", "git push", { approvalStatus: "denied" })],
+          ["a push still waiting for approval", ran("thr_self", "git push", { status: "pending", approvalStatus: "pending" })],
+        ])("still drops what the remote holds after %s", async (_what, family) => {
+          const { result, infos } = await attribute({ ...options, ...family });
           expect(result).toMatchObject({ commits: [], upstreamCommits: ["u1", "u2"] });
+          expect(infos).toEqual([
+            "auto-review: commit u1 came from origin/develop; not this turn's",
+            "auto-review: commit u2 came from origin/master; not this turn's",
+          ]);
         });
       });
 
@@ -1602,7 +1634,8 @@ describe("workspace capture edge cases", () => {
       it("still drops a commit that falls outside the child's window too", async () => {
         const { result } = await attribute({
           entries: [self, child],
-          timelines: { thr_child: [command("git push origin HEAD:master")] },
+          // Not a push: after one nothing is dropped as upstream, whatever the commit's date.
+          timelines: { thr_child: [command("git commit -m child")] },
           commits: [upstreamCommit("u1", 15_000)],
           upstream: ["u1"],
         });
@@ -2152,6 +2185,46 @@ describe("isHistoryWritingGit", () => {
     "",
   ])("ignores %j", (text) => {
     expect(isHistoryWritingGit(text)).toBe(false);
+  });
+});
+
+describe("mayMoveRemoteRef", () => {
+  it.each([
+    "git push",
+    "git push origin develop",
+    "git -C repo push",
+    "GIT_SSH_COMMAND=x git push",
+    "cd x && git push",
+    "sh -c 'git push'",
+    "env git push",
+    "/usr/bin/git push origin HEAD",
+    "git --git-dir .git push",
+    "git stash push",
+    "echo push",
+    "git update-ref refs/remotes/origin/develop HEAD",
+    "git update-ref -d refs/heads/x",
+    "git branch -f x refs/remotes/origin/develop",
+    "git fetch . HEAD:refs/remotes/origin/develop",
+    "git fetch --force . a:b",
+    "gh repo sync",
+    "gh repo sync owner/repo",
+  ])("matches %j", (text) => {
+    expect(mayMoveRemoteRef(text)).toBe(true);
+  });
+
+  it.each([
+    "git pull origin develop",
+    "git fetch origin",
+    "git fetch",
+    "git status",
+    "git log --oneline",
+    "git commit -m x",
+    "pushd /tmp",
+    "gh repo view",
+    "npm run pushy",
+    "",
+  ])("ignores %j", (text) => {
+    expect(mayMoveRemoteRef(text)).toBe(false);
   });
 });
 

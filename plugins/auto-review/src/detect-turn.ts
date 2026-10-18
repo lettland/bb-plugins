@@ -12,7 +12,7 @@ import {
   authoredPathsFromRows,
   kinEvidence,
   ownWindows,
-  ranGitPush,
+  mayHaveMovedRemoteRef,
   rowsSince,
   siblingAuthoredPaths,
   turnTimeline,
@@ -218,16 +218,19 @@ function upstreamRefs(workspace: AvailableWorkspace): string[] {
  * `origin/<base>` or from `origin/<branch>` (a `git pull` of it), and authored
  * outside every window this thread's family was running, the windows
  * `foreignCommitsOf` treats as ours, and touching none of the family's
- * tool-edited files. The own branch's ref is left out when the family ran
- * `git push` since the earliest candidate's author date: a pushed commit of the
- * thread's own, backdated, would otherwise look like pulled work. A commit the thread makes is authored
- * while one of its rows runs, whatever tool made it. A rewrite keeps the author
- * date, though (`git commit --amend`, `rebase`, `cherry-pick`): one of the
- * thread's earlier turns may have authored a commit that this turn only
- * amended and pushed. So the windows reach back to the earliest candidate's
- * author date. What stays accepted is a rewrite of a commit the thread never
- * authored, such as a cherry-pick of someone else's old commit: it still counts
- * as upstream. Any doubt keeps a commit with the turn.
+ * tool-edited files. A commit the thread makes is authored while one of its
+ * rows runs, whatever tool made it. A rewrite keeps the author date, though
+ * (`git commit --amend`, `rebase`, `cherry-pick`): one of the thread's earlier
+ * turns may have authored a commit that this turn only amended. So the windows
+ * reach back to the earliest candidate's author date. What stays accepted is a
+ * rewrite of a commit the thread never authored, such as a cherry-pick of
+ * someone else's old commit: it still counts as upstream.
+ *
+ * Nothing is dropped when a row of the family since that date may have moved a
+ * remote-tracking ref (`mayMoveRemoteRef`): a commit of the thread's own, even
+ * backdated, would then be reachable from the remote and look pulled. A push
+ * made through a script, an alias or a tool that is not a shell row goes
+ * unseen. Any doubt keeps a commit with the turn.
  */
 async function upstreamCommitsOf(
   upstream: UpstreamInput,
@@ -264,9 +267,9 @@ async function upstreamCommitsOf(
       ),
     ),
   );
-  // The first of the first `count` refs that holds a commit.
-  const holder = (sha: string, count: number) => refs.slice(0, count).find((_ref, at) => reachable[at]?.has(sha));
-  const candidates = outside.filter(({ sha }) => holder(sha, refs.length) !== undefined);
+  // The first ref that holds a commit.
+  const holder = (sha: string) => refs.find((_ref, at) => reachable[at]?.has(sha));
+  const candidates = outside.filter(({ sha }) => holder(sha) !== undefined);
   if (candidates.length === 0) {
     return none;
   }
@@ -288,12 +291,14 @@ async function upstreamCommitsOf(
     since < startedAt ? Number.NEGATIVE_INFINITY : input.turnStart.sinceSeq,
   );
   const familyPaths = new Set([...ownPaths, ...lookbackPaths, ...kin.paths]);
-  const pushed = refs.length > 1 && [rows, ...kin.threads].some((thread) => ranGitPush(thread, since, now));
-  if (pushed) {
-    bb.log.info(`auto-review: not checking whether the turn's commits came from ${refs[1]}: the thread's family ran git push`);
+  if ([rows, ...kin.threads].some((thread) => mayHaveMovedRemoteRef(thread, since, now))) {
+    return skip(
+      `the thread's family may have pushed or moved a remote-tracking ref since ${new Date(since).toISOString()}`,
+      reusable,
+    );
   }
   const dropped = candidates.flatMap(({ sha, authoredAt, paths }) => {
-    const ref = holder(sha, pushed ? 1 : refs.length);
+    const ref = holder(sha);
     return ref !== undefined &&
       paths !== null &&
       !windows.some((window) => withinWindow(window, authoredAt)) &&
@@ -387,7 +392,9 @@ async function readSiblings(
  * review. So are uncommitted paths a sibling's shell command wrote to by name,
  * when nothing of the family names them. Commits that merely arrived with the
  * remote base or the checkout branch's own remote-tracking ref are no one's to
- * review here, and their paths do not count either; nor do commits nothing of the family could have made (see `claimOwnChanges`).
+ * review here, and their paths do not count either, unless the family may have
+ * pushed meanwhile; nor do commits nothing of the family could have made (see
+ * `claimOwnChanges`).
  */
 export async function turnChangedPaths(
   bb: BbPluginApi,
