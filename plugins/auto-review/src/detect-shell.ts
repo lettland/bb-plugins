@@ -141,3 +141,19 @@ export function mayMoveRemoteRef(text: string): boolean {
     REMOTE_REF_WORDS.test(text) || namesRemoteUrl(text) || text.split(/[;&|\n]/u).some(mayMoveRemoteRefInCommand)
   );
 }
+
+/**
+ * A lone `&` (not `&&`, `&>`, `>&` or an escaped one) or one of the words that
+ * detach a process from its shell.
+ */
+const DETACH_WORDS = /(?<![<>&\\])&(?![>&])|\b(?:nohup|setsid|disown|daemon)\b/u;
+
+/**
+ * Whether shell text may leave a process running after it returns, which could
+ * still write files later. Loose on purpose, like `mayMoveRemoteRef`, and never
+ * truncated: a miss would let a later write be taken for someone else's, so
+ * false positives (`curl "u?a=1&b=2"`) only keep the work with the turn.
+ */
+export function mayDetach(text: string): boolean {
+  return DETACH_WORDS.test(text);
+}

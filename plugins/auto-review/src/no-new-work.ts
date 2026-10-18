@@ -6,35 +6,58 @@ import {
   type AvailableWorkspace,
 } from "./detect.js";
 import { familyClaims } from "./detect-claim.js";
+import type { ParkBaseline } from "./detect-upstream.js";
 import type { ThreadListEntry } from "./detect-workspace.js";
 import { refreshIdleSnapshot } from "./last-idle.js";
 import type { ThreadState, TurnStart } from "./state.js";
 import { keepCursor } from "./turn-end.js";
 
 /**
- * Whether a parked turn is being released rather than re-run by a user turn:
- * no user request came after the snapshot taken when it was parked. A failed
- * lookup counts as a release, so the gate is skipped and the turn reviews.
+ * How a turn that was parked comes to be evaluated: `released` when no user
+ * request came after the snapshot taken when it was parked, `unreadable` when
+ * that could not be read, and `none` when it was not parked, has no snapshot,
+ * or a user's turn re-ran it.
  */
-async function releasedFromPark(
+export type ParkRelease = "none" | "released" | "unreadable";
+
+export async function parkRelease(
   ctx: ReviewContext,
   thread: GateThreadLike,
   state: ThreadState,
-  lastIdle: TurnStart,
-): Promise<boolean> {
-  if (state.phase !== "deferred") {
-    return false;
+): Promise<ParkRelease> {
+  const { lastIdle } = state;
+  if (state.phase !== "deferred" || lastIdle?.tree === undefined) {
+    return "none";
   }
   try {
-    return (await firstUserTurnSince(ctx.bb, thread.id, lastIdle.sinceSeq)) === null;
+    return (await firstUserTurnSince(ctx.bb, thread.id, lastIdle.sinceSeq)) === null ? "released" : "none";
   } catch (error) {
     ctx.bb.log.warn(
       `auto-review: could not read whether the user wrote since ${thread.id} was parked; reviewing anyway: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
-    return true;
+    return "unreadable";
   }
+}
+
+/**
+ * The park snapshot a released turn is measured against: only for a provider
+ * park (a child-held turn waits on more than a queue), a release the read
+ * could vouch for, and a snapshot with a tree and a time. Any doubt, none.
+ */
+export function parkBaseline(state: ThreadState, release: ParkRelease): ParkBaseline | undefined {
+  const { lastIdle, turnStart } = state;
+  if (
+    release !== "released" ||
+    state.heldBy !== undefined ||
+    turnStart?.tree === undefined ||
+    lastIdle?.tree === undefined ||
+    lastIdle.startedAt === undefined
+  ) {
+    return undefined;
+  }
+  return { startedAt: lastIdle.startedAt, tree: lastIdle.tree };
 }
 
 /**
@@ -94,7 +117,8 @@ async function hiddenShellEdit(
  * A review fires only at the end of work: a turn that added nothing to the
  * carried cursor since the last idle that kept it (a question, a reply to a
  * steer, a status check) never fires. The carried work waits for the next turn
- * that changes something; a parked turn's release is exempt. Never `standDown`:
+ * that changes something; a parked turn's release (`release`, from
+ * `parkRelease`, read once) is exempt, an unreadable one included. Never `standDown`:
  * in the `deferred` phase it would reset the turn and drop the carried work.
  */
 export async function noNewWork(
@@ -104,9 +128,10 @@ export async function noNewWork(
   environmentId: string,
   workspace: AvailableWorkspace,
   threadEntries: readonly ThreadListEntry[],
+  release: ParkRelease,
 ): Promise<boolean> {
   const { lastIdle } = state;
-  if (lastIdle?.tree === undefined || (await releasedFromPark(ctx, thread, state, lastIdle))) {
+  if (lastIdle?.tree === undefined || release !== "none") {
     return false;
   }
   const turn = await turnChangedPaths(ctx.bb, {

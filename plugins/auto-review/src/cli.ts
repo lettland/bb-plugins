@@ -74,14 +74,16 @@ function threadError(threadId: string, wantsJson: boolean): PluginCliResult {
     : { exitCode: 1, stderr: `${message}\n` };
 }
 
-/** The last fire for `status`: its outcome, reason and time, and how many changes stood unclaimed by the thread's family, when it counted any. */
+/** The last fire for `status`: its outcome, reason and time, and how many changes stood unclaimed by the thread's family or were made while the turn waited, when it counted any. */
 function lastFireLine(lastFire: LastFire | null): string {
   if (lastFire === null) {
     return "never";
   }
   const unclaimed =
     lastFire.unclaimedCount === undefined ? "" : `, ${lastFire.unclaimedCount} change(s) not made by this thread's family`;
-  return `${lastFire.outcome} (${lastFire.reason}) at ${new Date(lastFire.at).toISOString()}${unclaimed}`;
+  const commits = lastFire.parkedCommits?.length ? ` (commit(s) ${lastFire.parkedCommits.join(", ")})` : "";
+  const parked = lastFire.parkedCount === undefined ? "" : `, ${lastFire.parkedCount} change(s) made while this turn waited${commits}`;
+  return `${lastFire.outcome} (${lastFire.reason}) at ${new Date(lastFire.at).toISOString()}${unclaimed}${parked}`;
 }
 
 /** What releases a deferred turn, for `status`. */

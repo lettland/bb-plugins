@@ -10,7 +10,8 @@ import {
 import { decide } from "./decide.js";
 import { deferTurn, providerReviewInFlight } from "./deferral.js";
 import { removeDeferral } from "./deferrals.js";
-import { fetchWorkspace, tryCaptureSinceSeq, type AvailableWorkspace, type TurnScope } from "./detect.js";
+import { fetchWorkspace, tryCaptureSinceSeq, type TurnScope } from "./detect.js";
+import { parkedFire } from "./detect-park.js";
 import { readFindings, recordUnreported } from "./findings-store.js";
 import { openFindingsForPrompt } from "./findings.js";
 import { refreshIdleSnapshot } from "./last-idle.js";
@@ -75,8 +76,6 @@ export interface DispatchInput {
   thread: GateThreadLike;
   state: ThreadState;
   environmentId: string;
-  /** The workspace the turn was scoped from, reused for the snapshot a deferral records. */
-  workspace: AvailableWorkspace;
   config: EffectiveConfig;
   decision: ReturnType<typeof decide>;
   base: string;
@@ -102,13 +101,17 @@ export function committedSinceHead(turn: TurnScope, state: ThreadState): string 
 
 /**
  * The turn-start head the secret scan runs from: set by any commit made during
- * the turn, this thread's or another's. A head that moved with no such commit
+ * the turn, this thread's or another's, or that arrived while it waited in the
+ * review queue. A head that moved with no such commit
  * (a pull, a rebase, a branch switch) leaves it null; so does a turn whose only
  * commits arrived with the remote base, which scans nothing, as pulled commits
  * always did.
  */
 export function commitScanHead(turn: TurnScope, state: ThreadState): string | null {
-  return turnStartHeadIf(turn.commits.length > 0 || turn.foreignCommits.length > 0, state);
+  return turnStartHeadIf(
+    turn.commits.length > 0 || turn.foreignCommits.length > 0 || turn.parkedCommits.length > 0,
+    state,
+  );
 }
 
 /**
@@ -207,7 +210,7 @@ export async function dispatchReview(
   ctx: ReviewContext,
   input: DispatchInput,
 ): Promise<void> {
-  const { thread, state, environmentId, workspace, config, decision, base, isWorktree, scope, turn, unclaimedCount } = input;
+  const { thread, state, environmentId, config, decision, base, isWorktree, scope, turn, unclaimedCount } = input;
   const extra: FireExtra = {
     commit: decision.commit,
     merge: decision.merge,
@@ -215,6 +218,7 @@ export async function dispatchReview(
     isWorktree,
     scopePaths: scope,
     ...(unclaimedCount === undefined ? {} : { unclaimedCount }),
+    ...parkedFire(turn),
   };
   const deferred = await withProviderLock(thread.providerId, async () => {
     if (await providerReviewInFlight(ctx, thread.providerId, thread.id)) {
@@ -236,6 +240,7 @@ export async function dispatchReview(
       commitScanFrom: commitScanHead(turn, state),
       foreignCommits: turn.foreignCommits.map(({ sha }) => sha),
       upstreamCommits: turn.upstreamCommits,
+      parkedCommits: turn.parkedCommits,
       ownCommits: turn.commits,
       aislopScan: await aislopScanAvailable(ctx.bb),
       priorFindings: prior.findings,
@@ -244,8 +249,8 @@ export async function dispatchReview(
     await sendReview(ctx, thread, prompt, extra);
     return false;
   });
-  // Hashing the tree stays out of the provider lock so it does not serialise other dispatches.
+  // Hashing the tree stays out of the provider lock so it does not serialise other dispatches. It is read afresh, after the snapshot's start time, for `withoutParked`.
   if (deferred) {
-    await refreshIdleSnapshot(ctx.bb, thread, state, workspace);
+    await refreshIdleSnapshot(ctx.bb, thread, state);
   }
 }

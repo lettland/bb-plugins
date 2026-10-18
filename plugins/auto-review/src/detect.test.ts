@@ -17,7 +17,7 @@ import {
   turnChangedPaths,
   type AvailableWorkspace,
 } from "./detect.js";
-import { isHistoryWritingGit, mayMoveRemoteRef } from "./detect-shell.js";
+import { isHistoryWritingGit, mayDetach, mayMoveRemoteRef } from "./detect-shell.js";
 import { commitScanHead, committedSinceHead } from "./dispatch.js";
 import { buildReviewPrompt, renderScope } from "./prompt.js";
 import type { ThreadState } from "./state.js";
@@ -1037,7 +1037,7 @@ describe("workspace capture edge cases", () => {
         workspace: ws({ workingTree: { files: [tracked("shell.ts")] } }),
         threadEntries: [],
       });
-      expect(paths).toEqual({ paths: ["own.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [], mode: "exact", unclaimed: [] });
+      expect(paths).toEqual({ paths: ["own.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [], parkedCommits: [], parkedPaths: [], mode: "exact", unclaimed: [] });
       expect(diffFileCalls).toEqual([]);
     });
 
@@ -1104,6 +1104,8 @@ describe("workspace capture edge cases", () => {
         committedPaths: ["own.ts", "shell.ts"],
         foreignCommits: [],
         upstreamCommits: [],
+        parkedCommits: [],
+        parkedPaths: [],
         mode: "exact",
         unclaimed: [],
       });
@@ -1310,6 +1312,8 @@ describe("workspace capture edge cases", () => {
         committedPaths: [],
         foreignCommits: [foreign("c1"), foreign("c2")],
         upstreamCommits: [],
+        parkedCommits: [],
+        parkedPaths: [],
         mode: "exact",
         unclaimed: [],
       });
@@ -1371,6 +1375,8 @@ describe("workspace capture edge cases", () => {
         committedPaths: ["src/own.ts", "src/a.ts"],
         foreignCommits: [],
         upstreamCommits: [],
+        parkedCommits: [],
+        parkedPaths: [],
         mode: "exact",
         unclaimed: [],
       });
@@ -1403,6 +1409,8 @@ describe("workspace capture edge cases", () => {
         committedPaths: ["src/own.ts"],
         foreignCommits: [foreign("theirs")],
         upstreamCommits: [],
+        parkedCommits: [],
+        parkedPaths: [],
         mode: "exact",
         unclaimed: [],
       });
@@ -1421,6 +1429,8 @@ describe("workspace capture edge cases", () => {
         committedPaths: [],
         foreignCommits: [foreign("theirs")],
         upstreamCommits: [],
+        parkedCommits: [],
+        parkedPaths: [],
         mode: "exact",
         unclaimed: [],
       });
@@ -1438,6 +1448,8 @@ describe("workspace capture edge cases", () => {
         committedPaths: [],
         foreignCommits: [foreign("c1")],
         upstreamCommits: [],
+        parkedCommits: [],
+        parkedPaths: [],
         mode: "exact",
         unclaimed: [],
       });
@@ -1479,6 +1491,8 @@ describe("workspace capture edge cases", () => {
           committedPaths: [],
           foreignCommits: [],
           upstreamCommits: ["u1", "u2"],
+          parkedCommits: [],
+          parkedPaths: [],
           mode: "sweep",
           unclaimed: [],
         });
@@ -1865,6 +1879,8 @@ describe("workspace capture edge cases", () => {
           committedPaths: ["lib/shared.ts"],
           foreignCommits: [],
           upstreamCommits: ["u1"],
+          parkedCommits: [],
+          parkedPaths: [],
           mode: "exact",
           unclaimed: [],
         });
@@ -1945,6 +1961,8 @@ describe("workspace capture edge cases", () => {
           committedPaths: [],
           foreignCommits: [],
           upstreamCommits: ["u1"],
+          parkedCommits: [],
+          parkedPaths: [],
           mode: "exact",
           unclaimed: [],
         });
@@ -2007,6 +2025,8 @@ describe("workspace capture edge cases", () => {
           committedPaths: [],
           foreignCommits: [],
           upstreamCommits: ["u1"],
+          parkedCommits: [],
+          parkedPaths: [],
           mode: "exact",
           unclaimed: [],
         });
@@ -2327,6 +2347,33 @@ describe("mayMoveRemoteRef", () => {
     expect(mayMoveRemoteRef(`${"remote.".repeat(30_000)} fetch`)).toBe(false);
     expect(mayMoveRemoteRef(`fetch ${"a ".repeat(100_000)}b:c`)).toBe(true);
     expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});
+
+describe("mayDetach", () => {
+  it.each([
+    "npm run dev &",
+    "npm run dev& echo started",
+    "sleep 1 &\nwait",
+    "nohup ./serve.sh > out.log",
+    "setsid ./serve.sh",
+    "(./serve.sh & disown)",
+    "daemon -- ./serve.sh",
+    "curl 'https://example.test/?a=1&b=2'",
+  ])("may leave %j running", (text) => {
+    expect(mayDetach(text)).toBe(true);
+  });
+
+  it.each([
+    "npm test && npm run build",
+    "npm test 2>&1 | tail -n 5",
+    "cmd >&2",
+    "cmd &> out.log",
+    "echo a \\& b",
+    "git log --oneline",
+    "",
+  ])("does not for %j", (text) => {
+    expect(mayDetach(text)).toBe(false);
   });
 });
 

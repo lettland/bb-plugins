@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createFakePluginHost,
   makePluginAgentConfigurationContext,
@@ -2302,6 +2302,124 @@ describe("auto-review plugin", () => {
     expect(await host.bb.storage.kv.list("review:")).toEqual([`review:${THREAD_ID}`]);
     expect(await host.bb.storage.kv.list("deferral:")).toEqual([]);
     await host.harness.dispose();
+  });
+
+  describe("a parked turn's release leaves out what changed while it waited", () => {
+    /** Parks the turn behind a review elsewhere; `parked` runs after the park, before the release. */
+    async function releaseAfter(host: Host, beforePark: () => void, parked: () => void) {
+      await plugin(host.bb);
+      await startReview(host, "elsewhere");
+      await emitActive(host);
+      beforePark();
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("deferred");
+      parked();
+      return emitIdle(host, "elsewhere");
+    }
+    const written = (path: string) => [{ path, status: "??", content: path }];
+
+    it("stands down as changed-while-parked, not unclaimed-changes, when the family claimed nothing and only a later write is left", async () => {
+      const host = createHost({ authoredRows: [], workingTreeFiles: [] });
+      const released = await releaseAfter(host, () => undefined, () => host.setWorkingTree(written("src/late.ts")));
+      expect(released.errors).toEqual([]);
+      expect(host.sends).toHaveLength(0);
+      expect(host.metadata.phase).toBe("idle");
+      expect(await lastFire(host)).toMatchObject({
+        outcome: "stood-down",
+        reason: "changed-while-parked",
+        parkedCount: 1,
+        parkedPaths: ["src/late.ts"],
+        parkedCommits: [],
+      });
+      expect(await lastFire(host)).not.toHaveProperty("unclaimedCount");
+      await host.harness.dispose();
+    });
+
+    it("stands down as changed-while-parked when a sweep took every change and only a later write is left", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(100_000);
+        // A build that ran during the turn and ended before it was parked: its writes cannot be listed.
+        const build = { ...(shellRow() as object), startedAt: 100_500, completedAt: 101_000 };
+        const host = createHost({ authoredRows: [build], workingTreeFiles: [] });
+        await plugin(host.bb);
+        await startReview(host, "elsewhere");
+        await emitActive(host);
+        vi.setSystemTime(110_000);
+        await emitIdle(host);
+        host.setWorkingTree(written("src/late.ts"));
+        vi.setSystemTime(120_000);
+        await emitIdle(host, "elsewhere");
+        expect(host.sends).toHaveLength(0);
+        expect(await lastFire(host)).toMatchObject({
+          outcome: "stood-down",
+          reason: "changed-while-parked",
+          parkedCount: 1,
+          parkedPaths: ["src/late.ts"],
+        });
+        await host.harness.dispose();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("stands down as changed-while-parked when changes the family did not make are left as well", async () => {
+      const host = createHost({ authoredRows: [], workingTreeFiles: [] });
+      await releaseAfter(
+        host,
+        () => host.setWorkingTree(written("ide/before.ts")),
+        () => host.setWorkingTree([...written("ide/before.ts"), ...written("src/late.ts")]),
+      );
+      expect(host.sends).toHaveLength(0);
+      expect(await lastFire(host)).toMatchObject({
+        outcome: "stood-down",
+        reason: "changed-while-parked",
+        unclaimedCount: 1,
+        parkedCount: 1,
+        parkedPaths: ["src/late.ts"],
+      });
+      await host.harness.dispose();
+    });
+
+    it("reviews what the turn changed before it was parked and records what it left out", async () => {
+      const host = createHost({ authoredRows: [fileChangeRow("src/a.ts")], workingTreeFiles: [{ path: "src/a.ts" }] });
+      await releaseAfter(host, () => undefined, () => host.setWorkingTree([{ path: "src/a.ts" }, ...written("src/late.ts")]));
+      expect(host.sends).toHaveLength(1);
+      expect(promptText(host)).toContain("src/a.ts");
+      expect(promptText(host)).not.toContain("src/late.ts");
+      expect(await lastFire(host)).toMatchObject({
+        outcome: "fired",
+        scopePaths: ["src/a.ts"],
+        parkedCount: 1,
+        parkedPaths: ["src/late.ts"],
+      });
+      await host.harness.dispose();
+    });
+
+    it("takes the park snapshot after the park, so a write between the start of the evaluation and the park is in it", async () => {
+      const host = createHost({ authoredRows: [], workingTreeFiles: [] });
+      await plugin(host.bb);
+      await startReview(host, "elsewhere");
+      await emitActive(host);
+      // The first status read is the evaluation's own; the write lands before the next, the snapshot's.
+      host.onNextStatusRead(() => host.onNextStatusRead(() => host.setWorkingTree(written("src/late.ts"))));
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("deferred");
+      expect(Object.keys((host.metadata.lastIdle as { tree: { files: object } }).tree.files)).toEqual(["src/late.ts"]);
+      await host.harness.dispose();
+    });
+
+    it("takes it fresh when the re-check under the provider lock parks the turn", async () => {
+      const host = createHost({ authoredRows: [fileChangeRow("src/a.ts")], workingTreeFiles: [{ path: "src/a.ts" }] });
+      await plugin(host.bb);
+      await emitActive(host);
+      host.armReviewBeforeLock();
+      host.onNextStatusRead(() => host.onNextStatusRead(() => host.setWorkingTree([{ path: "src/a.ts" }, ...written("src/late.ts")])));
+      await emitIdle(host);
+      expect(host.metadata.phase).toBe("deferred");
+      expect(Object.keys((host.metadata.lastIdle as { tree: { files: object } }).tree.files).sort()).toEqual(["src/a.ts", "src/late.ts"]);
+      await host.harness.dispose();
+    });
   });
 
   it("keeps releasing past a parked turn that starts no review", async () => {

@@ -71,6 +71,37 @@ export function fingerprintsMatch(before: string, after: string): boolean {
 }
 
 /**
+ * The uncommitted paths of `workspace` that differ from `before`: new ones, and
+ * ones whose line stats or, where both sides carry a hash, content changed.
+ */
+export async function changedFiles(
+  bb: BbPluginApi,
+  environmentId: string,
+  before: TreeSnapshot,
+  workspace: AvailableWorkspace,
+): Promise<Set<string>> {
+  const changed = new Set<string>();
+  const recheck: Array<{ file: WorkingTreeFile; prior: string }> = [];
+  for (const file of workspace.workingTree.files) {
+    const prior = before.files[file.path];
+    if (prior === undefined) {
+      changed.add(file.path);
+    } else if (!fingerprintsMatch(prior, `${statPart(file)}|`)) {
+      changed.add(file.path);
+    } else if (!prior.endsWith("|")) {
+      recheck.push({ file, prior });
+    }
+  }
+  await mapLimit(recheck, HASH_CONCURRENCY, async ({ file, prior }) => {
+    const now = `${statPart(file)}|${await contentHash(bb, environmentId, file)}`;
+    if (!fingerprintsMatch(prior, now)) {
+      changed.add(file.path);
+    }
+  });
+  return changed;
+}
+
+/**
  * Untracked harness output is left out: it is never attributed anyway, and a
  * checkout full of edit backups would otherwise spend the hash budget on them.
  * Files without line stats (untracked) are hashed first, since for them the

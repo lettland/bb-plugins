@@ -21,11 +21,13 @@ import {
   type AvailableWorkspace,
   type TurnChanges,
 } from "./detect.js";
+import { parkedFire } from "./detect-park.js";
+import type { ParkBaseline } from "./detect-upstream.js";
 import type { ThreadListEntry } from "./detect-workspace.js";
 import { dispatchReview } from "./dispatch.js";
 import { isBusyStatus, selfIsWorktree } from "./gate.js";
 import { lastIdleFloor, refreshIdleSnapshot, refreshLastIdle } from "./last-idle.js";
-import { noNewWork } from "./no-new-work.js";
+import { noNewWork, parkBaseline, parkRelease } from "./no-new-work.js";
 import {
   reviewContinuationPending,
   userTurnSinceDelivery,
@@ -181,7 +183,8 @@ async function deferredBehindOthers(
   // never do.
   if (await providerReviewInFlight(ctx, thread.providerId, thread.id)) {
     await deferTurn(ctx, thread, state, environmentId, { reason: "sibling-active" });
-    await refreshIdleSnapshot(ctx.bb, thread, state, workspace);
+    // Read afresh, after the snapshot's start time: a write must not fall between the tree read and the quiet window `withoutParked` measures.
+    await refreshIdleSnapshot(ctx.bb, thread, state);
     return true;
   }
   return false;
@@ -237,6 +240,7 @@ async function reviewScope(
   environmentId: string,
   workspace: AvailableWorkspace,
   threadEntries: readonly ThreadListEntry[],
+  park: ParkBaseline | undefined,
 ): Promise<ReviewScope | null> {
   const { bb } = ctx;
   const isWorktree = selfIsWorktree(threadEntries, thread.id);
@@ -247,12 +251,16 @@ async function reviewScope(
     turnStart,
     workspace,
     threadEntries,
+    ...(park === undefined ? {} : { park }),
   });
   if (turn.paths.length === 0) {
-    // Changes none of this thread's family made are not its to review; nothing changed at all is no authorship.
-    await (turn.unclaimed.length > 0
-      ? standDown(ctx, thread, state, "unclaimed-changes", { unclaimedCount: turn.unclaimed.length })
-      : standDown(ctx, thread, state, "no-authorship"));
+    // What changed while the turn waited, and changes none of this thread's family made, are not its to review; nothing changed at all is no authorship.
+    const parked = turn.parkedPaths.length > 0 || turn.parkedCommits.length > 0;
+    const reason = parked ? "changed-while-parked" : turn.unclaimed.length > 0 ? "unclaimed-changes" : "no-authorship";
+    await standDown(ctx, thread, state, reason, {
+      ...parkedFire(turn),
+      ...(turn.unclaimed.length === 0 ? {} : { unclaimedCount: turn.unclaimed.length }),
+    });
     return null;
   }
   const scope = computeScope(
@@ -312,10 +320,12 @@ export async function evaluate(
     environmentId,
     includeHidden: true,
   });
-  if (await noNewWork(ctx, thread, state, environmentId, workspace, threadEntries)) {
+  const release = await parkRelease(ctx, thread, state);
+  if (await noNewWork(ctx, thread, state, environmentId, workspace, threadEntries, release)) {
     return;
   }
-  const reviewed = await reviewScope(ctx, thread, state, turnStart, environmentId, workspace, threadEntries);
+  const park = parkBaseline(state, release);
+  const reviewed = await reviewScope(ctx, thread, state, turnStart, environmentId, workspace, threadEntries, park);
   if (reviewed === null) {
     return;
   }
@@ -331,7 +341,6 @@ export async function evaluate(
     thread,
     state,
     environmentId,
-    workspace,
     config,
     decision,
     base,

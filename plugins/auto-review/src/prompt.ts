@@ -58,13 +58,15 @@ export interface BuildPromptInput {
   committedSince?: string | null;
   /**
    * The head the secret scan starts from: set when the turn made any commit,
-   * this thread's or another's. Defaults to `committedSince`.
+   * this thread's or another's, or any arrived while it waited. Defaults to `committedSince`.
    */
   commitScanFrom?: string | null;
   /** Commits another thread made during the turn; they are not this thread's to review. */
   foreignCommits?: readonly string[];
   /** Commits merged into the remote base by someone else; the range after `committedSince` may hold them. */
   upstreamCommits?: readonly string[];
+  /** Commits that arrived while the turn waited in the review queue; someone else made them, so they are not this thread's to review. */
+  parkedCommits?: readonly string[];
   /** The commits this thread made during the turn; named only next to `upstreamCommits`. */
   ownCommits?: readonly string[];
   /** Whether the aislop plugin's `bb aislop scan` is available to run. */
@@ -206,6 +208,7 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
   const commits = turnCommitText({
     foreign: input.foreignCommits ?? [],
     upstream: input.upstreamCommits ?? [],
+    parked: input.parkedCommits ?? [],
     own: input.ownCommits ?? [],
     committedSince,
     scanSince,

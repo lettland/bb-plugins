@@ -881,6 +881,29 @@ describe("auto-review cli: status", () => {
     });
   });
 
+  it("shows what was left out as made while the turn waited, from a stored last fire that parses through the schema", async () => {
+    await withHost({}, async (host) => {
+      const stored = lastFire({
+        outcome: "stood-down",
+        reason: "changed-while-parked",
+        scopePaths: [],
+        parkedCount: 2,
+        parkedCommits: ["abcdef1"],
+        parkedPaths: ["src/a.ts", "src/b.ts"],
+      });
+      expect(lastFireSchema.safeParse(stored).success).toBe(true);
+      await host.kv.set(`lastfire:${PROJECT_ID}:${THREAD_ID}`, stored);
+      const text = await host.run(["status", THREAD_ID]);
+      expect(text.stdout).toContain(
+        "lastFire: stood-down (changed-while-parked) at 2026-01-02T03:04:05.000Z, 2 change(s) made while this turn waited (commit(s) abcdef1)\n",
+      );
+      const payload = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(payload.stdout)).toMatchObject({
+        lastFire: { reason: "changed-while-parked", parkedCount: 2, parkedCommits: ["abcdef1"], parkedPaths: ["src/a.ts", "src/b.ts"] },
+      });
+    });
+  });
+
   it("explains how long a deferred turn has waited", async () => {
     await withHost({}, async (host) => {
       const deferredSince = Date.now() - 7 * 60_000 - 5_000;

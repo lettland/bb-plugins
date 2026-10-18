@@ -8,6 +8,7 @@ import { commitPaths, novelCommits, turnCommits } from "./detect-commits.js";
 
 import type { CommitChange, TreeChanges, TurnChangeInput, UpstreamInput } from "./detect-upstream.js";
 import { withoutUpstream } from "./detect-upstream.js";
+import { withoutParked } from "./detect-park.js";
 export type { CommitChange, TreeChanges, TurnChangeInput } from "./detect-upstream.js";
 
 import { claimedChanges } from "./detect-attribute.js";
@@ -22,10 +23,10 @@ import {
 } from "./detect-timeline.js";
 import type { KinEvidence, SiblingEvidence } from "./detect-timeline.js";
 
-import { contentHash, fingerprintsMatch, statPart } from "./detect-tree.js";
+import { changedFiles } from "./detect-tree.js";
 
 import { isHarnessOutput } from "./detect-workspace.js";
-import type { AvailableWorkspace, WorkingTreeFile } from "./detect-workspace.js";
+import type { AvailableWorkspace } from "./detect-workspace.js";
 
 /**
  * Paths the working tree shows changed since `before`, however they changed:
@@ -39,32 +40,9 @@ export async function treeChangedPaths(
   workspace: AvailableWorkspace,
   startedAt?: number,
 ): Promise<TreeChanges> {
-  const changed = new Set<string>();
-  const recheck: Array<{ file: WorkingTreeFile; prior: string }> = [];
-  for (const file of workspace.workingTree.files) {
-    const prior = before.files[file.path];
-    if (prior === undefined) {
-      changed.add(file.path);
-    } else if (!fingerprintsMatch(prior, `${statPart(file)}|`)) {
-      changed.add(file.path);
-    } else if (!prior.endsWith("|")) {
-      recheck.push({ file, prior });
-    }
-  }
-  await mapLimit(recheck, HASH_CONCURRENCY, async ({ file, prior }) => {
-    const now = `${statPart(file)}|${await contentHash(bb, environmentId, file)}`;
-    if (!fingerprintsMatch(prior, now)) {
-      changed.add(file.path);
-    }
-  });
-
-  const novel = await novelCommits(
-    bb,
-    environmentId,
-    before,
-    await turnCommits(bb, environmentId, before, workspace),
-    startedAt,
-  );
+  const changed = await changedFiles(bb, environmentId, before, workspace);
+  const { commits: made, capped } = await turnCommits(bb, environmentId, before, workspace);
+  const novel = await novelCommits(bb, environmentId, before, made, startedAt);
   const perCommit = await mapLimit(novel, HASH_CONCURRENCY, async ({ sha, authoredAt }) => ({
     sha,
     authoredAt,
@@ -79,7 +57,14 @@ export async function treeChangedPaths(
   for (const path of committedPaths) {
     changed.add(path);
   }
-  return { paths: [...changed], commits, committedPaths, commitChanges: kept, uncommittedPaths };
+  return {
+    paths: [...changed],
+    commits,
+    committedPaths,
+    commitChanges: kept,
+    uncommittedPaths,
+    ...(capped ? { capped: true as const } : {}),
+  };
 }
 
 /** A commit made during the turn that another thread made, and which thread. */
@@ -99,6 +84,10 @@ export interface TurnChanges {
   foreignCommits: ForeignCommit[];
   /** Commits that arrived with the remote base, or the checkout branch's own remote-tracking ref, during the turn, merged by someone else; not the turn's work. */
   upstreamCommits: string[];
+  /** Commits that arrived while the turn waited in the review queue; someone else made them. */
+  parkedCommits: string[];
+  /** Changes made while the turn waited in the review queue, left out of `paths`; never the turn's. */
+  parkedPaths: string[];
   /** `exact` claims only the changes this thread's family made or named; `sweep` takes every unattributed change, as when something ran whose writes cannot be listed. */
   mode: "exact" | "sweep";
   /** Uncommitted changes nothing of the family claimed; they are never in `paths`. */
@@ -224,7 +213,17 @@ export async function turnChangedPaths(
   const ownRows = await turnTimeline(bb, threadId, turnStart.sinceSeq);
   const own = authoredPathsFromRows(ownRows.rows, turnStart.sinceSeq);
   if (turnStart.tree === undefined) {
-    return { paths: own, commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [], mode: "exact", unclaimed: [] };
+    return {
+      paths: own,
+      commits: [],
+      committedPaths: [],
+      foreignCommits: [],
+      upstreamCommits: [],
+      parkedCommits: [],
+      parkedPaths: [],
+      mode: "exact",
+      unclaimed: [],
+    };
   }
   const ownSet = new Set(own);
   const harnessOutput = new Set(
@@ -233,7 +232,8 @@ export async function turnChangedPaths(
   const fetched = await treeChangedPaths(bb, environmentId, turnStart.tree, workspace, turnStart.startedAt);
   const now = Date.now();
   const upstream = await withoutUpstream({ bb, input, now, ownRows, ownPaths: ownSet }, fetched);
-  const { tree } = upstream;
+  const parked = await withoutParked({ bb, input, now, ownRows, ownPaths: ownSet }, upstream.tree);
+  const { tree } = parked;
   const unattributed = (paths: readonly string[]) =>
     paths.filter((path) => !ownSet.has(path) && !harnessOutput.has(path));
   const { sibling, foreignCommits, kin } = await readSiblings(
@@ -252,6 +252,8 @@ export async function turnChangedPaths(
     sibling,
     foreignCommits,
     upstreamCommits: upstream.shas,
+    parkedCommits: parked.commits,
+    parkedPaths: parked.paths,
     kin,
     unattributed,
   });

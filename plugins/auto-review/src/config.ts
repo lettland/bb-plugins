@@ -13,6 +13,7 @@ export const FIRE_REASONS = [
   "deferred",
   "no-authorship",
   "unclaimed-changes",
+  "changed-while-parked",
   "empty-scope",
   "no-turn-start",
   "user-stopped",
@@ -57,6 +58,10 @@ export const lastFireSchema = z.object({
   scopePaths: z.array(z.string()),
   /** How many changes stood unclaimed by the thread's family; a count, never the paths. */
   unclaimedCount: z.number().int().nonnegative().optional(),
+  /** How many changes were made while the turn waited in the review queue and left out; with the commits that arrived then and up to five example paths. */
+  parkedCount: z.number().int().nonnegative().optional(),
+  parkedCommits: z.array(z.string()).optional(),
+  parkedPaths: z.array(z.string()).optional(),
 });
 export type LastFire = z.infer<typeof lastFireSchema>;
 

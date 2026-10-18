@@ -1,6 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
-import type { TurnStart } from "./state.js";
+import type { TreeSnapshot, TurnStart } from "./state.js";
 
 import { remoteReachableShas, remoteRef } from "./detect-commits.js";
 
@@ -35,6 +35,14 @@ export interface TreeChanges {
   commitChanges: CommitChange[];
   /** The changed paths the working tree shows, committed ones left out. */
   uncommittedPaths: string[];
+  /** Set when the list of commits made during the turn may be missing some. */
+  capped?: true;
+}
+
+/** The snapshot taken when a turn was last parked behind another thread's review. */
+export interface ParkBaseline {
+  startedAt: number;
+  tree: TreeSnapshot;
 }
 
 export interface TurnChangeInput {
@@ -43,6 +51,8 @@ export interface TurnChangeInput {
   turnStart: TurnStart;
   workspace: AvailableWorkspace;
   threadEntries: readonly ThreadListEntry[];
+  /** Set only for a turn released from a provider park whose snapshot can serve as a baseline; see `withoutParked`. */
+  park?: ParkBaseline;
 }
 
 export interface UpstreamInput {
@@ -190,15 +200,15 @@ async function upstreamCommitsOf(
 }
 
 /** `tree` without the commits `dropped`, and the paths only they touched. */
-function withoutCommits(tree: TreeChanges, dropped: ReadonlySet<string>): TreeChanges {
+export function withoutCommits(tree: TreeChanges, dropped: ReadonlySet<string>): TreeChanges {
   const commitChanges = tree.commitChanges.filter(({ sha }) => !dropped.has(sha));
   const committedPaths = [...new Set(commitChanges.flatMap(({ paths }) => paths ?? []))];
   return {
+    ...tree,
     paths: [...new Set([...tree.uncommittedPaths, ...committedPaths])],
     commits: commitChanges.map(({ sha }) => sha),
     committedPaths,
     commitChanges,
-    uncommittedPaths: tree.uncommittedPaths,
   };
 }
 

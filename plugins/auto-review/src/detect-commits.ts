@@ -265,6 +265,12 @@ export async function novelCommits(
   return commits.filter(({ sha }) => novel.has(sha));
 }
 
+/** The commits made during the turn, and whether the list is cut short: it hit `MAX_NEW_COMMITS` or the host listed fewer commits than are ahead. */
+export interface TurnCommits {
+  commits: TurnCommit[];
+  capped: boolean;
+}
+
 /**
  * Commits made during the turn: the head moved off `before.headSha`. On a
  * branch ahead of its base they are the commits ahead that were not ahead at
@@ -277,30 +283,37 @@ export async function turnCommits(
   environmentId: string,
   before: TreeSnapshot,
   workspace: AvailableWorkspace,
-): Promise<TurnCommit[]> {
+): Promise<TurnCommits> {
   if (headShaOf(workspace) === before.headSha) {
-    return [];
+    return { commits: [], capped: false };
   }
   let commits: readonly { sha: string; authoredAt?: number }[] = [];
+  let incomplete = false;
   if (workspace.mergeBase !== null) {
     const known = new Set(before.commits);
     commits = workspace.mergeBase.commits.filter((commit) => !known.has(commit.sha));
+    incomplete = workspace.mergeBase.aheadCount > workspace.mergeBase.commits.length;
   } else if (before.headSha !== null) {
     try {
       const since = await bb.sdk.environments.status({
         environmentId,
         mergeBaseBranch: before.headSha,
       });
-      commits =
-        since.outcome === "available" ? (since.workspace.mergeBase?.commits ?? []) : [];
+      if (since.outcome === "available" && since.workspace.mergeBase !== null) {
+        commits = since.workspace.mergeBase.commits;
+        incomplete = since.workspace.mergeBase.aheadCount > commits.length;
+      }
     } catch {
       commits = [];
     }
   }
-  return commits.slice(0, MAX_NEW_COMMITS).map((commit) => ({
-    sha: commit.sha,
-    authoredAt: typeof commit.authoredAt === "number" ? commit.authoredAt : null,
-  }));
+  return {
+    commits: commits.slice(0, MAX_NEW_COMMITS).map((commit) => ({
+      sha: commit.sha,
+      authoredAt: typeof commit.authoredAt === "number" ? commit.authoredAt : null,
+    })),
+    capped: incomplete || commits.length >= MAX_NEW_COMMITS,
+  };
 }
 
 /**

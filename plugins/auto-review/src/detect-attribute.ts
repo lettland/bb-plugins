@@ -46,7 +46,7 @@ interface ClaimOutcome {
   kin: KinEvidence | undefined;
 }
 
-function examples(paths: readonly string[]): string {
+export function examples(paths: readonly string[]): string {
   const shown = paths.slice(0, LOG_EXAMPLES).join(", ");
   return paths.length > LOG_EXAMPLES ? `${shown} and ${paths.length - LOG_EXAMPLES} more` : shown;
 }
@@ -128,6 +128,8 @@ export interface TurnReading {
   sibling: SiblingEvidence | undefined;
   foreignCommits: ForeignCommit[];
   upstreamCommits: string[];
+  parkedCommits: string[];
+  parkedPaths: string[];
   kin: KinEvidence | undefined;
   /** Changed paths this thread's own rows and harness state do not account for. */
   unattributed: (paths: readonly string[]) => string[];
@@ -161,6 +163,8 @@ export async function claimedChanges(turn: TurnReading): Promise<TurnChanges> {
     committedPaths: keptPaths.filter(ours),
     foreignCommits: turn.foreignCommits,
     upstreamCommits: turn.upstreamCommits,
+    parkedCommits: turn.parkedCommits,
+    parkedPaths: turn.parkedPaths,
     mode: outcome.mode,
     unclaimed: outcome.unclaimed,
   };
