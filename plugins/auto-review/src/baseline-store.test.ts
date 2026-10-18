@@ -147,7 +147,8 @@ describe("plan baselines", () => {
     expect(unifiedDelta(padded("old"), padded("new"), "plan")?.length).toBeGreaterThan(PLAN_DELTA_BUDGET);
     expect(await planScope(f.bb, THREAD, PLAN, padded("new"), NOW)).toEqual({ kind: "full" });
     expect(unifiedDelta(lines(4_000, "old"), lines(4_000, "new"), "plan")).toBeUndefined();
-  });
+    // Diffing thousands of lines takes seconds under coverage, past the 5 s default.
+  }, 30_000);
 
   it("keeps no baseline for a plan that cannot be read or is too large", async () => {
     const f = fake();
