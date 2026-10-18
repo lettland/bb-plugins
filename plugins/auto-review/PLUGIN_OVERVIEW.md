@@ -32,7 +32,7 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   the files it named count and the rest stands down as `unclaimed-changes`; when it ran
   something whose writes cannot be listed (a build, codegen, a script, an unknown command) the
   turn is a sweep, as described next. A sweep keeps every commit that is not a sibling's or
-  the remote base's; only exact mode drops one nothing of the family could have made. A
+  the remote base's (or the checkout branch's own remote-tracking ref's); only exact mode drops one nothing of the family could have made. A
   thread's shell keeps its directory between rows, and a relative path whose directory is a
   guess claims every changed path that ends in it. See the README for the classes and the
   commit rule.
@@ -51,7 +51,9 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   own auto-review covers it: the commit's time must fall in that command's run, nothing of
   this thread's family (itself, its bb children and owned threads) may have been running
   then, and the commit may touch none of the files that family edited with tools; any
-  doubt keeps the commit with this thread. A sibling's uncommitted shell edit, or a
+  doubt keeps the commit with this thread. A commit that arrived with a pull, reachable from
+  `origin/<mainline>` or from `origin/<the checkout's own branch>` and authored outside every
+  window of this thread's family, is not the thread's work either. A sibling's uncommitted shell edit, or a
   human's edit, made in the same checkout during the turn cannot be told apart and is
   claimed, and this thread's own shell edits (no tool row) swept into a sibling's
   `git add -A` commit are left to the sibling.

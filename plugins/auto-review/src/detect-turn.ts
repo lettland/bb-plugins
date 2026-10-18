@@ -201,8 +201,20 @@ async function foreignCommitsOf(
 }
 
 /**
+ * The remote-tracking refs a pulled commit may have arrived with: the mainline
+ * base's, and the checkout's own branch's when that is another branch.
+ */
+function upstreamRefs(workspace: AvailableWorkspace): string[] {
+  const base = remoteRef(mainlineBase(workspace));
+  const { currentBranch } = workspace.branch;
+  const own = currentBranch ? remoteRef(currentBranch) : base;
+  return own === base ? [base] : [base, own];
+}
+
+/**
  * The commits the remote base brought in that someone else merged: reachable
- * from `origin/<base>` and authored outside every window this thread's family
+ * from `origin/<base>`, or from the remote-tracking ref of the checkout's own
+ * branch (a `git pull` of it), and authored outside every window this thread's family
  * was running, the windows `foreignCommitsOf` treats as ours, and touching none
  * of the family's tool-edited files. A commit the thread makes is authored
  * while one of its rows runs, whatever tool made it. A rewrite keeps the author
@@ -217,10 +229,10 @@ async function upstreamCommitsOf(
   upstream: UpstreamInput,
 ): Promise<{ shas: string[]; kin: KinEvidence | undefined }> {
   const { bb, input, startedAt, now, ownRows, ownPaths, commits } = upstream;
-  const base = mainlineBase(input.workspace);
+  const refs = upstreamRefs(input.workspace);
   const none = { shas: [], kin: undefined };
   const skip = (reason: string, kin?: KinEvidence) => {
-    bb.log.info(`auto-review: not checking whether the turn's commits came from ${remoteRef(base)}: ${reason}`);
+    bb.log.info(`auto-review: not checking whether the turn's commits came from ${refs.join(" or ")}: ${reason}`);
     return { shas: [], kin };
   };
   const dated = commits.flatMap(({ sha, authoredAt, paths }) =>
@@ -237,14 +249,18 @@ async function upstreamCommitsOf(
   if (outside.length === 0) {
     return none;
   }
-  const reachable = await remoteReachableShas(
-    bb,
-    input.environmentId,
-    base,
-    outside.map(({ sha }) => sha),
-    headShaOf(input.workspace),
+  const reachable = await Promise.all(
+    refs.map((ref) =>
+      remoteReachableShas(
+        bb,
+        input.environmentId,
+        ref,
+        outside.map(({ sha }) => sha),
+        headShaOf(input.workspace),
+      ),
+    ),
   );
-  const candidates = outside.filter(({ sha }) => reachable.has(sha));
+  const candidates = outside.filter(({ sha }) => reachable.some((held) => held.has(sha)));
   if (candidates.length === 0) {
     return none;
   }
@@ -302,7 +318,7 @@ async function withoutUpstream(
       ? { shas: [], kin: undefined }
       : await upstreamCommitsOf({ ...context, startedAt, commits: fetched.commitChanges });
   for (const sha of shas) {
-    bb.log.info(`auto-review: commit ${sha} came from ${remoteRef(mainlineBase(input.workspace))}; not this turn's`);
+    bb.log.info(`auto-review: commit ${sha} came from ${upstreamRefs(input.workspace).join(" or ")}; not this turn's`);
   }
   return { tree: withoutCommits(fetched, new Set(shas)), shas, kin };
 }

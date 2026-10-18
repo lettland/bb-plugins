@@ -1240,6 +1240,10 @@ describe("workspace capture edge cases", () => {
       base?: string;
       /** Shas the remote base already holds; by default none, so every commit is still ahead of it. */
       upstream?: string[];
+      /** The checkout's own branch; the base unless given. */
+      branch?: string;
+      /** Shas only the remote-tracking ref of `branch` holds, when it is not the base. */
+      ownRemote?: string[];
       /** Replaces the answer for `origin/<base>`. */
       remote?: (ref: string, ahead: readonly { sha: string }[]) => unknown;
       turnStart?: Record<string, unknown>;
@@ -1255,7 +1259,8 @@ describe("workspace capture edge cases", () => {
             return turnStartStatus(commits);
           }
           remoteCalls.push(ref);
-          const ahead = commits.filter(({ sha }) => !(options.upstream ?? []).includes(sha));
+          const held = (ref === `origin/${options.branch}` ? options.ownRemote : options.upstream) ?? [];
+          const ahead = commits.filter(({ sha }) => !held.includes(sha));
           return options.remote === undefined ? remoteStatus(ref, ahead) : options.remote(ref, ahead);
         },
         diffFiles: async ({ sha }) => {
@@ -1280,7 +1285,7 @@ describe("workspace capture edge cases", () => {
         environmentId: "env",
         turnStart: { sinceSeq: 5, startedAt, tree: { headSha: "h0", files: {}, commits: [] }, ...options.turnStart },
         workspace: ws({
-          branch: { currentBranch: "b", defaultBranch: options.base ?? "master" },
+          branch: { currentBranch: options.branch ?? options.base ?? "master", defaultBranch: options.base ?? "master" },
           checkout: { kind: "branch", headSha: "head" },
           mergeBase: null,
           workingTree: { files: (options.uncommitted ?? []).map((path) => tracked(path)) },
@@ -1483,6 +1488,27 @@ describe("workspace capture edge cases", () => {
         ]);
         expect(committedSinceHead(result, state)).toBeNull();
         expect(commitScanHead(result, state)).toBeNull();
+      });
+
+      it("leaves out a commit pulled from the remote-tracking ref of the checkout's own branch", async () => {
+        const { result, infos, remoteCalls } = await attribute({
+          branch: "develop",
+          commits: [upstreamCommit("u1")],
+          ownRemote: ["u1"],
+        });
+        expect(remoteCalls).toEqual(["origin/master", "origin/develop"]);
+        expect(result).toMatchObject({ commits: [], committedPaths: [], upstreamCommits: ["u1"] });
+        expect(infos).toEqual(["auto-review: commit u1 came from origin/master or origin/develop; not this turn's"]);
+      });
+
+      it("keeps a commit the thread authored that is on the remote-tracking ref of the checkout's own branch", async () => {
+        const { result } = await attribute({
+          branch: "develop",
+          timelines: { thr_self: [search(null, { startedAt: 19_500, completedAt: 21_000 })] },
+          commits: [upstreamCommit("u1", 20_500)],
+          ownRemote: ["u1"],
+        });
+        expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
       });
 
       it("leaves a commit nothing of the family could have made out of the review, in exact mode, next to the upstream one", async () => {
