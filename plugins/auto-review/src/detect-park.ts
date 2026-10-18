@@ -20,7 +20,7 @@ import { commitPaths, MAX_NEW_COMMITS } from "./detect-commits.js";
 import { HASH_CONCURRENCY, mapLimit } from "./detect-limit.js";
 import { shellText, walkRows } from "./detect-rows.js";
 import type { WorkRow } from "./detect-rows.js";
-import { mayDetach } from "./detect-shell.js";
+import { detachedBy } from "./detect-shell.js";
 
 import { FAMILY_LOOKBACK_MS, kinEvidence, ownWindows, rowsSince } from "./detect-timeline.js";
 
@@ -91,41 +91,42 @@ async function commitsAfterPark(
 }
 
 /**
- * Whether a row may write files the timeline does not show, or keep writing
- * after it returned: a background delegation, a workflow task that is not in a
+ * Why a row may write files the timeline does not show, or keep writing
+ * after it returned (undefined when it cannot): a background delegation, a workflow task that is not in a
  * finished state or finished at or after the park (or at an unknown time), an
  * extension call, and a tool that is not known to be read-only (the same
  * classification the family's claims use). The last two are deliberately
  * conservative: a tool can start a detached process the timeline cannot show, so
  * any write-capable tool or MCP call in the lookback turns the filtering off.
  */
-function mayStillWrite(row: WorkRow, parkedAt: number): boolean {
+function stillWritesWhy(row: WorkRow, parkedAt: number): string | undefined {
   switch (row.workKind) {
     case "delegation":
-      return row.background;
+      return row.background ? "background delegation" : undefined;
     case "workflow":
-      return !FINISHED_TASKS.includes(row.taskStatus) || row.completedAt === null || row.completedAt >= parkedAt;
+      return !FINISHED_TASKS.includes(row.taskStatus) || row.completedAt === null || row.completedAt >= parkedAt ? "workflow task" : undefined;
     case "extension":
-      return true;
+      return "extension call";
     case "tool":
-      return !isReadOnlyTool(row.toolName);
+      return isReadOnlyTool(row.toolName) ? undefined : `tool ${row.toolName}`;
     default:
-      return false;
+      return undefined;
   }
 }
 
-/** Whether rows ran something that may keep writing: see `mayStillWrite`, or shell that detaches. */
-function detachesWork(rows: readonly TimelineRow[], parkedAt: number): boolean {
+/** What in these rows may keep writing: see `stillWritesWhy`, or the word that shows shell detaching; never the command itself. */
+function detachedWork(rows: readonly TimelineRow[], parkedAt: number): string | undefined {
   for (const row of walkRows(rows)) {
     if (row.kind !== "work") {
       continue;
     }
     const text = shellText(row);
-    if (mayStillWrite(row, parkedAt) || (text !== null && mayDetach(text))) {
-      return true;
+    const why = stillWritesWhy(row, parkedAt) ?? (text === null ? undefined : detachedBy(text));
+    if (why !== undefined) {
+      return why;
     }
   }
-  return false;
+  return undefined;
 }
 
 /**
@@ -151,8 +152,12 @@ async function quietKinPaths(
   if (!kin.complete) {
     return "a related thread could not be read in full";
   }
-  if ([rows, ...kin.threads].some((thread) => detachesWork(thread, parkedAt))) {
-    return "the thread's family ran work that may have kept writing after it returned";
+  const threads = [{ id: input.threadId, rows }, ...kin.threadIds.map((id, at) => ({ id, rows: kin.threads[at] as TimelineRow[] }))];
+  for (const thread of threads) {
+    const why = detachedWork(thread.rows, parkedAt);
+    if (why !== undefined) {
+      return `thread ${thread.id} ran work that may have kept writing after it returned (${why})`;
+    }
   }
   if (ownWindows(rows, parkedAt, now).length > 0 || kin.windows.some(({ end }) => end >= parkedAt)) {
     return "the thread's family was active since the park";
@@ -176,9 +181,10 @@ async function unlistedParkPaths(
 ): Promise<string[] | string> {
   const known = new Set([...start.commits, ...(start.recentCommits ?? []).map(({ sha }) => sha)]);
   const held = [...park.tree.commits, ...(park.tree.recentCommits ?? []).map(({ sha }) => sha)];
-  // The park snapshot's lists are only known to be whole when they reach back to the turn-start head (or that head is the park head).
+  // Assumes the park list is complete and the turn-start head is on the park head's first-parent chain, so a list that holds it reaches back far enough.
+  // A list the host capped when the park snapshot was taken cannot be detected now; reaching back to the turn-start head stands in for completeness.
   if (park.tree.headSha !== start.headSha && (start.headSha === null || !held.includes(start.headSha))) {
-    return "the commits made before the park cannot be told from the snapshots";
+    return "the park snapshot's commit lists do not reach back to the turn-start head";
   }
   const made = held.filter((sha) => !known.has(sha));
   const unlisted = [...new Set(made)].filter((sha) => !listed.has(sha));

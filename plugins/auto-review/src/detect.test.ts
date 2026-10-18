@@ -2392,6 +2392,15 @@ describe("mayDetach", () => {
     "sudo at now",
     "echo 'x' | (at now)",
     "batch",
+    "/usr/bin/at now",
+    "env at now",
+    "nice at now",
+    "if x; then at now; fi",
+    "ls | xargs at",
+    "docker run --detach=true x",
+    "nerdctl run -d x",
+    "nerdctl compose up",
+    "coproc sleep 5",
   ])("may leave %j running", (text) => {
     expect(mayDetach(text)).toBe(true);
   });
@@ -2423,6 +2432,22 @@ describe("mayDetach", () => {
     expect(mayDetach(`${"x ".repeat(100_000)}-${"a".repeat(100_000)}`)).toBe(false);
     expect(mayDetach(`${"echo hi; ".repeat(20_000)}nohup x`)).toBe(true);
     expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  // The shapes a backtracking regex goes quadratic on: a long run the pattern can split in many ways, then a character that fails it.
+  it.each([
+    ["a flag of d's that ends in a digit", `docker -${"d".repeat(50_000)}1`],
+    ["a flag with no d", `docker -${"a".repeat(50_000)}`],
+    ["sudo and a long run of blanks", `sudo${" ".repeat(50_000)}x`],
+    ["a quote and a long run of blanks", `(${" ".repeat(50_000)}x`],
+    ["a path separator and a long run of blanks", `/${" ".repeat(50_000)}x`],
+    ["brew and a long run of blanks", `brew${" ".repeat(50_000)}x`],
+    ["a long run of blanks", `${" ".repeat(50_000)}x`],
+    ["a long run of lone dashes", `docker ${"- ".repeat(25_000)}`],
+  ])("stays fast on %s", (_name, text) => {
+    const started = performance.now();
+    expect(mayDetach(text)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(2_000);
   });
 });
 

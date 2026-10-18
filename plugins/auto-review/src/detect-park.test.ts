@@ -371,7 +371,7 @@ describe("a turn released from a park", () => {
       const { result, infos } = await released({ ...sweepOnly, ...options });
       expect(result).toMatchObject(noneParked);
       if (reason !== undefined) {
-        expect(infos).toContain(`auto-review: not leaving out what changed while the turn was parked: ${reason}`);
+        expect(infos.some((line) => line.startsWith(`auto-review: not leaving out what changed while the turn was parked: ${reason}`))).toBe(true);
       }
       return result;
     }
@@ -495,23 +495,32 @@ describe("a turn released from a park", () => {
     });
 
     it.each([
-      ["a command that backgrounds a process", "npm run dev &"],
-      ["nohup", "nohup ./serve.sh > out.log"],
-      ["setsid", "setsid ./serve.sh"],
-      ["a detached container", "docker compose up -d"],
-      ["a detached tmux session", "tmux new-session -d -s dev 'npm run dev'"],
-      ["a scheduled job", "at now + 1 minute"],
-      ["a supervised process", "pm2 start app.js"],
-    ])("when the family ran %s that ended before the park", async (_name, text) => {
+      ["a command that backgrounds a process", "npm run dev &", "&"],
+      ["nohup", "nohup ./serve.sh > out.log", "nohup"],
+      ["setsid", "setsid ./serve.sh", "setsid"],
+      ["a detached container", "docker compose up -d", "docker … up"],
+      ["a detached container with a flag", "docker run -d --name db postgres", "docker … -d"],
+      ["a detached tmux session", "tmux new-session -d -s dev 'npm run dev'", "tmux"],
+      ["a scheduled job", "at now + 1 minute", "at"],
+      ["a supervised process", "pm2 start app.js", "pm2"],
+    ])("when the family ran %s that ended before the park", async (_name, text, word) => {
       const detached = rowAt({ workKind: "command", approvalStatus: null, command: text, cwd: "/w" }, 11_000);
       const result = await unfiltered(
         { ...afterPark, timelines: { self: [opaque, detached] } },
-        "the thread's family ran work that may have kept writing after it returned",
+        `thread self ran work that may have kept writing after it returned (${word})`,
       );
       expect(result.paths).toContain("lib/after.ts");
     });
 
-    const stillWrites = "the thread's family ran work that may have kept writing after it returned";
+    // The reason names the thread and what tripped it, never the command's text.
+    it("names the matched word and the thread, not the command", async () => {
+      const secret = rowAt({ workKind: "command", approvalStatus: null, command: "API_KEY=hunter2 tmux new -d x", cwd: "/w" }, 11_000);
+      const { infos } = await released({ ...sweepOnly, ...afterPark, timelines: { self: [opaque, secret] } });
+      expect(infos.join("\n")).toContain("thread self ran work that may have kept writing after it returned (tmux)");
+      expect(infos.join("\n")).not.toContain("hunter2");
+    });
+
+    const stillWrites = "thread self ran work that may have kept writing after it returned";
     const task = (taskStatus: string, completedAt: number | null) =>
       rowAt({ workKind: "workflow", taskStatus, taskType: "t", workflowName: null }, 11_000, completedAt as number);
 
@@ -522,7 +531,7 @@ describe("a turn released from a park", () => {
       ["finished at an unknown time", task("failed", null)],
       ["queued", task("queued", 12_000)],
     ])("when a workflow task was %s", async (_name, row) => {
-      await unfiltered({ ...afterPark, timelines: { self: [opaque, row] } }, stillWrites);
+      await unfiltered({ ...afterPark, timelines: { self: [opaque, row] } }, `${stillWrites} (workflow task)`);
     });
 
     it.each(["completed", "failed", "killed", "stopped"])("leaves the filter on for a workflow task that was %s before the park", async (state) => {
@@ -531,10 +540,10 @@ describe("a turn released from a park", () => {
     });
 
     it.each([
-      ["a tool that is not known to be read-only", rowAt({ workKind: "tool", approvalStatus: null, toolName: "apply", toolArgs: { path: "x" } }, 11_000)],
-      ["an extension call", rowAt({ workKind: "extension", callId: "call-1", extensionKind: "mcp/tool" }, 11_000)],
-    ])("when the family ran %s", async (_name, row) => {
-      await unfiltered({ ...afterPark, timelines: { self: [opaque, row] } }, stillWrites);
+      ["a tool that is not known to be read-only", rowAt({ workKind: "tool", approvalStatus: null, toolName: "apply", toolArgs: { path: "x" } }, 11_000), "tool apply"],
+      ["an extension call", rowAt({ workKind: "extension", callId: "call-1", extensionKind: "mcp/tool" }, 11_000), "extension call"],
+    ])("when the family ran %s", async (_name, row, why) => {
+      await unfiltered({ ...afterPark, timelines: { self: [opaque, row] } }, `${stillWrites} (${why})`);
     });
 
     it("leaves the filter on for a tool that is known to be read-only", async () => {
@@ -563,12 +572,26 @@ describe("a turn released from a park", () => {
 
     it.each([
       ["a window", edit("lib/kid.ts", 40_000), "the thread's family was active since the park"],
-      ["a detached command", rowAt({ workKind: "command", approvalStatus: null, command: "docker compose up -d", cwd: "/w" }, 12_000), stillWrites],
+      ["a detached command", rowAt({ workKind: "command", approvalStatus: null, command: "docker compose up -d", cwd: "/w" }, 12_000), "thread kid ran work that may have kept writing after it returned (docker … up)"],
     ])("when a kin thread gained %s between the two quiet reads", async (_name, row, reason) => {
       const kid = entry("kid", { parentThreadId: "self" });
       await unfiltered(
         { ...afterPark, entries: [self, kid], timelines: { self: [opaque], kid: [] }, lateRows: { threadId: "kid", reads: 1, rows: [row] } },
         reason,
+      );
+    });
+
+    it("when a branch turn started at the base, with no commits ahead, and committed before the park", async () => {
+      // The park list holds only the new commit: nothing shows it reaches back to the turn-start head, which is the base.
+      await unfiltered(
+        {
+          ...afterPark,
+          turnCommits: { commits: [] },
+          parkCommits: { commits: ["c1"] },
+          parkedAfter: 1,
+          chain: [{ sha: "c1", paths: ["lib/mine.ts"], authoredAt: 20_000 }],
+        },
+        "the park snapshot's commit lists do not reach back to the turn-start head",
       );
     });
 
@@ -583,7 +606,7 @@ describe("a turn released from a park", () => {
           parkedAfter: 1,
           chain: [{ sha: "c1", paths: ["lib/new.ts"], authoredAt: 5_000 }],
         },
-        "the commits made before the park cannot be told from the snapshots",
+        "the park snapshot's commit lists do not reach back to the turn-start head",
       );
     });
 
@@ -595,7 +618,7 @@ describe("a turn released from a park", () => {
     });
 
     it.each([
-      ["names none of them", { parkCommits: { commits: [] } }, "the commits made before the park cannot be told from the snapshots"],
+      ["names none of them", { parkCommits: { commits: [] } }, "the park snapshot's commit lists do not reach back to the turn-start head"],
       ["names too many of them", { parkCommits: { commits: ["h0", ...Array.from({ length: 21 }, (_, at) => `p${at}`)] } }, "too many commits were made before the park to read"],
     ] as Array<[string, Options, string]>)("when the park snapshot %s", async (_name, options, reason) => {
       await unfiltered(
@@ -604,9 +627,15 @@ describe("a turn released from a park", () => {
       );
     });
 
+    it("leaves the filter on for a delegation that ran in the foreground", async () => {
+      const delegation = rowAt({ workKind: "delegation", callId: "c1", toolName: "Agent", childRef: null, childRows: [], background: false }, 11_000);
+      const { result } = await released({ ...sweepOnly, ...afterPark, timelines: { self: [opaque, delegation] } });
+      expect(result.parkedCommits).toEqual(["c1"]);
+    });
+
     it("when the family started a background delegation", async () => {
       const delegation = rowAt({ workKind: "delegation", callId: "c1", toolName: "Agent", childRef: null, childRows: [], background: true }, 11_000);
-      await unfiltered({ ...afterPark, timelines: { self: [opaque, delegation] } }, "the thread's family ran work that may have kept writing after it returned");
+      await unfiltered({ ...afterPark, timelines: { self: [opaque, delegation] } }, `${stillWrites} (background delegation)`);
     });
 
     it.each([

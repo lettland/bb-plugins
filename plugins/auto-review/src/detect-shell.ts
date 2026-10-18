@@ -148,28 +148,54 @@ export function mayMoveRemoteRef(text: string): boolean {
  * it keeps running after the command returns. Any mention counts, quoted or not.
  */
 const DETACH_WORDS =
-  /(?<![<>&\\])&(?![>&])|\b(?:nohup|setsid|disown|daemon|systemd-run|systemctl|service|launchctl|crontab|pm2|tmux|screen|batch)\b|\bbrew\s+services\b/u;
-
-/** `at` as a command word: at the start of a command, after `sudo`, `(`, `$(`, a quote or a backtick. */
-const AT_COMMAND = /(?:^|\bsudo\s+|[(`'"])\s*at\b/u;
-
-/** A container program, and what starts or detaches one: `-d`-style flags, `--detach`, `start`, `restart`, `up`. */
-const CONTAINER_PROGRAM = /\b(?:docker|podman|compose)\b/u;
-const CONTAINER_START = /(?:^|\s)(?:--detach|-[A-Za-z]*d[A-Za-z]*)(?=[\s"'`)]|$)|\b(?:start|restart|up)\b/u;
+  /(?<![<>&\\])&(?![>&])|\b(?:nohup|setsid|disown|daemon|coproc|systemd-run|systemctl|service|launchctl|crontab|pm2|tmux|screen|batch)\b|\bbrew\s+services\b/u;
 
 /**
- * Whether shell text may leave a process running after it returns, which could
- * still write files later. Loose on purpose, like `mayMoveRemoteRef`, and never
- * truncated: a miss would let a later write be taken for someone else's, so
- * false positives (`curl "u?a=1&b=2"`, any `service` or `tmux` mention) only keep
- * the work with the turn. It sees programs inside quotes, `$( )`, backticks and
- * a shell wrapper's string, because it reads the text and not its words. Linear:
- * a split into commands at `;`, `|`, newlines and `&&`, then a few word-boundary
- * tests on each.
+ * `at` as a command word: at the start of a command, after a path separator,
+ * `(`, a quote or a backtick, or after a word that runs its argument. Each
+ * alternative is fixed, with one `\s*` before `at`, so the match is linear.
  */
+const AT_COMMAND = /(?:^|[/(`'"]|\b(?:sudo|env|nice|time|exec|command|then|do|xargs)\b)\s*at\b/u;
+
+/**
+ * A container program, and what starts or detaches one: `-d`-style flags,
+ * `--detach`, `start`, `restart`, `up`. The first run of letters in a flag cannot
+ * hold a `d`, so the flag can only match one way and cannot backtrack.
+ */
+const CONTAINER_PROGRAM = /\b(?:docker|podman|nerdctl|compose)\b/u;
+const CONTAINER_START =
+  /(?:^|\s)(?:--detach(?=[=\s"'`)]|$)|-[A-Za-ce-z]*d[A-Za-z]*(?=[\s"'`)]|$))|\b(?:start|restart|up)\b/u;
+
+/**
+ * What in shell text may leave a process running after it returns, which could
+ * still write files later: the matched word (`&`, `tmux`, `at`, `docker … -d`),
+ * never any other part of the text; undefined when nothing does. Loose on
+ * purpose, like `mayMoveRemoteRef`, and never truncated: a miss would let a
+ * later write be taken for someone else's, so false positives (`curl
+ * "u?a=1&b=2"`, any `service` or `tmux` mention) only keep the work with the
+ * turn. It sees programs inside quotes, `$( )`, backticks and a shell wrapper's
+ * string, because it reads the text and not its words. Linear: a split into
+ * commands at `;`, `|`, newlines and `&&`, then a few word-boundary tests on each.
+ */
+export function detachedBy(text: string): string | undefined {
+  const word = DETACH_WORDS.exec(text);
+  if (word !== null) {
+    return word[0].replace(/\s+/gu, " ");
+  }
+  for (const command of text.split(/[;|\n]|&&/u)) {
+    if (AT_COMMAND.test(command)) {
+      return "at";
+    }
+    const program = CONTAINER_PROGRAM.exec(command);
+    const start = program === null ? null : CONTAINER_START.exec(command);
+    if (program !== null && start !== null) {
+      return `${program[0]} … ${start[0].trim()}`;
+    }
+  }
+  return undefined;
+}
+
+/** Whether shell text may leave a process running after it returns; see `detachedBy`. */
 export function mayDetach(text: string): boolean {
-  return (
-    DETACH_WORDS.test(text) ||
-    text.split(/[;|\n]|&&/u).some((command) => AT_COMMAND.test(command) || (CONTAINER_PROGRAM.test(command) && CONTAINER_START.test(command)))
-  );
+  return detachedBy(text) !== undefined;
 }

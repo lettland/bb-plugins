@@ -219,9 +219,9 @@ It ships enabled (opt-out).
   while a turn waits is not reviewed by that turn: ask in a later turn to have it reviewed.
   Nothing is left out after any activity of the thread or its children since the park (checked
   again after the files are read), or work that may still be writing: a shell command that
-  mentions a lone `&`, `nohup`, `setsid`, `disown`, `daemon`, `systemd-run`, `systemctl`,
+  mentions a lone `&`, `nohup`, `setsid`, `disown`, `daemon`, `coproc`, `systemd-run`, `systemctl`,
   `service`, `launchctl`, `crontab`, `pm2`, `batch`, any `tmux` or `screen`, `brew services`,
-  `at` as a command, or `docker`, `podman` or `compose` with `-d`, `--detach`, `start`, `restart`
+  `at` as a command, or `docker`, `podman`, `nerdctl` or `compose` with `-d`, `--detach`, `start`, `restart`
   or `up` (even inside quotes or `$( )`); a background agent; a harness background command or a
   workflow task not finished before the park; any extension (MCP) call or tool not known to be
   read-only, since a tool can start a detached process the timeline cannot show. Nor is it left
