@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  isNativePlanGateProvider,
   passesThreadGate,
   planGateServes,
-  PLAN_GATE_PROVIDER_ID,
   reviewInFlight,
   selfIsWorktree,
   type HeldReview,
@@ -18,7 +18,7 @@ const okThread = {
   originPluginId: null,
   visibility: "visible",
   environmentId: "env_1",
-  providerId: PLAN_GATE_PROVIDER_ID,
+  providerId: "claude-code",
 };
 
 describe("passesThreadGate", () => {
@@ -175,11 +175,39 @@ describe("selfIsWorktree", () => {
   });
 });
 
+describe("isNativePlanGateProvider", () => {
+  it.each(["claude-code", "claude-code-work", "claude-code-a-b"])(
+    "is true for %s",
+    (providerId) => {
+      expect(isNativePlanGateProvider(providerId)).toBe(true);
+    },
+  );
+
+  it.each(["acp-claude-work", "acp-claude-code", "codex", "claude-codex", "claude-codework", "xclaude-code", ""])(
+    "is false for %j",
+    (providerId) => {
+      expect(isNativePlanGateProvider(providerId)).toBe(false);
+    },
+  );
+});
+
 const servingConfig = { enabled: true };
 
 describe("planGateServes", () => {
   it("serves a top-level, enabled claude-code thread", () => {
     expect(planGateServes(okThread, servingConfig)).toBe(true);
+  });
+
+  it("serves a claude-code profile provider like claude-code", () => {
+    expect(
+      planGateServes({ ...okThread, providerId: "claude-code-work" }, servingConfig),
+    ).toBe(true);
+  });
+
+  it("stands down for a lookalike that is not in the claude-code family", () => {
+    expect(
+      planGateServes({ ...okThread, providerId: "claude-codex" }, servingConfig),
+    ).toBe(false);
   });
 
   it("stands down for a different provider (e.g. the ACP bridge)", () => {

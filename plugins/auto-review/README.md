@@ -6,8 +6,8 @@ changes, applies fixes, commits only the paths that turn touched, and on a perso
 mainline (e.g. `master`) merges the feature branch into it locally. It never pushes.
 
 It also reviews plans, on every provider, through one of two paths kept strictly separate
-by provider so a plan is never reviewed twice. On Claude Code, whose ExitPlanMode routes
-to a real plan approval the gate can hold, the first presentation of a plan is held back
+by provider so a plan is never reviewed twice. On Claude Code (and its `claude-code-<slug>` profile providers), whose ExitPlanMode
+routes to a real plan approval the gate can hold, the first presentation of a plan is held back
 (queued, reviewed, revised) before the user sees it. Every other provider's plan approvals
 never reach that gate, so instead a thread instruction tells those agents to write the
 plan to a file and call the `PresentPlan` tool before substantial work, even outside plan

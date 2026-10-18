@@ -390,7 +390,7 @@ export const PLAN_FIRST_INSTRUCTIONS = [
 
 /**
  * Thread instructions for every other served provider: no plan approval of
- * theirs ever reaches the native gate (see `PLAN_GATE_PROVIDER_ID`), so the
+ * theirs ever reaches the native gate (see `isNativePlanGateProvider`), so the
  * agent is routed through the provider-agnostic `PresentPlan` tool instead,
  * which plays the role ExitPlanMode plays for Claude Code above.
  */

@@ -3104,9 +3104,15 @@ describe("auto-review plugin", () => {
     expect(claudeCode.skills).toEqual(["auto-review"]);
     expect(claudeCode.instructions).toBe(PLAN_FIRST_INSTRUCTIONS);
 
+    // A claude-code profile provider shares the bridge, so it gets the same.
+    const claudeCodeWork = await resolve(null, null, "claude-code-work");
+    expect(claudeCodeWork.tools.map((tool) => tool.name)).toEqual(["ReportReview"]);
+    expect(claudeCodeWork.skills).toEqual(["auto-review"]);
+    expect(claudeCodeWork.instructions).toBe(PLAN_FIRST_INSTRUCTIONS);
+
     // Every other provider's plan approvals never reach the native gate, so
     // they get PresentPlan plus its own instructions instead.
-    for (const providerId of ["acp-claude-work", "codex"]) {
+    for (const providerId of ["acp-claude-work", "codex", "claude-codex"]) {
       const resolved = await resolve(null, null, providerId);
       expect(resolved.tools.map((tool) => tool.name).sort()).toEqual(["PresentPlan", "ReportReview"]);
       expect(resolved.skills).toEqual(["auto-review"]);
@@ -3125,7 +3131,7 @@ describe("auto-review plugin", () => {
     await host.harness.setSettings({ enabled: false });
     // With the global switch off no plan-first tool or instruction is offered,
     // but a project can still enable review, so ReportReview stays.
-    for (const providerId of ["acp-claude-work", "claude-code"]) {
+    for (const providerId of ["acp-claude-work", "claude-code", "claude-code-work"]) {
       const disabled = await resolve(null, null, providerId);
       expect(disabled.tools.map((tool) => tool.name)).toEqual(["ReportReview"]);
       expect(disabled.instructions).toBeNull();

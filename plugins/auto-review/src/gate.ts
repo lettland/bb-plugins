@@ -30,13 +30,19 @@ export function passesThreadGate(thread: GateThread): boolean {
   return true;
 }
 
-/** The only provider whose plan approvals reach auto-review's gate (see server.ts). */
-export const PLAN_GATE_PROVIDER_ID = "claude-code";
+/**
+ * Whether this provider id belongs to the claude-code family — `claude-code`
+ * and the native profile providers it registers as `claude-code-<slug>` — the
+ * only providers whose plan approvals reach auto-review's gate (see server.ts).
+ */
+export function isNativePlanGateProvider(providerId: string): boolean {
+  return providerId === "claude-code" || providerId.startsWith("claude-code-");
+}
 
 /**
  * Whether auto-review's plan gate owns this thread's plan review. True only for a
- * top-level, visible, environment-bound `claude-code` thread with auto-review on —
- * every other thread (ACP, standalone, disabled, child) falls to whatever
+ * top-level, visible, environment-bound claude-code-family thread with auto-review
+ * on — every other thread (ACP, standalone, disabled, child) falls to whatever
  * reviews plans outside auto-review instead (e.g. agent-hooks' own hook).
  */
 export function planGateServes(
@@ -45,7 +51,7 @@ export function planGateServes(
 ): boolean {
   return (
     config.enabled &&
-    thread.providerId === PLAN_GATE_PROVIDER_ID &&
+    isNativePlanGateProvider(thread.providerId) &&
     passesThreadGate(thread)
   );
 }

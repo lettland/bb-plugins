@@ -101,7 +101,7 @@ for the user's own, explicit approval — a tool result is never treated as that
 except the auto-approve case below. An
 arm left for more than the 30-minute stale window is treated as gone (a crashed turn, a
 session that never came back): the next call reviews again rather than releasing
-unreviewed. Claude Code never gets `PresentPlan`, and no other provider gets the native
+unreviewed. The claude-code family (`claude-code`, `claude-code-<slug>`) never gets `PresentPlan`, and no other provider gets the native
 gate's instructions, so the two review paths can never land on the same plan.
 
 Reading only the bare deny, an agent commonly reacts by asking the user what to change
@@ -129,8 +129,8 @@ The gate only sees a plan that is presented for approval, and an agent outside p
 would otherwise go straight from its own design to edits. So while auto-review is enabled
 globally it adds a thread instruction: before substantial work (a new module, a
 multi-file change, a design the user has not seen) the agent presents a plan, even when the
-thread is not in plan mode. On Claude Code — the only provider whose plan approvals reach
-the gate — the agent is told to enter plan mode (EnterPlanMode) and present it
+thread is not in plan mode. On Claude Code (and its `claude-code-<slug>` profile providers) — the only providers
+whose plan approvals reach the gate — the agent is told to enter plan mode (EnterPlanMode) and present it
 (ExitPlanMode). Every other top-level provider instead gets the `PresentPlan` tool and an
 instruction to write the plan to a file and call it, follow its result, and never treat a
 tool result — including ExitPlanMode's own "approved" outcome — as the user's approval,
@@ -300,7 +300,7 @@ All commands accept `--json`.
   and time, and `reviewResult`: the last review's outcome and its time, or `pending` (with no
   time) while a review is in flight; the open and re-raised finding counts; `omittedFromPrompt`,
   how many open findings do not fit the next review's prompt; and the last incident).
-  `planGate` is true only for a top-level, visible, environment-bound `claude-code` thread
+  `planGate` is true only for a top-level, visible, environment-bound claude-code-family thread
   with auto-review enabled — the one case where auto-review's own native
   plan gate (see *Plan review* above) owns this thread's plan review instead of another
   gate (e.g. agent-hooks' `review-plan-before-exit.sh`, which stands down when this is

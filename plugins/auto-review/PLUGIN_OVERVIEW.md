@@ -98,9 +98,9 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   `delta vs baseline` or `full (no baseline)`; an auto-approval, a redo and a thread deletion
   clear a plan's baseline.
 - Reviews plans too, on every provider, through two paths kept strictly separate by
-  provider capability so one plan is never reviewed twice. On Claude Code, whose
-  ExitPlanMode routes to a real `interaction.pending` with `subject.kind: "plan"` the
-  native gate can hold, it fires on that event, holds the first presentation back (queues
+  provider capability so one plan is never reviewed twice. On Claude Code (and its
+  `claude-code-<slug>` profile providers), whose ExitPlanMode routes to a real
+  `interaction.pending` with `subject.kind: "plan"` the native gate can hold, it fires on that event, holds the first presentation back (queues
   a review-plan turn, then denies the approval), and releases the revised plan on its
   re-presentation. If the agent reacts to the bare deny by asking the user what to
   change, auto-review auto-answers that one question itself (reason
@@ -111,8 +111,8 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   the review instructions, and the second call (after the agent applies the findings)
   releases it — the agent then ends its turn and waits for the user's own, explicit
   approval, since a tool result is never the user's approval (except when a project opts in
-  to auto-approve and the plan completed the review cycle). Claude Code never gets
-  `PresentPlan`, and no other provider gets the native gate's instructions, so the two
+  to auto-approve and the plan completed the review cycle). Claude Code and its profile
+  providers never get `PresentPlan`, and no other provider gets the native gate's instructions, so the two
   paths never compete for the same plan.
 - Per project and off by default (the Plan auto-approve section on the settings page, or
   `bb auto-review auto-approve on --project <id>`), a plan is approved automatically once it completed the review cycle (reason `plan-approved`);
@@ -154,8 +154,8 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   [--clear]` lists a thread's finding chains and incidents (`--clear` is terminal-only and needs
   an explicit thread id). The `threadReview` RPC and the realtime channel `auto-review:thread:<id>`
   serve the same state to the UI. `status`
-  reports `planGate`: whether this thread is a top-level, enabled `claude-code`
-  thread, so its plan review is owned here, by the native gate, rather than by another gate
+  reports `planGate`: whether this thread is a top-level, enabled claude-code-family
+  (`claude-code` or `claude-code-<slug>`) thread, so its plan review is owned here, by the native gate, rather than by another gate
   (e.g. agent-hooks). It does not reflect `PresentPlan`, which has no equivalent gate to hand
   off from on its own providers.
 

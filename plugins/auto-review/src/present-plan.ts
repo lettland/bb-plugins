@@ -11,7 +11,7 @@ import { clearPlanBaseline, planScope, settlePlanBaseline, stagePlanPending } fr
 import { effectiveConfig, readProjectConfig } from "./config.js";
 import { recordFire, type EffectiveConfig, type ReviewContext } from "./context.js";
 import { tryCaptureSinceSeq } from "./detect.js";
-import { PLAN_GATE_PROVIDER_ID } from "./gate.js";
+import { isNativePlanGateProvider } from "./gate.js";
 import { planReleaseReason, planSkillCheck, reviewRanSince, warnPlanUnreviewed } from "./plan.js";
 import {
   buildPresentPlanReviewPrompt,
@@ -185,19 +185,20 @@ async function presentPlan(
 // user unreviewed (or, on `PresentPlan`, is told review is off here — see
 // `presentPlan` above).
 //
-// Claude Code is the only provider whose plan approvals reach the NATIVE
-// gate (`gatePlan`): its ExitPlanMode routes to a real `interaction.pending`
+// The claude-code family (`claude-code` and its `claude-code-<slug>` profile
+// providers, which share one bridge) is the only set of providers whose plan
+// approvals reach the NATIVE gate (`gatePlan`): its ExitPlanMode routes to a real `interaction.pending`
 // with `subject.kind: "plan"`, even in the `full` permission mode, which is
 // what lets that gate hold and re-present a plan by denying its own
 // approval. The ACP bridge, by contrast, auto-approves every permission
 // request in `full` mode (`handlePermissionRequest`), and in its other modes
 // raises only a generic approval, never one with that subject kind — the
 // SDK has no capability flag for this, so there is nothing to branch on but
-// the provider id. On every other provider the native gate never sees a
+// the provider id (`isNativePlanGateProvider`). On every other provider the native gate never sees a
 // plan, so instead those threads get the `PresentPlan` tool: a
 // provider-agnostic review path the agent drives itself (write the plan to
 // a file, call `PresentPlan`, apply its findings, call it again to
-// release). Claude Code never gets this tool — it already has a review path
+// release). A claude-code-family provider never gets this tool — it already has a review path
 // through the native gate, and offering both would let one plan be reviewed
 // twice or let a `PresentPlan` cycle (which the native gate cannot see)
 // stand in for a native review it never actually ran.
@@ -215,7 +216,7 @@ function agentConfiguration(
   if (!review.globals.enabled) {
     return { tools: [REPORT_REVIEW_TOOL_NAME], skills: ["auto-review"] };
   }
-  return context.provider.id === PLAN_GATE_PROVIDER_ID
+  return isNativePlanGateProvider(context.provider.id)
     ? {
         tools: [REPORT_REVIEW_TOOL_NAME],
         skills: ["auto-review"],
