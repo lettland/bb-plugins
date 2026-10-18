@@ -1545,8 +1545,8 @@ describe("workspace capture edge cases", () => {
           ownRemote: ["u1"],
         };
         const since = new Date(5_500).toISOString();
-        const skipLine = (refs: string) =>
-          `auto-review: not checking whether the turn's commits came from ${refs}: the thread's family may have pushed or moved a remote-tracking ref since ${since}`;
+        const skipLine = (refs: string, who = "thread thr_self") =>
+          `auto-review: not checking whether the turn's commits came from ${refs}: the thread's family may have pushed or moved a remote-tracking ref since ${since} (${who})`;
         const ran = (thread: "thr_self" | "thr_child" | "thr_sibling", text: string, over: Record<string, unknown> = {}) => ({
           entries: [self, child, sibling],
           timelines: { [thread]: [command(text, { createdAt: 30_000, startedAt: 30_000, completedAt: 30_500, ...over })] },
@@ -1559,8 +1559,78 @@ describe("workspace capture edge cases", () => {
         ] as const)("drops no commit as upstream when %s", async (_what, thread, text) => {
           const { result, infos } = await attribute({ ...options, ...ran(thread, text) });
           expect(result).toMatchObject({ commits: ["u1", "u2"], upstreamCommits: [] });
+          expect(infos).toEqual([skipLine("origin/master or origin/develop", `thread ${thread}`)]);
+        });
+
+        it("names every thread of the family whose rows tripped the guard", async () => {
+          const push = (over: Record<string, unknown> = {}) =>
+            command("git push", { createdAt: 30_000, startedAt: 30_000, completedAt: 30_500, ...over });
+          const { infos } = await attribute({
+            ...options,
+            entries: [self, child],
+            timelines: { thr_self: [push()], thr_child: [push()] },
+          });
+          expect(infos).toEqual([skipLine("origin/master or origin/develop", "threads thr_self, thr_child")]);
+        });
+
+        it("counts a push of a thread the checkout's thread owns through its lifecycle", async () => {
+          const owned = entry("thr_owned", { lifecycleOwnerThreadId: "thr_self" });
+          const { result, infos } = await attribute({
+            ...options,
+            entries: [self, owned],
+            timelines: { thr_owned: [command("git push origin develop", { createdAt: 30_000, startedAt: 30_000, completedAt: 30_500 })] },
+          });
+          expect(result).toMatchObject({ commits: ["u1", "u2"], upstreamCommits: [] });
+          expect(infos).toEqual([skipLine("origin/master or origin/develop", "thread thr_owned")]);
+        });
+
+        it("counts a search row that carries a push", async () => {
+          const { result, infos } = await attribute({
+            ...options,
+            timelines: { thr_self: [search("git push origin develop", { createdAt: 30_000, startedAt: 30_000, completedAt: 30_500 })] },
+          });
+          expect(result).toMatchObject({ commits: ["u1", "u2"], upstreamCommits: [] });
           expect(infos).toEqual([skipLine("origin/master or origin/develop")]);
         });
+
+        it("counts a push made after the earliest commit was authored but before the turn started", async () => {
+          const { result, infos } = await attribute({
+            ...options,
+            ...ran("thr_self", "git push origin develop", { createdAt: 7_000, startedAt: 7_000, completedAt: 7_500 }),
+          });
+          expect(result).toMatchObject({ commits: ["u1", "u2"], upstreamCommits: [] });
+          expect(infos).toEqual([skipLine("origin/master or origin/develop")]);
+        });
+
+        // A row's window reaches one second either side of it, so a push that ended a second before the earliest commit still counts.
+        it.each([
+          ["a second before", 4_500, true],
+          ["more than a second before", 4_499, false],
+        ])("treats a push that ended %s the earliest commit's author date accordingly", async (_when, completedAt, trips) => {
+          const { infos } = await attribute({
+            ...options,
+            ...ran("thr_self", "git push origin develop", { createdAt: 4_000, startedAt: 4_000, completedAt }),
+          });
+          expect(infos).toEqual(
+            trips
+              ? [skipLine("origin/master or origin/develop")]
+              : [
+                  "auto-review: commit u1 came from origin/develop; not this turn's",
+                  "auto-review: commit u2 came from origin/master; not this turn's",
+                ],
+          );
+        });
+
+        it.each([".git/refs/remotes/origin/develop", ".git/packed-refs"])(
+          "drops no commit as upstream when a tool edited %s",
+          async (path) => {
+            const { result, infos } = await attribute({ ...options, timelines: { thr_self: [edit(path)] } });
+            expect(result).toMatchObject({ commits: ["u1", "u2"], upstreamCommits: [] });
+            expect(infos).toEqual([
+              "auto-review: not checking whether the turn's commits came from origin/master or origin/develop: the thread's family edited a file that holds remote-tracking refs",
+            ]);
+          },
+        );
 
         it("keeps a commit only the mainline holds, on a branch checkout, after a push", async () => {
           const { result, infos } = await attribute({
@@ -2208,6 +2278,20 @@ describe("mayMoveRemoteRef", () => {
     "git fetch --force . a:b",
     "gh repo sync",
     "gh repo sync owner/repo",
+    'git fetch "." a:b',
+    "git fetch ./ a:b",
+    'git fetch "$PWD" a:b',
+    "git fetch $(pwd) a:b",
+    "git fetch . ",
+    "git fetch '.' HEAD",
+    "git fetch origin develop:refs/remotes/origin/develop",
+    "git branch -f x remotes/origin/develop",
+    "git send-pack ../other HEAD",
+    "git remote set-url origin .",
+    "git config remote.origin.url .",
+    "git -c url.x.insteadOf=y fetch",
+    "git config --global url.x.insteadOf y",
+    "rm .git/packed-refs",
   ])("matches %j", (text) => {
     expect(mayMoveRemoteRef(text)).toBe(true);
   });
@@ -2222,9 +2306,20 @@ describe("mayMoveRemoteRef", () => {
     "pushd /tmp",
     "gh repo view",
     "npm run pushy",
+    "git fetch --all --prune",
+    'rg "\\.push\\("',
+    "git remote -v",
     "",
   ])("ignores %j", (text) => {
     expect(mayMoveRemoteRef(text)).toBe(false);
+  });
+
+  it("answers for a long line without separators in linear time", () => {
+    const started = Date.now();
+    expect(mayMoveRemoteRef(`fetch ${"a ".repeat(100_000)}`)).toBe(false);
+    expect(mayMoveRemoteRef(`${"remote.".repeat(30_000)} fetch`)).toBe(false);
+    expect(mayMoveRemoteRef(`fetch ${"a ".repeat(100_000)}b:c`)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 });
 

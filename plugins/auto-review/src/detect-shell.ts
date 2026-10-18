@@ -90,16 +90,48 @@ export function isHistoryWritingGit(text: string): boolean {
 }
 
 /**
- * Shell text that can move a remote-tracking ref, which would make a local
- * commit look like pulled work: the word `push` anywhere (`git push`, inside a
- * nested shell, behind `env` or a path to git), `update-ref`, a
- * `refs/remotes/` name, `gh repo sync`, or a `git fetch` whose source is `.`.
- * Not a parser: false positives (`git stash push`, `echo push`) only keep a
- * commit in review, and a miss would drop one.
+ * Words that can move a remote-tracking ref or the remote it follows, found
+ * anywhere in shell text: `push` (not after a `.`, as in a `.push(` pattern),
+ * `update-ref`, `send-pack`, `set-url`, `insteadOf`, `packed-refs`, and
+ * `remotes/` (git reads `remotes/origin/x` as `refs/remotes/origin/x`).
  */
-const REMOTE_REF_MOVERS =
-  /\bpush\b|\bupdate-ref\b|refs\/remotes\/|\bgh\s+repo\s+sync\b|\bfetch\b[^;&|\n]*\s\.(?:\s|$)/u;
+const REMOTE_REF_WORDS =
+  /(?<![.\w])push\b|\bupdate-ref\b|\bsend-pack\b|\bset-url\b|\binsteadOf\b|\bpacked-refs\b|\bremotes\//u;
 
+/** A `git fetch` source that is this repository. */
+const LOCAL_SOURCES: ReadonlySet<string> = new Set([".", '"."', "'.'", "./", "$PWD", '"$PWD"', "$(pwd)"]);
+
+/** Whether one command, split at `;`, `&`, `|` or a newline, fetches into a local ref or runs `gh repo sync`. */
+function mayMoveRemoteRefInCommand(command: string): boolean {
+  const words = command.split(/\s+/u);
+  const fetch = words.indexOf("fetch");
+  if (fetch !== -1) {
+    // A refspec (`a:b`) or a local source makes the fetch write refs of this repository.
+    const rest = words.slice(fetch + 1);
+    if (rest.some((word) => LOCAL_SOURCES.has(word) || (word.indexOf(":") > 0 && !word.endsWith(":")))) {
+      return true;
+    }
+  }
+  const gh = words.indexOf("gh");
+  return gh !== -1 && words[gh + 1] === "repo" && words[gh + 2] === "sync";
+}
+
+/** A `remote.<name>.url` config key, found without backtracking. */
+function namesRemoteUrl(text: string): boolean {
+  const at = text.indexOf("remote.");
+  return at !== -1 && text.indexOf(".url", at + "remote.".length) !== -1;
+}
+
+/**
+ * Shell text that can move a remote-tracking ref, which would make a local
+ * commit look like pulled work. The words of `REMOTE_REF_WORDS`, a
+ * `remote.<name>.url` key, `gh repo sync`, and a `git fetch` with a refspec or
+ * a local source. Not a parser, and never truncated, since a miss would drop a
+ * commit: false positives (`git stash push`, `echo push`) only keep one in
+ * review. Every check is linear in the text.
+ */
 export function mayMoveRemoteRef(text: string): boolean {
-  return REMOTE_REF_MOVERS.test(text);
+  return (
+    REMOTE_REF_WORDS.test(text) || namesRemoteUrl(text) || text.split(/[;&|\n]/u).some(mayMoveRemoteRefInCommand)
+  );
 }

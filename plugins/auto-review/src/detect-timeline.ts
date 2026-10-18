@@ -282,6 +282,8 @@ export interface KinEvidence {
   texts: RowText[];
   /** The rows of each of those threads back to the lookback, for the claim side to classify; a thread's shell keeps its directory across its own rows only. */
   threads: TimelineRow[][];
+  /** The id of each of `threads`, in the same order. */
+  threadIds: string[];
   /** False when a thread could not be read in full; nothing it did can be ruled out. */
   complete: boolean;
 }
@@ -304,7 +306,7 @@ export async function kinEvidence(
       own.has(entry.id) &&
       (entry.status !== "idle" || entry.updatedAt >= startedAt),
   );
-  const evidence: KinEvidence = { paths: new Set(), windows: [], texts: [], threads: [], complete: true };
+  const evidence: KinEvidence = { paths: new Set(), windows: [], texts: [], threads: [], threadIds: [], complete: true };
   for (const thread of kin) {
     try {
       const { rows, truncated } = await recentTimelineRows(
@@ -314,6 +316,7 @@ export async function kinEvidence(
       );
       evidence.complete &&= !truncated;
       evidence.threads.push(rows);
+      evidence.threadIds.push(thread.id);
       addChangedPaths(rows, (row) => row.createdAt >= startedAt, evidence.paths);
       evidence.windows.push(...ownWindows(rows, startedAt, now));
       evidence.texts.push(

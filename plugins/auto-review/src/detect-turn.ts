@@ -226,11 +226,13 @@ function upstreamRefs(workspace: AvailableWorkspace): string[] {
  * rewrite of a commit the thread never authored, such as a cherry-pick of
  * someone else's old commit: it still counts as upstream.
  *
- * Nothing is dropped when a row of the family since that date may have moved a
- * remote-tracking ref (`mayMoveRemoteRef`): a commit of the thread's own, even
- * backdated, would then be reachable from the remote and look pulled. A push
- * made through a script, an alias or a tool that is not a shell row goes
- * unseen. Any doubt keeps a commit with the turn.
+ * Nothing is dropped when a row of the family since the turn start, or since
+ * that date when it is earlier, may have moved a remote-tracking ref
+ * (`mayMoveRemoteRef`), or when a tool edited a file that holds one: a commit of
+ * the thread's own, even backdated, would then be reachable from the remote and
+ * look pulled. A push made through a script, an alias or a tool that is not a
+ * shell row goes unseen, and so does one made in an earlier turn, before a
+ * commit dated after it. Any doubt keeps a commit with the turn.
  */
 async function upstreamCommitsOf(
   upstream: UpstreamInput,
@@ -291,11 +293,19 @@ async function upstreamCommitsOf(
     since < startedAt ? Number.NEGATIVE_INFINITY : input.turnStart.sinceSeq,
   );
   const familyPaths = new Set([...ownPaths, ...lookbackPaths, ...kin.paths]);
-  if ([rows, ...kin.threads].some((thread) => mayHaveMovedRemoteRef(thread, since, now))) {
+  const moved = [
+    { id: input.threadId, rows },
+    ...kin.threads.map((threadRows, at) => ({ id: kin.threadIds[at] ?? "", rows: threadRows })),
+  ].filter((thread) => mayHaveMovedRemoteRef(thread.rows, since, now));
+  if (moved.length > 0) {
+    const ids = moved.map(({ id }) => id).join(", ");
     return skip(
-      `the thread's family may have pushed or moved a remote-tracking ref since ${new Date(since).toISOString()}`,
+      `the thread's family may have pushed or moved a remote-tracking ref since ${new Date(since).toISOString()} (${moved.length > 1 ? "threads" : "thread"} ${ids})`,
       reusable,
     );
+  }
+  if ([...familyPaths].some((path) => path.includes("refs/remotes/") || path.endsWith("packed-refs"))) {
+    return skip("the thread's family edited a file that holds remote-tracking refs", reusable);
   }
   const dropped = candidates.flatMap(({ sha, authoredAt, paths }) => {
     const ref = holder(sha);

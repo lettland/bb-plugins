@@ -221,13 +221,18 @@ It ships enabled (opt-out).
   reachable from `origin/<mainline>` or from the remote-tracking ref of the checkout's own
   branch (`origin/<branch>`), was authored outside every window of this thread's family, and
   touches none of the files that family edited with tools. The log names the ref that held
-  each such commit. The window reaches back to the earliest such commit's author date. If a
-  row of the family in that window may have pushed or moved a remote-tracking ref, nothing
-  is dropped as upstream, from either ref, and the log says so: a commit of the thread's
-  own, even backdated, would otherwise look pulled once pushed. The row matches loosely: the
-  word `push` (so `git stash push` counts too), `update-ref`, a `refs/remotes/` name,
-  `gh repo sync`, or a `git fetch` from `.`; a row that was denied or never ran does not
-  count. A push made through a script, an alias or a tool that is not a shell row is not
+  each such commit. If a row of the family may have pushed or moved a remote-tracking ref
+  from the turn start, or from the earliest such commit's author date when that is earlier,
+  nothing is dropped as upstream, from either ref, and the log says so and names the
+  thread(s): a commit of the thread's own, even backdated, would otherwise look pulled once
+  pushed. Once the family has pushed, pulled older work stays in review too. The same
+  holds when a tool edited a file under `refs/remotes/` or `packed-refs`. The row matches
+  loosely, in shell text of any length: the word `push` (not after a `.`, so
+  `git stash push` counts and `.push(` does not), `update-ref`, `send-pack`, `set-url`,
+  `insteadOf`, `packed-refs`, `remotes/`, a `remote.<name>.url` key, `gh repo sync`, or a
+  `git fetch` with a refspec (`a:b`) or a local source (`.`, `./`, `$PWD`, `$(pwd)`); a row
+  that was denied or never ran does not count. A push made through a script, an alias or a tool
+  that is not a shell row, or in an earlier turn before a commit dated after it, is not
   detected, so a deliberately backdated commit pushed that way can still be dropped. A
   commit someone made by hand in the same checkout and pushed to the branch counts as
   upstream too, as on the mainline. Only `origin/<branch>` is checked, not another
