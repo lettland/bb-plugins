@@ -206,6 +206,21 @@ It ships enabled (opt-out).
   `unclaimed-changes` (`no-authorship` still means nothing changed), and `bb auto-review status`
   shows how many in `lastFire`, as a count; the log lists at most five example paths. A review
   that fires with some changes left unclaimed records the count in `lastFire` as well.
+- Leaves out what changed while a parked turn waited. A turn parked behind another review
+  takes a snapshot of the tree when it is parked, and on release anything that appeared after the
+  latest such snapshot and that the turn had not touched before it (an uncommitted path, or a
+  commit that arrived meanwhile, such as a fast-forward merge or your own commit) is not the
+  turn's: it is not reviewed, and a commit among it is scanned for secrets but never rewritten. A
+  file or commit the turn already touched stays, whoever changed it again. When only such
+  changes are left the turn stands down as `changed-while-parked` and scans nothing;
+  `lastFire` and the log name the commits and up to five example paths. Something you commit
+  while a turn waits is not reviewed by that turn: ask in a later turn to have it reviewed.
+  Nothing is left out after any activity of the thread or its children since the park, work
+  they detached from the shell (a lone `&`, `nohup`, `setsid`, a background agent), when HEAD
+  does not descend from the head at the park (an amend, a rebase, a reset), when the turn's
+  commit list is capped or a commit's paths cannot be read, or after a failed read. A turn
+  parked again takes a new snapshot, so changes between two parks stay with the turn. Limit:
+  a row of the thread opened more than 30 minutes before the turn started is not seen.
 - Attributes work to the turn from the thread's own file-change rows plus a working-tree
   snapshot taken at turn start, so shell edits, generators and commits made during the
   turn all count in a sweep. Files another thread changed, files already dirty and left untouched,
@@ -391,6 +406,8 @@ It ships enabled (opt-out).
   dropped, and fires when the blocking review ends. A question you send while the turn is
   parked does not fire it: the parked work becomes carried work, and the next turn that
   changes something reviews it.
+  A released turn reviews only what it changed before it was parked (see `changed-while-parked`
+  above).
 - Never fires alongside a message you queued. If a user message is waiting when the turn
   ends (or its turn has already started), the review is carried into that turn. It fires
   once a turn that changes something ends with nothing of yours queued, covering every turn

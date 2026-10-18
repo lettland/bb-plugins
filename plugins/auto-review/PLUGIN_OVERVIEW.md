@@ -36,6 +36,15 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   ref); only exact mode drops one nothing of the family could have made. A thread's shell
   keeps its directory between rows, and a relative path whose directory is a guess claims
   every changed path that ends in it. See the README for the classes and the commit rule.
+- Leaves out what changed while a parked turn waited: on release, an uncommitted path or a
+  commit that appeared after the turn's latest park snapshot and that the turn had not touched
+  before it is not the turn's. It is not reviewed (a commit is still scanned for secrets,
+  never rewritten); a file or commit the turn already touched stays. When only such changes are
+  left the turn stands down as `changed-while-parked`, scanning nothing, and something you
+  commit while a turn waits is not reviewed by that turn. Nothing is left out after any family
+  activity since the park, work detached from the shell, a HEAD that does not descend from the
+  park head, a capped commit list, or a failed read; a row opened over 30 minutes before the
+  turn started is not seen. A turn parked again takes a new snapshot.
 - Attributes work to the turn however it was made: the thread's own `file-change` rows
   after the turn's start cursor, plus whatever the working tree shows changed since the
   turn started (a fingerprint per uncommitted path and the commits ahead of the base,

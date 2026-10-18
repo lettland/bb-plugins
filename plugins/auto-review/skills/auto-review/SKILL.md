@@ -457,6 +457,18 @@ thread, so the turn's review and commit are never dropped by it.
   so is a turn that ran a command that can write files (or anything whose writes can't be read) in
   a tree of more than 200 uncommitted files, or with a file whose content could not be read (a
   same-size edit to such a file cannot be seen).
+- `changed-while-parked` — the turn was parked behind another review, and everything left after
+  its release changed while it waited: an uncommitted path or a commit that appeared after the
+  latest park snapshot (the turn parks again, it takes a new one) and that the turn had not
+  touched before it. Wins over `unclaimed-changes` and `no-authorship` when anything was left
+  out that way, in exact and sweep mode alike. Scans nothing; `lastFire` and the log name the
+  commits and up to five example paths. A file or commit the turn already touched stays with it.
+  Nothing is left out after any activity of the thread or its children since the park, work
+  detached from the shell (a lone `&`, `nohup`, `setsid`, a background agent), when HEAD does not
+  descend from the head at the park (an amend, a rebase, a reset), when the commit list is capped
+  or a commit's paths cannot be read, or after a failed read; a row opened more than 30 minutes
+  before the turn started is not seen. Something committed while a turn waits is not reviewed by
+  that turn: ask in a later turn to have it reviewed.
 - `no-authorship` — the turn changed no files: no tool edit, and nothing in the working
   tree (a new, rewritten or deleted path, or one in a commit the turn made — on a branch or
   straight onto the mainline) changed since the turn started. Edits made through shell commands count. Untracked
