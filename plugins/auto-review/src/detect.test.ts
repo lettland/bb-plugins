@@ -2360,6 +2360,22 @@ describe("mayDetach", () => {
     "(./serve.sh & disown)",
     "daemon -- ./serve.sh",
     "curl 'https://example.test/?a=1&b=2'",
+    "docker compose up -d",
+    "docker compose up --build --detach web",
+    "docker run -d --name db postgres",
+    "sudo /usr/bin/podman run -dit img",
+    "docker-compose up -d",
+    "tmux new-session -d -s dev 'npm run dev'",
+    "tmux new -s dev",
+    "tmux send-keys -d x",
+    "screen -dmS dev ./serve.sh",
+    "screen -d -m ./serve.sh",
+    "systemd-run --user ./job.sh",
+    "pm2 start app.js",
+    "launchctl load ~/Library/LaunchAgents/x.plist",
+    "crontab -e",
+    "at now + 1 minute",
+    "cd /w && at 5pm",
   ])("may leave %j running", (text) => {
     expect(mayDetach(text)).toBe(true);
   });
@@ -2371,6 +2387,13 @@ describe("mayDetach", () => {
     "cmd &> out.log",
     "echo a \\& b",
     "git log --oneline",
+    "docker build -t app .",
+    "docker compose up --build",
+    "docker run --rm img",
+    "tmux ls",
+    "screen -ls",
+    "echo look at this",
+    "cat attach.txt",
     "",
   ])("does not for %j", (text) => {
     expect(mayDetach(text)).toBe(false);

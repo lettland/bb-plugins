@@ -460,15 +460,22 @@ thread, so the turn's review and commit are never dropped by it.
 - `changed-while-parked` — the turn was parked behind another review, and everything left after
   its release changed while it waited: an uncommitted path or a commit that appeared after the
   latest park snapshot (the turn parks again, it takes a new one) and that the turn had not
-  touched before it. Wins over `unclaimed-changes` and `no-authorship` when anything was left
-  out that way, in exact and sweep mode alike. Scans nothing; `lastFire` and the log name the
-  commits and up to five example paths. A file or commit the turn already touched stays with it.
-  Nothing is left out after any activity of the thread or its children since the park, work
-  detached from the shell (a lone `&`, `nohup`, `setsid`, a background agent), when HEAD does not
-  descend from the head at the park (an amend, a rebase, a reset), when the commit list is capped
-  or a commit's paths cannot be read, or after a failed read; a row opened more than 30 minutes
-  before the turn started is not seen. Something committed while a turn waits is not reviewed by
-  that turn: ask in a later turn to have it reviewed.
+  touched before it. Untracked harness output never counts. Wins over `unclaimed-changes` and
+  `no-authorship` when anything was left out that way, in exact and sweep mode alike. Scans
+  nothing; `lastFire` and the log name the commits and up to five example paths. A file or
+  commit the turn already touched stays with it. A commit that arrived while the turn waited
+  still rides along in the turn's merge: it is only scanned for secrets, not reviewed.
+  Nothing is left out after any activity of the thread or its children since the park (checked
+  again after the files are read), work that may still be writing (a lone `&`, `nohup`,
+  `setsid`, `disown`, `docker ... -d`, `tmux`, `screen`, `systemd-run`, `pm2`, `launchctl`,
+  `crontab`, `at`; a background agent; a harness background command or workflow task not
+  finished before the park; an extension call or a tool not known to be read-only), when HEAD
+  does not descend from the head at the park (an amend, a rebase, a reset), when the commit list
+  is capped, a commit's paths cannot be read or the commits made before the park cannot be told
+  from the snapshots, or after a failed read. A row opened more than 30 minutes before the turn
+  started is not seen, and neither is one the host has not yet recorded when the timelines are
+  read (a small race). Something committed while a turn waits is not reviewed by that turn: ask
+  in a later turn to have it reviewed.
 - `no-authorship` — the turn changed no files: no tool edit, and nothing in the working
   tree (a new, rewritten or deleted path, or one in a commit the turn made — on a branch or
   straight onto the mainline) changed since the turn started. Edits made through shell commands count. Untracked

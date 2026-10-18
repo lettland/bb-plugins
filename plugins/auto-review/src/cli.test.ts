@@ -888,19 +888,31 @@ describe("auto-review cli: status", () => {
         reason: "changed-while-parked",
         scopePaths: [],
         parkedCount: 2,
-        parkedCommits: ["abcdef1"],
+        parkedCommits: ["abcdef1234567890"],
         parkedPaths: ["src/a.ts", "src/b.ts"],
       });
       expect(lastFireSchema.safeParse(stored).success).toBe(true);
       await host.kv.set(`lastfire:${PROJECT_ID}:${THREAD_ID}`, stored);
       const text = await host.run(["status", THREAD_ID]);
       expect(text.stdout).toContain(
-        "lastFire: stood-down (changed-while-parked) at 2026-01-02T03:04:05.000Z, 2 change(s) made while this turn waited (commit(s) abcdef1)\n",
+        "lastFire: stood-down (changed-while-parked) at 2026-01-02T03:04:05.000Z, 2 change(s) and commit(s) abcdef1 made while this turn waited\n",
       );
       const payload = await host.run(["status", THREAD_ID, "--json"]);
       expect(parse(payload.stdout)).toMatchObject({
-        lastFire: { reason: "changed-while-parked", parkedCount: 2, parkedCommits: ["abcdef1"], parkedPaths: ["src/a.ts", "src/b.ts"] },
+        lastFire: { reason: "changed-while-parked", parkedCount: 2, parkedCommits: ["abcdef1234567890"], parkedPaths: ["src/a.ts", "src/b.ts"] },
       });
+    });
+  });
+
+  it.each([
+    ["commits only", { parkedCount: 0, parkedCommits: ["abcdef1234567890"] }, ", commit(s) abcdef1 made while this turn waited"],
+    ["changes only", { parkedCount: 3 }, ", 3 change(s) made while this turn waited"],
+    ["a zero count and no commits", { parkedCount: 0 }, ""],
+  ])("words the left-out changes around what there is: %s", async (_name, extra, tail) => {
+    await withHost({}, async (host) => {
+      await host.kv.set(`lastfire:${PROJECT_ID}:${THREAD_ID}`, lastFire({ outcome: "stood-down", reason: "changed-while-parked", ...extra }));
+      const text = await host.run(["status", THREAD_ID]);
+      expect(text.stdout).toContain(`lastFire: stood-down (changed-while-parked) at 2026-01-02T03:04:05.000Z${tail}\n`);
     });
   });
 

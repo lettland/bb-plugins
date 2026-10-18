@@ -218,7 +218,6 @@ export async function dispatchReview(
     isWorktree,
     scopePaths: scope,
     ...(unclaimedCount === undefined ? {} : { unclaimedCount }),
-    ...parkedFire(turn),
   };
   const deferred = await withProviderLock(thread.providerId, async () => {
     if (await providerReviewInFlight(ctx, thread.providerId, thread.id)) {
@@ -246,7 +245,8 @@ export async function dispatchReview(
       priorFindings: prior.findings,
       priorFindingsOmitted: prior.omitted,
     });
-    await sendReview(ctx, thread, prompt, extra);
+    // A re-park records no parked fields: it reviewed nothing, and the next evaluation decides again.
+    await sendReview(ctx, thread, prompt, { ...extra, ...parkedFire(turn) });
     return false;
   });
   // Hashing the tree stays out of the provider lock so it does not serialise other dispatches. It is read afresh, after the snapshot's start time, for `withoutParked`.

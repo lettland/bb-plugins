@@ -73,16 +73,21 @@ export function fingerprintsMatch(before: string, after: string): boolean {
 /**
  * The uncommitted paths of `workspace` that differ from `before`: new ones, and
  * ones whose line stats or, where both sides carry a hash, content changed.
+ * Only the paths in `only` are looked at when it is given.
  */
 export async function changedFiles(
   bb: BbPluginApi,
   environmentId: string,
   before: TreeSnapshot,
   workspace: AvailableWorkspace,
+  only?: ReadonlySet<string>,
 ): Promise<Set<string>> {
   const changed = new Set<string>();
   const recheck: Array<{ file: WorkingTreeFile; prior: string }> = [];
   for (const file of workspace.workingTree.files) {
+    if (only !== undefined && !only.has(file.path)) {
+      continue;
+    }
     const prior = before.files[file.path];
     if (prior === undefined) {
       changed.add(file.path);

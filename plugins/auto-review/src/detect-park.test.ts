@@ -59,7 +59,19 @@ interface Options {
   startedAt?: number | null;
   /** The thread's own timeline can be read this many times; the next read fails. */
   selfReads?: number;
+  /** Rows the thread's timeline gains after this many reads of it. */
+  lateRows?: { reads: number; rows: unknown[] };
+  /** Untracked paths now. */
+  untracked?: string[];
+  /** The `aheadCount` every status answer reports, instead of the number of commits listed. */
+  aheadCount?: number;
+  /** Replace what the park snapshot holds of the commits made before it. */
+  parkCommits?: { commits?: string[]; recentCommits?: Array<{ sha: string; authorName: string; authoredAt: number; subject: string }> };
+  /** Replace the turn-start snapshot's commit lists. */
+  turnCommits?: { commits?: string[]; recentCommits?: Array<{ sha: string; authorName: string; authoredAt: number; subject: string }> };
 }
+
+const recent = (sha: string) => ({ sha, authorName: "a", authoredAt: 1_000, subject: sha });
 
 async function released(options: Options = {}) {
   const infos: string[] = [];
@@ -70,14 +82,20 @@ async function released(options: Options = {}) {
   const parkHead = "parkHead" in options ? options.parkHead : (chain[(options.parkedAfter ?? 0) - 1]?.sha ?? "h0");
   const live = {
     workingTree: {
-      files: (options.uncommitted ?? []).map((entry) => {
-        const [path, insertions] = typeof entry === "string" ? [entry, 1] : entry;
-        return { path, status: "M", insertions, deletions: 0 };
-      }),
+      files: [
+        ...(options.uncommitted ?? []).map((entry) => {
+          const [path, insertions] = typeof entry === "string" ? [entry, 1] : entry;
+          return { path, status: "M", insertions, deletions: 0 };
+        }),
+        ...(options.untracked ?? []).map((path) => ({ path, status: "??", insertions: null, deletions: null })),
+      ],
     },
     branch: { currentBranch: "b", defaultBranch: "master" },
     checkout: { kind: "branch", branchName: "b", headSha: head },
-    mergeBase: options.mainline === true ? null : { files: [], commits: chain.map(({ sha, authoredAt }) => ({ sha, authoredAt: authoredAt ?? 25_000 })) },
+    mergeBase:
+      options.mainline === true
+        ? null
+        : { files: [], aheadCount: options.aheadCount ?? chain.length, commits: chain.map(({ sha, authoredAt }) => ({ sha, authoredAt: authoredAt ?? 25_000 })) },
   };
   const bb = {
     log: { info: (message: string) => infos.push(message), warn: (message: string) => infos.push(message) },
@@ -102,7 +120,7 @@ async function released(options: Options = {}) {
                 files: [],
                 mergeBaseBranch: ref,
                 baseRef: ref,
-                aheadCount: ahead.length,
+                aheadCount: options.aheadCount ?? ahead.length,
                 commits: ahead.map(({ sha, authoredAt }) => ({ sha, authoredAt: authoredAt ?? 25_000 })),
               },
             },
@@ -126,16 +144,22 @@ async function released(options: Options = {}) {
           if (rows instanceof Error) {
             throw rows;
           }
+          if (threadId === "self" && options.lateRows !== undefined && selfReads > options.lateRows.reads) {
+            return { rows: [...rows, ...options.lateRows.rows], maxSeq: 0, timelinePage: { hasOlderRows: false, olderCursor: null } };
+          }
           return { rows, maxSeq: 0, timelinePage: { hasOlderRows: false, olderCursor: null } };
         },
       },
     },
   } as never;
-  const turnTree = { headSha: "h0", files: options.turnFiles ?? {}, commits: [] };
+  const turnTree = { headSha: "h0", files: options.turnFiles ?? {}, commits: [], ...options.turnCommits };
+  // What the snapshots hold of the commits made before the park: on a branch the commits ahead, on the mainline the recent ones.
+  const before = chain.slice(0, options.parkedAfter ?? 0).map(({ sha }) => sha);
+  const heldAtPark = options.mainline === true ? { commits: [], recentCommits: before.map(recent) } : { commits: before };
   const park =
     options.park === null
       ? undefined
-      : { startedAt: PARKED_AT, tree: { headSha: parkHead, files: options.parkFiles ?? {}, commits: [] }, ...options.park };
+      : { startedAt: PARKED_AT, tree: { headSha: parkHead, files: options.parkFiles ?? {}, ...heldAtPark, ...options.parkCommits }, ...options.park };
   const result = await turnChangedPaths(bb, {
     threadId: "self",
     environmentId: "env",
@@ -214,6 +238,15 @@ describe("a turn released from a park", () => {
       ]);
     });
 
+    it("but never untracked harness output, which neither snapshot holds", async () => {
+      const { result } = await released({
+        timelines: { self: [opaque] },
+        uncommitted: ["lib/after.ts"],
+        untracked: [".claude/settings.local.json", ".bb/log.txt"],
+      });
+      expect(result).toMatchObject({ paths: [], parkedPaths: ["lib/after.ts"] });
+    });
+
     it("a sibling's git commit made after the park as parked, not as the sibling's", async () => {
       const sibling = entry("sibling", { status: "active" });
       const git = rowAt({ workKind: "command", approvalStatus: null, command: "git commit -q -m x", cwd: "/w" }, 35_000);
@@ -270,6 +303,25 @@ describe("a turn released from a park", () => {
       });
       expect(result).toMatchObject({ commits: ["c1", "c2"], ...noneParked });
       expect([...result.paths].sort()).toEqual(["lib/mine.ts", "lib/other.ts"]);
+    });
+
+    it.each([
+      ["mainline", true, { recentCommits: [recent("base1")] }],
+      ["branch", false, { commits: ["base1"] }],
+    ])("a path of a commit made before the park that the turn's own list dropped, on a %s checkout", async (_name, mainline, turnCommits) => {
+      // Its author date is older than the turn, as an amend's is, so the turn's list does not hold it.
+      const { result, infos } = await released({
+        mainline,
+        turnCommits,
+        timelines: { self: [opaque] },
+        parkedAfter: 1,
+        chain: [{ sha: "c1", paths: ["lib/c1file.ts"], authoredAt: 5_000 }],
+        uncommitted: ["lib/c1file.ts", "lib/after.ts"],
+      });
+      expect(result.commits).toEqual([]);
+      expect(result).toMatchObject({ parkedPaths: ["lib/after.ts"], parkedCommits: [] });
+      expect(result.paths).toEqual(["lib/c1file.ts"]);
+      expect(infos.filter((line) => line.includes("not leaving out"))).toEqual([]);
     });
 
     it("a file edited without a hash before the park, when it changes again after", async () => {
@@ -443,6 +495,10 @@ describe("a turn released from a park", () => {
       ["a command that backgrounds a process", "npm run dev &"],
       ["nohup", "nohup ./serve.sh > out.log"],
       ["setsid", "setsid ./serve.sh"],
+      ["a detached container", "docker compose up -d"],
+      ["a detached tmux session", "tmux new-session -d -s dev 'npm run dev'"],
+      ["a scheduled job", "at now + 1 minute"],
+      ["a supervised process", "pm2 start app.js"],
     ])("when the family ran %s that ended before the park", async (_name, text) => {
       const detached = rowAt({ workKind: "command", approvalStatus: null, command: text, cwd: "/w" }, 11_000);
       const result = await unfiltered(
@@ -450,6 +506,72 @@ describe("a turn released from a park", () => {
         "the thread's family ran work that may have kept writing after it returned",
       );
       expect(result.paths).toContain("lib/after.ts");
+    });
+
+    const stillWrites = "the thread's family ran work that may have kept writing after it returned";
+    const task = (taskStatus: string, completedAt: number | null) =>
+      rowAt({ workKind: "workflow", taskStatus, taskType: "t", workflowName: null }, 11_000, completedAt as number);
+
+    it.each([
+      ["running", task("running", null)],
+      ["paused", task("paused", null)],
+      ["finished after the park", task("completed", 31_000)],
+      ["finished at an unknown time", task("failed", null)],
+    ])("when a workflow task was %s", async (_name, row) => {
+      await unfiltered({ ...afterPark, timelines: { self: [opaque, row] } }, stillWrites);
+    });
+
+    it("leaves the filter on for a workflow task that finished before the park", async () => {
+      const { result } = await released({ ...sweepOnly, ...afterPark, timelines: { self: [opaque, task("completed", 12_000)] } });
+      expect(result.parkedCommits).toEqual(["c1"]);
+    });
+
+    it.each([
+      ["a tool that is not known to be read-only", rowAt({ workKind: "tool", approvalStatus: null, toolName: "apply", toolArgs: { path: "x" } }, 11_000)],
+      ["an extension call", rowAt({ workKind: "extension" }, 11_000)],
+    ])("when the family ran %s", async (_name, row) => {
+      await unfiltered({ ...afterPark, timelines: { self: [opaque, row] } }, stillWrites);
+    });
+
+    it("leaves the filter on for a tool that is known to be read-only", async () => {
+      const read = rowAt({ workKind: "tool", approvalStatus: null, toolName: "Read", toolArgs: { path: "x" } }, 11_000);
+      const { result } = await released({ ...sweepOnly, ...afterPark, timelines: { self: [opaque, read] } });
+      expect(result.parkedCommits).toEqual(["c1"]);
+    });
+
+    it("when the family started something while the files were hashed", async () => {
+      // Reads of the thread's timeline: the turn's own, the first quiet check, the second.
+      await unfiltered(
+        { ...afterPark, lateRows: { reads: 2, rows: [edit("lib/elsewhere.ts", 40_000)] } },
+        "the thread's family was active since the park",
+      );
+    });
+
+    it.each([
+      ["mainline", true],
+      ["branch", false],
+    ])("when the status call reports more commits ahead than it lists, on a %s checkout", async (_name, mainline) => {
+      await unfiltered(
+        { mainline, aheadCount: 3, timelines: { self: [opaque] }, uncommitted: ["lib/after.ts"], chain: [{ sha: "c1", paths: ["lib/new.ts"], authoredAt: 35_000 }] },
+        "the turn's commits or timeline may be incomplete",
+      );
+    });
+
+    it("when a commit made before the park that the turn's own list dropped has paths that could not be read", async () => {
+      await unfiltered(
+        { ...afterPark, turnCommits: { commits: ["base1"] }, parkedAfter: 1, chain: [{ sha: "c1", paths: null, authoredAt: 5_000 }] },
+        "a commit made before the park has paths that could not be read",
+      );
+    });
+
+    it.each([
+      ["names none of them", { parkCommits: { commits: [] } }, "the commits made before the park cannot be told from the snapshots"],
+      ["names too many of them", { parkCommits: { commits: Array.from({ length: 21 }, (_, at) => `p${at}`) } }, "too many commits were made before the park to read"],
+    ] as Array<[string, Options, string]>)("when the park snapshot %s", async (_name, options, reason) => {
+      await unfiltered(
+        { ...afterPark, parkedAfter: 1, chain: [{ sha: "c1", paths: ["lib/new.ts"], authoredAt: 20_000 }], ...options },
+        reason,
+      );
     });
 
     it("when the family started a background delegation", async () => {

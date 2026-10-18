@@ -81,8 +81,11 @@ function lastFireLine(lastFire: LastFire | null): string {
   }
   const unclaimed =
     lastFire.unclaimedCount === undefined ? "" : `, ${lastFire.unclaimedCount} change(s) not made by this thread's family`;
-  const commits = lastFire.parkedCommits?.length ? ` (commit(s) ${lastFire.parkedCommits.join(", ")})` : "";
-  const parked = lastFire.parkedCount === undefined ? "" : `, ${lastFire.parkedCount} change(s) made while this turn waited${commits}`;
+  const parts = [
+    lastFire.parkedCount ? `${lastFire.parkedCount} change(s)` : "",
+    lastFire.parkedCommits?.length ? `commit(s) ${lastFire.parkedCommits.map((sha) => sha.slice(0, 7)).join(", ")}` : "",
+  ].filter(Boolean);
+  const parked = parts.length === 0 ? "" : `, ${parts.join(" and ")} made while this turn waited`;
   return `${lastFire.outcome} (${lastFire.reason}) at ${new Date(lastFire.at).toISOString()}${unclaimed}${parked}`;
 }
 

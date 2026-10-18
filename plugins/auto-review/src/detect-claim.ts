@@ -79,7 +79,7 @@ export interface FamilyClaims {
   stale: string[];
 }
 
-const isReadOnlyTool = (toolName: string) =>
+export const isReadOnlyTool = (toolName: string) =>
   READ_ONLY_TOOLS.has(toolName) || READ_ONLY_PREFIXES.some((prefix) => toolName.startsWith(prefix));
 
 /** Whether a row had begun before the turn and had recorded no end by its idle. */

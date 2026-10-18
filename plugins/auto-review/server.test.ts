@@ -2396,6 +2396,37 @@ describe("auto-review plugin", () => {
       await host.harness.dispose();
     });
 
+    it("does not count harness output, so a turn with no work of its own stands down as before", async () => {
+      const host = createHost({ authoredRows: [], workingTreeFiles: [] });
+      await releaseAfter(
+        host,
+        () => host.setWorkingTree(written(".claude/settings.local.json")),
+        () => host.setWorkingTree([...written(".claude/settings.local.json"), ...written(".bb/late.log")]),
+      );
+      expect(host.sends).toHaveLength(0);
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "no-authorship" });
+      expect(await lastFire(host)).not.toHaveProperty("parkedCount");
+      await host.harness.dispose();
+    });
+
+    it("records no parked fields when the release parks the turn again", async () => {
+      const host = createHost({ authoredRows: [fileChangeRow("src/a.ts")], workingTreeFiles: [{ path: "src/a.ts" }] });
+      await releaseAfter(
+        host,
+        () => undefined,
+        () => {
+          host.setWorkingTree([{ path: "src/a.ts" }, ...written("src/late.ts")]);
+          host.armReviewBeforeLock();
+        },
+      );
+      expect(host.metadata.phase).toBe("deferred");
+      const fire = await lastFire(host);
+      expect(fire).toMatchObject({ outcome: "deferred", reason: "sibling-active" });
+      expect(fire).not.toHaveProperty("parkedCount");
+      expect(fire).not.toHaveProperty("parkedPaths");
+      await host.harness.dispose();
+    });
+
     it("takes the park snapshot after the park, so a write between the start of the evaluation and the park is in it", async () => {
       const host = createHost({ authoredRows: [], workingTreeFiles: [] });
       await plugin(host.bb);

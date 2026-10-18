@@ -3,24 +3,35 @@
  * queue. A parked turn's idle snapshot (`lastIdle`) is the baseline: what the
  * live tree shows beyond it, and that the turn had not touched before, was not
  * made by the turn. Any doubt keeps the work with the turn.
+ *
+ * Known race: the checks that the thread and its kin were quiet read their
+ * timelines twice, once before and once after the file contents are hashed, but
+ * a row the host has not yet written to a timeline when it is read is not seen.
+ * A write from such a row that lands in a hashed file is then taken for a change
+ * made while the turn waited.
  */
 
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
 import { examples } from "./detect-attribute.js";
 
+import { isReadOnlyTool } from "./detect-claim.js";
+import { commitPaths, MAX_NEW_COMMITS } from "./detect-commits.js";
+import { HASH_CONCURRENCY, mapLimit } from "./detect-limit.js";
 import { shellText, walkRows } from "./detect-rows.js";
+import type { WorkRow } from "./detect-rows.js";
 import { mayDetach } from "./detect-shell.js";
 
 import { FAMILY_LOOKBACK_MS, kinEvidence, ownWindows, rowsSince } from "./detect-timeline.js";
 
 import { changedFiles, fingerprintsMatch } from "./detect-tree.js";
 
-import type { TreeChanges, TurnChangeInput, UpstreamInput } from "./detect-upstream.js";
+import type { ParkBaseline, TreeChanges, TurnChangeInput, UpstreamInput } from "./detect-upstream.js";
 import { withoutCommits } from "./detect-upstream.js";
 
-import { headShaOf } from "./detect-workspace.js";
+import { headShaOf, isHarnessOutput } from "./detect-workspace.js";
 import type { AvailableWorkspace, TimelineRow } from "./detect-workspace.js";
+import type { TreeSnapshot } from "./state.js";
 
 /** What was left out of a turn as made while it was parked. */
 export interface ParkedOut {
@@ -76,14 +87,36 @@ async function commitsAfterPark(
   return new Set(mergeBase.commits.map(({ sha }) => sha));
 }
 
-/** Whether rows ran something that may keep writing after it returned: shell that detaches, or a background delegation. */
-function detachesWork(rows: readonly TimelineRow[]): boolean {
+/**
+ * Whether a row may write files the timeline does not show, or keep writing
+ * after it returned: a background delegation, a workflow task that is not
+ * finished or finished at or after the park (or at an unknown time), an
+ * extension call, and a tool that is not known to be read-only (the same
+ * classification the family's claims use).
+ */
+function mayStillWrite(row: WorkRow, parkedAt: number): boolean {
+  switch (row.workKind) {
+    case "delegation":
+      return row.background;
+    case "workflow":
+      return ["pending", "running", "paused"].includes(row.taskStatus) || row.completedAt === null || row.completedAt >= parkedAt;
+    case "extension":
+      return true;
+    case "tool":
+      return !isReadOnlyTool(row.toolName);
+    default:
+      return false;
+  }
+}
+
+/** Whether rows ran something that may keep writing: see `mayStillWrite`, or shell that detaches. */
+function detachesWork(rows: readonly TimelineRow[], parkedAt: number): boolean {
   for (const row of walkRows(rows)) {
     if (row.kind !== "work") {
       continue;
     }
     const text = shellText(row);
-    if ((row.workKind === "delegation" && row.background) || (text !== null && mayDetach(text))) {
+    if (mayStillWrite(row, parkedAt) || (text !== null && mayDetach(text))) {
       return true;
     }
   }
@@ -102,8 +135,9 @@ async function quietKinPaths(
   context: Omit<UpstreamInput, "startedAt" | "commits">,
   parkedAt: number,
   startedAt: number,
+  now: number,
 ): Promise<Set<string> | string> {
-  const { bb, input, now } = context;
+  const { bb, input } = context;
   const rows = await rowsSince(bb, input.threadId, startedAt - FAMILY_LOOKBACK_MS);
   if (typeof rows === "string") {
     return rows;
@@ -112,13 +146,47 @@ async function quietKinPaths(
   if (!kin.complete) {
     return "a related thread could not be read in full";
   }
-  if ([rows, ...kin.threads].some(detachesWork)) {
+  if ([rows, ...kin.threads].some((thread) => detachesWork(thread, parkedAt))) {
     return "the thread's family ran work that may have kept writing after it returned";
   }
   if (ownWindows(rows, parkedAt, now).length > 0 || kin.windows.some(({ end }) => end >= parkedAt)) {
     return "the thread's family was active since the park";
   }
   return kin.paths;
+}
+
+/**
+ * The paths of the commits made before the park that `fetched` does not list
+ * (the turn's own list drops, say, a commit that kept an old author date), from
+ * the park snapshot's commits that the turn-start snapshot did not hold, or why
+ * they cannot be told: a head that moved with no such commit named, too many
+ * of them, or paths that could not be read.
+ */
+async function unlistedParkPaths(
+  bb: BbPluginApi,
+  input: TurnChangeInput,
+  start: TreeSnapshot,
+  park: ParkBaseline,
+  listed: ReadonlySet<string>,
+): Promise<string[] | string> {
+  const known = new Set([...start.commits, ...(start.recentCommits ?? []).map(({ sha }) => sha)]);
+  const made = [...park.tree.commits, ...(park.tree.recentCommits ?? []).map(({ sha }) => sha)].filter((sha) => !known.has(sha));
+  if (made.length === 0 && park.tree.headSha !== start.headSha) {
+    return "the commits made before the park cannot be told from the snapshots";
+  }
+  const unlisted = [...new Set(made)].filter((sha) => !listed.has(sha));
+  if (unlisted.length > MAX_NEW_COMMITS) {
+    return "too many commits were made before the park to read";
+  }
+  const read = await mapLimit(unlisted, HASH_CONCURRENCY, (sha) => commitPaths(bb, input.environmentId, sha));
+  const paths: string[] = [];
+  for (const one of read) {
+    if (one === null) {
+      return "a commit made before the park has paths that could not be read";
+    }
+    paths.push(...one);
+  }
+  return paths;
 }
 
 /** Whether a path's fingerprint differs between two snapshots; a side with no content hash cannot rule it out. */
@@ -145,9 +213,10 @@ export async function withoutParked(
   const { bb, input, ownRows, ownPaths } = context;
   const { park, turnStart } = input;
   const none = { tree: fetched, commits: [], paths: [] };
+  const startTree = turnStart.tree;
   if (
     park === undefined ||
-    turnStart.tree === undefined ||
+    startTree === undefined ||
     turnStart.startedAt === undefined ||
     (fetched.uncommittedPaths.length === 0 && fetched.commitChanges.length === 0)
   ) {
@@ -164,7 +233,7 @@ export async function withoutParked(
   if (typeof after === "string") {
     return skip(after);
   }
-  const kinPaths = await quietKinPaths(context, park.startedAt, turnStart.startedAt);
+  const kinPaths = await quietKinPaths(context, park.startedAt, turnStart.startedAt, context.now);
   if (typeof kinPaths === "string") {
     return skip(kinPaths);
   }
@@ -179,12 +248,22 @@ export async function withoutParked(
     }
     paths.forEach((path) => touched.add(path));
   }
+  const unlisted = await unlistedParkPaths(bb, input, startTree, park, new Set(fetched.commitChanges.map(({ sha }) => sha)));
+  if (typeof unlisted === "string") {
+    return skip(unlisted);
+  }
+  unlisted.forEach((path) => touched.add(path));
   const touchedBefore = (path: string) =>
-    touched.has(path) || fingerprintsDiffer(turnStart.tree?.files[path], park.tree.files[path]);
-  const sincePark = await changedFiles(bb, input.environmentId, park.tree, input.workspace);
-  const leftOut = new Set(
-    fetched.uncommittedPaths.filter((path) => sincePark.has(path) && !touchedBefore(path)),
-  );
+    touched.has(path) || fingerprintsDiffer(startTree.files[path], park.tree.files[path]);
+  const harness = new Set(input.workspace.workingTree.files.filter(isHarnessOutput).map((file) => file.path));
+  const candidates = new Set(fetched.uncommittedPaths.filter((path) => !harness.has(path) && !touchedBefore(path)));
+  const sincePark = await changedFiles(bb, input.environmentId, park.tree, input.workspace, candidates);
+  // The family may have started something while the files were hashed: look again.
+  const stillQuiet = await quietKinPaths(context, park.startedAt, turnStart.startedAt, Date.now());
+  if (typeof stillQuiet === "string") {
+    return skip(stillQuiet);
+  }
+  const leftOut = new Set([...candidates].filter((path) => sincePark.has(path)));
   const droppedCommits = new Set(
     arrived.flatMap(({ sha, paths }) => (paths !== null && !paths.some(touchedBefore) ? [sha] : [])),
   );
@@ -192,7 +271,8 @@ export async function withoutParked(
     { ...fetched, uncommittedPaths: fetched.uncommittedPaths.filter((path) => !leftOut.has(path)) },
     droppedCommits,
   );
-  const paths = fetched.paths.filter((path) => !tree.paths.includes(path));
+  const kept = new Set(tree.paths);
+  const paths = fetched.paths.filter((path) => !kept.has(path));
   const commits = [...droppedCommits];
   if (paths.length > 0 || commits.length > 0) {
     bb.log.info(
