@@ -217,10 +217,16 @@ It ships enabled (opt-out).
   is only left to the sibling when nothing of this thread's own family (this thread, its
   bb children and owned threads) was running at the commit's time and the commit touches
   none of the files that family edited with tools; any doubt keeps the commit with this
-  thread. A commit that arrived with a pull is left out the same way: it is reachable from
-  `origin/<mainline>` or from the remote-tracking ref of the checkout's own branch
-  (`origin/<branch>`), was authored outside every window of this thread's family, and touches
-  none of the files that family edited with tools; the log names the refs checked. Uncommitted paths a sibling's shell command wrote to by name during the turn (a
+  thread. A commit that arrived with a pull is left out the same way, as upstream: it is
+  reachable from `origin/<mainline>` or from the remote-tracking ref of the checkout's own
+  branch (`origin/<branch>`), was authored outside every window of this thread's family, and
+  touches none of the files that family edited with tools. The log names the ref that held
+  each such commit. The own-branch ref is skipped when the family ran `git push` during the
+  window (a backdated commit of its own that it pushed would otherwise look pulled), and the
+  log says so. A commit someone made by hand in the same checkout and pushed to the branch
+  counts as upstream too, as on the mainline. Only `origin/<branch>` is checked, not another
+  configured upstream remote. Uncommitted paths a sibling's shell command wrote to by name
+  during the turn (a
   redirect or `tee` target, the last argument of `cp`/`mv`/`install`, `rm`, `sed -i`, `perl -i`,
   `git checkout --` and `git restore` paths, and the paths in a `python`, `node`, `ruby` or `perl`
   script that writes a file) are left to it the same way, when no tool edit or kept commit of

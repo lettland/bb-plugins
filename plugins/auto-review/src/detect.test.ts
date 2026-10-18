@@ -1244,7 +1244,7 @@ describe("workspace capture edge cases", () => {
       branch?: string;
       /** Shas only the remote-tracking ref of `branch` holds, when it is not the base. */
       ownRemote?: string[];
-      /** Replaces the answer for `origin/<base>`. */
+      /** Replaces the answer for every `origin/` ref asked about; it gets the ref and the commits ahead of it. */
       remote?: (ref: string, ahead: readonly { sha: string }[]) => unknown;
       turnStart?: Record<string, unknown>;
       /** Whether the thread's own timeline gets the git row at the start of the turn; on unless false. */
@@ -1498,17 +1498,73 @@ describe("workspace capture edge cases", () => {
         });
         expect(remoteCalls).toEqual(["origin/master", "origin/develop"]);
         expect(result).toMatchObject({ commits: [], committedPaths: [], upstreamCommits: ["u1"] });
-        expect(infos).toEqual(["auto-review: commit u1 came from origin/master or origin/develop; not this turn's"]);
+        expect(infos).toEqual(["auto-review: commit u1 came from origin/develop; not this turn's"]);
       });
 
-      it("keeps a commit the thread authored that is on the remote-tracking ref of the checkout's own branch", async () => {
-        const { result } = await attribute({
+      it("names the mainline when it holds a commit the checkout's own branch does not", async () => {
+        const { result, infos } = await attribute({
           branch: "develop",
-          timelines: { thr_self: [search(null, { startedAt: 19_500, completedAt: 21_000 })] },
-          commits: [upstreamCommit("u1", 20_500)],
+          commits: [upstreamCommit("u1")],
+          upstream: ["u1"],
+        });
+        expect(result).toMatchObject({ commits: [], upstreamCommits: ["u1"] });
+        expect(infos).toEqual(["auto-review: commit u1 came from origin/master; not this turn's"]);
+      });
+
+      it("still leaves out what the mainline holds when the checkout's own remote-tracking ref cannot be read", async () => {
+        const { result, allInfos } = await attribute({
+          branch: "develop",
+          commits: [upstreamCommit("u1")],
+          upstream: ["u1"],
+          remote: (ref, ahead) => (ref === "origin/develop" ? { outcome: "unavailable" } : remoteStatus(ref, ahead)),
+        });
+        expect(result).toMatchObject({ commits: [], upstreamCommits: ["u1"] });
+        expect(allInfos.filter((line) => line.includes("came from"))).toEqual([
+          "auto-review: not checking whether the turn's commits came from origin/develop: no origin/develop to compare against",
+          "auto-review: commit u1 came from origin/master; not this turn's",
+        ]);
+      });
+
+      it("keeps a commit the thread authored in an earlier turn that is on the checkout's own remote-tracking ref", async () => {
+        const { result, remoteCalls } = await attribute({
+          branch: "develop",
+          timelines: { thr_self: [rowAt(5_000, 6_000, "git commit -m original")] },
+          commits: [upstreamCommit("u1", 5_500)],
           ownRemote: ["u1"],
         });
+        expect(remoteCalls).toEqual(["origin/master", "origin/develop"]);
         expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: [] });
+      });
+
+      describe("when the family pushed during the window", () => {
+        const options = {
+          branch: "develop",
+          commits: [upstreamCommit("u1", 5_500), upstreamCommit("u2", 5_600)],
+          upstream: ["u2"],
+          ownRemote: ["u1"],
+        };
+        const pushedBy = (thread: "thr_self" | "thr_child", text: string) => ({
+          entries: [self, child],
+          timelines: { [thread]: [rowAt(30_000, 30_500, text)] },
+        });
+
+        it.each([
+          ["the thread", "thr_self"],
+          ["a child thread", "thr_child"],
+        ] as const)("ignores the checkout's own remote-tracking ref when %s ran git push", async (_who, thread) => {
+          const { result, infos } = await attribute({ ...options, ...pushedBy(thread, "git push origin develop") });
+          // u1 is held only by origin/develop, which a push of the thread's own may have made it reach; u2 is the mainline's.
+          expect(result).toMatchObject({ commits: ["u1"], upstreamCommits: ["u2"] });
+          expect(infos).toEqual([
+            "auto-review: not checking whether the turn's commits came from origin/develop: the thread's family ran git push",
+            "auto-review: commit u2 came from origin/master; not this turn's",
+          ]);
+        });
+
+        it("still counts the own branch's ref when the family ran git that does not push", async () => {
+          const { result } = await attribute({ ...options, ...pushedBy("thr_self", "git pull origin develop") });
+          expect(result).toMatchObject({ commits: [], upstreamCommits: ["u1", "u2"] });
+        });
       });
 
       it("leaves a commit nothing of the family could have made out of the review, in exact mode, next to the upstream one", async () => {

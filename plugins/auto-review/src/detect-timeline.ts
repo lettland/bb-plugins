@@ -2,7 +2,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
 import { rowTexts, rowWindow, shellText, walkRows } from "./detect-rows.js";
 import type { OpenRowEnds, RowText, TimeWindow, WorkRow } from "./detect-rows.js";
-import { isHistoryWritingGit } from "./detect-shell.js";
+import { isGitPush, isHistoryWritingGit } from "./detect-shell.js";
 import type {
   ThreadListEntry,
   TimelineResult,
@@ -164,6 +164,11 @@ function runsHistoryGit(row: WorkRow): boolean {
   return text !== null && isHistoryWritingGit(text);
 }
 
+function runsGitPush(row: WorkRow): boolean {
+  const text = shellText(row);
+  return text !== null && isGitPush(text);
+}
+
 /** The windows of the wanted rows that overlap the turn, which began at `startedAt`. */
 function overlappingWindows(
   rows: readonly TimelineRow[],
@@ -194,6 +199,11 @@ export function ownWindows(
   now: number,
 ): TimeWindow[] {
   return overlappingWindows(rows, startedAt, { pending: now, unended: now }, () => true);
+}
+
+/** Whether any of these rows ran `git push` while the turn, which began at `startedAt`, was under way. A row that never recorded an end is taken to be running until `now`. */
+export function ranGitPush(rows: readonly TimelineRow[], startedAt: number, now: number): boolean {
+  return overlappingWindows(rows, startedAt, { pending: now, unended: now }, runsGitPush).length > 0;
 }
 
 export interface SiblingEvidence {

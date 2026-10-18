@@ -57,19 +57,24 @@ function simpleCommands(text: string): string[][] {
   return commands;
 }
 
-function writesHistory(words: readonly string[]): boolean {
+/** The git subcommand of a simple command, or undefined when it is not git. */
+function gitSubcommand(words: readonly string[]): string | undefined {
   let at = 0;
   while (ENV_ASSIGNMENT.test(words[at] ?? "")) {
     at += 1;
   }
   if (words[at] !== "git") {
-    return false;
+    return undefined;
   }
   at += 1;
   while ((words[at] ?? "").startsWith("-")) {
     at += words[at] === "-C" || words[at] === "-c" ? 2 : 1;
   }
-  return HISTORY_GIT_SUBCOMMANDS.has(words[at] ?? "");
+  return words[at];
+}
+
+function writesHistory(words: readonly string[]): boolean {
+  return HISTORY_GIT_SUBCOMMANDS.has(gitSubcommand(words) ?? "");
 }
 
 /**
@@ -80,4 +85,9 @@ function writesHistory(words: readonly string[]): boolean {
  */
 export function isHistoryWritingGit(text: string): boolean {
   return simpleCommands(text).some(writesHistory);
+}
+
+/** Whether shell text runs `git push`, which can make a local commit reachable from a remote-tracking ref. */
+export function isGitPush(text: string): boolean {
+  return simpleCommands(text).some((words) => gitSubcommand(words) === "push");
 }

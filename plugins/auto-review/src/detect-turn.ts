@@ -12,6 +12,7 @@ import {
   authoredPathsFromRows,
   kinEvidence,
   ownWindows,
+  ranGitPush,
   rowsSince,
   siblingAuthoredPaths,
   turnTimeline,
@@ -126,7 +127,7 @@ export interface TurnChanges {
   committedPaths: string[];
   /** Commits made during the turn that a sibling thread's git made; the sibling's to review. */
   foreignCommits: ForeignCommit[];
-  /** Commits that arrived with the remote base during the turn, merged by someone else; not the turn's work. */
+  /** Commits that arrived with the remote base, or the checkout branch's own remote-tracking ref, during the turn, merged by someone else; not the turn's work. */
   upstreamCommits: string[];
   /** `exact` claims only the changes this thread's family made or named; `sweep` takes every unattributed change, as when something ran whose writes cannot be listed. */
   mode: "exact" | "sweep";
@@ -202,7 +203,7 @@ async function foreignCommitsOf(
 
 /**
  * The remote-tracking refs a pulled commit may have arrived with: the mainline
- * base's, and the checkout's own branch's when that is another branch.
+ * base's first, then the checkout's own branch's when that is another branch.
  */
 function upstreamRefs(workspace: AvailableWorkspace): string[] {
   const base = remoteRef(mainlineBase(workspace));
@@ -212,11 +213,14 @@ function upstreamRefs(workspace: AvailableWorkspace): string[] {
 }
 
 /**
- * The commits the remote base brought in that someone else merged: reachable
- * from `origin/<base>`, or from the remote-tracking ref of the checkout's own
- * branch (a `git pull` of it), and authored outside every window this thread's family
- * was running, the windows `foreignCommitsOf` treats as ours, and touching none
- * of the family's tool-edited files. A commit the thread makes is authored
+ * The commits the remote base, or the checkout's own branch, brought in that
+ * someone else merged, each with the first ref that holds it: reachable from
+ * `origin/<base>` or from `origin/<branch>` (a `git pull` of it), and authored
+ * outside every window this thread's family was running, the windows
+ * `foreignCommitsOf` treats as ours, and touching none of the family's
+ * tool-edited files. The own branch's ref is left out when the family ran
+ * `git push` since the earliest candidate's author date: a pushed commit of the
+ * thread's own, backdated, would otherwise look like pulled work. A commit the thread makes is authored
  * while one of its rows runs, whatever tool made it. A rewrite keeps the author
  * date, though (`git commit --amend`, `rebase`, `cherry-pick`): one of the
  * thread's earlier turns may have authored a commit that this turn only
@@ -227,13 +231,13 @@ function upstreamRefs(workspace: AvailableWorkspace): string[] {
  */
 async function upstreamCommitsOf(
   upstream: UpstreamInput,
-): Promise<{ shas: string[]; kin: KinEvidence | undefined }> {
+): Promise<{ dropped: Array<{ sha: string; ref: string }>; kin: KinEvidence | undefined }> {
   const { bb, input, startedAt, now, ownRows, ownPaths, commits } = upstream;
   const refs = upstreamRefs(input.workspace);
-  const none = { shas: [], kin: undefined };
+  const none = { dropped: [], kin: undefined };
   const skip = (reason: string, kin?: KinEvidence) => {
     bb.log.info(`auto-review: not checking whether the turn's commits came from ${refs.join(" or ")}: ${reason}`);
-    return { shas: [], kin };
+    return { dropped: [], kin };
   };
   const dated = commits.flatMap(({ sha, authoredAt, paths }) =>
     authoredAt === null ? [] : [{ sha, authoredAt, paths }],
@@ -260,7 +264,9 @@ async function upstreamCommitsOf(
       ),
     ),
   );
-  const candidates = outside.filter(({ sha }) => reachable.some((held) => held.has(sha)));
+  // The first of the first `count` refs that holds a commit.
+  const holder = (sha: string, count: number) => refs.slice(0, count).find((_ref, at) => reachable[at]?.has(sha));
+  const candidates = outside.filter(({ sha }) => holder(sha, refs.length) !== undefined);
   if (candidates.length === 0) {
     return none;
   }
@@ -282,15 +288,20 @@ async function upstreamCommitsOf(
     since < startedAt ? Number.NEGATIVE_INFINITY : input.turnStart.sinceSeq,
   );
   const familyPaths = new Set([...ownPaths, ...lookbackPaths, ...kin.paths]);
-  const shas = candidates
-    .filter(
-      ({ authoredAt, paths }) =>
-        paths !== null &&
-        !windows.some((window) => withinWindow(window, authoredAt)) &&
-        !paths.some((path) => familyPaths.has(path)),
-    )
-    .map(({ sha }) => sha);
-  return { shas, kin: reusable };
+  const pushed = refs.length > 1 && [rows, ...kin.threads].some((thread) => ranGitPush(thread, since, now));
+  if (pushed) {
+    bb.log.info(`auto-review: not checking whether the turn's commits came from ${refs[1]}: the thread's family ran git push`);
+  }
+  const dropped = candidates.flatMap(({ sha, authoredAt, paths }) => {
+    const ref = holder(sha, pushed ? 1 : refs.length);
+    return ref !== undefined &&
+      paths !== null &&
+      !windows.some((window) => withinWindow(window, authoredAt)) &&
+      !paths.some((path) => familyPaths.has(path))
+      ? [{ sha, ref }]
+      : [];
+  });
+  return { dropped, kin: reusable };
 }
 
 /** `tree` without the commits `dropped`, and the paths only they touched. */
@@ -306,20 +317,21 @@ function withoutCommits(tree: TreeChanges, dropped: ReadonlySet<string>): TreeCh
   };
 }
 
-/** `fetched` without the commits that arrived with the remote base, which are logged; none are dropped when the turn start time is unknown. */
+/** `fetched` without the commits that arrived with the remote base or the checkout branch's own remote-tracking ref, which are logged; none are dropped when the turn start time is unknown. */
 async function withoutUpstream(
   context: Omit<UpstreamInput, "startedAt" | "commits">,
   fetched: TreeChanges,
 ): Promise<{ tree: TreeChanges; shas: string[]; kin: KinEvidence | undefined }> {
   const { bb, input } = context;
   const { startedAt } = input.turnStart;
-  const { shas, kin } =
+  const { dropped, kin } =
     startedAt === undefined || fetched.commitChanges.length === 0
-      ? { shas: [], kin: undefined }
+      ? { dropped: [], kin: undefined }
       : await upstreamCommitsOf({ ...context, startedAt, commits: fetched.commitChanges });
-  for (const sha of shas) {
-    bb.log.info(`auto-review: commit ${sha} came from ${upstreamRefs(input.workspace).join(" or ")}; not this turn's`);
+  for (const { sha, ref } of dropped) {
+    bb.log.info(`auto-review: commit ${sha} came from ${ref}; not this turn's`);
   }
+  const shas = dropped.map(({ sha }) => sha);
   return { tree: withoutCommits(fetched, new Set(shas)), shas, kin };
 }
 
@@ -374,8 +386,8 @@ async function readSiblings(
  * during the turn, and commits it made with git, which are the sibling's to
  * review. So are uncommitted paths a sibling's shell command wrote to by name,
  * when nothing of the family names them. Commits that merely arrived with the
- * remote base are no one's to review here, and their paths do not count either;
- * nor do commits nothing of the family could have made (see `claimOwnChanges`).
+ * remote base or the checkout branch's own remote-tracking ref are no one's to
+ * review here, and their paths do not count either; nor do commits nothing of the family could have made (see `claimOwnChanges`).
  */
 export async function turnChangedPaths(
   bb: BbPluginApi,
