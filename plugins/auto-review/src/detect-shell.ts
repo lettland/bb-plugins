@@ -131,9 +131,10 @@ function namesRemoteUrl(text: string): boolean {
  * Shell text that can move a remote-tracking ref, which would make a local
  * commit look like pulled work. The words of `REMOTE_REF_WORDS`, a
  * `remote.<name>.url` key, `git remote add|rename`, `gh repo sync`, and a
- * `git fetch` with a refspec or a local source. Not a parser, and never truncated, since a miss would drop a
- * commit: false positives (`git stash push`, `echo push`) only keep one in
- * review. Every check is linear in the text.
+ * `git fetch` with a refspec or a local source. Not a parser, and never
+ * truncated, since a miss would drop a commit: false positives (`git stash
+ * push`, `echo push`) only keep one in review. Every check is linear in the
+ * text.
  */
 export function mayMoveRemoteRef(text: string): boolean {
   return (
