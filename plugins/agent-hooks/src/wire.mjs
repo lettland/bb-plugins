@@ -42,6 +42,7 @@ export const WIRING = [
   { script: "review-plan-before-exit.sh", events: [{ event: "PreToolUse", matcher: "ExitPlanMode" }] },
   { script: "verify-before-stop.sh", events: [{ event: "Stop" }, { event: "SubagentStop" }] },
   { script: "session-reset.sh", events: [{ event: "SessionStart" }] },
+  { script: "context-nudge.sh", events: [{ event: "PostToolUse" }] },
 ];
 
 export const PROVIDERS = {

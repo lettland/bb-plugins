@@ -142,7 +142,7 @@ async function cmdStatus(argv, out) {
       if (!r.ok) bad += 1;
       out(`  ${r.ok ? "ok  " : "FAIL"} ${r.script.padEnd(28)} ${r.detail}`);
     }
-    const gates = results.filter((r) => r.script !== "session-reset.sh");
+    const gates = results.filter((r) => r.script !== "session-reset.sh" && r.script !== "context-nudge.sh");
     const denied = gates.filter((r) => r.ok).length;
     out(`\n  ${denied}/${gates.length} gate hooks responding, session-reset ${
       results.find((r) => r.script === "session-reset.sh")?.ok ? "clean" : "FAILING"

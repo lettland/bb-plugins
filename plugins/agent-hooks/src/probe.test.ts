@@ -42,6 +42,7 @@ const GOOD: Record<string, string> = {
   "review-plan-before-exit.sh": `cat >/dev/null; echo '{"continue":false}'`,
   "verify-before-stop.sh": `cat >/dev/null; exit 0`,
   "session-reset.sh": `cat >/dev/null; exit 0`,
+  "context-nudge.sh": `cat >/dev/null; exit 0`,
 };
 
 function install(dir: string, bodies: Record<string, string>, mode = 0o700) {
@@ -72,6 +73,7 @@ describe("PROBES", () => {
       "review-plan-before-exit.sh",
       "verify-before-stop.sh",
       "session-reset.sh",
+      "context-nudge.sh",
     ]);
   });
 
@@ -100,6 +102,7 @@ describe("probeAll with fake hooks", () => {
       ["review-plan-before-exit.sh", true, "denied as expected"],
       ["verify-before-stop.sh", true, "ran, exit 0"],
       ["session-reset.sh", true, "clean no-op"],
+      ["context-nudge.sh", true, "clean no-op"],
     ]);
     expect(byScript(results, "guard-bash.sh").note).toMatch(/never executed/);
     expect(byScript(results, "secret-scan.sh").note).toBeUndefined();
@@ -171,6 +174,7 @@ describe("probeAll with fake hooks", () => {
       "review-plan-before-exit.sh": recorder("plan", `echo '${DENY_JSON}'`),
       "verify-before-stop.sh": recorder("stop", "exit 0"),
       "session-reset.sh": recorder("reset", "exit 0"),
+      "context-nudge.sh": recorder("nudge", "exit 0"),
     });
     const results: Result[] = await probeAll({ installDir: dir });
     expect(results.every((r) => r.ok)).toBe(true);
@@ -192,7 +196,7 @@ describe("probeAll with fake hooks", () => {
     expect(secret.tool_input.file_path).toBe(path.join(secretDir, "src", "probe.ts"));
     expect(secret.tool_input.content).toContain(FAKE_KEY);
 
-    const projectDirs = ["guard", "secret", "plan", "stop", "reset"].map((n) => {
+    const projectDirs = ["guard", "secret", "plan", "stop", "reset", "nudge"].map((n) => {
       expect(existsSync(path.join(rec, `${n}.logs`))).toBe(true); // .claude/logs pre-created
       return readFileSync(path.join(rec, `${n}.dir`), "utf8");
     });
@@ -243,6 +247,7 @@ describe("probeAll against the shipped hooks", () => {
       "denied as expected",
       "denied as expected",
       "ran, exit 0",
+      "clean no-op",
       "clean no-op",
     ]);
   });

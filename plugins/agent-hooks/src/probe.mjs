@@ -17,7 +17,8 @@ import path from "node:path";
 import { INSTALL_DIR } from "./wire.mjs";
 
 /** One probe per hook. `expect: "deny"` means the hook must refuse the input;
- *  session-reset has no deny path at all, so it is checked for a clean no-op. */
+ *  session-reset and context-nudge have no deny path at all, so they are checked for a
+ *  clean no-op. */
 export const PROBES = [
   {
     script: "guard-bash.sh",
@@ -54,6 +55,13 @@ export const PROBES = [
     toolName: "SessionStart",
     toolInput: {},
     note: "cleanup hook: exits 0 with no output by design",
+  },
+  {
+    script: "context-nudge.sh",
+    expect: "noop",
+    toolName: "PostToolUse",
+    toolInput: {},
+    note: "no transcript in the synthetic envelope, so it correctly stays silent",
   },
 ];
 

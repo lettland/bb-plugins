@@ -2,10 +2,14 @@
 # SessionStart hook — clears stale gate files so a crashed session cannot deadlock
 # the next one.
 #
-# This exists ONLY to serve review-plan-before-exit.sh, which arms a session-scoped
-# `.plan-review-gate-<session-id>` file. If a session dies between arming the gate
-# and re-presenting its plan, the file is left behind; without this prune, the next
-# session in that repo inherits it and is blocked on a review it cannot satisfy.
+# This exists ONLY to serve two hooks' session-scoped state files:
+#   - review-plan-before-exit.sh arms `.plan-review-gate-<session-id>`. If a session
+#     dies between arming the gate and re-presenting its plan, the file is left
+#     behind; without this prune, the next session in that repo inherits it and is
+#     blocked on a review it cannot satisfy.
+#   - context-nudge.sh keeps `.context-nudge-<session-id>`, the highest context band
+#     it has announced. It only needs to outlive its session, so it is pruned much
+#     later than a gate (a long session must not re-fire after two idle hours).
 #
 # TRIMMED IN THE PORT from k0d3's 89-line version. Dropped:
 #   - chmod +x over $CLAUDE_PROJECT_DIR/hooks
@@ -32,5 +36,6 @@ mkdir -p "$LOG_DIR" 2> /dev/null || exit 0
 # breaks concurrent sessions, which is worse.
 find "$LOG_DIR" -name ".plan-review-gate*" -mmin +120 -delete 2> /dev/null
 find "$LOG_DIR" -name ".session-blocks-*" -mmin +120 -delete 2> /dev/null
+find "$LOG_DIR" -name ".context-nudge-*" -mmin +1440 -delete 2> /dev/null
 
 exit 0

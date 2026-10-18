@@ -369,6 +369,398 @@ fi
 # SOFT BLOCK — blocked, but user can re-request
 # ═══════════════════════════════════════════════════════
 
+# Git hook bypass. The agent must fix what a hook reports, not skip the hook:
+# `--no-verify` (and its unambiguous prefixes), `commit -n`, a one-shot
+# `-c core.hooksPath=…` / `--config-env` / GIT_CONFIG_* override, and a persistent
+# `git config core.hooksPath <dir>`.
+#
+# Parsing rules adapted from ecc block-no-verify.js, Copyright (c) 2026 Affaan
+# Mustafa, MIT.
+#
+# The `for raw in $clause` split used by the rm checks is quote-blind, so it would
+# block `git commit -m "drop -n flag"`. This check tokenizes with python's shlex
+# instead. The program below is FIXED text run as `python3 -I -c`; the command goes
+# in on stdin and is never evaluated, sourced or put in argv. -I (isolated mode)
+# keeps a planted shlex.py/re.py in the project dir, and PYTHON* env vars, out.
+#
+# Bash acts only on an explicit `ALLOW` or `BLOCK:<kind>` line. Anything else (no
+# python3, the macOS stub exiting non-zero, unbalanced quotes, an exception, empty
+# output) falls to a whitespace scan for the same patterns, which errs toward
+# blocking.
+#
+# KNOWN GAPS (not regressions; do not "discover" them as bugs):
+#   - HUSKY=0
+#   - git aliases (`git ci -n`)
+#   - heredoc bodies fed to a shell (bodies are not scanned, same as ecc), and a
+#     `<<WORD` inside quoted text that has a later terminator line, which hides the
+#     lines between
+#   - hooks disabled through a config file the agent writes directly, and
+#     GIT_CONFIG_GLOBAL pointing at such a file
+IFS= read -r -d '' GIT_BYPASS_PY << 'PY'
+import os
+import re
+import shlex
+import sys
+
+HOOK_CMDS = {"commit", "push", "merge", "cherry-pick", "rebase", "am"}
+PUNCT = ";&|\n"
+# Prefix words that may sit between a clause start and its assignments.
+PREFIX_WORDS = {"env", "export", "declare", "typeset", "command", "exec", "sudo", "time", "nice", "nohup"}
+ASSIGN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+# `git commit` options whose value is the next token (or the rest of a short cluster).
+COMMIT_LONG_VALUE = {
+    "--message", "--file", "--reuse-message", "--reedit-message", "--template", "--author",
+    "--date", "--cleanup", "--fixup", "--squash", "--pathspec-from-file", "--trailer",
+}
+CONFIG_READ_FLAGS = {
+    "--get", "--get-all", "--get-regexp", "--get-urlmatch", "--unset", "--unset-all",
+    "--list", "-l", "--remove-section", "--rename-section", "--edit", "-e",
+}
+CONFIG_VALUE_FLAGS = {"-f", "--file", "--blob", "--type", "--default", "--comment"}
+GLOBAL_VALUE = {"-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix"}
+
+
+def strip_heredocs(text):
+    """Drop heredoc bodies, keeping the marker's own line. No terminator: unchanged."""
+    marker = re.compile(r"(?<!<)<<(?!<)(-?)[ \t]*(['\"]?)(\w+)\2")
+    lines = text.split("\n")
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        i += 1
+        for m in marker.finditer(line):
+            dash, delim = m.group(1), m.group(3)
+            for k in range(i, len(lines)):
+                cand = lines[k].lstrip("\t") if dash else lines[k]
+                if cand == delim:
+                    i = k + 1
+                    break
+    return "\n".join(out)
+
+
+def join_continuations(text):
+    """Remove backslash-newline pairs, as bash does (an escaped backslash does not count)."""
+    return re.sub(r"(?<!\\)((?:\\\\)*)\\\n", r"\1", text)
+
+
+def strip_comments(text):
+    """Delete `# …` to end of line when # starts a word outside quotes."""
+    out = []
+    quote = None
+    word_start = True
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            out.append(c)
+            if c == "'":
+                quote = None
+        elif quote == '"':
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                i += 1
+                out.append(text[i])
+            elif c == '"':
+                quote = None
+        elif c == "\\" and i + 1 < n:
+            i += 1
+            out.append(c)
+            out.append(text[i])
+        elif c in "'\"":
+            quote = c
+            out.append(c)
+        elif c == "#" and word_start:
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        else:
+            out.append(c)
+        word_start = quote is None and c in " \t\n;&|()<>"
+        i += 1
+    return "".join(out)
+
+
+def clauses(text):
+    """Split into token lists on unquoted ; & | and newline. Raises ValueError on bad quoting."""
+    lex = shlex.shlex(text, posix=True, punctuation_chars=PUNCT)
+    lex.whitespace_split = True
+    lex.whitespace = " \t\r"
+    lex.commenters = ""
+    toks = list(lex)
+    res = []
+    cur = []
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        nxt = toks[i + 1] if i + 1 < len(toks) else ""
+        if t == "&":
+            # `2>&1` and `&>file` are redirections, not a clause break.
+            if cur and cur[-1].endswith((">", "<")):
+                cur[-1] += "&"
+                i += 1
+                if re.fullmatch(r"\d+|-", nxt):
+                    cur[-1] += nxt
+                    i += 1
+                continue
+            if nxt.startswith(">"):
+                cur.append("&" + nxt)
+                i += 2
+                continue
+        if t and not t.strip(PUNCT):
+            if cur:
+                res.append(cur)
+                cur = []
+        else:
+            cur.append(t)
+        i += 1
+    if cur:
+        res.append(cur)
+    return res
+
+
+def norm(t):
+    """Strip the shell syntax welded onto a token: $(git, (git, `git, \\git, x)."""
+    if t.startswith("$("):
+        t = t[2:]
+    t = t.lstrip("({`")
+    if t.startswith("\\"):
+        t = t[1:]
+    return t.rstrip(")};`")
+
+
+def hooks_path_key(v):
+    return v.split("=", 1)[0].strip().lower() == "core.hookspath"
+
+
+def check_assignments(toks):
+    for raw in toks:
+        t = norm(raw)
+        m = ASSIGN.match(t)
+        if m:
+            name, val = m.group(1), m.group(2)
+            if name == "GIT_CONFIG_PARAMETERS":
+                return "bypass"
+            if re.fullmatch(r"GIT_CONFIG_KEY_\d+", name) and val.strip().lower() == "core.hookspath":
+                return "bypass"
+            continue
+        if t.startswith("-") or os.path.basename(t) in PREFIX_WORDS:
+            continue
+        break
+    return None
+
+
+def find_git(toks):
+    for idx, raw in enumerate(toks):
+        t = raw if raw.startswith("-") else raw.partition("=")[2] if "=" in raw else raw
+        if os.path.basename(norm(t)) == "git":
+            return idx
+    return None
+
+
+def scan_hook_cmd(sub, rest):
+    """True when the subcommand's options carry a hook bypass."""
+    k = 0
+    while k < len(rest):
+        t = rest[k]
+        k += 1
+        if not t.startswith("-"):
+            continue
+        t = t.rstrip(")`}")  # `(git commit -n)` leaves the paren welded on
+        if t == "--":
+            break
+        if t.startswith("--"):
+            name = t.split("=", 1)[0]
+            if len(name) >= 6 and "--no-verify".startswith(name):
+                return True
+            if sub == "commit" and "=" not in t and name in COMMIT_LONG_VALUE:
+                k += 1
+            continue
+        if sub != "commit":
+            continue
+        cluster = t[1:]
+        for pos, ch in enumerate(cluster):
+            if ch == "n":
+                return True
+            if ch in "uS":  # stuck optional value: -uno
+                break
+            if ch in "mFCct":  # value is the rest of the cluster, else the next token
+                if pos == len(cluster) - 1:
+                    k += 1
+                break
+    return False
+
+
+def scan_config(rest):
+    """True when `git config` writes core.hooksPath. Reads stay allowed."""
+    positional = []
+    reading = False
+    k = 0
+    while k < len(rest):
+        t = rest[k]
+        k += 1
+        if t.startswith("-"):
+            name = t.split("=", 1)[0]
+            if name in CONFIG_READ_FLAGS:
+                reading = True
+            if name in CONFIG_VALUE_FLAGS and "=" not in t:
+                k += 1
+            continue
+        positional.append(norm(t))
+    if reading:
+        return False
+    if positional[:1] and positional[0].lower() == "set":  # git 2.46+ syntax
+        positional = positional[1:]
+    return len(positional) >= 2 and positional[0].lower() == "core.hookspath"
+
+
+def check_git(toks, j):
+    n = len(toks)
+    while j < n:
+        t = toks[j]
+        if t in ("-c", "--config-env"):
+            if j + 1 < n and hooks_path_key(toks[j + 1]):
+                return "bypass"
+            j += 2
+        elif t in GLOBAL_VALUE:
+            j += 2
+        elif t.startswith("--config-env="):
+            if hooks_path_key(t[len("--config-env="):]):
+                return "bypass"
+            j += 1
+        elif t.startswith("-c") and not t.startswith("--"):  # -ccore.hooksPath=x
+            if hooks_path_key(t[2:]):
+                return "bypass"
+            j += 1
+        elif t.startswith("-"):  # --git-dir=…, --no-pager, -C/tmp, --exec-path …
+            j += 1
+        else:
+            break
+    if j >= n:
+        return None
+    sub = norm(toks[j])
+    rest = toks[j + 1:]
+    if sub in HOOK_CMDS and scan_hook_cmd(sub, rest):
+        return "bypass"
+    if sub == "config" and scan_config(rest):
+        return "hookspath"
+    return None
+
+
+def check_clause(toks):
+    kind = check_assignments(toks)
+    if kind:
+        return kind
+    g = find_git(toks)
+    return None if g is None else check_git(toks, g + 1)
+
+
+def main():
+    text = sys.stdin.buffer.read().decode("utf-8", "replace")
+    text = strip_comments(join_continuations(strip_heredocs(text)))
+    for clause in clauses(text):
+        kind = check_clause(clause)
+        if kind:
+            print("BLOCK:" + kind)
+            return
+    print("ALLOW")
+
+
+main()
+PY
+
+# Quote-blind whitespace scan for the same patterns; prints the kind of the first
+# hit, or nothing. Runs in a subshell (via $(...)), so `set -f` stays local.
+git_bypass_fallback() {
+  local clause raw tok ltok prev has_git has_hookcmd has_commit has_config has_nv has_n hp_key
+  set -f
+  while IFS= read -r clause; do
+    [ -z "$clause" ] && continue
+    has_git=0 has_hookcmd=0 has_commit=0 has_config=0 has_nv=0 has_n=0 hp_key=0 prev=""
+    for raw in $clause; do
+      tok="$(normalize_token "$raw")"
+      ltok="$(printf '%s' "$tok" | tr '[:upper:]' '[:lower:]')"
+      case "$raw" in -*) ;; *)
+        case "$(normalize_token "${raw#*=}")" in git | */git) has_git=1 ;; esac
+        ;;
+      esac
+      case "$tok" in
+        GIT_CONFIG_PARAMETERS=*)
+          echo bypass
+          return
+          ;;
+        commit) has_commit=1 has_hookcmd=1 ;;
+        push | merge | cherry-pick | rebase | am) has_hookcmd=1 ;;
+        config) has_config=1 ;;
+        --no-v | --no-ve | --no-ver | --no-veri | --no-verif | --no-verify | --no-verify=*) has_nv=1 ;;
+        --*) ;;
+        -*n*) has_n=1 ;;
+      esac
+      case "$ltok" in
+        git_config_key_*=core.hookspath | *core.hookspath=*)
+          echo bypass
+          return
+          ;;
+        core.hookspath)
+          if [ "$prev" = "-c" ] || [ "$prev" = "--config-env" ]; then
+            echo bypass
+            return
+          fi
+          hp_key=1
+          ;;
+        *)
+          # a value after `git config … core.hooksPath` is a write
+          if [ "$hp_key" = 1 ] && [ "$has_config" = 1 ]; then
+            echo hookspath
+            return
+          fi
+          ;;
+      esac
+      prev="$raw"
+    done
+    if [ "$has_git" = 1 ]; then
+      if [ "$has_nv" = 1 ] && [ "$has_hookcmd" = 1 ]; then
+        echo bypass
+        return
+      fi
+      if [ "$has_n" = 1 ] && [ "$has_commit" = 1 ]; then
+        echo bypass
+        return
+      fi
+    fi
+  done <<< "$(printf '%s' "$COMMAND" | tr ';|&\n' '\n' | tr -s '\n')"
+}
+
+# Gate (a bash builtin match, no extra process): run python only when the command has a
+# `git` word (also behind a quote, backtick, backslash or path) or mentions GIT_CONFIG, so
+# `.gitignore`/`github`/`digit` stay off it.
+GIT_WORD='(^|[[:space:]/;&|(`\"'"'"'])git(["'"'"']|[[:space:]]|$)'
+if [[ "$COMMAND" =~ $GIT_WORD || "$COMMAND" == *GIT_CONFIG* ]]; then
+  GIT_VERDICT="$(printf '%s' "$COMMAND" | python3 -I -c "$GIT_BYPASS_PY" 2> /dev/null)" || GIT_VERDICT=""
+  GIT_FALLBACK_NOTE=""
+  case "$GIT_VERDICT" in
+    ALLOW | BLOCK:bypass | BLOCK:hookspath) ;;
+    *)
+      GIT_FALLBACK_NOTE=" (Fallback scan: if the flag only appears in message text, write the message to a file and use \`git commit -F <file>\`.)"
+      GIT_FALLBACK_KIND="$(git_bypass_fallback)"
+      GIT_VERDICT="ALLOW"
+      [ -n "$GIT_FALLBACK_KIND" ] && GIT_VERDICT="BLOCK:$GIT_FALLBACK_KIND"
+      ;;
+  esac
+  case "$GIT_VERDICT" in
+    BLOCK:bypass)
+      log_incident "HIGH" "SOFT BLOCKED: git hook bypass: $COMMAND"
+      deny "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks." "Fix what the git hook reports and re-run without the bypass. If a bypass is really needed, ask the user to run the command themselves.${GIT_FALLBACK_NOTE}"
+      ;;
+    BLOCK:hookspath)
+      log_incident "HIGH" "SOFT BLOCKED: git core.hooksPath write: $COMMAND"
+      deny "SOFT BLOCK: setting core.hooksPath disables or redirects the repo's git hooks." "This disables or redirects the repo's git hooks. If the repo really uses a custom hooks dir, ask the user to confirm; don't retry.${GIT_FALLBACK_NOTE}"
+      ;;
+  esac
+fi
+
 # rm with a recursive flag (-r / -R / --recursive) deletes a whole tree.
 # Force-only rm (`rm -f <named files>`, no -r) is NOT soft-blocked — it drops
 # to the LOW warn tier below, since forcing named files is low-risk and the

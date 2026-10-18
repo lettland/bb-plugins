@@ -13,11 +13,12 @@ full rationale.
 
 | Script | Event | Job |
 |---|---|---|
-| `guard-bash.sh` | PreToolUse(Bash) | Blocks catastrophic `rm` (system paths, a home directory or its direct children), force push, secret exfiltration, environment dumps |
+| `guard-bash.sh` | PreToolUse(Bash) | Blocks catastrophic `rm` (system paths, a home directory or its direct children), force push, secret exfiltration, environment dumps. Soft-blocks a git hook bypass (`--no-verify`, `commit -n`, a `core.hooksPath` override or write) |
 | `secret-scan.sh` | PreToolUse(Write\|Edit) | Refuses to write a credential into a file that could be committed |
 | `review-plan-before-exit.sh` | PreToolUse(ExitPlanMode) | Denies a plan's first presentation until it has been reviewed — in plan mode, defers to auto-review's own plan gate where it already owns the review (`bb auto-review status --json` reports `planGate: true`) |
 | `verify-before-stop.sh` | Stop, SubagentStop | Blocks one stop when this turn's tool output shows an unresolved failure |
-| `session-reset.sh` | SessionStart | Prunes stale plan-review gates so a crashed session cannot deadlock the next |
+| `session-reset.sh` | SessionStart | Prunes stale plan-review gates so a crashed session cannot deadlock the next, and old context-nudge state |
+| `context-nudge.sh` | PostToolUse(all tools) | Each time context crosses a new 200k band, asks the agent to finish the step and end the turn with a short handoff |
 
 The home `rm` rule reads depth from the literal target. A home directory, its
 direct children, any `.`/`..` segment, a glob (`*`, `?`, `[`, `{`) in the first
@@ -25,6 +26,23 @@ two segments (`~/*/*`, `~/workspace/*`), and anything under `~/.ssh`, `~/.gnupg`
 or `~/.aws` are hard-blocked. Deeper files are allowed; deeper `rm -r` gets the
 recursive soft block. Heredoc bodies and `-m` messages are scanned like argv, so
 prose that says rm next to a home path is blocked too: use `git commit -F <file>`.
+
+The git hook-bypass block tokenizes the command with python's `shlex` (`python3 -I`, command on
+stdin, never evaluated), so `git commit -m "drop -n flag"` is allowed while `git commit -an -m x`,
+`git -C dir commit --no-verify` and `git -c core.hooksPath=/dev/null commit` are not. Without a
+usable `python3` it falls back to a quote-blind whitespace scan that errs toward blocking; the
+deny then says so and suggests `git commit -F <file>`. Known gaps: `HUSKY=0`, git aliases, heredoc
+bodies fed to a shell, and hooks disabled through a config file the agent writes directly.
+
+`context-nudge.sh` reads the last real token reading from the session transcript
+(`input + cache_read + cache_creation` of the last non-`<synthetic>` assistant entry). It fires once per
+band (200k, 400k, ... capped at 800k) and keeps the announced band in
+`.claude/logs/.context-nudge-<session-id>`; a reading below it (after a compaction) lowers the stored band
+so the next climb fires again. Jumping several bands fires once. Subagent tool calls (an `agent_id` in the
+envelope) and `AGENT_HOOKS_HOST=codex` exit at once. Claude Code documents `agent_id` as identifying the
+subagent or teammate a hook fires in, but not as absent on main-thread calls; a runtime that sent it there
+would silence the nudge. Two parallel tool calls can both fire for the same band. Anything missing (jq,
+transcript, a parseable usage entry) is a silent no-op.
 
 `codex-shim.sh` bridges Codex's hook environment (which lacks `CLAUDE_PROJECT_DIR`) to these scripts.
 

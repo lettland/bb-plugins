@@ -88,7 +88,7 @@ describe("codex merge", () => {
     // so the snake_case entries parsed fine and would never have fired.
     const out = planCodex({ hooks: {} });
     expect(Object.keys(out.hooks).sort()).toEqual(
-      ["PreToolUse", "SessionStart", "Stop", "SubagentStop"].sort(),
+      ["PostToolUse", "PreToolUse", "SessionStart", "Stop", "SubagentStop"].sort(),
     );
     for (const snake of ["pre_tool_use", "session_start", "stop", "subagent_stop"]) {
       expect(out.hooks[snake]).toBeUndefined();

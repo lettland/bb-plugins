@@ -40,17 +40,24 @@ Providers: `claude-code` (`~/.claude`), `claude-work` (`~/.claude-work`), `codex
 
 | Script | Event | Job |
 |---|---|---|
-| `guard-bash.sh` | PreToolUse(Bash) | Catastrophic `rm`, force push, secret exfiltration, environment dumps |
+| `guard-bash.sh` | PreToolUse(Bash) | Catastrophic `rm`, force push, secret exfiltration, environment dumps; soft-blocks a git hook bypass (`--no-verify`, `commit -n`, `core.hooksPath`) |
 | `secret-scan.sh` | PreToolUse(Write\|Edit) | Refuses to write a credential into a file that could be committed |
 | `review-plan-before-exit.sh` | PreToolUse(ExitPlanMode) | Denies a plan's first presentation until it has been reviewed — in plan mode, defers to auto-review's own plan gate where it already owns the review (`bb auto-review status --json` reports `planGate: true`) |
 | `verify-before-stop.sh` | Stop, SubagentStop | Blocks one stop when this turn's tool output shows an unresolved failure |
-| `session-reset.sh` | SessionStart | Prunes stale plan-review gates so a crashed session cannot deadlock the next |
+| `session-reset.sh` | SessionStart | Prunes stale plan-review gates so a crashed session cannot deadlock the next, and old context-nudge state |
+| `context-nudge.sh` | PostToolUse(all tools) | Each time context crosses a new 200k band, asks the agent to finish the step and end the turn with a short handoff |
 
 Deferring to auto-review is not a guarantee a review happens: auto-review's own plan gate
 can itself release a plan unreviewed on its own failure (queue failed, deny failed, hold
 went stale — each recorded as a reason in `bb auto-review status`'s `lastFire`). The hook's
 deny+arm only falls back when reading `planGate` itself fails; it does not re-check whether
 auto-review's review actually ran.
+
+`context-nudge.sh` fires once per 200k band (capped at 800k), keyed by session in
+`.claude/logs/.context-nudge-<session-id>`, and re-arms after a compaction drops the reading below
+the stored band. It skips subagent tool calls (`agent_id` in the envelope) so a subagent never spends the
+parent's band; Claude Code documents `agent_id` for subagents and teammates but does not state it is
+absent on main-thread calls. Two parallel tool calls can both fire for one band (accepted).
 
 ## Two design rules worth not re-litigating
 
@@ -61,6 +68,14 @@ tracked `config.yml` used to be caught only by pattern, and one written to a `.e
 that nobody had gitignored was waved through on the name alone. Every failure mode —
 no git, no repo, an error, a path outside the tree — falls back to the name-based
 rule, so it **fails closed**.
+
+**The git hook-bypass check tokenizes with `shlex`; the rm checks do not.** The `rm` token scan splits
+on whitespace and ignores quoting, which is fine there (a false positive costs a re-request) but would
+block `git commit -m "drop -n flag"`. The git check strips heredoc bodies and comments, then runs a fixed
+`python3 -I -c` program with the command on stdin; the command is never evaluated, sourced or put in argv.
+Bash acts only on an explicit `ALLOW` or `BLOCK:<kind>` line; anything else (no python3, a shlex error,
+an exception, empty output) falls back to a quote-blind scan that errs toward blocking. Parsing rules are
+adapted from ecc `block-no-verify.js` (MIT).
 
 **`rm` detection asks "is any token an rm?", never "what is the command?"** Resolving
 a command word regresses `sudo -u root rm` (the `-u` value gets eaten), `/bin/rm`,

@@ -111,3 +111,57 @@
 {"id": "env-path-mixed-case-file", "cmd": "cat .env.Production", "expect": "hard", "why": "env-path: identifier must be ALL-CAPS to the next boundary"}
 {"id": "env-path-dotted-suffix", "cmd": "cat .env.FOO.local", "expect": "hard", "why": "env-path: a dotted suffix makes it a file name again"}
 {"id": "env-path-smuggled", "cmd": "cat .env.local;.env.X", "expect": "hard", "why": "env-path: stripping the property path leaves the real file"}
+{"id": "git-commit-n", "cmd": "git commit -n -m x", "expect": "soft", "why": "git hook bypass: ecc port: -n skips pre-commit"}
+{"id": "git-commit-an-cluster", "cmd": "git commit -an -m x", "expect": "soft", "why": "git hook bypass: -n inside a short cluster"}
+{"id": "git-global-C-commit-n", "cmd": "git -C /tmp/x commit -n -m x", "expect": "soft", "why": "git hook bypass: global -C value skipped"}
+{"id": "git-global-gitdir-no-verify", "cmd": "git --git-dir=/x commit --no-verify", "expect": "soft", "why": "git hook bypass: global --git-dir= form skipped"}
+{"id": "git-global-c-push-no-verify", "cmd": "git -c core.pager=cat push --no-verify", "expect": "soft", "why": "git hook bypass: global -c with an unrelated key"}
+{"id": "git-push-no-veri-prefix", "cmd": "git push --no-veri", "expect": "soft", "why": "git hook bypass: unambiguous prefix of --no-verify"}
+{"id": "git-cherry-pick-no-verify", "cmd": "git cherry-pick --no-verify abc", "expect": "soft", "why": "git hook bypass: cherry-pick is a hook subcommand"}
+{"id": "git-c-hookspath", "cmd": "git -c core.hooksPath=/dev/null commit -m x", "expect": "soft", "why": "git hook bypass: one-shot hooksPath override"}
+{"id": "git-c-hookspath-stuck", "cmd": "git -ccore.hooksPath=/dev/null commit -m x", "expect": "soft", "why": "git hook bypass: stuck -c form"}
+{"id": "git-config-env-hookspath", "cmd": "git --config-env=core.hooksPath=X commit -m x", "expect": "soft", "why": "git hook bypass: --config-env override"}
+{"id": "git-env-config-parameters", "cmd": "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/dev/null'\" git commit -m x", "expect": "soft", "why": "git hook bypass: env assignment"}
+{"id": "git-env-config-key", "cmd": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit -m x", "expect": "soft", "why": "git hook bypass: GIT_CONFIG_KEY_n"}
+{"id": "git-config-hookspath-write", "cmd": "git config core.hooksPath /dev/null", "expect": "soft", "why": "git hook bypass: persistent bypass"}
+{"id": "git-commit-no-verify", "cmd": "git commit --no-verify -m x", "expect": "soft", "why": "git hook bypass: plain long flag"}
+{"id": "git-c-hookspath-case", "cmd": "git -c core.HOOKSPATH=/x commit -m x", "expect": "soft", "why": "git hook bypass: key is case-insensitive"}
+{"id": "git-newline-clause", "cmd": "git status\ngit commit -n -m x", "expect": "soft", "why": "git hook bypass: newline is a clause break"}
+{"id": "git-abs-path", "cmd": "/usr/bin/git commit -n -m x", "expect": "soft", "why": "git hook bypass: basename git"}
+{"id": "git-env-prefix-config", "cmd": "env GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/x'\" git commit -m x", "expect": "soft", "why": "git hook bypass: assignment after env"}
+{"id": "git-export-config", "cmd": "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/x'\"; git commit -m x", "expect": "soft", "why": "git hook bypass: export persists across clauses"}
+{"id": "git-sudo", "cmd": "sudo git commit -n -m x", "expect": "soft", "why": "git hook bypass: git anywhere in the clause"}
+{"id": "git-sudo-user", "cmd": "sudo -u root git commit -n -m x", "expect": "soft", "why": "git hook bypass: git after a flag value"}
+{"id": "git-subshell", "cmd": "(git commit -n -m x)", "expect": "soft", "why": "git hook bypass: paren welded to the token"}
+{"id": "git-cmd-subst", "cmd": "x=$(git commit -n -m x)", "expect": "soft", "why": "git hook bypass: assignment + command substitution"}
+{"id": "git-backtick", "cmd": "`git commit -n -m x`", "expect": "soft", "why": "git hook bypass: backtick welded to the token"}
+{"id": "git-backslash", "cmd": "\\git commit -n -m x", "expect": "soft", "why": "git hook bypass: alias-bypass backslash"}
+{"id": "git-comment-then-commit", "cmd": "git status # note\ngit commit -n -m x", "expect": "soft", "why": "git hook bypass: comment ends at the newline"}
+{"id": "git-line-continuation", "cmd": "git \\\ncommit -n -m x", "expect": "soft", "why": "git hook bypass: backslash-newline joins"}
+{"id": "git-line-continuation-indented", "cmd": "git \\\n    commit -n -m x", "expect": "soft", "why": "git hook bypass: indented continuation"}
+{"id": "git-heredoc-then-commit", "cmd": "cat <<EOF > f; git commit -n -m x\nbody\nEOF", "expect": "soft", "why": "git hook bypass: marker line keeps its commit clause"}
+{"id": "git-config-set-hookspath", "cmd": "git config set core.hooksPath /x", "expect": "soft", "why": "git hook bypass: git 2.46 set form"}
+{"id": "git-config-global-hookspath", "cmd": "git config --global core.hooksPath /x", "expect": "soft", "why": "git hook bypass: scope flag + write"}
+{"id": "git-message-hash-then-n", "cmd": "git commit -m \"#42\" -n", "expect": "soft", "why": "git hook bypass: #42 is a quoted value, -n still seen"}
+{"id": "git-here-string-then-commit", "cmd": "cat <<<EOF; git commit -n -m x", "expect": "soft", "why": "git hook bypass: <<< is not a heredoc"}
+{"id": "git-redirect-amp", "cmd": "git commit -m x &>/dev/null --no-verify", "expect": "soft", "why": "git hook bypass: &> is a redirect, not a clause break"}
+{"id": "git-quoted-git", "cmd": "\"git\" commit -n -m x", "expect": "soft", "why": "git hook bypass: quotes around the command word"}
+{"id": "git-heredoc-form-comment-first", "cmd": "# don't push\ngit commit -m \"$(cat <<'EOF'\nmention --no-verify here\nEOF\n)\"", "expect": "allow", "why": "git hook bypass: apostrophe in a comment; heredoc body not scanned"}
+{"id": "git-comment-apostrophe", "cmd": "git status  # it's fine\ngit log -n 5", "expect": "allow", "why": "git hook bypass: apostrophe in a comment must not open a quote"}
+{"id": "git-message-heredoc-lookalike", "cmd": "git commit -m \"see <<EOF\"", "expect": "allow", "why": "git hook bypass: no terminator line, nothing stripped"}
+{"id": "git-redirect-2to1", "cmd": "git commit -m x >/dev/null 2>&1", "expect": "allow", "why": "git hook bypass: 2>&1 is not a clause break"}
+{"id": "git-message-mentions-n", "cmd": "git commit -m \"drop -n flag\"", "expect": "allow", "why": "git hook bypass: quoted message text"}
+{"id": "git-message-mentions-no-verify", "cmd": "git commit -m \"why --no-verify is blocked\"", "expect": "allow", "why": "git hook bypass: quoted message text"}
+{"id": "git-message-colon-n", "cmd": "git commit -m fix:-n", "expect": "allow", "why": "git hook bypass: one token"}
+{"id": "git-config-read", "cmd": "git config core.hooksPath", "expect": "allow", "why": "git hook bypass: read"}
+{"id": "git-config-get", "cmd": "git config --get core.hooksPath", "expect": "allow", "why": "git hook bypass: read"}
+{"id": "git-heredoc-form-no-verify", "cmd": "git commit -m \"$(cat <<'EOF'\nbody mentions --no-verify\nEOF\n)\"", "expect": "allow", "why": "git hook bypass: Claude Code heredoc commit form"}
+{"id": "git-heredoc-form-balanced-quotes", "cmd": "git commit -m \"$(cat <<'EOF'\nbody with \"balanced -n quotes\" here\nEOF\n)\"", "expect": "allow", "why": "git hook bypass: balanced quotes in the body"}
+{"id": "git-heredoc-form-odd-quote", "cmd": "git commit -m \"$(cat <<'EOF'\nbody with an odd \" quote\nEOF\n)\"", "expect": "allow", "why": "git hook bypass: odd number of double quotes in the body"}
+{"id": "git-commit-uno", "cmd": "git commit -uno -m x", "expect": "allow", "why": "git hook bypass: -u takes a stuck optional value"}
+{"id": "git-commit-mn-message", "cmd": "git commit -mn", "expect": "allow", "why": "git hook bypass: -mn is the message n"}
+{"id": "git-commit-c-reedit", "cmd": "git commit -c HEAD", "expect": "allow", "why": "git hook bypass: -c after commit is reedit-message"}
+{"id": "git-log-n", "cmd": "git log -n 5", "expect": "allow", "why": "git hook bypass: -n only matters for commit"}
+{"id": "grep-no-verify", "cmd": "grep -- --no-verify file", "expect": "allow", "why": "git hook bypass: no git word"}
+{"id": "git-push-plain", "cmd": "git push", "expect": "allow", "why": "git hook bypass: plain push"}
+{"id": "git-message-dash-n-value", "cmd": "git commit -m \"-n\"", "expect": "allow", "why": "git hook bypass: value of -m"}

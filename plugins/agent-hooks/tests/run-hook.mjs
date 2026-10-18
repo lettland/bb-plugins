@@ -61,12 +61,14 @@ export function makeGitRepo({ ignored = [], tracked = [] } = {}) {
  * Returns { exitCode, stdout, verdict, reason }.
  * @param {string} script
  * @param {unknown} toolInput
- * @param {{ projectDir?: string, env?: Record<string, string>, toolName?: string, permissionMode?: string }} [options]
+ * `envelope` is merged over the default event envelope, so a test can set
+ * `agent_id`, `hook_event_name`, its own `session_id` or `transcript_path`.
+ * @param {{ projectDir?: string, env?: Record<string, string>, toolName?: string, permissionMode?: string, envelope?: Record<string, unknown> }} [options]
  */
 export function runHook(
   script,
   toolInput,
-  { projectDir, env = {}, toolName = "Bash", permissionMode } = {},
+  { projectDir, env = {}, toolName = "Bash", permissionMode, envelope: envelopeOverride = {} } = {},
 ) {
   const dir = projectDir ?? makeProjectDir();
   const owned = projectDir === undefined;
@@ -77,6 +79,7 @@ export function runHook(
     tool_name: toolName,
     tool_input: toolInput,
     ...(permissionMode === undefined ? {} : { permission_mode: permissionMode }),
+    ...envelopeOverride,
   });
 
   return new Promise((resolve) => {
