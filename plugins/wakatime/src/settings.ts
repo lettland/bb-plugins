@@ -71,7 +71,7 @@ export function defineWakatimeSettings(bb: BbPluginApi) {
       type: "select",
       label: "Entity sent to WakaTime",
       description:
-        "title: the thread title is the entity of the per-thread heartbeat. threadId: the thread id is the entity, and no file entries are sent at all, whatever File activity says. This changes the entity only; the project and branch are still sent.",
+        "title: the thread title is the entity of the per-thread heartbeat. threadId: the thread id is the entity. Besides dropping file entries (none are sent at all, whatever File activity says), this changes only the entity: the project and branch are still sent.",
       options: [...ENTITY_MODES],
       default: "title",
     },
@@ -106,4 +106,9 @@ export function parseExcludeList(raw: string): string[] {
 
 export function entityModeOf(value: string): EntityMode {
   return (ENTITY_MODES as readonly string[]).includes(value) ? (value as EntityMode) : "title";
+}
+
+/** An unknown stored value sends nothing: the mode fails closed. */
+export function fileModeOf(value: string): FileMode {
+  return (FILE_MODES as readonly string[]).includes(value) ? (value as FileMode) : "off";
 }

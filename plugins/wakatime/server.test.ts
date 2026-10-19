@@ -177,7 +177,6 @@ describe("wakatime plugin", () => {
 
   it("aborts the version call after 5000 ms", async () => {
     let seen: AbortSignal | undefined;
-    version = (() => undefined) as never;
     host = createFakePluginHost({
       pluginId: "wakatime",
       settings: { cliPath: cli },

@@ -165,6 +165,62 @@ describe("runner", () => {
     expect(runner.health().lastHeartbeatAt).not.toBeNull();
   });
 
+  describe("guard", () => {
+    it("skips a job whose guard says no, or throws, without spawning", async () => {
+      const exec = vi.fn<Exec>().mockResolvedValue(OK);
+      const runner = createRunner({ exec, log: fakeLog() });
+      expect(await runner.submit(job("a", { guard: async () => false }))).toBe("skipped");
+      expect(
+        await runner.submit(
+          job("b", {
+            guard: async () => {
+              throw new Error("settings down");
+            },
+          }),
+        ),
+      ).toBe("skipped");
+      expect(exec).not.toHaveBeenCalled();
+      expect(runner.health().lastError).toBeNull();
+    });
+
+    it("lets a job through when its guard agrees", async () => {
+      const exec = vi.fn<Exec>().mockResolvedValue(OK);
+      const runner = createRunner({ exec, log: fakeLog() });
+      expect(await runner.submit(job("a", { guard: async () => true }))).toBe("ok");
+      expect(exec).toHaveBeenCalledTimes(1);
+    });
+
+    it("asks only after a slot is free, not when the job is queued", async () => {
+      const { exec, calls } = deferredExec();
+      const runner = createRunner({ exec, log: fakeLog() });
+      for (let i = 0; i < MAX_CONCURRENT; i++) void runner.submit(job(`busy${i}`));
+      await flush();
+      const guard = vi.fn(async () => true);
+      const queued = runner.submit(job("queued", { guard }));
+      await flush();
+      expect(guard).not.toHaveBeenCalled();
+      calls[0]!.settle(OK);
+      await flush();
+      expect(guard).toHaveBeenCalledTimes(1);
+      expect(calls).toHaveLength(MAX_CONCURRENT + 1);
+      calls[MAX_CONCURRENT]!.settle(OK);
+      expect(await queued).toBe("ok");
+    });
+
+    it("skips a queued job whose guard turns false by the time its slot frees", async () => {
+      const { exec, calls } = deferredExec();
+      const runner = createRunner({ exec, log: fakeLog() });
+      for (let i = 0; i < MAX_CONCURRENT; i++) void runner.submit(job(`busy${i}`));
+      await flush();
+      let allowed = true;
+      const queued = runner.submit(job("queued", { guard: async () => allowed }));
+      allowed = false;
+      calls[0]!.settle(OK);
+      expect(await queued).toBe("skipped");
+      expect(calls).toHaveLength(MAX_CONCURRENT);
+    });
+  });
+
   it("hands a job's stdin to exec, and omits it for a job without one", async () => {
     const exec = vi.fn<Exec>().mockResolvedValue(OK);
     const runner = createRunner({ exec, log: fakeLog() });
@@ -313,6 +369,20 @@ describe("runner", () => {
       // A different problem is a new error.
       await runner.verify(dir);
       expect(runner.health().lastError).toMatchObject({ at: 9_000, problem: "not-a-file" });
+    });
+
+    it("treats the same problem on a different cliPath as a new error", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(1_000);
+      const runner = createRunner({ exec: vi.fn<Exec>().mockResolvedValue(OK), log: fakeLog() });
+      await runner.verify(path.join(dir, "first-missing"));
+      expect(runner.health().lastError).toMatchObject({ at: 1_000, problem: "not-found" });
+      vi.setSystemTime(5_000);
+      await runner.verify(path.join(dir, "second-missing"));
+      expect(runner.health().lastError).toMatchObject({ at: 5_000, problem: "not-found" });
+      vi.setSystemTime(9_000);
+      await runner.verify(path.join(dir, "second-missing"));
+      expect(runner.health().lastError).toMatchObject({ at: 5_000 });
     });
 
     it("verify keeps a non-path error", async () => {

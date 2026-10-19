@@ -3,7 +3,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { diffLineCount, fileHeartbeats, toExtraHeartbeat } from "./file-activity.js";
+import { anyTurnedSpecial, diffLineCount, fileHeartbeats, recheckSaved, toExtraHeartbeat } from "./file-activity.js";
 import type { EventRowLike, FileSpec } from "./file-activity.js";
 
 describe("diffLineCount", () => {
@@ -236,13 +236,20 @@ describe("fileHeartbeats: is_unsaved_entity", () => {
     expect(await unsaved(path.join(root, "a.ts"), root)).toBe(false);
   });
 
-  it("is true for a deleted file, a directory, and a socket (neither is a regular file)", async () => {
+  it("is true for a deleted file, a directory, and a socket (neither is a regular file)", async ({ skip }) => {
     mkdirSync(path.join(root, "dir"));
     expect(await unsaved(path.join(root, "gone.ts"), root)).toBe(true);
     expect(await unsaved(path.join(root, "dir"), root)).toBe(true);
     const socket = path.join(root, "s");
     const server = net.createServer();
-    await new Promise<void>((resolve) => server.listen(socket, resolve));
+    const listening = await new Promise<boolean>((resolve, reject) => {
+      server.once("error", (error: NodeJS.ErrnoException) =>
+        error.code === "EPERM" || error.code === "EACCES" ? resolve(false) : reject(error),
+      );
+      server.listen(socket, () => resolve(true));
+    });
+    // A sandbox that forbids creating a socket (EPERM/EACCES) cannot run this fixture; the other two cases above still ran.
+    if (!listening) skip();
     try {
       expect(await unsaved(socket, root)).toBe(true);
     } finally {
@@ -304,5 +311,42 @@ describe("toExtraHeartbeat", () => {
   it("never carries diff text, a command or any key", () => {
     const sneaky = { ...spec, diff: "secret diff", cmd: "a command", key: "waka_x" } as FileSpec;
     expect(JSON.stringify(toExtraHeartbeat(sneaky, ctx))).not.toMatch(/secret diff|a command|waka_x/);
+  });
+});
+
+describe("send-time file checks", () => {
+  function saved(file: string): FileSpec {
+    return { path: file, write: true, timeMs: 1, unsaved: false };
+  }
+
+  it.each([
+    ["missing", "missing.ts", false, true],
+    ["a symlink", "link.ts", true, true],
+    ["a directory", "dir", true, true],
+    ["a regular file", "regular.ts", false, false],
+  ] as const)("%s: turned special = %s, unsaved after the re-check = %s", async (label, name, special, unsaved) => {
+    try {
+      writeFileSync(path.join(root, "regular.ts"), "x");
+      mkdirSync(path.join(root, "dir"));
+      symlinkSync(path.join(root, "regular.ts"), path.join(root, "link.ts"));
+      const spec = saved(path.join(root, name));
+      expect(await anyTurnedSpecial([spec]), label).toBe(special);
+      expect((await recheckSaved([spec]))[0]!.unsaved, label).toBe(unsaved);
+    } finally {
+      rmSync(path.join(root, "link.ts"), { force: true });
+    }
+  });
+
+  it("leaves a spec that was already unsaved alone, and checks a mixed chunk as a whole", async () => {
+    try {
+      writeFileSync(path.join(root, "regular.ts"), "x");
+      symlinkSync(path.join(root, "regular.ts"), path.join(root, "link.ts"));
+      const already = { ...saved(path.join(root, "link.ts")), unsaved: true };
+      expect(await anyTurnedSpecial([already])).toBe(false);
+      expect((await recheckSaved([already]))[0]).toBe(already);
+      expect(await anyTurnedSpecial([saved(path.join(root, "regular.ts")), saved(path.join(root, "link.ts"))])).toBe(true);
+    } finally {
+      rmSync(path.join(root, "link.ts"), { force: true });
+    }
   });
 });

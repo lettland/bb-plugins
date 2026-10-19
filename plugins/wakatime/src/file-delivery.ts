@@ -1,10 +1,10 @@
 import type { PluginLogger } from "@get-bb/plugin-sdk";
 import type { Job, JobOutcome, Runner } from "./cli.js";
-import { fileHeartbeats } from "./file-activity.js";
+import { anyTurnedSpecial, fileHeartbeats, recheckSaved } from "./file-activity.js";
 import type { EventRowLike, FileSpec } from "./file-activity.js";
 import { envInfoOf, isExcluded, TtlCache } from "./heartbeat.js";
 import type { EnvInfo, EnvironmentSdk, ProjectLike } from "./heartbeat.js";
-import { parseExcludeList } from "./settings.js";
+import { fileModeOf, parseExcludeList } from "./settings.js";
 import type { FileMode, WakatimeSettings } from "./settings.js";
 import type { WakatimeStatus } from "./rpc-contract.js";
 
@@ -50,8 +50,9 @@ interface ThreadFiles {
   buffer: FileSpec[];
   /** Path -> `createdAt` of the last read that was kept. */
   reads: Map<string, number>;
-  /** Pulls run one after another on this chain; it never rejects. */
-  chain: Promise<void>;
+  /** The pull running now, and the one waiting behind it; neither ever rejects. At most one of each. */
+  running: Promise<void> | null;
+  waiting: Promise<void> | null;
   /** At most one flush per thread, so `heartbeat:<id>` has one submitter. */
   flushing: boolean;
   inFlight: Promise<void> | null;
@@ -61,6 +62,8 @@ interface ThreadFiles {
   epoch: number;
   /** An event read failed since the last success, so only the first failure is logged. */
   failing: boolean;
+  /** The environment could not be read, so the pull is holding at `lastSeq` until it can; logged once. */
+  waitingOnEnvironment: boolean;
 }
 
 export interface DeliverRequest {
@@ -69,11 +72,14 @@ export interface DeliverRequest {
   environmentId: string | null;
   /** Final stop: wait for a flush in flight, then send every chunk. */
   final: boolean;
-  /** The CLI call for one chunk, or null when the throttle holds the app heartbeat back. */
-  build(chunk: FileSpec[], first: boolean): Job | null;
+  /** The CLI call for one chunk, from the settings just read, or null when the throttle holds the app heartbeat back. */
+  build(chunk: FileSpec[], first: boolean, settings: WakatimeSettings): Job | null;
 }
 
 type Drops = WakatimeStatus["droppedFiles"];
+
+/** Thrown by a pull that must not move its read position; the pull has already said why. */
+class EnvironmentUnreadable extends Error {}
 
 /**
  * Collects the files agents touched, from bb's own thread events, and sends
@@ -109,12 +115,14 @@ export class FileDelivery {
         lastSeq: null,
         buffer: [],
         reads: new Map(),
-        chain: Promise.resolve(),
+        running: null,
+        waiting: null,
         flushing: false,
         inFlight: null,
         retire: false,
         epoch: 0,
         failing: false,
+        waitingOnEnvironment: false,
       });
       return;
     }
@@ -123,12 +131,28 @@ export class FileDelivery {
     state.retire = false;
   }
 
-  /** Chain a pull of the thread's new events; resolves when it and every earlier pull are done. */
-  pull(id: string): Promise<void> {
+  /**
+   * Pull the thread's new events. One pull runs and at most one waits behind
+   * it, so a stream of payloads never builds a backlog; a caller that finds one
+   * waiting shares it. `sequence` is the latest event the caller knows of: if
+   * it is not past what was already read, there is nothing to pull.
+   */
+  pull(id: string, sequence?: number): Promise<void> {
     const state = this.states.get(id);
     if (state === undefined || this.disposed) return Promise.resolve();
-    state.chain = state.chain.then(() => this.pullOnce(state));
-    return state.chain;
+    if (sequence !== undefined && state.lastSeq !== null && sequence <= state.lastSeq) return Promise.resolve();
+    if (state.waiting !== null) return state.waiting;
+    const run = (): Promise<void> => {
+      state.waiting = null;
+      const done: Promise<void> = this.pullOnce(state).finally(() => {
+        if (state.running === done) state.running = null;
+      });
+      state.running = done;
+      return done;
+    };
+    if (state.running === null) return run();
+    state.waiting = state.running.then(run);
+    return state.waiting;
   }
 
   private alive(state: ThreadFiles): boolean {
@@ -138,7 +162,7 @@ export class FileDelivery {
   /** Files to send under these settings: nothing unless the thread is timed, named by id, and file activity is on. */
   private modeOf(settings: WakatimeSettings, project: ProjectLike): FileMode {
     if (!this.timed(settings, project) || settings.entity === "threadId") return "off";
-    return settings.fileActivity as FileMode;
+    return fileModeOf(settings.fileActivity);
   }
 
   private timed(settings: WakatimeSettings, project: ProjectLike): boolean {
@@ -150,6 +174,7 @@ export class FileDelivery {
     this.drops.filtered += state.buffer.length;
     state.buffer = [];
     state.lastSeq = null;
+    state.waitingOnEnvironment = false;
     state.reads.clear();
     state.epoch += 1;
   }
@@ -192,8 +217,9 @@ export class FileDelivery {
       await this.readPages(state, mode);
       state.failing = false;
     } catch (error) {
+      if (error instanceof EnvironmentUnreadable) return;
       if (!state.failing) {
-        this.log.warn(`could not read thread events: ${error instanceof Error ? error.name : "error"}`);
+        this.log.warn(`could not read thread events (${state.id}): ${error instanceof Error ? error.name : "error"}`);
       }
       state.failing = true;
     }
@@ -224,7 +250,16 @@ export class FileDelivery {
         signal: AbortSignal.timeout(EVENTS_TIMEOUT_MS),
       });
       if (!this.alive(state) || state.lastSeq === null || rows.length === 0) return;
-      const env = state.environmentId === null ? null : await envInfoOf(this.sdk.environments, this.environments, state.environmentId);
+      const env =
+        state.environmentId === null ? null : await envInfoOf(this.sdk.environments, this.environments, state.environmentId);
+      // The lookup itself failed, which is not the same as having no folder: stop
+      // before `lastSeq` moves, so the next pull reads these rows again.
+      if (state.environmentId !== null && env === null) {
+        if (!state.waitingOnEnvironment) this.log.warn(`could not read the thread's environment (${state.id})`);
+        state.waitingOnEnvironment = true;
+        throw new EnvironmentUnreadable();
+      }
+      state.waitingOnEnvironment = false;
       const scan = await fileHeartbeats(rows, { path: env?.path ?? null }, mode);
       if (!this.alive(state) || state.lastSeq === null) return;
       this.drops.outOfScope += scan.outOfScope;
@@ -283,20 +318,40 @@ export class FileDelivery {
       if (settings === null || !this.alive(state)) return;
       this.applyPrivacy(state, settings);
       if (!this.timed(settings, state.project)) return;
-      const chunk = state.buffer.splice(0, CHUNK_SIZE);
+      const epoch = state.epoch;
+      const chunk = await recheckSaved(state.buffer.splice(0, CHUNK_SIZE));
+      if (!this.alive(state)) return;
+      if (state.epoch !== epoch) {
+        this.drops.filtered += chunk.length;
+        return;
+      }
       if (!first && chunk.length === 0) return;
-      const job = req.build(chunk, first);
+      const built = req.build(chunk, first, settings);
       // Held back by the throttle. Not reachable for a thread today (its entry is
       // forgotten whenever its timer ends), kept because only the first call consults it.
-      if (job === null) {
+      if (built === null) {
         state.buffer.unshift(...chunk);
         return;
       }
-      const epoch = state.epoch;
+      // A call that waits for a slot re-checks, just before it starts, that this thread may still send files.
+      const job = chunk.length === 0 ? built : { ...built, guard: () => this.maySend(state, chunk) };
       const outcome = await this.runner.submit(job);
       this.settle(state, chunk, outcome, epoch);
       if (outcome !== "ok" || !req.final) return;
     }
+  }
+
+  /**
+   * Whether the chunk may still go out as it is: under the settings as they are
+   * now (nothing in it that they would filter), and with no file turned into a
+   * non-regular entry. False sends it back to be rebuilt by the next flush.
+   */
+  private async maySend(state: ThreadFiles, chunk: FileSpec[]): Promise<boolean> {
+    const settings = await this.settings.get();
+    if (!this.alive(state)) return false;
+    const mode = this.applyPrivacy(state, settings);
+    if (mode === "off" || (mode === "edits" && chunk.some((spec) => !spec.write))) return false;
+    return this.alive(state) && !(await anyTurnedSpecial(chunk));
   }
 
   /** Account for a chunk after the runner answered. */
@@ -337,8 +392,17 @@ export class FileDelivery {
 
   stats() {
     let pending = 0;
-    for (const state of this.states.values()) pending += state.buffer.length;
-    return { lastFileBatchAt: this.lastFileBatchAt, pendingFiles: pending, droppedFiles: { ...this.drops } };
+    let waiting = 0;
+    for (const state of this.states.values()) {
+      pending += state.buffer.length;
+      if (state.waitingOnEnvironment) waiting += 1;
+    }
+    return {
+      lastFileBatchAt: this.lastFileBatchAt,
+      pendingFiles: pending,
+      droppedFiles: { ...this.drops },
+      waitingOnEnvironment: waiting,
+    };
   }
 
   /** Test hook: how many threads have state, and how much they hold. */

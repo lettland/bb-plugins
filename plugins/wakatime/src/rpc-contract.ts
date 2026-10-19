@@ -28,7 +28,9 @@ const statusSchema = z.object({
   lastFileBatchAt: z.number().nullable(),
   /** File entries buffered in memory, waiting for their thread's next heartbeat. */
   pendingFiles: z.number(),
-  /** File entries that never reached wakatime-cli, by reason. */
+  /** Threads whose file pipeline is holding because their environment cannot be read. */
+  waitingOnEnvironment: z.number(),
+  /** File entries that never reached wakatime-cli since the plugin loaded, by reason. */
   droppedFiles: z.object({
     outOfScope: z.number(),
     overflow: z.number(),

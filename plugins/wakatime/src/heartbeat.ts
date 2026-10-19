@@ -27,7 +27,7 @@ export interface ThreadLike {
 // Control characters (newlines included) would split a dashboard row or corrupt
 // argv; format characters (bidi, zero-width) would disguise it. U+200D stays so
 // emoji sequences survive.
-function clean(value: string | null | undefined): string | null {
+export function clean(value: string | null | undefined): string | null {
   const text = Array.from(value ?? "")
     .filter((char) => char === "\u200D" || !/\p{Cf}/u.test(char))
     .join("")
@@ -172,8 +172,6 @@ export interface ResolvedContext {
   thread: ThreadLike | null;
   project: ProjectLike | null;
   branch: string | null;
-  /** The environment's folder on the bb server host, when it has one. */
-  path: string | null;
 }
 
 /**
@@ -205,28 +203,38 @@ export async function resolveContext(
     }
   }
   const env = thread?.environmentId ? await envInfoOf(sdk.environments, environments, thread.environmentId) : null;
-  return { thread, project, branch: env?.branch ?? null, path: env?.path ?? null };
+  return { thread, project, branch: env?.branch ?? null };
 }
 
+/**
+ * The environment's branch and folder, cached. Null when the environment could
+ * not be read at all (nothing is cached, so the next read tries again); when
+ * only the branch fallback fails, the folder is kept.
+ */
 export async function envInfoOf(
   environments: EnvironmentSdk,
   cache: TtlCache<EnvInfo>,
   environmentId: string,
-): Promise<EnvInfo> {
+): Promise<EnvInfo | null> {
   const cached = cache.get(environmentId, Date.now());
   if (cached !== undefined) return cached;
+  let env: Awaited<ReturnType<EnvironmentSdk["get"]>>;
   try {
-    const env = await environments.get({ environmentId });
-    let branch = env.branchName;
-    if (branch === null) {
+    env = await environments.get({ environmentId });
+  } catch {
+    return null;
+  }
+  let branch = env.branchName;
+  if (branch === null) {
+    try {
       const status = await environments.status({ environmentId });
       branch = status.outcome === "available" ? (status.workspace?.branch.currentBranch ?? null) : null;
+    } catch {
+      // The folder is still good; the partial answer is not cached, so the next read asks again.
+      return { branch: null, path: env.path };
     }
-    const info = { branch, path: env.path };
-    cache.set(environmentId, info, Date.now());
-    return info;
-  } catch {
-    // Not cached: the next heartbeat tries again.
-    return { branch: null, path: null };
   }
+  const info = { branch, path: env.path };
+  cache.set(environmentId, info, Date.now());
+  return info;
 }

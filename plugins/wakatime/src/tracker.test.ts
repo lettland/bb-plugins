@@ -71,7 +71,15 @@ function harness(options: Options = {}) {
   const threads = new Map((options.threads ?? []).map((t) => [t.id, t]));
   const projects = options.projects ?? [PROJECT];
   const jobs: Job[] = [];
+  // Each entry answers one waiting job; like the real runner it asks the job's guard first.
   const held: ((outcome: JobOutcome) => void)[] = [];
+  const answer = (job: Job, outcome: JobOutcome): Promise<JobOutcome> =>
+    job.guard === undefined
+      ? Promise.resolve(outcome)
+      : job.guard().then(
+          (allowed) => (allowed ? outcome : "skipped"),
+          () => "skipped",
+        );
   const rows: EventRow[] = [];
   const eventCalls: Record<string, unknown>[] = [];
   const state = {
@@ -81,6 +89,9 @@ function harness(options: Options = {}) {
     eventsGate: null as Promise<void> | null,
     seedFailures: 0,
     envPath: repoDir as string | null,
+    envGetFailures: 0,
+    envStatusError: false,
+    envBranchNull: false,
     getCalls: 0,
     getError: false,
     gate: null as Promise<void> | null,
@@ -102,8 +113,10 @@ function harness(options: Options = {}) {
   const fakeRunner: Runner = {
     submit(job) {
       jobs.push(job);
-      if (state.hold) return new Promise((resolve) => held.push(resolve));
-      return Promise.resolve(state.outcome);
+      if (state.hold) {
+        return new Promise((resolve) => held.push((outcome) => void answer(job, outcome).then(resolve)));
+      }
+      return answer(job, state.outcome);
     },
     health: () => ({ ...health }),
     verify: async (cliPath) => {
@@ -165,9 +178,14 @@ function harness(options: Options = {}) {
     },
     environments: {
       async get() {
-        return { branchName: "feat/x", path: state.envPath };
+        if (state.envGetFailures > 0) {
+          state.envGetFailures--;
+          throw new Error("environment down");
+        }
+        return { branchName: state.envBranchNull ? null : "feat/x", path: state.envPath };
       },
       async status() {
+        if (state.envStatusError) throw new Error("git down");
         return { outcome: "unavailable" };
       },
     },
@@ -740,6 +758,7 @@ describe("status and exclude check", () => {
       lastFileBatchAt: null,
       pendingFiles: 0,
       droppedFiles: { outOfScope: 0, overflow: 0, filtered: 0, failed: 0 },
+      waitingOnEnvironment: 0,
       unmatchedExcludes: ["ghost", "missing-too"],
     });
     h.health.lastHeartbeatAt = 5;
@@ -1109,7 +1128,7 @@ describe("file delivery", () => {
       await start(h);
       expect(desc(h)).toHaveLength(1);
       expect(asc(h)).toHaveLength(0);
-      expect(h.log.warn).toHaveBeenCalledWith("could not read thread events: Error");
+      expect(h.log.warn).toHaveBeenCalledWith("could not read thread events (thr_1): Error");
       edit(h, "gap.ts");
       h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
       await drain();
@@ -1129,7 +1148,7 @@ describe("file delivery", () => {
         await drain();
       }
       expect(h.log.warn).toHaveBeenCalledTimes(1);
-      expect(String(h.log.warn.mock.calls[0]![0])).toBe("could not read thread events: Error");
+      expect(String(h.log.warn.mock.calls[0]![0])).toBe("could not read thread events (thr_1): Error");
       h.state.eventsError = false;
       edit(h, "a.ts");
       h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
@@ -1669,7 +1688,403 @@ describe("file delivery", () => {
       h.state.eventsError = "string";
       h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
       await drain();
-      expect(h.log.warn).toHaveBeenCalledWith("could not read thread events: error");
+      expect(h.log.warn).toHaveBeenCalledWith("could not read thread events (thr_1): error");
+    });
+  });
+  describe("environment lookup", () => {
+    it("keeps the rows of a page and sends them later when the environment cannot be read once", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      // Let the cached environment expire so the next pull has to read it again.
+      await vi.advanceTimersByTimeAsync(61_000);
+      h.state.envGetFailures = 1;
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect((await h.tracker.status()).droppedFiles.outOfScope).toBe(0);
+      expect(h.tracker.stateSize().files.buffered).toBe(0);
+      expect(h.log.warn).toHaveBeenCalledTimes(1);
+      expect(h.log.warn).toHaveBeenCalledWith("could not read the thread's environment (thr_1)");
+      // The next pull reads the same rows again.
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect(h.tracker.stateSize().files.buffered).toBe(1);
+      await tick();
+      expect(sentFiles(h)).toEqual(["a.ts"]);
+    });
+
+    it("keeps the folder when only the branch fallback fails, so the specs are in scope", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      h.state.envBranchNull = true;
+      h.state.envStatusError = true;
+      await start(h);
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      await tick();
+      expect(sentFiles(h)).toEqual(["a.ts"]);
+      expect((await h.tracker.status()).droppedFiles.outOfScope).toBe(0);
+    });
+
+    it("still counts a thread with no environment folder, or an empty one, as out of scope", async () => {
+      for (const envPath of [null, ""] as const) {
+        const h = harness({ threads: [thread("thr_1")] });
+        h.state.envPath = envPath;
+        await start(h);
+        edit(h, "a.ts");
+        h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+        await drain();
+        expect((await h.tracker.status()).droppedFiles.outOfScope).toBe(1);
+      }
+    });
+  });
+
+  describe("the pull queue", () => {
+    it("keeps at most one pull running and one waiting, however many payloads arrive", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      const before = asc(h).length;
+      let open!: () => void;
+      h.state.eventsGate = new Promise<void>((resolve) => (open = resolve));
+      for (let i = 0; i < 25; i++) h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect(asc(h).length - before).toBe(1);
+      open();
+      await drain();
+      expect(asc(h).length - before).toBe(2);
+    });
+
+    it("does not make a tick or a stop wait behind a backlog", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      let open!: () => void;
+      h.state.eventsGate = new Promise<void>((resolve) => (open = resolve));
+      for (let i = 0; i < 25; i++) h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      const stopping = h.idle("thr_1");
+      await drain();
+      open();
+      await stopping;
+      await drain();
+      // The running pull, the one waiting, and nothing queued for the 25 payloads or the stop.
+      expect(asc(h).length).toBeLessThanOrEqual(4);
+      expect(h.jobs).toHaveLength(2);
+    });
+
+    it("skips a pull whose payload sequence is not past what was read", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      edit(h, "old.ts");
+      await start(h);
+      const before = asc(h).length;
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")!, sequence: 1 });
+      await drain();
+      expect(asc(h).length).toBe(before);
+      edit(h, "new.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")!, sequence: 2 });
+      await drain();
+      expect(asc(h).length).toBe(before + 1);
+      expect(h.tracker.stateSize().files.buffered).toBe(1);
+    });
+  });
+
+  describe("a job that waited", () => {
+    it("is skipped, not spawned, and counted as filtered when file activity was switched off while it waited", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      h.state.hold = true;
+      await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+      await drain();
+      expect(h.held).toHaveLength(1);
+      expect(h.jobs[h.jobs.length - 1]!.guard).toBeTypeOf("function");
+      // The change lands without the settings-change signal; the guard reads the settings itself.
+      h.settings.fileActivity = "off";
+      h.state.hold = false;
+      h.held[0]!("ok");
+      await drain();
+      const status = await h.tracker.status();
+      expect(status.droppedFiles.filtered).toBe(1);
+      expect(status.pendingFiles).toBe(0);
+      expect(status.lastFileBatchAt).toBeNull();
+    });
+
+    it("is allowed through when nothing changed, and an app heartbeat without files carries no guard", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      expect(h.jobs[0]!.guard).toBeUndefined();
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      h.state.hold = true;
+      await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+      await drain();
+      h.state.hold = false;
+      h.held[0]!("ok");
+      await drain();
+      expect((await h.tracker.status()).lastFileBatchAt).not.toBeNull();
+    });
+  });
+
+  describe("fail closed", () => {
+    it("sends and reads nothing when the stored fileActivity value is unknown", async () => {
+      const h = harness({ threads: [thread("thr_1")], settings: { fileActivity: "everything" } });
+      await start(h);
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await tick();
+      expect(sentFiles(h)).toEqual([]);
+      expect(h.eventCalls).toHaveLength(0);
+    });
+  });
+
+  describe("at send time", () => {
+    it("sends a file that has since become a symlink, or vanished, as unsaved", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      const outside = path.join(repoDir, "..", `waka-outside-${path.basename(repoDir)}`);
+      writeFileSync(outside, "x");
+      try {
+      writeFileSync(path.join(repoDir, "swapped.ts"), "x");
+      writeFileSync(path.join(repoDir, "vanished.ts"), "x");
+      writeFileSync(path.join(repoDir, "steady.ts"), "x");
+      edit(h, "swapped.ts");
+      edit(h, "vanished.ts");
+      edit(h, "steady.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      // Between the read and the send: one file becomes a symlink, one disappears.
+      rmSync(path.join(repoDir, "swapped.ts"));
+      symlinkSync(outside, path.join(repoDir, "swapped.ts"));
+      rmSync(path.join(repoDir, "vanished.ts"));
+      await tick();
+      const sent = extras(h.jobs[h.jobs.length - 1]!);
+      expect(sent.map((e) => [path.basename(String(e.entity)), e.is_unsaved_entity ?? false])).toEqual([
+        ["swapped.ts", true],
+        ["vanished.ts", true],
+        ["steady.ts", false],
+      ]);
+      } finally {
+        rmSync(outside, { force: true });
+      }
+    });
+
+    it("builds the app heartbeat from the settings the send read, not from before a pull", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      let open!: () => void;
+      h.state.eventsGate = new Promise<void>((resolve) => (open = resolve));
+      await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+      await drain();
+      h.settings.entity = "threadId";
+      open();
+      await drain();
+      const last = h.jobs[h.jobs.length - 1]!;
+      expect(arg(last, "--entity")).toBe("thr_1");
+      expect(last.stdin).toBeUndefined();
+    });
+
+    it("uses the cleaned project name in the argv and in every file entry", async () => {
+      const h = harness({ threads: [thread("thr_1")], projects: [{ id: "prj_1", name: "ac\u202Eme\n" }] });
+      await start(h);
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      await tick();
+      const last = h.jobs[h.jobs.length - 1]!;
+      expect(arg(last, "--project")).toBe("acme");
+      expect(extras(last).map((extra) => extra.project)).toEqual(["acme"]);
+    });
+  });
+
+  describe("at the final stop", () => {
+    it.each([
+      ["agent tracking is off", { trackAgentActivity: false }],
+      ["the project is excluded", { excludeProjects: "prj_1" }],
+    ] as const)("forgets the thread's read position when %s", async (_label, change) => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect(h.tracker.stateSize().files.threads).toBe(1);
+      Object.assign(h.settings, change);
+      await h.idle("thr_1");
+      expect(h.tracker.stateSize().files).toEqual({ threads: 0, buffered: 0, reads: 0 });
+    });
+  });
+  describe("the send-time guard", () => {
+    async function waitingJob(h: ReturnType<typeof harness>) {
+      h.state.hold = true;
+      await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+      await drain();
+      expect(h.held).toHaveLength(1);
+      h.state.hold = false;
+    }
+
+    it("sends the writes later but never the reads when the mode narrows to edits while the job waits", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      read(h, "r.ts", T0);
+      edit(h, "w.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      await waitingJob(h);
+      expect(files(h.jobs[h.jobs.length - 1]!)).toEqual(["r.ts", "w.ts"]);
+      h.settings.fileActivity = "edits";
+      h.held[0]!("ok");
+      await drain();
+      // The call was skipped, so the chunk went back; the reads are not in it any more.
+      expect(sentFiles(h)).toEqual(["r.ts", "w.ts"]);
+      expect((await h.tracker.status()).lastFileBatchAt).toBeNull();
+      await tick();
+      expect(files(h.jobs[h.jobs.length - 1]!)).toEqual(["w.ts"]);
+      const status = await h.tracker.status();
+      expect(status.droppedFiles.filtered).toBe(1);
+      expect(status.pendingFiles).toBe(0);
+    });
+
+    it("skips the call when a file became a symlink during the wait, and the next flush marks it unsaved", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      const target = path.join(repoDir, "..", `waka-target-${path.basename(repoDir)}`);
+      writeFileSync(target, "x");
+      try {
+      writeFileSync(path.join(repoDir, "a.ts"), "x");
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      await waitingJob(h);
+      expect(extras(h.jobs[h.jobs.length - 1]!)[0]!.is_unsaved_entity).toBeUndefined();
+      rmSync(path.join(repoDir, "a.ts"));
+      symlinkSync(target, path.join(repoDir, "a.ts"));
+      h.held[0]!("ok");
+      await drain();
+      expect((await h.tracker.status()).lastFileBatchAt).toBeNull();
+      expect((await h.tracker.status()).pendingFiles).toBe(1);
+      await tick();
+      const last = h.jobs[h.jobs.length - 1]!;
+      expect(extras(last).map((e) => [path.basename(String(e.entity)), e.is_unsaved_entity])).toEqual([["a.ts", true]]);
+      expect((await h.tracker.status()).lastFileBatchAt).not.toBeNull();
+      } finally {
+        rmSync(target, { force: true });
+      }
+    });
+  });
+
+  describe("the send-time guard, further", () => {
+    it("does not refuse a file that was deleted during the wait, and the heartbeat still goes", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      writeFileSync(path.join(repoDir, "gone.ts"), "x");
+      edit(h, "gone.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      h.state.hold = true;
+      await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+      await drain();
+      expect(h.held).toHaveLength(1);
+      h.state.hold = false;
+      rmSync(path.join(repoDir, "gone.ts"));
+      h.held[0]!("ok");
+      await drain();
+      expect((await h.tracker.status()).lastFileBatchAt).not.toBeNull();
+      expect((await h.tracker.status()).pendingFiles).toBe(0);
+    });
+
+    it("keeps the writes and counts the reads as filtered when the final stop is refused under an edits narrowing", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      read(h, "r.ts", T0);
+      edit(h, "w.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      h.state.hold = true;
+      const stopping = h.idle("thr_1");
+      await drain();
+      expect(h.held).toHaveLength(1);
+      expect(files(h.jobs[h.jobs.length - 1]!)).toEqual(["r.ts", "w.ts"]);
+      h.settings.fileActivity = "edits";
+      h.state.hold = false;
+      h.held[0]!("ok");
+      await stopping;
+      await drain();
+      // The final call was skipped: nothing was sent, the chunk went back, the loop stopped.
+      expect(h.jobs).toHaveLength(2);
+      expect((await h.tracker.status()).pendingFiles).toBe(2);
+      expect((await h.tracker.status()).lastFileBatchAt).toBeNull();
+      // Next turn: the reads are dropped as filtered and the writes go out.
+      h.threads.set("thr_1", thread("thr_1"));
+      await start(h);
+      expect(files(h.jobs[h.jobs.length - 1]!)).toEqual(["w.ts"]);
+      const status = await h.tracker.status();
+      expect(status.droppedFiles.filtered).toBe(1);
+      expect(status.pendingFiles).toBe(0);
+    });
+  });
+
+  describe("an unreadable environment, then file activity off", () => {
+    it("stops counting the thread as waiting once nothing is held", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      await vi.advanceTimersByTimeAsync(61_000);
+      h.state.envGetFailures = 1;
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect((await h.tracker.status()).waitingOnEnvironment).toBe(1);
+      h.settings.fileActivity = "off";
+      h.tracker.onSettingsChanged();
+      await drain();
+      expect((await h.tracker.status()).waitingOnEnvironment).toBe(0);
+    });
+
+    it("clears it on a pull that finds file activity off, even without the settings-change signal", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      await vi.advanceTimersByTimeAsync(61_000);
+      h.state.envGetFailures = 1;
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      h.settings.fileActivity = "off";
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect((await h.tracker.status()).waitingOnEnvironment).toBe(0);
+    });
+  });
+
+  describe("an unreadable environment", () => {
+    it("holds the read position across repeated failures, logs the first one, and shows the count in status", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      await vi.advanceTimersByTimeAsync(61_000);
+      h.state.envGetFailures = 3;
+      for (let i = 0; i < 3; i++) {
+        h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+        await drain();
+        expect((await h.tracker.status()).waitingOnEnvironment).toBe(1);
+      }
+      const warnings = h.log.warn.mock.calls.map((call) => String(call[0]));
+      expect(warnings).toEqual(["could not read the thread's environment (thr_1)"]);
+      // The read position never moved: every pull asked for the same rows.
+      const afterSeqs = asc(h).slice(-3).map((call) => call.afterSeq);
+      expect(afterSeqs).toEqual([afterSeqs[0], afterSeqs[0], afterSeqs[0]]);
+      expect((await h.tracker.status()).droppedFiles.outOfScope).toBe(0);
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      const status = await h.tracker.status();
+      expect(status.waitingOnEnvironment).toBe(0);
+      expect(status.pendingFiles).toBe(1);
+      // After recovering, a later failure is logged again.
+      await vi.advanceTimersByTimeAsync(61_000);
+      h.state.envGetFailures = 1;
+      edit(h, "b.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect(h.log.warn).toHaveBeenCalledTimes(2);
     });
   });
 });

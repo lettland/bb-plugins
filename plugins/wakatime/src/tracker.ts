@@ -8,6 +8,7 @@ import type { FileSdk } from "./file-delivery.js";
 import {
   buildArgv,
   BRANCH_TTL_MS,
+  clean,
   entityFor,
   isExcluded,
   resolveContext,
@@ -111,7 +112,8 @@ export class Tracker {
     first = true,
   ): Job | null {
     const entity = entityFor(ctx.thread, entityModeOf(settings.entity));
-    const project = ctx.project?.name;
+    // The same cleaned name goes to the argv and to every file entry.
+    const project = clean(ctx.project?.name) ?? undefined;
     const timeMs = Date.now();
     if (first && !this.throttle.allow({ key, category }, entity, project, timeMs, bypass)) return null;
     const args = buildArgv(
@@ -129,14 +131,8 @@ export class Tracker {
     };
   }
 
-  /** A context resolved from a thread always carries its project: `resolveContext` returns null otherwise. */
-  private projectOf(ctx: ResolvedContext & { thread: ThreadLike }): ProjectLike {
-    return ctx.project!;
-  }
-
   /** Send a thread's heartbeat through the file pipeline, the only submitter for its key. */
   private deliver(
-    settings: WakatimeSettings,
     ctx: ResolvedContext & { thread: ThreadLike },
     bypass: boolean,
     final: boolean,
@@ -144,11 +140,13 @@ export class Tracker {
     const { thread } = ctx;
     return this.files.deliver({
       id: thread.id,
-      project: this.projectOf(ctx),
+      // A context resolved from a thread always carries its project: `resolveContext` returns null otherwise.
+      project: ctx.project!,
       environmentId: thread.environmentId,
       final,
-      build: (chunk, first) =>
-        this.heartbeatJob(settings, ctx, thread.id, settings.agentCategory, bypass, chunk, first),
+      // Built from the settings the send just read, not from any read before a pull.
+      build: (chunk, first, fresh) =>
+        this.heartbeatJob(fresh, ctx, thread.id, fresh.agentCategory, bypass, chunk, first),
     });
   }
 
@@ -228,9 +226,9 @@ export class Tracker {
       if (this.excluded(settings, ctx.project)) return this.skip(thread.id, own, generation);
       // An idle that landed during the awaits already cleared this timer.
       if (this.timers.get(thread.id) !== own) return;
-      this.files.attach(thread.id, this.projectOf({ ...ctx, thread }), thread.environmentId);
+      this.files.attach(thread.id, ctx.project!, thread.environmentId);
       void this.files.pull(thread.id);
-      await this.deliver(settings, { ...ctx, thread }, false, false);
+      await this.deliver({ ...ctx, thread }, false, false);
     } catch {
       this.release(thread.id, own);
     }
@@ -247,12 +245,12 @@ export class Tracker {
       if (ctx === null) return this.release(id, own);
       if (this.excluded(settings, ctx.project)) return this.skip(id, own, generation);
       if (this.timers.get(id) !== own) return;
-      this.files.attach(id, this.projectOf({ ...ctx, thread }), thread.environmentId);
+      this.files.attach(id, ctx.project!, thread.environmentId);
       await this.files.pull(id);
       if (this.timers.get(id) !== own) return;
       // Already paced at the throttle window, so a tick that fires a
       // millisecond early must not be dropped.
-      await this.deliver(settings, { ...ctx, thread }, true, false);
+      await this.deliver({ ...ctx, thread }, true, false);
     } catch {
       this.release(id, own);
     }
@@ -273,12 +271,17 @@ export class Tracker {
     try {
       const settings = await this.settings.get();
       const ctx = await resolveContext(this.sdk, this.branches, { threadId: thread.id }, thread);
-      if (this.disposed || ctx === null || this.excluded(settings, ctx.project)) return;
-      if (!settings.trackAgentActivity || this.stopping.get(thread.id) !== token) return;
+      if (this.disposed || ctx === null) return;
+      if (this.excluded(settings, ctx.project) || !settings.trackAgentActivity) {
+        // Not timed any more: no old read position may survive to a later turn.
+        this.files.untime(thread.id);
+        return;
+      }
+      if (this.stopping.get(thread.id) !== token) return;
       // Chained behind every earlier pull, so a thread that starts again meanwhile never re-seeds.
-      this.files.attach(thread.id, this.projectOf({ ...ctx, thread }), thread.environmentId);
+      this.files.attach(thread.id, ctx.project!, thread.environmentId);
       await this.files.pull(thread.id);
-      await this.deliver(settings, { ...ctx, thread }, true, true);
+      await this.deliver({ ...ctx, thread }, true, true);
     } catch (error) {
       this.log.warn(`could not finish thread time: ${error instanceof Error ? error.name : "error"}`);
     } finally {
@@ -404,9 +407,9 @@ export class Tracker {
     return this.stop(thread);
   }
 
-  onEvents(payload: { thread: ThreadLike }): void {
+  onEvents(payload: { thread: ThreadLike; sequence?: number }): void {
     // A timed thread's new events are pulled into its buffer; others may start a timer.
-    if (this.timers.has(payload.thread.id)) void this.files.pull(payload.thread.id);
+    if (this.timers.has(payload.thread.id)) void this.files.pull(payload.thread.id, payload.sequence);
     else void this.adopt(payload.thread);
   }
 

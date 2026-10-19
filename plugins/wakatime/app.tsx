@@ -26,7 +26,7 @@ const PROBLEM_LABELS: Record<PathProblem, string> = {
 };
 
 const DROP_LABELS: Record<keyof WakatimeStatus["droppedFiles"], string> = {
-  outOfScope: "outside the environment folder",
+  outOfScope: "outside the environment folder, or the thread has no environment folder",
   overflow: "buffer full",
   filtered: "dropped by your fileActivity, entity, agent-tracking or exclusion settings",
   failed: "wakatime-cli failed",
@@ -36,7 +36,7 @@ const formatTime = (at: number | null) => (at === null ? "none yet" : new Date(a
 
 /** File entries: the last batch sent, what waits in memory, and what was dropped and why. */
 function FileRows(props: { status: WakatimeStatus }) {
-  const { lastFileBatchAt, pendingFiles, droppedFiles } = props.status;
+  const { lastFileBatchAt, pendingFiles, droppedFiles, waitingOnEnvironment } = props.status;
   const dropped = (Object.keys(DROP_LABELS) as (keyof typeof DROP_LABELS)[]).filter((key) => droppedFiles[key] > 0);
   return (
     <>
@@ -51,9 +51,17 @@ function FileRows(props: { status: WakatimeStatus }) {
           {pendingFiles === 0 ? "" : " (kept in memory until the thread's next heartbeat or turn)"}
         </dd>
       </div>
+      {waitingOnEnvironment === 0 ? null : (
+        <div>
+          <dt style={{ color: SOFT_INK }}>
+            Waiting on environment lookup: {waitingOnEnvironment} thread{waitingOnEnvironment === 1 ? "" : "s"}
+          </dt>
+          <dd style={{ margin: 0 }}>File entries are held until the environment can be read.</dd>
+        </div>
+      )}
       {dropped.map((key) => (
         <div key={key}>
-          <dt style={{ color: SOFT_INK }}>File entries dropped: {DROP_LABELS[key]}</dt>
+          <dt style={{ color: SOFT_INK }}>File entries dropped since the plugin loaded: {DROP_LABELS[key]}</dt>
           <dd style={{ margin: 0 }}>{droppedFiles[key]}</dd>
         </div>
       ))}

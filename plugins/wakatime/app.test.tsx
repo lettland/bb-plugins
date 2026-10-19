@@ -10,6 +10,7 @@ const BASE: WakatimeStatus = {
   lastError: null,
   lastFileBatchAt: null,
   pendingFiles: 0,
+  waitingOnEnvironment: 0,
   droppedFiles: { outOfScope: 0, overflow: 0, filtered: 0, failed: 0 },
   unmatchedExcludes: [],
 };
@@ -64,10 +65,22 @@ describe("StatusPanel", () => {
     }));
     await screen.findByText("/opt/wakatime-cli");
     expect(screen.getByText(/3 \(kept in memory until the thread's next heartbeat or turn\)/)).toBeTruthy();
-    expect(screen.getByText("File entries dropped: outside the environment folder")).toBeTruthy();
-    expect(screen.getByText("File entries dropped: dropped by your fileActivity, entity, agent-tracking or exclusion settings")).toBeTruthy();
-    expect(screen.getByText("File entries dropped: wakatime-cli failed")).toBeTruthy();
+    expect(screen.getByText("File entries dropped since the plugin loaded: outside the environment folder, or the thread has no environment folder")).toBeTruthy();
+    expect(screen.getByText("File entries dropped since the plugin loaded: dropped by your fileActivity, entity, agent-tracking or exclusion settings")).toBeTruthy();
+    expect(screen.getByText("File entries dropped since the plugin loaded: wakatime-cli failed")).toBeTruthy();
     expect(screen.queryByText(/buffer full/)).toBeNull();
+  });
+
+  it("shows how many threads wait on an environment lookup, only when there are some", async () => {
+    render(() => ({ ...BASE, waitingOnEnvironment: 2 }));
+    expect(await screen.findByText("Waiting on environment lookup: 2 threads")).toBeTruthy();
+    cleanup();
+    render(() => ({ ...BASE, waitingOnEnvironment: 1 }));
+    expect(await screen.findByText("Waiting on environment lookup: 1 thread")).toBeTruthy();
+    cleanup();
+    render(() => BASE);
+    await screen.findByText("/opt/wakatime-cli");
+    expect(screen.queryByText(/Waiting on environment lookup/)).toBeNull();
   });
 
   it("labels the problem and the exit code, in an alert span inside the dd", async () => {

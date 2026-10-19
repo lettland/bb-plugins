@@ -34,7 +34,7 @@ Per thread (about every 2 minutes while it is active, and once more when it stop
 
 Per file (when `fileActivity` is on and `entity` is `title`):
 
-- the file path, only if it lies inside the thread's environment folder (after resolving symlinks; `node_modules` and `.git` are skipped)
+- the absolute file path on the bb server host, only if it lies inside the thread's environment folder (after resolving symlinks; `node_modules` and `.git` are skipped)
 - whether the agent wrote or only read it
 - for edits, the number of lines changed (counted from the diff; the diff itself is not sent)
 - the time of the event
@@ -68,7 +68,7 @@ The bb version is read once in the background after the plugin loads; heartbeats
 | `trackAgentActivity` | on | Per-thread heartbeats about every 2 minutes while a thread is active. Off sends nothing about agent threads, files included. |
 | `agentCategory` | `building` | One of the categories below; used for threads and their files. |
 | `fileActivity` | `edits-and-reads` | `edits-and-reads`, `edits`, or `off`. File entries reach the dashboard up to about 2 minutes late (they go with the thread's next heartbeat), and a change takes effect at the next send. |
-| `entity` | `title` | `title` or `threadId`. This changes the entity only; the project and branch are still sent. With `threadId`, no file entries are sent at all, whatever `fileActivity` says. |
+| `entity` | `title` | `title` or `threadId`. Besides dropping file entries (with `threadId` none are sent at all, whatever `fileActivity` says), this changes only the entity: the project and branch are still sent. |
 | `excludeProjects` | empty | bb project ids or names. Find project ids with `bb project list`. |
 
 Settings are read fresh on every use.
@@ -79,7 +79,7 @@ Settings are read fresh on every use.
 
 - **Your activity:** the plugin's frontend listens for keyboard, pointer, and wheel input while the bb window is focused and visible, and asks the server for a heartbeat when the route changes and otherwise at most every 2 minutes. The server allows one heartbeat per key and category every 120 seconds, and every bb window, tab, or remote client counts as the server owner's activity.
 - **Agent time:** `thread.active` sends a heartbeat and starts a 2-minute timer for the thread. Each tick re-reads the thread and sends only if it is still `active`. `thread.idle` and `thread.failed` send a final heartbeat and stop the timer. Threads already running when the plugin loads are picked up at startup.
-- **File activity:** a thread starts at the current end of its event log, so history is never replayed. While it runs, completed file changes and file reads are collected in memory (a pull makes no CLI call). Each tick and the final stop send them: up to 200 files per `wakatime-cli` call, in order. A read of the same path within 2 minutes of the previous one is sent once; writes are never thinned. Only one send per thread is in flight at a time.
+- **File activity:** a thread starts at the current end of its event log, so history is never replayed. While it runs, completed file changes and file reads are collected in memory (a pull makes no CLI call). Each tick and the final stop send them: up to 200 files per `wakatime-cli` call, in order. A read of the same path within 2 minutes of the previous one is sent once; writes are never thinned. Only one send per thread is in flight at a time. A send that waits for a free `wakatime-cli` slot re-reads your settings just before it starts. If what it carries is no longer allowed, or a file in it has turned into something that is not a regular file (a symlink, say), the call is skipped and its file entries go back to the buffer. The next send drops whatever your current settings no longer allow (counted as dropped by your settings) and sends the rest; with file activity off, everything is dropped. A file that has simply been deleted does not stop a send, but if it is deleted while its send waits for a slot, that entry may go out without `is_unsaved_entity`, and `wakatime-cli` may then drop that one entry. The thread's next tick sends the heartbeat; when the skipped call is the final stop's, that last heartbeat is not re-sent.
 - **In memory only:** pending file entries live only in the bb server's memory, until the thread's next tick or turn. They are discarded when the thread is archived or deleted and when the plugin reloads or the server restarts. At most 2000 are kept; past that the oldest are dropped.
 - **CLI runner:** no shell; at most 4 `wakatime-cli` processes at once and one in flight per key; a 150 s timeout.
 
@@ -96,14 +96,16 @@ Overlapping heartbeats share wall-clock time rather than adding up. Agent heartb
 
 ## Failures and gaps
 
-The WakaTime status panel in Settings shows the CLI path in use, the last successful heartbeat, the last error, and the file pipeline: the last time file entries were sent, how many wait in memory (they go with the thread's next tick or turn), and how many were dropped, by reason:
+The WakaTime status panel in Settings shows the CLI path in use, the last successful heartbeat, the last error, and the file pipeline: the last time file entries were sent, how many wait in memory (they go with the thread's next tick or turn), and how many were dropped since the plugin loaded, by reason:
 
-- **outside the environment folder**: the path was not inside the thread's environment folder
+- **outside the environment folder, or the thread has no environment folder**: the path was not inside the thread's environment folder, or the thread has none
 - **buffer full**: more than 2000 were waiting
 - **dropped by your settings**: `fileActivity`, `entity`, agent tracking or an exclusion changed while they waited
 - **wakatime-cli failed**: the call that carried them failed. Network failures may sit in the CLI's own offline queue; timeouts, kills, and config or auth errors are lost.
 
-Gaps that are not counted: if reading a thread's event log fails at the start, the plugin retries on the next event or tick, and anything that landed in between is neither sent nor counted; entries still pending when the plugin is disposed are discarded.
+If a thread's environment cannot be read, its file pipeline holds at the same read position and retries on the next event or tick, so nothing is skipped or dropped; the panel shows "Waiting on environment lookup: N thread(s)" and the server log says so once. The indicator clears when a read succeeds or when file activity stops for the thread.
+
+Gaps that are not counted: if reading a thread's event log fails at the start, the plugin retries on the next event or tick, and anything that landed in between is neither sent nor counted; events between a thread becoming active and the first read of its event log after the plugin loads are not sent; entries still pending when the plugin is disposed, or when the thread is archived or deleted, are discarded.
 
 An error is shown only while it is newer than the last successful heartbeat, so a bad API key is visible there until a later run succeeds. The exception is a path problem (the `cliPath` is not absolute, not found, not a regular file, or not executable): it is not compared with the last success and stays until a path check passes. Each time the panel reads the status, the plugin checks the current `cliPath`, so fixing the path clears the error without waiting for a heartbeat. It has a Refresh button, and a failed refresh is shown next to it.
 

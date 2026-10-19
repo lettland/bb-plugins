@@ -67,6 +67,12 @@ export interface Job {
   args: string[];
   /** Written to the process's stdin, newline-terminated (the `--extra-heartbeats` JSON). */
   stdin?: string;
+  /**
+   * Asked just before the process would start, after a slot is free: false (or
+   * a throw) skips the job without spawning, for a job that waited and may no
+   * longer be allowed to send what it carries.
+   */
+  guard?: () => Promise<boolean>;
   timeoutMs: number;
 }
 
@@ -144,6 +150,9 @@ export class CliRunner implements Runner {
   private verifiedPath: string | null = null;
   // The last path reported as usable, to log a change once.
   private reportedPath: string | null = null;
+  // The typed path and problem behind the current path error, so the same
+  // problem on another path is a new error.
+  private problemKey: string | null = null;
   private running = 0;
   private disposed = false;
 
@@ -174,10 +183,12 @@ export class CliRunner implements Runner {
       return true;
     }
     this.verifiedPath = null;
-    // The same problem again keeps its time, so reading the status does not move them.
+    // The same problem on the same path again keeps its time, so reading the status does not move it.
     const last = this.state.lastError;
-    if (last?.kind !== "missing-cli" || last.problem !== problem) {
+    const key = `${job.cliPath.trim()}\0${problem}`;
+    if (last?.kind !== "missing-cli" || last.problem !== problem || this.problemKey !== key) {
       this.state.lastError = { kind: "missing-cli", exitCode: null, at: Date.now(), problem };
+      this.problemKey = key;
     }
     if (!this.warnedPaths.has(file)) {
       this.warnedPaths.add(file);
@@ -200,6 +211,7 @@ export class CliRunner implements Runner {
   private async execute(job: Job): Promise<JobOutcome> {
     const file = expandHome(job.cliPath);
     if (!(await this.ensureUsable(file, job))) return "skipped";
+    if (job.guard !== undefined && !(await job.guard().catch(() => false))) return "skipped";
     let result: ExecResult;
     try {
       result = await this.exec(file, job.args, {

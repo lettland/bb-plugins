@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   APP_ENTITY,
   buildArgv,
+  envInfoOf,
   entityFor,
   isExcluded,
   resolveContext,
@@ -206,12 +207,11 @@ describe("resolveContext", () => {
     expect(ctx?.thread?.id).toBe("thr_1");
     expect(ctx?.project?.name).toBe("acme");
     expect(ctx?.branch).toBe("feat/x");
-    expect(ctx?.path).toBe("/work/proj");
   });
 
   it("returns an empty context for a view with no ids", async () => {
     const { api } = sdk();
-    expect(await resolveContext(api, new TtlCache(60_000), {})).toEqual({ thread: null, project: null, branch: null, path: null });
+    expect(await resolveContext(api, new TtlCache(60_000), {})).toEqual({ thread: null, project: null, branch: null });
   });
 
   it("resolves a project-only view", async () => {
@@ -263,5 +263,50 @@ describe("resolveContext", () => {
     const { api, calls } = sdk({ thread: thread({ environmentId: null }) });
     expect((await resolveContext(api, new TtlCache(60_000), { threadId: "thr_1" }))?.branch).toBeNull();
     expect(calls.env).toBe(0);
+  });
+});
+
+describe("envInfoOf", () => {
+  function environments(overrides: {
+    getFailures?: number;
+    statusError?: boolean;
+    branchName?: string | null;
+  }) {
+    let failures = overrides.getFailures ?? 0;
+    const calls = { get: 0, status: 0 };
+    const api = {
+      async get() {
+        calls.get++;
+        if (failures > 0) {
+          failures--;
+          throw new Error("down");
+        }
+        return { branchName: overrides.branchName === undefined ? null : overrides.branchName, path: "/work/proj" };
+      },
+      async status() {
+        calls.status++;
+        if (overrides.statusError) throw new Error("git down");
+        return { outcome: "available", workspace: { branch: { currentBranch: "main" } } };
+      },
+    };
+    return { api, calls };
+  }
+
+  it("keeps the folder, and caches nothing, when only the branch fallback fails", async () => {
+    const cache = new TtlCache<EnvInfo>(60_000);
+    const { api, calls } = environments({ statusError: true });
+    expect(await envInfoOf(api, cache, "env_1")).toEqual({ branch: null, path: "/work/proj" });
+    expect(cache.size).toBe(0);
+    await envInfoOf(api, cache, "env_1");
+    expect(calls.get).toBe(2);
+  });
+
+  it("is null, and caches nothing, when the environment itself cannot be read; the next read recovers", async () => {
+    const cache = new TtlCache<EnvInfo>(60_000);
+    const { api } = environments({ getFailures: 1, branchName: "feat/x" });
+    expect(await envInfoOf(api, cache, "env_1")).toBeNull();
+    expect(cache.size).toBe(0);
+    expect(await envInfoOf(api, cache, "env_1")).toEqual({ branch: "feat/x", path: "/work/proj" });
+    expect(cache.size).toBe(1);
   });
 });

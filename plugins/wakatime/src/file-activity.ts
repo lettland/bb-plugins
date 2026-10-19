@@ -1,4 +1,4 @@
-import { realpath, stat } from "node:fs/promises";
+import { lstat, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import type { FileMode } from "./settings.js";
 
@@ -182,4 +182,33 @@ export function toExtraHeartbeat(
     ...(spec.aiLineChanges === undefined ? {} : { ai_line_changes: spec.aiLineChanges }),
     ...(spec.unsaved ? { is_unsaved_entity: true } : {}),
   };
+}
+
+/** At send time: a file that was a regular file when it was read but is not now (swapped for a symlink, say, or deleted) goes out as unsaved. */
+export function recheckSaved(chunk: FileSpec[]): Promise<FileSpec[]> {
+  return Promise.all(
+    chunk.map(async (spec) => {
+      if (spec.unsaved) return spec;
+      try {
+        return (await lstat(spec.path)).isFile() ? spec : { ...spec, unsaved: true };
+      } catch {
+        return { ...spec, unsaved: true };
+      }
+    }),
+  );
+}
+
+/** A file that still exists but is no longer a regular file (a symlink, a directory, a FIFO). A missing one is not: the CLI simply cannot read through it. */
+export async function anyTurnedSpecial(chunk: FileSpec[]): Promise<boolean> {
+  const checks = await Promise.all(
+    chunk.map(async (spec) => {
+      if (spec.unsaved) return false;
+      try {
+        return !(await lstat(spec.path)).isFile();
+      } catch {
+        return false;
+      }
+    }),
+  );
+  return checks.some(Boolean);
 }
