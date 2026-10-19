@@ -393,10 +393,12 @@ hold does not end it: the agent answers the message while the reviewers keep run
 explicit request to stop the review ends it. The agent stops the reviewers it spawned,
 reports `blocked` with a summary starting "Stopped by the user." (the agent's claim; the
 plugin does not verify it) and the panel shows "Blocked". A stop pressed in a review or
-wake-up turn ends the review too. The stop button pressed during the user's own turn stops
-that turn only: the review goes on, and, as with any stopped turn, that turn's work is not
-auto-reviewed afterwards. A message steered into the review's or a wake-up turn is part of
-that review. Another plugin's queued message neither extends the hold nor ends it.
+wake-up turn ends the review too, and it also drops the follow-up review of the user's own
+edits, which then stay uncommitted and unreviewed. The stop button pressed during the user's
+own turn stops that turn only: the review goes on, and, as with any stopped turn, that
+turn's work is not auto-reviewed afterwards. A message steered into the review's or a
+wake-up turn is part of that review. Another plugin's queued message neither extends the
+hold nor ends it.
 The user's own turns that changed files are reviewed together, once the hold ends, as one
 follow-up review from the first of those turns. That follow-up can start right after a stop,
 or wait while a queued reviewer wake-up or a child of the user's own task is still running.
@@ -412,9 +414,13 @@ turn's fixes get one more review. Known limits:
   runs can mark that turn as authored.
 - Child threads the user's own turn spawns count toward the hold. They can keep it open, and
   sibling reviews waiting, for up to the 2-hour cap.
-- A turn whose requests cannot be read is counted as the user's, since a follow-up review
-  that finds nothing costs less than an unreviewed edit. A stop pressed in a wake-up turn
-  that was misread this way does not end the review; a typed request to stop still does.
+- A turn whose requests cannot be read is counted as the user's, and as having changed
+  files, since a follow-up review that finds nothing costs less than an unreviewed edit. A stop
+  pressed in that turn still ends the review, as it would in a review or wake-up turn.
+- The turn that ended is read from the event log (its `turn/completed`), and its changes are
+  measured from the cursor `onThreadActive` took for the turn that was current when the idle
+  is handled. If core already drained the next turn before the idle is handled, that cursor is
+  the next turn's and the ended turn's edits can fall outside the follow-up.
 
 What auto-review also limits is how many reviews run at once **per provider**, because
 reviews on one provider share that provider's usage limits: a Claude Code review here and a

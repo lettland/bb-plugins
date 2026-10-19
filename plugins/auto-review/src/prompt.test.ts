@@ -1397,7 +1397,7 @@ describe("the steer-interruption note", () => {
     "continue these steps only once every reviewer has finished, been stopped, or been reported stuck",
     "`bb thread interactions list <id> --json` for a pending approval",
     "handle a failed or stuck one as the skill says",
-    "they can keep sending messages meanwhile and asking you to stop the review ends it",
+    "they can keep sending messages meanwhile (the stop button during their own turn stops only that turn) and asking you to stop the review ends it",
     "Finish any lens that fell through to a subagent or to this thread first",
     "tell the user in one line how many reviewers are still running",
     "`bb thread show <id> --json` for an `error` status",
@@ -1463,14 +1463,15 @@ describe("what the prompts say about the user's messages while reviewers run", (
   const STOP_STEP = "call the ReportReview tool with outcome `blocked`, a summary that starts with exactly `Stopped by the user.`, and the findings so far";
   const code = (decision: Decision, paths: readonly string[] = ["src/a.ts"]) =>
     buildReviewPrompt({ decision, reviewMode: "auto", scope: renderScope(paths) });
-  const COMMIT_ON = "tell the user that auto-review reviews it after this review and commits it then, as this project's auto-review policy commits";
-  const COMMIT_OFF = "tell the user that auto-review reviews it after this review but does not commit it, as this project's auto-review policy leaves reviewed changes uncommitted";
-  const COMMIT_OVERFLOW = "tell the user that auto-review reviews it after this review but does not commit it, as this review's own file list is too long to commit automatically";
+  const STOP = "reviews it after this review — unless the review or that turn is stopped with the stop button —";
+  const COMMIT_ON = `tell the user that auto-review ${STOP} and commits it then, as this project's auto-review policy commits`;
+  const COMMIT_OFF = `tell the user that auto-review ${STOP} but does not commit it, as this project's auto-review policy leaves reviewed changes uncommitted`;
+  const COMMIT_OVERFLOW = `tell the user that auto-review ${STOP} but does not commit it, as this review's own file list is too long to commit automatically`;
 
   it("gives the post-turn review a stop step that reports blocked", () => {
     const text = code({ commit: true, merge: false });
     expect(text).toContain(STOP_STEP);
-    expect(text).toContain("is still reviewed once any child threads of theirs finish unless they pressed stop during it");
+    expect(text).toContain("is still reviewed once any child threads of theirs finish, unless the review or that turn is stopped with the stop button");
     expect(text).toContain("`blocked` (you had to stop: a secret, a missing review workflow, a failed commit or merge, or the user asked to stop the review)");
   });
 

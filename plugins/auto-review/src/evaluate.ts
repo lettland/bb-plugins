@@ -17,7 +17,6 @@ import {
   mainlineBase,
   runningChildIds,
   stoppedByUser,
-  tryCaptureSinceSeq,
   turnChangedPaths,
   type AvailableWorkspace,
   type TurnChanges,
@@ -30,8 +29,8 @@ import { isBusyStatus, selfIsWorktree } from "./gate.js";
 import { lastIdleFloor, refreshIdleSnapshot, refreshLastIdle } from "./last-idle.js";
 import { noNewWork, parkBaseline, parkRelease } from "./no-new-work.js";
 import {
+  noteUserTurn,
   reviewContinuationPending,
-  userTurnEnded,
 } from "./review-continuation.js";
 import {
   deliveredPatch,
@@ -350,70 +349,6 @@ export async function evaluate(
   });
 }
 
-/**
- * Whether a turn of the user's own during the hold changed files, by the same
- * attribution a review uses. A check that cannot be made warns and counts as
- * authored: the follow-up review stands down on its own when nothing changed.
- */
-async function userTurnAuthored(
-  ctx: ReviewContext,
-  thread: GateThreadLike,
-  turnStart: TurnStart,
-): Promise<boolean> {
-  const { bb } = ctx;
-  try {
-    const { environmentId } = thread;
-    const workspace = environmentId === null ? null : await fetchWorkspace(bb, environmentId);
-    if (environmentId === null || workspace === null) {
-      throw new Error("the workspace is unavailable");
-    }
-    const threadEntries = await bb.sdk.threads.list({ environmentId, includeHidden: true });
-    const turn = await turnChangedPaths(bb, {
-      threadId: thread.id,
-      environmentId,
-      turnStart,
-      workspace,
-      threadEntries,
-    });
-    return turn.paths.length > 0;
-  } catch (error) {
-    bb.log.warn(
-      `auto-review: could not read whether the user's turn in ${thread.id} changed files; counting it as authored: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return true;
-  }
-}
-
-/**
- * What the idle that just ended a turn during the hold adds to the state, when
- * the turn was the user's: where their work began, whether any of it changed
- * files, and the cursor a stop inside the turn is read against. Written before
- * the stop check; the returned state includes it.
- */
-async function noteUserTurn(
-  ctx: ReviewContext,
-  thread: GateThreadLike,
-  state: ThreadState,
-): Promise<ThreadState> {
-  const { bb } = ctx;
-  const { turnStart } = state;
-  if (turnStart === undefined || !(await userTurnEnded(bb, thread.id, state, turnStart))) {
-    return state;
-  }
-  const floor = await tryCaptureSinceSeq(bb, thread.id, `the stop floor of the user's turn in ${thread.id}`);
-  const patch: Partial<ThreadState> = {
-    ...(state.userTurnStart === undefined ? { userTurnStart: turnStart } : {}),
-    ...(state.userTurnAuthored === true || !(await userTurnAuthored(ctx, thread, turnStart))
-      ? {}
-      : { userTurnAuthored: true as const }),
-    ...(floor === undefined ? {} : { userStopFloorSeq: floor }),
-  };
-  await writeState(bb, thread.id, patch);
-  return { ...state, ...patch };
-}
-
 export async function handleIdle(ctx: ReviewContext, thread: GateThreadLike): Promise<void> {
   const { bb } = ctx;
   const state = await readState(bb, thread.id);
@@ -437,7 +372,7 @@ export async function handleIdle(ctx: ReviewContext, thread: GateThreadLike): Pr
       const { set, remove } = resetToIdlePatch();
       await writeState(bb, thread.id, set, remove);
       if (stopped && held.userTurnAuthored === true) {
-        // A stopped turn's work is never reviewed on its own.
+        // The review was stopped: the user's own work is not reviewed on its own either, and stays as it is.
         await recordFire(ctx, thread.projectId, thread.id, "stood-down", "user-stopped");
       }
       return;

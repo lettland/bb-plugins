@@ -136,54 +136,90 @@ function isUserRequest(data: TurnRequestData): boolean {
   );
 }
 
+export interface EndedTurn {
+  /** Whether the user started the turn. */
+  users: boolean;
+  /** The seq of the turn's `turn/completed`: a stop after it was not pressed inside the turn. */
+  completedSeq: number;
+}
+
+/** No turn has completed since the last one handled: every idle's read ends here once it has caught up. */
+export class NoTurnCompletedError extends Error {}
+
+/** A turn completed after the cursor, but whether the user started it could not be read; `completedSeq` still marks it handled. */
+export class UnreadTurnError extends Error {
+  constructor(
+    message: string,
+    readonly completedSeq: number,
+  ) {
+    super(message);
+  }
+}
+
 /**
- * Whether the turn that has just ended was started by the user. The turn is the
- * one the latest `turn/input/accepted` after the cursor names; the requests
- * that started it are those accepted into it that are not steers, found by
- * `clientRequestId` among the `client/turn/requested` rows since the cursor,
- * which a queued request's row, logged before the turn it waited behind ended,
- * is inside. The accepted event is always turn-scoped, so whether a request
- * steered is read from where it landed, whatever its kind: it steered iff its
- * target names an expected turn and that is the turn it was accepted into. A
- * `steer` or `auto` request whose expected turn had ended landed in a turn of
- * its own, so it began that turn. If inputs were batched into one turn, any of
- * them being the user's makes it the user's. A turn whose only inputs since the
- * cursor are steers began before it, such as one the review prompt was steered
- * into, and is not the user's.
+ * The turn that has just ended, and whether the user started it. The turn is the
+ * first to complete after `handledSeq` (the cursor when none was handled yet),
+ * not the newest accepted input: core may have drained the next queued turn, or
+ * several, before this idle is handled, so the caller reads them one after the
+ * other, each from the end of the last. The
+ * requests that started it are those accepted into it that are not steers,
+ * found by `clientRequestId` among the `client/turn/requested` rows since the
+ * cursor, which a queued request's row, logged before the turn it waited behind
+ * ended, is inside. The accepted event is always turn-scoped, so whether a
+ * request steered is read from where it landed, whatever its kind: it steered
+ * iff its target names an expected turn and that is the turn it was accepted
+ * into. A `steer` or `auto` request whose expected turn had ended landed in a
+ * turn of its own, so it began that turn. If inputs were batched into one turn,
+ * any of them being the user's makes it the user's. A turn with no input
+ * accepted into it since the cursor, or only steers, began before the cursor,
+ * such as one the review prompt was steered into, and is not the user's.
  *
- * Throws when no turn input was accepted since the cursor, or an accepted input
- * has no request row, so the caller decides what an unreadable turn counts as.
+ * Throws a `NoTurnCompletedError` when no turn completed after `handledSeq`. Once a turn did, a failure
+ * to read it (a lookup error, an accepted input with no request row) throws an
+ * `UnreadTurnError` carrying its end, so the caller decides what an unreadable
+ * turn counts as and still moves past it.
  */
-export async function endedTurnIsUsers(
+export async function endedTurn(
   bb: BbPluginApi,
   threadId: string,
   sinceSeq: number,
-): Promise<boolean> {
-  const accepted = await collect(eventsSince(bb, threadId, sinceSeq, "turn/input/accepted"));
-  const ended = accepted.at(-1)?.scope;
-  if (ended === undefined || ended.kind !== "turn") {
-    throw new Error(`no turn input was accepted since seq ${sinceSeq}`);
+  handledSeq = sinceSeq,
+): Promise<EndedTurn> {
+  const { value: completed } = await eventsSince(bb, threadId, Math.max(sinceSeq, handledSeq), "turn/completed").next();
+  if (completed === undefined) {
+    throw new NoTurnCompletedError(`no turn completed since seq ${Math.max(sinceSeq, handledSeq)}`);
   }
-  const requests = new Map(
-    (await collect(eventsSince(bb, threadId, sinceSeq, "client/turn/requested"))).map((event) => [
-      event.data.requestId,
-      event.data,
-    ]),
-  );
-  let users = false;
-  for (const { data, scope } of accepted) {
-    if (scope.kind !== "turn" || scope.turnId !== ended.turnId) {
-      continue;
-    }
-    const request = requests.get(data.clientRequestId);
-    if (request === undefined) {
-      throw new Error(`no turn request ${data.clientRequestId} for the input accepted into turn ${ended.turnId}`);
-    }
-    const { target } = request;
-    const steers = "expectedTurnId" in target && target.expectedTurnId === ended.turnId;
-    users ||= !steers && isUserRequest(request);
+  if (completed.scope.kind !== "turn") {
+    throw new UnreadTurnError(`the end of a turn at seq ${completed.seq} names no turn`, completed.seq);
   }
-  return users;
+  const { turnId } = completed.scope;
+  try {
+    const accepted = (await collect(eventsSince(bb, threadId, sinceSeq, "turn/input/accepted"))).filter(
+      ({ scope }) => scope.kind === "turn" && scope.turnId === turnId,
+    );
+    if (accepted.length === 0) {
+      return { users: false, completedSeq: completed.seq };
+    }
+    const requests = new Map(
+      (await collect(eventsSince(bb, threadId, sinceSeq, "client/turn/requested"))).map((event) => [
+        event.data.requestId,
+        event.data,
+      ]),
+    );
+    let users = false;
+    for (const { data } of accepted) {
+      const request = requests.get(data.clientRequestId);
+      if (request === undefined) {
+        throw new Error(`no turn request ${data.clientRequestId} for the input accepted into turn ${turnId}`);
+      }
+      const { target } = request;
+      const steers = "expectedTurnId" in target && target.expectedTurnId === turnId;
+      users ||= !steers && isUserRequest(request);
+    }
+    return { users, completedSeq: completed.seq };
+  } catch (error) {
+    throw new UnreadTurnError(error instanceof Error ? error.message : String(error), completed.seq);
+  }
 }
 
 /**

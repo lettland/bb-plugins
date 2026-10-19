@@ -7,12 +7,15 @@ export {
 } from "./detect-timeline.js";
 export {
   captureSinceSeq,
-  endedTurnIsUsers,
+  endedTurn,
+  NoTurnCompletedError,
+  UnreadTurnError,
   firstUserTurnSince,
   stoppedByUser,
   tryCaptureSinceSeq,
   userTurnRunningSince,
 } from "./detect-events.js";
+export type { EndedTurn } from "./detect-events.js";
 export { runningChildIds, spawnedDescendantIds } from "./detect-children.js";
 export {
   captureTree,

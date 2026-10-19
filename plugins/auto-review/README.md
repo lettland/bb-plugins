@@ -409,11 +409,13 @@ It ships enabled (opt-out).
   reviewed again. A message you send during the hold does not end it: the agent answers
   while the reviewers keep running, and only an explicit request to stop the review ends it
   (reported as `blocked`, "Stopped by the user."). A stop pressed in a review or wake-up turn
-  ends it too; pressed during your own turn it stops that turn only. Your own turns that
+  ends it too, and drops the follow-up review of your own edits, which then stay uncommitted
+  and unreviewed; pressed during your own turn it stops that turn only. Your own turns that
   changed files are reviewed together once the children finish, and not if you stopped one of
   them; a message steered into the review or a wake-up turn counts as part of the review.
-  Other reviews on the provider wait behind the hold, up to that cap. Residual race: if a child goes idle before bb queues its wake-up,
-  the hold ends one idle early and that wake-up turn's fixes get one more review.
+  Other reviews on the provider wait behind the hold, up to that cap. Residual race: if a
+  child goes idle before bb queues its wake-up, the hold ends one idle early and that wake-up
+  turn's fixes get one more review.
 - Runs one review at a time per provider across all projects, since those reviews share
   the provider's usage limits. A turn ending behind another review is deferred, not
   dropped, and fires when the blocking review ends. A question you send while the turn is

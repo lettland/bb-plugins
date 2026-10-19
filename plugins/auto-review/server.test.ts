@@ -89,6 +89,8 @@ interface HostOptions {
   turnEventsThrow?: boolean;
   /** Listing `client/turn/requested` events fails, so no user turn can be read. */
   turnRequestsThrow?: boolean;
+  /** The turn a send starts is still running: no `turn/completed` is logged for it. The plan gate reads such an end as the boundary of the review turn, so plan tests leave it running. */
+  sentTurnsKeepRunning?: boolean;
   /** Listing `turn/input/accepted` events fails, so no turn can be anchored to its requests. */
   turnInputsThrow?: boolean;
   /** Resolving a `user_answer` (only) fails — the global `resolveThrows` would also break the deny. */
@@ -136,6 +138,8 @@ interface TurnRequest {
   turnId?: string;
   /** The turn an `auto` or `steer` request expects to be running. Default: the turn it is accepted into for a steer, `turn-1` for `auto`. */
   expectedTurnId?: string;
+  /** The turn the request landed in has not completed: it is running, with nothing logged for its end yet. */
+  running?: boolean;
   /** The request has no `client/turn/requested` row, though the provider accepted an input for it. */
   unlogged?: boolean;
   /** The request is queued behind a running turn: logged, but no turn has accepted it yet. */
@@ -234,6 +238,33 @@ function acceptedTurnId(requests: readonly TurnRequest[], request: TurnRequest):
   return request.auto === true ? "turn-1" : `turn-${request.seq}`;
 }
 
+/**
+ * The `turn/completed` events a thread has logged: those a test recorded, and one for every other
+ * turn that took input, right after its last input, unless a request says it is still running.
+ */
+function turnEndsOf(
+  requests: readonly TurnRequest[],
+  explicit: ReadonlyArray<{ seq: number; turnId?: string }>,
+): Array<{ seq: number; turnId?: string }> {
+  const accepted = requests.filter((request) => request.queued !== true);
+  const derived = [...new Set(accepted.map((request) => acceptedTurnId(requests, request)))]
+    .filter(
+      (turnId) =>
+        !explicit.some((end) => end.turnId === turnId) &&
+        !accepted.some((request) => request.running === true && acceptedTurnId(requests, request) === turnId),
+    )
+    .map((turnId) => ({
+      turnId,
+      seq:
+        Math.max(
+          ...accepted
+            .filter((request) => acceptedTurnId(requests, request) === turnId)
+            .map((request) => request.acceptedAt ?? request.seq),
+        ) + 1,
+    }));
+  return [...explicit, ...derived];
+}
+
 function createHost(options: HostOptions = {}) {
   const metadataByThread = new Map<string, Record<string, unknown>>();
   const bucket = (threadId: string): Record<string, unknown> => {
@@ -270,13 +301,14 @@ function createHost(options: HostOptions = {}) {
   let maxSeq = 100;
   let timelineThrows = false;
   let timelineReadsLeft: number | undefined;
+  let turnEndReadsLeft: number | undefined;
   let statusThrows = false;
   let onStatusRead: (() => void) | undefined;
   let queuedRows = options.queuedRows ?? [];
   let interrupts: Record<string, InterruptEvent[]> = {};
   let itemEvents: Record<string, ItemStartedEvent[]> = {};
   let completedEvents: Record<string, ItemStartedEvent[]> = {};
-  let turnEnds: Record<string, number[]> = {};
+  let turnEnds: Record<string, Array<{ seq: number; turnId?: string }>> = {};
   let turnRequests: Record<string, TurnRequest[]> = {};
 
   const sdk = {
@@ -488,14 +520,19 @@ function createHost(options: HostOptions = {}) {
             if (options.turnEventsThrow === true) {
               throw new Error("events unavailable");
             }
+            if (turnEndReadsLeft !== undefined && (turnEndReadsLeft -= 1) === 0) {
+              turnEndReadsLeft = undefined;
+              throw new Error("events unavailable");
+            }
+            const ends = turnEndsOf(turnRequests[args.threadId] ?? [], turnEnds[args.threadId] ?? []);
             rows.push(
-              ...(turnEnds[args.threadId] ?? [])
-                .filter((seq) => seq > after)
-                .map((seq) => ({
-                  id: `ev-${args.threadId}-turn-${seq}`,
-                  scope: { kind: "thread" },
+              ...ends
+                .filter((end) => end.seq > after)
+                .map((end) => ({
+                  id: `ev-${args.threadId}-turn-${end.seq}`,
+                  scope: end.turnId === undefined ? { kind: "thread" } : { kind: "turn", turnId: end.turnId },
                   threadId: args.threadId,
-                  seq,
+                  seq: end.seq,
                   createdAt: 1_000,
                   type: "turn/completed",
                   data: {},
@@ -547,7 +584,7 @@ function createHost(options: HostOptions = {}) {
             ...turnRequests,
             [args.threadId]: [
               ...(turnRequests[args.threadId] ?? []),
-              { seq: maxSeq + 1, initiator: "user", text: part.text },
+              { seq: maxSeq + 1, initiator: "user", text: part.text, running: options.sentTurnsKeepRunning === true },
             ],
           };
         }
@@ -722,7 +759,30 @@ function createHost(options: HostOptions = {}) {
     },
     /** Record a `turn/completed` event: the turn really ended (steering a message in emits none). */
     completeTurn: (seq: number, threadId: string = THREAD_ID) => {
-      turnEnds = { ...turnEnds, [threadId]: [...(turnEnds[threadId] ?? []), seq] };
+      turnEnds = { ...turnEnds, [threadId]: [...(turnEnds[threadId] ?? []), { seq }] };
+    },
+    /** The `read`th listing of `turn/completed` events from now on fails, once; the others succeed. */
+    failTurnEndRead: (read: number) => {
+      turnEndReadsLeft = read;
+    },
+    /** The turn ids with a logged `turn/completed`, in log order. */
+    completedTurnIds: (threadId: string = THREAD_ID) =>
+      turnEndsOf(turnRequests[threadId] ?? [], turnEnds[threadId] ?? [])
+        .sort((left, right) => left.seq - right.seq)
+        .map((end) => end.turnId),
+    /** From now on, listing `turn/input/accepted` events fails (or works again). */
+    setTurnInputsThrow: (next: boolean) => {
+      options.turnInputsThrow = next;
+    },
+    /** Record the `turn/completed` of the turn a request was accepted into. */
+    completeTurnOf: (requestSeq: number, seq: number, threadId: string = THREAD_ID) => {
+      const requests = turnRequests[threadId] ?? [];
+      const request = requests.find((entry) => entry.seq === requestSeq);
+      if (request === undefined) {
+        throw new Error(`no request at seq ${requestSeq}`);
+      }
+      const turnId = acceptedTurnId(requests, request);
+      turnEnds = { ...turnEnds, [threadId]: [...(turnEnds[threadId] ?? []), { seq, turnId }] };
     },
     /** Record a `client/turn/requested` event: a turn someone asked the thread to start. */
     requestTurn: (request: TurnRequest, threadId: string = THREAD_ID) => {
@@ -732,12 +792,12 @@ function createHost(options: HostOptions = {}) {
     setTurnRequestsThrow: (next: boolean) => {
       options.turnRequestsThrow = next;
     },
-    /** A queued request's turn starts: the provider accepts it into that turn now. */
-    startQueuedTurn: (seq: number, acceptedAt: number, threadId: string = THREAD_ID) => {
+    /** A queued request's turn starts: the provider accepts it into that turn now (`running`: and it has not ended). */
+    startQueuedTurn: (seq: number, acceptedAt: number, running = false, threadId: string = THREAD_ID) => {
       turnRequests = {
         ...turnRequests,
         [threadId]: (turnRequests[threadId] ?? []).map((request) =>
-          request.seq === seq ? { ...request, queued: false, acceptedAt } : request,
+          request.seq === seq ? { ...request, queued: false, acceptedAt, running } : request,
         ),
       };
     },
@@ -1822,16 +1882,20 @@ describe("auto-review plugin", () => {
 
     /**
      * A turn that runs while the review holds: its request (the user's, or a
-     * wake-up from bb), its start, then its idle with the tree as given.
+     * wake-up from bb), its start, then its end and idle with the tree as given.
+     * `beforeIdle` runs between the turn's end and the idle being handled.
      */
-    async function holdTurn(host: Host, request: TurnRequest, tree?: string[]) {
+    async function holdTurn(host: Host, request: TurnRequest, tree?: string[], beforeIdle?: () => void) {
       host.requestTurn(request);
       host.setMaxSeq(request.acceptedAt ?? request.seq + 10);
       await emitActive(host);
       if (tree !== undefined) {
         host.setWorkingTree(tree.map((path) => ({ path })));
       }
-      host.setMaxSeq((request.acceptedAt ?? request.seq) + 20);
+      const idleSeq = (request.acceptedAt ?? request.seq) + 20;
+      host.setMaxSeq(idleSeq);
+      host.completeTurnOf(request.seq, idleSeq);
+      beforeIdle?.();
       await emitIdle(host);
     }
 
@@ -1882,7 +1946,7 @@ describe("auto-review plugin", () => {
       await holdTurn(host, wakeUp(180));
       expect(host.sends).toHaveLength(1);
       expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
-      expect((await lastFire(host)).scopePaths).toContain("src/user.ts");
+      expect((await lastFire(host)).scopePaths).toEqual(expect.arrayContaining(["src/user.ts", "src/fix.ts"]));
       expect(host.metadata.turnStart).toEqual(userCursor);
       expect(host.metadata.userTurnStart).toBeUndefined();
       expect(host.metadata.userTurnAuthored).toBeUndefined();
@@ -2110,6 +2174,8 @@ describe("auto-review plugin", () => {
         await delivered(host);
         host.requestTurn(userRequest(115, steer));
         await holdTurn(host, wakeUp(110), ["src/user.ts"]);
+        // Steering a message in ends no turn: the wake-up's is the only one logged.
+        expect(host.completedTurnIds()).toEqual(["turn-110"]);
         expect(host.metadata.userTurnStart).toBeUndefined();
         expect(host.metadata.phase).toBe("awaiting-review");
         await host.harness.dispose();
@@ -2132,6 +2198,139 @@ describe("auto-review plugin", () => {
       await holdTurn(host, userRequest(120, { auto: true, turnId: "turn-120" }), ["src/user.ts"]);
       expect(host.metadata.userTurnAuthored).toBe(true);
       await host.harness.dispose();
+    });
+
+    it("reads each of several turns that completed before their idle was handled, and ignores the surplus idle after", async () => {
+      const host = editingHost();
+      await plugin(host.bb);
+      await delivered(host);
+      // The user's turn and the wake-up behind it both end before the user turn's idle is handled.
+      await holdTurn(host, userRequest(120), ["src/user.ts"], () => {
+        host.requestTurn(wakeUp(150));
+        host.completeTurnOf(150, 170);
+      });
+      expect(host.metadata.userTurnAuthored).toBe(true);
+      expect(host.metadata.userStopFloorSeq).toBe(140);
+      expect(host.metadata.handledTurnEndSeq).toBe(170);
+
+      // The wake-up's own idle has nothing left to read: no warning, nothing marked.
+      host.setEnvThreads(idleChild);
+      await emitIdle(host);
+      expect(warned(host, "could not read whether the turn that ended")).toBe(false);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      expect(host.sends).toHaveLength(1);
+      expect((await lastFire(host)).scopePaths).toContain("src/user.ts");
+      expect(host.metadata.handledTurnEndSeq).toBeUndefined();
+      await host.harness.dispose();
+    });
+
+    it("reads every turn that ended when one idle covers two, so the hold does not end before the user's", async () => {
+      const host = editingHost({ envThreads: idleChild });
+      await plugin(host.bb);
+      await delivered(host);
+      // The wake-up and the user's turn behind it both end; only one idle is handled.
+      await holdTurn(host, wakeUp(110), ["src/user.ts"], () => {
+        host.requestTurn(userRequest(120));
+        host.completeTurnOf(120, 140);
+      });
+      expect(host.sends).toHaveLength(1);
+      expect((await lastFire(host)).scopePaths).toContain("src/user.ts");
+      await host.harness.dispose();
+    });
+
+    it("exits the read loop on a lookup failure after the first turn, counting that turn as the user's with the floor unchanged", async () => {
+      const host = editingHost({ authoredRows: [] });
+      await plugin(host.bb);
+      await delivered(host);
+      // Two turns ended; the first reads fine (a wake-up), the second listing of ends fails.
+      await holdTurn(host, wakeUp(110), undefined, () => {
+        host.requestTurn(userRequest(120));
+        host.completeTurnOf(120, 140);
+        host.failTurnEndRead(2);
+      });
+      expect(warned(host, "could not read whether the turn that ended")).toBe(true);
+      expect(host.metadata.handledTurnEndSeq).toBe(130);
+      expect(host.metadata.userTurnStart).toBeDefined();
+      expect(host.metadata.userTurnAuthored).toBe(true);
+      expect(host.metadata.userStopFloorSeq).toBeUndefined();
+      await host.harness.dispose();
+    });
+
+    it("misses a user turn's edits when the next turn's cursor was taken before its idle was handled (a documented limit)", async () => {
+      const host = editingHost({ authoredRows: [fileChangeRow("src/user.ts", 135)] });
+      await plugin(host.bb);
+      await delivered(host);
+      host.requestTurn(userRequest(120));
+      host.setMaxSeq(130);
+      await emitActive(host);
+      host.setWorkingTree([{ path: "src/user.ts" }]);
+      host.completeTurnOf(120, 140);
+      // The wake-up behind it starts, and its cursor is taken, before the user turn's idle is handled.
+      host.requestTurn(wakeUp(150, { running: true }));
+      host.setMaxSeq(160);
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 160 });
+      expect(host.metadata.userTurnAuthored).toBeUndefined();
+
+      host.setEnvThreads(idleChild);
+      host.completeTurnOf(150, 170);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(0);
+      await host.harness.dispose();
+    });
+
+    it("keeps the stop floor where an earlier user turn set it when a later turn cannot be read, so a stop in it still ends the review", async () => {
+      const host = editingHost({ authoredRows: [] });
+      await plugin(host.bb);
+      await delivered(host);
+      await holdTurn(host, userRequest(120));
+      expect(host.metadata.userStopFloorSeq).toBe(140);
+
+      host.setTurnInputsThrow(true);
+      host.interrupt({ seq: 165, reason: "manual-stop" });
+      await holdTurn(host, wakeUp(150));
+      expect(warned(host, "could not read whether the turn that ended")).toBe(true);
+      expect(host.metadata.phase).toBe("idle");
+      expect(await lastReportOutcome(host)).toBe("stopped");
+      await host.harness.dispose();
+    });
+
+    it("moves past a turn that began before the review was sent, then reads the user's turn and the wake-up behind it", async () => {
+      const run = async (stopInWakeUp: boolean) => {
+        const host = editingHost();
+        await plugin(host.bb);
+        await delivered(host);
+        // A turn whose inputs were accepted before the review (cursor 100) ends during the hold.
+        host.requestTurn(userRequest(90));
+        host.completeTurnOf(90, 110);
+        host.setMaxSeq(100);
+        await emitActive(host);
+        await emitIdle(host);
+        expect(host.metadata.userTurnStart).toBeUndefined();
+        expect(host.metadata.handledTurnEndSeq).toBe(110);
+
+        await holdTurn(host, userRequest(120), ["src/user.ts"]);
+        expect(host.metadata.userTurnAuthored).toBe(true);
+        expect(host.metadata.userStopFloorSeq).toBe(140);
+
+        host.setEnvThreads(idleChild);
+        if (stopInWakeUp) {
+          host.interrupt({ seq: 165, reason: "manual-stop" });
+        }
+        await holdTurn(host, wakeUp(150));
+        return host;
+      };
+
+      const reviewed = await run(false);
+      expect(reviewed.sends).toHaveLength(1);
+      expect((await lastFire(reviewed)).scopePaths).toContain("src/user.ts");
+      await reviewed.harness.dispose();
+
+      const stopped = await run(true);
+      expect(stopped.sends).toHaveLength(0);
+      expect(await lastReportOutcome(stopped)).toBe("stopped");
+      await stopped.harness.dispose();
     });
 
     it("defers the follow-up behind a child still running past the cap", async () => {
@@ -2217,6 +2416,9 @@ describe("auto-review plugin", () => {
       expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 130 });
       expect(host.metadata.userTurnAuthored).toBe(true);
       expect(host.metadata.phase).toBe("awaiting-review");
+      // The turn was found, so it is handled; the floor stays unset.
+      expect(host.metadata.handledTurnEndSeq).toBe(140);
+      expect(host.metadata.userStopFloorSeq).toBeUndefined();
       await host.harness.dispose();
     });
 
@@ -2227,6 +2429,7 @@ describe("auto-review plugin", () => {
       await holdTurn(host, wakeUp(120, { unlogged: true }), ["src/user.ts"]);
       expect(warned(host, "could not read whether the turn that ended")).toBe(true);
       expect(host.metadata.userTurnAuthored).toBe(true);
+      expect(host.metadata.handledTurnEndSeq).toBe(140);
       await host.harness.dispose();
     });
 
@@ -2240,20 +2443,67 @@ describe("auto-review plugin", () => {
       await host.harness.dispose();
     });
 
-    it("warns and leaves the stop floor unset when the cursor cannot be read, so a stop inside the turn ends the review", async () => {
-      const host = editingHost({ authoredRows: [] });
+    it("keeps the stop floor where it was when the turn cannot be classified, so a stop in the review's own turn still ends the review", async () => {
+      const host = editingHost({ authoredRows: [], turnInputsThrow: true });
       await plugin(host.bb);
       await delivered(host);
-      host.requestTurn(userRequest(120));
-      host.setMaxSeq(130);
+      host.requestTurn({ seq: 110, initiator: "user", text: `${AUTO_REVIEW_MARKER} review the changes` });
+      host.setMaxSeq(110);
       await emitActive(host);
       host.interrupt({ seq: 135, reason: "manual-stop" });
-      host.failTimelineRead(1);
+      host.setMaxSeq(140);
       await emitIdle(host);
-      expect(warned(host, "could not capture a timeline cursor for the stop floor")).toBe(true);
+      expect(warned(host, "could not read whether the turn that ended")).toBe(true);
       expect(host.metadata.userStopFloorSeq).toBeUndefined();
       expect(host.metadata.phase).toBe("idle");
       expect(await lastReportOutcome(host)).toBe("stopped");
+      expect(host.sends).toHaveLength(0);
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "user-stopped" });
+      await host.harness.dispose();
+    });
+
+    it("reads the turn that ended from its turn/completed, not from a turn already drained behind it", async () => {
+      // A user turn that changed files, with a queued wake-up already running when its idle is handled.
+      const userFirst = async (stopInWakeUp: boolean) => {
+        const host = editingHost();
+        await plugin(host.bb);
+        await delivered(host);
+        host.requestTurn(wakeUp(125, { queued: true }));
+        host.setEnvThreads(runningChild);
+        if (stopInWakeUp) {
+          host.interrupt({ seq: 155, reason: "manual-stop" });
+        }
+        await holdTurn(host, userRequest(120), ["src/user.ts"], () => {
+          host.startQueuedTurn(125, 150, true);
+        });
+        return host;
+      };
+
+      const kept = await userFirst(false);
+      expect(kept.metadata.userTurnAuthored).toBe(true);
+      expect(kept.metadata.userStopFloorSeq).toBe(140);
+      expect(kept.metadata.phase).toBe("awaiting-review");
+      await kept.harness.dispose();
+
+      // A stop pressed in the drained wake-up is after the user turn's end, so it is not swallowed.
+      const stopped = await userFirst(true);
+      expect(stopped.metadata.phase).toBe("idle");
+      expect(await lastReportOutcome(stopped)).toBe("stopped");
+      expect(stopped.sends).toHaveLength(0);
+      await stopped.harness.dispose();
+    });
+
+    it("does not read a wake-up as the user's turn because a user message was drained behind it", async () => {
+      const host = editingHost({ envThreads: idleChild });
+      await plugin(host.bb);
+      await delivered(host);
+      host.requestTurn(userRequest(125, { queued: true }));
+      await holdTurn(host, wakeUp(110), ["src/fix.ts"], () => {
+        host.startQueuedTurn(125, 150, true);
+      });
+      expect(host.metadata.userTurnStart).toBeUndefined();
+      expect(host.metadata.phase).toBe("idle");
+      expect(host.sends).toHaveLength(0);
       await host.harness.dispose();
     });
 
@@ -3849,7 +4099,7 @@ describe("auto-review plugin", () => {
     });
 
     it("approves a review delivered straight into the turn only with evidence", async () => {
-      const withEvidence = await hostWith({ sendDelivery: "sent" });
+      const withEvidence = await hostWith({ sendDelivery: "sent", sentTurnsKeepRunning: true });
       await emitPlan(withEvidence);
       expect(withEvidence.metadata.planReviewEntryId).toBeUndefined();
       expect(withEvidence.metadata.planReviewDeliveredSeq).toBe(100);
@@ -3858,7 +4108,7 @@ describe("auto-review plugin", () => {
       expect(withEvidence.resolutions).toEqual([DENY, APPROVE]);
       await withEvidence.harness.dispose();
 
-      const withoutEvidence = await hostWith({ sendDelivery: "sent" });
+      const withoutEvidence = await hostWith({ sendDelivery: "sent", sentTurnsKeepRunning: true });
       await emitPlan(withoutEvidence);
       await emitPlan(withoutEvidence, planInteraction("# Plan v2", "pint-2"));
       expect(withoutEvidence.resolutions).toEqual([DENY]);
@@ -5559,6 +5809,17 @@ describe("auto-review plugin: one code review per user message", () => {
     await emitActive(host);
     await emitIdle(host);
     expect(host.metadata.phase).toBe("awaiting-review");
+    // The review turn ends with a reviewer still running; the user's turn then ends the hold.
+    host.setEnvThreads([
+      { id: THREAD_ID, status: "idle" },
+      { id: "child-1", status: "active", parentThreadId: THREAD_ID },
+    ]);
+    await emitIdle(host);
+    expect(host.metadata.phase).toBe("awaiting-review");
+    host.setEnvThreads([
+      { id: THREAD_ID, status: "idle" },
+      { id: "child-1", status: "idle", parentThreadId: THREAD_ID },
+    ]);
     host.requestTurn({ seq: 120, initiator: "user", text: "also do b" });
     host.setMaxSeq(130);
     await emitActive(host);

@@ -95,6 +95,13 @@ export const threadStateSchema = z.object({
    */
   userStopFloorSeq: z.number().int().nonnegative().optional(),
   /**
+   * The `turn/completed` seq of the latest turn a hold idle classified. A hold
+   * idle classifies every turn that completed after it, oldest first, so when
+   * core drained several turns before an idle was handled each is still read,
+   * and an idle with none left is a surplus one.
+   */
+  handledTurnEndSeq: z.number().int().nonnegative().optional(),
+  /**
    * The timeline cursor when the last code review was sent. No further code
    * review fires until the user sends a turn of their own after it. Durable:
    * not a latch key, so an idle reset keeps it; only `bb auto-review reset` clears it.
@@ -228,6 +235,7 @@ export const LATCH_KEYS: readonly string[] = [
   "userTurnStart",
   "userTurnAuthored",
   "userStopFloorSeq",
+  "handledTurnEndSeq",
 ];
 
 /** Native plan-gate keys, cleared together whenever that gate disarms. */

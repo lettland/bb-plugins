@@ -179,14 +179,15 @@ function reviewStep(mode: ReviewMode, committedSince: string | null, aislopScan:
  * says what that later review does with it.
  */
 function reviewerMessageRules(decision: Decision, scope: ScopeRendering): string {
+  const stopButton = " — unless the review or that turn is stopped with the stop button —";
   const commitClause = isNoCommit(decision, scope)
     ? decision.commit
-      ? "reviews it after this review but does not commit it, as this review's own file list is too long to commit automatically"
-      : "reviews it after this review but does not commit it, as this project's auto-review policy leaves reviewed changes uncommitted"
-    : "reviews it after this review and commits it then, as this project's auto-review policy commits";
+      ? `reviews it after this review${stopButton} but does not commit it, as this review's own file list is too long to commit automatically`
+      : `reviews it after this review${stopButton} but does not commit it, as this project's auto-review policy leaves reviewed changes uncommitted`
+    : `reviews it after this review${stopButton} and commits it then, as this project's auto-review policy commits`;
   const merge = decision.commit && decision.merge ? " While that work is uncommitted in the tree, skip the merge step and say why." : "";
   return [
-    "If the user asks you to stop the review, call the ReportReview tool with outcome `blocked`, a summary that starts with exactly `Stopped by the user.`, and the findings so far, tell the user that work from their own messages during the review, if it changed files, is still reviewed once any child threads of theirs finish unless they pressed stop during it, then end your turn.",
+    "If the user asks you to stop the review, call the ReportReview tool with outcome `blocked`, a summary that starts with exactly `Stopped by the user.`, and the findings so far, tell the user that work from their own messages during the review, if it changed files, is still reviewed once any child threads of theirs finish, unless the review or that turn is stopped with the stop button, then end your turn.",
     "A user message that directs this review (for example \"skip C2\" or \"also fix X\") is part of the review: a finding the user tells you to skip is reported `open` with the reason \"skipped at the user's request\", never dropped silently.",
     `Any other task in a user message is not part of this review, and it is not the work this thread set out to do in the step that judges that: while the review is open, do not commit that task's work, even under a standing instruction to commit as you go. If the message itself asks for a commit, tell the user that auto-review ${commitClause}. auto-review reviews that work separately once this review ends. If that work edited a file on the list above, leave that file uncommitted, including this review's own fixes to it, which wait for that review, and say so in the ReportReview summary.${merge}`,
   ].join(" ");
