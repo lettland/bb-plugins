@@ -41,44 +41,60 @@ export interface TrackerDeps {
 
 type Timer = ReturnType<typeof setInterval>;
 
-export function createTracker(deps: TrackerDeps) {
-  const { sdk, runner, log } = deps;
-  const throttle = new Throttle();
-  const branches = new TtlCache<string | null>(BRANCH_TTL_MS);
+/**
+ * Methods must be called on the instance, not detached: they read its fields
+ * through `this`.
+ */
+export class Tracker {
+  private readonly sdk: TrackerSdk;
+  private readonly runner: Runner;
+  private readonly log: PluginLogger;
+  private readonly settings: TrackerDeps["settings"];
+  private readonly plugin: TrackerDeps["plugin"];
+  private readonly sync: ReturnType<typeof createSyncScheduler>;
+  private readonly throttle = new Throttle();
+  private readonly branches = new TtlCache<string | null>(BRANCH_TTL_MS);
   // Thread id -> its agent-time interval. The registered timer is the only
   // record that a thread is being timed.
-  const timers = new Map<string, Timer>();
+  private readonly timers = new Map<string, Timer>();
   // Thread id -> token of the in-flight `experimental_thread.events`
   // confirmation. A stop event deletes it, which voids the confirmation.
-  const confirming = new Map<string, symbol>();
+  private readonly confirming = new Map<string, symbol>();
   // Threads known not to be timed (tracking off, project excluded, no context),
   // so a stream of events payloads does not re-read them. Cleared per thread on
   // activation and stop, and wholesale when settings change.
-  const notTimed = new Set<string>();
+  private readonly notTimed = new Set<string>();
   // Bumped when settings change, so a read that was already in flight cannot
   // mark a thread from the old settings.
-  let settingsGeneration = 0;
-  let checkedExcludes: string | null = null;
-  let disposed = false;
+  private settingsGeneration = 0;
+  private checkedExcludes: string | null = null;
+  private disposed = false;
 
-  const sync = createSyncScheduler(async () => {
-    const settings = await deps.settings.get();
-    if (!settings.syncAiActivity) return;
-    await runner.submit({
-      key: "sync",
-      kind: "sync",
-      cliPath: settings.cliPath,
-      args: ["--sync-ai-activity"],
-      timeoutMs: SYNC_TIMEOUT_MS,
+  constructor(deps: TrackerDeps) {
+    this.sdk = deps.sdk;
+    this.runner = deps.runner;
+    this.log = deps.log;
+    this.settings = deps.settings;
+    this.plugin = deps.plugin;
+    this.sync = createSyncScheduler(async () => {
+      const settings = await this.settings.get();
+      if (!settings.syncAiActivity) return;
+      await this.runner.submit({
+        key: "sync",
+        kind: "sync",
+        cliPath: settings.cliPath,
+        args: ["--sync-ai-activity"],
+        timeoutMs: SYNC_TIMEOUT_MS,
+      });
     });
-  });
+  }
 
-  function excluded(settings: WakatimeSettings, project: ProjectLike | null): boolean {
+  private excluded(settings: WakatimeSettings, project: ProjectLike | null): boolean {
     return project !== null && isExcluded(parseExcludeList(settings.excludeProjects), project);
   }
 
   /** Queue one heartbeat unless the throttle holds it back. `bypass` skips the throttle. */
-  function emit(
+  private emit(
     settings: WakatimeSettings,
     ctx: ResolvedContext,
     key: string,
@@ -88,12 +104,12 @@ export function createTracker(deps: TrackerDeps) {
     const entity = entityFor(ctx.thread, entityModeOf(settings.entity));
     const project = ctx.project?.name;
     const timeMs = Date.now();
-    if (!throttle.allow({ key, category }, entity, project, timeMs, bypass)) return false;
+    if (!this.throttle.allow({ key, category }, entity, project, timeMs, bypass)) return false;
     const args = buildArgv(
       { entity, project, branch: ctx.branch ?? undefined, category, timeMs },
-      deps.plugin(),
+      this.plugin(),
     );
-    void runner.submit({
+    void this.runner.submit({
       key: `heartbeat:${key}`,
       kind: "heartbeat",
       cliPath: settings.cliPath,
@@ -103,19 +119,19 @@ export function createTracker(deps: TrackerDeps) {
     return true;
   }
 
-  async function userHeartbeat(ids: { projectId?: string; threadId?: string }): Promise<boolean> {
-    const settings = await deps.settings.get();
+  async userHeartbeat(ids: { projectId?: string; threadId?: string }): Promise<boolean> {
+    const settings = await this.settings.get();
     if (!settings.trackUserActivity) return false;
-    const ctx = await resolveContext(sdk, branches, ids);
-    if (ctx === null || excluded(settings, ctx.project)) return false;
-    return emit(settings, ctx, USER_KEY, settings.userCategory, false);
+    const ctx = await resolveContext(this.sdk, this.branches, ids);
+    if (ctx === null || this.excluded(settings, ctx.project)) return false;
+    return this.emit(settings, ctx, USER_KEY, settings.userCategory, false);
   }
 
-  function release(id: string, own: Timer): void {
-    if (timers.get(id) !== own) return;
+  private release(id: string, own: Timer): void {
+    if (this.timers.get(id) !== own) return;
     clearInterval(own);
-    timers.delete(id);
-    throttle.forget(id);
+    this.timers.delete(id);
+    this.throttle.forget(id);
   }
 
   /**
@@ -124,19 +140,19 @@ export function createTracker(deps: TrackerDeps) {
    * `generation` was read. Anything else, such as an unresolved context, only
    * releases: the next payload may succeed.
    */
-  function skip(id: string, own: Timer, generation: number): void {
-    if (timers.get(id) !== own) return;
-    release(id, own);
-    if (generation === settingsGeneration) notTimed.add(id);
+  private skip(id: string, own: Timer, generation: number): void {
+    if (this.timers.get(id) !== own) return;
+    this.release(id, own);
+    if (generation === this.settingsGeneration) this.notTimed.add(id);
   }
 
-  function stopLocal(id: string): void {
-    notTimed.delete(id);
-    const timer = timers.get(id);
+  private stopLocal(id: string): void {
+    this.notTimed.delete(id);
+    const timer = this.timers.get(id);
     if (timer !== undefined) clearInterval(timer);
-    timers.delete(id);
-    confirming.delete(id);
-    throttle.forget(id);
+    this.timers.delete(id);
+    this.confirming.delete(id);
+    this.throttle.forget(id);
   }
 
   /**
@@ -145,165 +161,165 @@ export function createTracker(deps: TrackerDeps) {
    * timer) and `valid()` holds. A thread that is no longer active, or whose
    * read fails, clears `expected`.
    */
-  async function confirmActive(
+  private async confirmActive(
     id: string,
     expected: Timer | undefined,
     valid: () => boolean,
   ): Promise<ThreadLike | null> {
     let thread: ThreadLike | null = null;
     try {
-      thread = await sdk.threads.get({ threadId: id });
+      thread = await this.sdk.threads.get({ threadId: id });
     } catch {
       thread = null;
     }
-    if (!valid() || timers.get(id) !== expected) return null;
+    if (!valid() || this.timers.get(id) !== expected) return null;
     if (thread === null || thread.status !== "active") {
-      if (expected !== undefined) release(id, expected);
+      if (expected !== undefined) this.release(id, expected);
       return null;
     }
     return thread;
   }
 
-  async function beginAgentTime(thread: ThreadLike, own: Timer): Promise<void> {
-    const generation = settingsGeneration;
+  private async beginAgentTime(thread: ThreadLike, own: Timer): Promise<void> {
+    const generation = this.settingsGeneration;
     try {
-      const settings = await deps.settings.get();
-      if (!settings.trackAgentActivity) return skip(thread.id, own, generation);
-      const ctx = await resolveContext(sdk, branches, { threadId: thread.id }, thread);
-      if (ctx === null) return release(thread.id, own);
-      if (excluded(settings, ctx.project)) return skip(thread.id, own, generation);
+      const settings = await this.settings.get();
+      if (!settings.trackAgentActivity) return this.skip(thread.id, own, generation);
+      const ctx = await resolveContext(this.sdk, this.branches, { threadId: thread.id }, thread);
+      if (ctx === null) return this.release(thread.id, own);
+      if (this.excluded(settings, ctx.project)) return this.skip(thread.id, own, generation);
       // An idle that landed during the awaits already cleared this timer.
-      if (timers.get(thread.id) !== own) return;
-      emit(settings, ctx, thread.id, settings.agentCategory, false);
+      if (this.timers.get(thread.id) !== own) return;
+      this.emit(settings, ctx, thread.id, settings.agentCategory, false);
     } catch {
-      release(thread.id, own);
+      this.release(thread.id, own);
     }
   }
 
-  async function tick(id: string, own: Timer): Promise<void> {
+  private async tick(id: string, own: Timer): Promise<void> {
     try {
-      const thread = await confirmActive(id, own, () => true);
+      const thread = await this.confirmActive(id, own, () => true);
       if (thread === null) return;
-      const generation = settingsGeneration;
-      const settings = await deps.settings.get();
-      if (!settings.trackAgentActivity) return skip(id, own, generation);
-      const ctx = await resolveContext(sdk, branches, { threadId: id }, thread);
-      if (ctx === null) return release(id, own);
-      if (excluded(settings, ctx.project)) return skip(id, own, generation);
-      if (timers.get(id) !== own) return;
+      const generation = this.settingsGeneration;
+      const settings = await this.settings.get();
+      if (!settings.trackAgentActivity) return this.skip(id, own, generation);
+      const ctx = await resolveContext(this.sdk, this.branches, { threadId: id }, thread);
+      if (ctx === null) return this.release(id, own);
+      if (this.excluded(settings, ctx.project)) return this.skip(id, own, generation);
+      if (this.timers.get(id) !== own) return;
       // Already paced at the throttle window, so a tick that fires a
       // millisecond early must not be dropped.
-      emit(settings, ctx, id, settings.agentCategory, true);
+      this.emit(settings, ctx, id, settings.agentCategory, true);
     } catch {
-      release(id, own);
+      this.release(id, own);
     }
   }
 
-  function startTimer(thread: ThreadLike): void {
-    if (disposed || timers.has(thread.id)) return;
+  private startTimer(thread: ThreadLike): void {
+    if (this.disposed || this.timers.has(thread.id)) return;
     // Registered before any await so a racing start or events payload sees it.
-    const own: Timer = setInterval(() => void tick(thread.id, own), AGENT_TICK_MS);
-    timers.set(thread.id, own);
-    void beginAgentTime(thread, own);
+    const own: Timer = setInterval(() => void this.tick(thread.id, own), AGENT_TICK_MS);
+    this.timers.set(thread.id, own);
+    void this.beginAgentTime(thread, own);
   }
 
-  async function stop(thread: ThreadLike): Promise<void> {
-    stopLocal(thread.id);
+  private async stop(thread: ThreadLike): Promise<void> {
+    this.stopLocal(thread.id);
     try {
-      const settings = await deps.settings.get();
-      const ctx = await resolveContext(sdk, branches, { threadId: thread.id }, thread);
-      if (disposed || ctx === null || excluded(settings, ctx.project)) return;
-      if (settings.trackAgentActivity) emit(settings, ctx, thread.id, settings.agentCategory, true);
-      if (settings.syncAiActivity) sync.request();
+      const settings = await this.settings.get();
+      const ctx = await resolveContext(this.sdk, this.branches, { threadId: thread.id }, thread);
+      if (this.disposed || ctx === null || this.excluded(settings, ctx.project)) return;
+      if (settings.trackAgentActivity) this.emit(settings, ctx, thread.id, settings.agentCategory, true);
+      if (settings.syncAiActivity) this.sync.request();
     } catch (error) {
-      log.warn(`could not finish thread time: ${error instanceof Error ? error.name : "error"}`);
+      this.log.warn(`could not finish thread time: ${error instanceof Error ? error.name : "error"}`);
     }
   }
 
-  async function adopt(thread: ThreadLike): Promise<void> {
+  private async adopt(thread: ThreadLike): Promise<void> {
     if (
-      disposed ||
+      this.disposed ||
       thread.status !== "active" ||
-      timers.has(thread.id) ||
-      confirming.has(thread.id) ||
-      notTimed.has(thread.id)
+      this.timers.has(thread.id) ||
+      this.confirming.has(thread.id) ||
+      this.notTimed.has(thread.id)
     ) {
       return;
     }
     const token = Symbol(thread.id);
-    confirming.set(thread.id, token);
-    const isCurrent = () => confirming.get(thread.id) === token;
-    const generation = settingsGeneration;
+    this.confirming.set(thread.id, token);
+    const isCurrent = () => this.confirming.get(thread.id) === token;
+    const generation = this.settingsGeneration;
     try {
       // Payloads keep coming while a thread runs; skip the live read when nothing would be timed.
-      const settings = await deps.settings.get();
+      const settings = await this.settings.get();
       if (!settings.trackAgentActivity || parseExcludeList(settings.excludeProjects).includes(thread.projectId)) {
-        if (isCurrent() && generation === settingsGeneration) notTimed.add(thread.id);
+        if (isCurrent() && generation === this.settingsGeneration) this.notTimed.add(thread.id);
         return;
       }
-      const live = await confirmActive(thread.id, undefined, isCurrent);
-      if (live !== null && isCurrent()) startTimer(live);
+      const live = await this.confirmActive(thread.id, undefined, isCurrent);
+      if (live !== null && isCurrent()) this.startTimer(live);
     } catch {
       // A settings read that fails is retried by the next payload.
     } finally {
-      if (isCurrent()) confirming.delete(thread.id);
+      if (isCurrent()) this.confirming.delete(thread.id);
     }
   }
 
   /** Threads running now, each confirmed active, get a timer; used at startup. */
-  async function reconcile(): Promise<void> {
+  async reconcile(): Promise<void> {
     try {
-      const running = await sdk.threads.listRunning();
+      const running = await this.sdk.threads.listRunning();
       await Promise.all(
         running.map(async ({ id }) => {
           try {
-            const thread = await sdk.threads.get({ threadId: id });
-            if (thread.status === "active") startTimer(thread);
+            const thread = await this.sdk.threads.get({ threadId: id });
+            if (thread.status === "active") this.startTimer(thread);
           } catch {
             // A thread that vanished between the two calls is not running.
           }
         }),
       );
     } catch (error) {
-      log.warn(`could not list running threads: ${error instanceof Error ? error.name : "error"}`);
+      this.log.warn(`could not list running threads: ${error instanceof Error ? error.name : "error"}`);
     }
   }
 
-  async function unmatchedExcludes(settings: WakatimeSettings): Promise<string[]> {
+  private async unmatchedExcludes(settings: WakatimeSettings): Promise<string[]> {
     const entries = parseExcludeList(settings.excludeProjects);
     if (entries.length === 0) return [];
-    return unmatchedEntries(entries, await sdk.projects.list({ includePersonal: true }));
+    return unmatchedEntries(entries, await this.sdk.projects.list({ includePersonal: true }));
   }
 
   /** Warn once per distinct `excludeProjects` value, by entry position only. */
-  async function checkExcludes(): Promise<void> {
+  async checkExcludes(): Promise<void> {
     try {
-      const settings = await deps.settings.get();
-      if (settings.excludeProjects === checkedExcludes) return;
-      checkedExcludes = settings.excludeProjects;
-      const unmatched = await unmatchedExcludes(settings);
+      const settings = await this.settings.get();
+      if (settings.excludeProjects === this.checkedExcludes) return;
+      this.checkedExcludes = settings.excludeProjects;
+      const unmatched = await this.unmatchedExcludes(settings);
       parseExcludeList(settings.excludeProjects).forEach((entry, index) => {
-        if (unmatched.includes(entry)) log.warn(`excludeProjects entry #${index + 1} matches no project`);
+        if (unmatched.includes(entry)) this.log.warn(`excludeProjects entry #${index + 1} matches no project`);
       });
     } catch {
-      checkedExcludes = null;
+      this.checkedExcludes = null;
     }
   }
 
   /** Settings changed: a thread skipped under the old ones may now be timed. */
-  function onSettingsChanged(): void {
-    settingsGeneration += 1;
-    notTimed.clear();
+  onSettingsChanged(): void {
+    this.settingsGeneration += 1;
+    this.notTimed.clear();
   }
 
-  async function status(): Promise<WakatimeStatus> {
-    const settings = await deps.settings.get();
+  async status(): Promise<WakatimeStatus> {
+    const settings = await this.settings.get();
     // Check the path in the setting now, so the error shown is about it and not an older path.
-    await runner.verify(settings.cliPath);
-    const health = runner.health();
+    await this.runner.verify(settings.cliPath);
+    const health = this.runner.health();
     let unmatched: string[] = [];
     try {
-      unmatched = await unmatchedExcludes(settings);
+      unmatched = await this.unmatchedExcludes(settings);
     } catch {
       // The status page still shows the rest.
     }
@@ -316,40 +332,46 @@ export function createTracker(deps: TrackerDeps) {
     };
   }
 
-  function dispose(): void {
-    disposed = true;
-    for (const timer of timers.values()) clearInterval(timer);
-    timers.clear();
-    confirming.clear();
-    notTimed.clear();
-    throttle.clear();
-    branches.clear();
-    sync.dispose();
+  dispose(): void {
+    this.disposed = true;
+    for (const timer of this.timers.values()) clearInterval(timer);
+    this.timers.clear();
+    this.confirming.clear();
+    this.notTimed.clear();
+    this.throttle.clear();
+    this.branches.clear();
+    this.sync.dispose();
   }
 
-  return {
-    userHeartbeat,
-    status,
-    checkExcludes,
-    reconcile,
-    dispose,
-    onActive(thread: ThreadLike) {
-      notTimed.delete(thread.id);
-      startTimer(thread);
-    },
-    onSettingsChanged,
-    onStop: stop,
-    onEvents: (payload: { thread: ThreadLike }) => void adopt(payload.thread),
-    onGone: stopLocal,
-    /** Test hooks: sizes of the per-thread state. */
-    stateSize: () => ({
-      timers: timers.size,
-      confirming: confirming.size,
-      notTimed: notTimed.size,
-      throttle: throttle.size,
-      branches: branches.size,
-    }),
-  };
+  onActive(thread: ThreadLike): void {
+    this.notTimed.delete(thread.id);
+    this.startTimer(thread);
+  }
+
+  onStop(thread: ThreadLike): Promise<void> {
+    return this.stop(thread);
+  }
+
+  onEvents(payload: { thread: ThreadLike }): void {
+    void this.adopt(payload.thread);
+  }
+
+  onGone(id: string): void {
+    this.stopLocal(id);
+  }
+
+  /** Test hooks: sizes of the per-thread state. */
+  stateSize() {
+    return {
+      timers: this.timers.size,
+      confirming: this.confirming.size,
+      notTimed: this.notTimed.size,
+      throttle: this.throttle.size,
+      branches: this.branches.size,
+    };
+  }
 }
 
-export type Tracker = ReturnType<typeof createTracker>;
+export function createTracker(deps: TrackerDeps) {
+  return new Tracker(deps);
+}

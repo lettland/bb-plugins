@@ -125,131 +125,145 @@ interface Entry {
   resolve: (outcome: JobOutcome) => void;
 }
 
-export function createRunner(options: { exec?: Exec; log: PluginLogger }): Runner {
-  const exec = options.exec ?? defaultExec;
-  const { log } = options;
-  const queue: Entry[] = [];
-  const inFlightKeys = new Set<string>();
-  const lastLoggedAt = new Map<ErrorKind, number>();
-  const warnedPaths = new Set<string>();
-  const state: RunnerHealth = { lastHeartbeatAt: null, lastSyncAt: null, lastError: null };
+export class CliRunner implements Runner {
+  private readonly exec: Exec;
+  private readonly log: PluginLogger;
+  private readonly queue: Entry[] = [];
+  private readonly inFlightKeys = new Set<string>();
+  private readonly lastLoggedAt = new Map<ErrorKind, number>();
+  private readonly warnedPaths = new Set<string>();
+  private readonly state: RunnerHealth = { lastHeartbeatAt: null, lastSyncAt: null, lastError: null };
   // The last path that passed the check; cleared by a spawn error so it is re-checked.
-  let verifiedPath: string | null = null;
+  private verifiedPath: string | null = null;
   // The last path reported as usable, to log a change once.
-  let reportedPath: string | null = null;
-  let running = 0;
-  let disposed = false;
+  private reportedPath: string | null = null;
+  private running = 0;
+  private disposed = false;
 
-  async function ensureUsable(
+  constructor(options: { exec?: Exec; log: PluginLogger }) {
+    this.exec = options.exec ?? defaultExec;
+    this.log = options.log;
+  }
+
+  private async ensureUsable(
     file: string,
     job: Pick<Job, "cliPath" | "kind">,
     recheck = false,
   ): Promise<boolean> {
-    if (!recheck && verifiedPath === file) return true;
+    if (!recheck && this.verifiedPath === file) return true;
     const problem = await checkCli(file);
     if (problem === null) {
-      verifiedPath = file;
-      warnedPaths.delete(file);
+      this.verifiedPath = file;
+      this.warnedPaths.delete(file);
       // Only a path-check error: one from a real spawn failure (no `problem`)
       // stays until a job succeeds.
-      if (state.lastError?.kind === "missing-cli" && state.lastError.problem !== undefined) state.lastError = null;
-      if (reportedPath !== null && reportedPath !== file) {
-        log.info(`wakatime-cli path changed to ${job.cliPath.trim()}`);
+      if (this.state.lastError?.kind === "missing-cli" && this.state.lastError.problem !== undefined) {
+        this.state.lastError = null;
       }
-      reportedPath = file;
+      if (this.reportedPath !== null && this.reportedPath !== file) {
+        this.log.info(`wakatime-cli path changed to ${job.cliPath.trim()}`);
+      }
+      this.reportedPath = file;
       return true;
     }
-    verifiedPath = null;
+    this.verifiedPath = null;
     // The same problem again keeps its job and time, so reading the status does not move them.
-    const last = state.lastError;
+    const last = this.state.lastError;
     if (last?.kind !== "missing-cli" || last.problem !== problem) {
-      state.lastError = { kind: "missing-cli", job: job.kind, exitCode: null, at: Date.now(), problem };
+      this.state.lastError = { kind: "missing-cli", job: job.kind, exitCode: null, at: Date.now(), problem };
     }
-    if (!warnedPaths.has(file)) {
-      warnedPaths.add(file);
-      log.warn(
+    if (!this.warnedPaths.has(file)) {
+      this.warnedPaths.add(file);
+      this.log.warn(
         `wakatime-cli is not usable at ${job.cliPath.trim()} (${problem}); heartbeats are skipped until it is`,
       );
     }
     return false;
   }
 
-  function recordFailure(job: Job, kind: ErrorKind, exitCode: number | null): void {
+  private recordFailure(job: Job, kind: ErrorKind, exitCode: number | null): void {
     const now = Date.now();
-    state.lastError = { kind, job: job.kind, exitCode, at: now };
-    const last = lastLoggedAt.get(kind);
+    this.state.lastError = { kind, job: job.kind, exitCode, at: now };
+    const last = this.lastLoggedAt.get(kind);
     if (last !== undefined && now - last < FAILURE_LOG_INTERVAL_MS) return;
-    lastLoggedAt.set(kind, now);
-    log.warn(`wakatime-cli failed: kind=${kind} exit=${exitCode ?? "none"}; see ~/.wakatime/wakatime.log`);
+    this.lastLoggedAt.set(kind, now);
+    this.log.warn(`wakatime-cli failed: kind=${kind} exit=${exitCode ?? "none"}; see ~/.wakatime/wakatime.log`);
   }
 
-  async function execute(job: Job): Promise<JobOutcome> {
+  private async execute(job: Job): Promise<JobOutcome> {
     const file = expandHome(job.cliPath);
-    if (!(await ensureUsable(file, job))) return "skipped";
+    if (!(await this.ensureUsable(file, job))) return "skipped";
     let result: ExecResult;
     try {
-      result = await exec(file, job.args, { timeoutMs: job.timeoutMs });
+      result = await this.exec(file, job.args, { timeoutMs: job.timeoutMs });
     } catch {
       result = { exitCode: null, signal: null, spawnError: "EXEC_FAILED" };
     }
     if (result.spawnError === null && result.signal === null && result.exitCode === 0) {
-      if (job.kind === "sync") state.lastSyncAt = Date.now();
-      else state.lastHeartbeatAt = Date.now();
-      lastLoggedAt.clear();
+      if (job.kind === "sync") this.state.lastSyncAt = Date.now();
+      else this.state.lastHeartbeatAt = Date.now();
+      this.lastLoggedAt.clear();
       return "ok";
     }
     const kind = classify(result);
-    if (kind === "missing-cli") verifiedPath = null;
-    recordFailure(job, kind, result.exitCode);
+    if (kind === "missing-cli") this.verifiedPath = null;
+    this.recordFailure(job, kind, result.exitCode);
     return "failed";
   }
 
-  function pump(): void {
+  private pump(): void {
     let index = 0;
-    while (index < queue.length && running < MAX_CONCURRENT) {
-      const entry = queue[index]!;
-      if (inFlightKeys.has(entry.job.key)) {
+    while (index < this.queue.length && this.running < MAX_CONCURRENT) {
+      const entry = this.queue[index]!;
+      if (this.inFlightKeys.has(entry.job.key)) {
         index += 1;
         continue;
       }
-      queue.splice(index, 1);
-      running += 1;
-      inFlightKeys.add(entry.job.key);
-      void execute(entry.job)
+      this.queue.splice(index, 1);
+      this.running += 1;
+      this.inFlightKeys.add(entry.job.key);
+      void this.execute(entry.job)
         .catch((): JobOutcome => "failed")
         .then((outcome) => {
-          running -= 1;
-          inFlightKeys.delete(entry.job.key);
+          this.running -= 1;
+          this.inFlightKeys.delete(entry.job.key);
           entry.resolve(outcome);
-          pump();
+          this.pump();
         });
     }
   }
 
-  return {
-    submit(job) {
-      if (disposed) return Promise.resolve("skipped");
-      const waiting = queue.find((entry) => entry.job.key === job.key);
-      if (waiting !== undefined) {
-        // Replace in place so the key keeps its queue position.
-        waiting.resolve("superseded");
-        waiting.job = job;
-        return new Promise((resolve) => {
-          waiting.resolve = resolve;
-        });
-      }
+  submit(job: Job): Promise<JobOutcome> {
+    if (this.disposed) return Promise.resolve("skipped");
+    const waiting = this.queue.find((entry) => entry.job.key === job.key);
+    if (waiting !== undefined) {
+      // Replace in place so the key keeps its queue position.
+      waiting.resolve("superseded");
+      waiting.job = job;
       return new Promise((resolve) => {
-        queue.push({ job, resolve });
-        pump();
+        waiting.resolve = resolve;
       });
-    },
-    async verify(cliPath) {
-      await ensureUsable(expandHome(cliPath), { cliPath, kind: "heartbeat" }, true);
-    },
-    health: () => ({ ...state }),
-    dispose() {
-      disposed = true;
-      for (const entry of queue.splice(0)) entry.resolve("skipped");
-    },
-  };
+    }
+    return new Promise((resolve) => {
+      this.queue.push({ job, resolve });
+      this.pump();
+    });
+  }
+
+  async verify(cliPath: string): Promise<void> {
+    await this.ensureUsable(expandHome(cliPath), { cliPath, kind: "heartbeat" }, true);
+  }
+
+  health(): RunnerHealth {
+    return { ...this.state };
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    for (const entry of this.queue.splice(0)) entry.resolve("skipped");
+  }
+}
+
+export function createRunner(options: { exec?: Exec; log: PluginLogger }): Runner {
+  return new CliRunner(options);
 }
