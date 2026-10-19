@@ -781,6 +781,7 @@ describe("auto-review cli: status", () => {
           planGate: false,
           phase: "idle",
           deferredSince: null,
+          lastParkedAt: null,
           heldBy: null,
           lastFire: null,
           reviewResult: { status: "none", at: null, summary: null },
@@ -922,11 +923,42 @@ describe("auto-review cli: status", () => {
       Object.assign(host.metadataFor(THREAD_ID), { phase: "deferred", deferredSince });
       const text = await host.run(["status", THREAD_ID]);
       expect(text.stdout).toContain("phase: deferred\ndeferred for: 7 min — ");
-      expect(text.stdout).toContain("It fires automatically as soon as that review ends.");
+      expect(text.stdout).toContain(
+        "It fires when that review ends, unless 30 minutes have passed since it was last parked or its work is already pushed.",
+      );
       expect(text.stdout).not.toContain("reset");
 
       const payload = await host.run(["status", THREAD_ID, "--json"]);
       expect(parse(payload.stdout)).toMatchObject({ phase: "deferred", deferredSince });
+    });
+  });
+
+  it("shows when a provider park was last parked, whether or not it has a deferral time", async () => {
+    await withHost({}, async (host) => {
+      const startedAt = Date.now() - 12 * 60_000 - 5_000;
+      Object.assign(host.metadataFor(THREAD_ID), { phase: "deferred", lastIdle: { sinceSeq: 1, startedAt } });
+      const text = await host.run(["status", THREAD_ID]);
+      expect(text.stdout).toContain("phase: deferred\nlast parked: 12 min ago (stands down at 30)\nlastFire: never\n");
+
+      const payload = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(payload.stdout)).toMatchObject({ lastParkedAt: startedAt });
+    });
+  });
+
+  it("omits the last parked line for a child-held park and for one with no park time", async () => {
+    await withHost({}, async (host) => {
+      Object.assign(host.metadataFor(THREAD_ID), {
+        phase: "deferred",
+        heldBy: ["child-1"],
+        lastIdle: { sinceSeq: 1, startedAt: Date.now() - 12 * 60_000 },
+      });
+      const held = await host.run(["status", THREAD_ID]);
+      expect(held.stdout).not.toContain("last parked");
+      expect(parse((await host.run(["status", THREAD_ID, "--json"])).stdout)).toMatchObject({ lastParkedAt: null });
+
+      Object.assign(host.metadataFor(THREAD_ID), { heldBy: undefined, lastIdle: { sinceSeq: 1 } });
+      const unstamped = await host.run(["status", THREAD_ID]);
+      expect(unstamped.stdout).not.toContain("last parked");
     });
   });
 

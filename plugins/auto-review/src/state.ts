@@ -18,6 +18,14 @@ export const REVIEW_IN_FLIGHT_PHASES: readonly AutoReviewPhase[] = [
 
 export const STALE_WINDOW_MS = 30 * 60 * 1_000;
 
+/**
+ * How long a released provider park may have waited, measured from its last
+ * park snapshot, before the review is dropped as `stale-park`. Separate from
+ * `STALE_WINDOW_MS` on purpose: that one bounds a review already dispatched,
+ * this one bounds a turn still waiting for its turn in the queue.
+ */
+export const STALE_PARK_MS = 30 * 60 * 1_000;
+
 /** How long a review waiting on its children or their wake-ups may hold the latch before it ends anyway. */
 export const REVIEW_CONTINUATION_CAP_MS = 2 * 60 * 60 * 1_000;
 

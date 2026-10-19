@@ -14,6 +14,7 @@ import {
 } from "./config.js";
 import { setAutoApprove } from "./cli-auto-approve.js";
 import { reviewStatusView, showFindings } from "./cli-findings.js";
+import { lastParkedAtOf, lastParkedLine } from "./cli-park.js";
 import { json } from "./cli-result.js";
 import { removeDeferral } from "./deferrals.js";
 import { isBusyStatus, planGateServes } from "./gate.js";
@@ -103,7 +104,7 @@ function deferredWaitText(heldBy: string[] | undefined): string {
   }
   return (
     "waiting for another auto-review on the same provider to finish.\n" +
-    "  It fires automatically as soon as that review ends.\n"
+    "  It fires when that review ends, unless 30 minutes have passed since it was last parked or its work is already pushed.\n"
   );
 }
 
@@ -349,6 +350,7 @@ export function registerAutoReviewCli(
         const planGate = planGateServes(thread, config);
         const lastFire = await readLastFire(bb, projectId, threadId);
         const review = await reviewStatusView(bb, threadId, state.phase);
+        const lastParkedAt = lastParkedAtOf(state);
         const payload = {
           threadId,
           projectId,
@@ -359,6 +361,7 @@ export function registerAutoReviewCli(
           planGate,
           phase: state.phase,
           deferredSince: state.deferredSince ?? null,
+          lastParkedAt,
           heldBy: state.heldBy ?? null,
           lastFire,
           ...review.fields,
@@ -375,6 +378,7 @@ export function registerAutoReviewCli(
             ? `deferred for: ${Math.floor((Date.now() - state.deferredSince) / 60_000)} min — ` +
               deferredWaitText(state.heldBy)
             : "";
+        const lastParkedText = lastParkedLine(lastParkedAt);
         return {
           exitCode: 0,
           stdout:
@@ -385,6 +389,7 @@ export function registerAutoReviewCli(
             `planGate: ${planGate}\n` +
             `phase: ${state.phase}\n` +
             deferredText +
+            lastParkedText +
             `lastFire: ${lastFireText}\n` +
             review.text,
         };

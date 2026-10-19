@@ -1,6 +1,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { describe, expect, it } from "vitest";
-import { endedTurn, EVENT_PAGE_MAX, NoTurnCompletedError, UnreadTurnError } from "./detect-events.js";
+import { AUTO_REVIEW_MARKER } from "./prompt.js";
+import { endedTurn, EVENT_PAGE_MAX, NoTurnCompletedError, quietSincePark, UnreadTurnError } from "./detect-events.js";
 
 interface Row {
   seq: number;
@@ -116,5 +117,45 @@ describe("endedTurn", () => {
   it("throws when nothing completed since the cursor", async () => {
     const { bb } = threadWith(2);
     await expect(endedTurn(bb, "thr", 100)).rejects.toThrow("no turn completed");
+  });
+});
+
+describe("quietSincePark", () => {
+  const started = (seq: number, turnId: string): Row => ({ seq, type: "turn/started", scope: { kind: "turn", turnId }, data: {} });
+
+  it("is quiet when the thread has no events", async () => {
+    expect(await quietSincePark(logOf([]).bb, "thr", 5)).toBe(true);
+  });
+
+  it("is quiet when the parked turn's own request, start and end are at or before the cursor", async () => {
+    const { bb } = logOf([request(3, "creq-1", "user"), started(4, "turn-1"), completed(5, "turn-1")]);
+    expect(await quietSincePark(bb, "thr", 5)).toBe(true);
+  });
+
+  it.each([
+    ["a wake-up request", [request(6, "creq-2", "system")]],
+    [
+      "a request auto-review sent itself",
+      [{ ...request(6, "creq-2", "user"), data: { ...request(6, "creq-2", "user").data, input: [{ type: "text", text: `${AUTO_REVIEW_MARKER} review` }] } }],
+    ],
+    ["a turn start whose request landed before the cursor", [request(4, "creq-2", "system"), started(6, "turn-2")]],
+    ["a turn end whose request landed before the cursor", [request(4, "creq-2", "system"), completed(6, "turn-2")]],
+  ])("is not quiet after %s", async (_name, rows) => {
+    expect(await quietSincePark(logOf(rows).bb, "thr", 5)).toBe(false);
+  });
+
+  it("is not quiet when the log cannot be read", async () => {
+    const bb = {
+      sdk: {
+        threads: {
+          events: {
+            list: async () => {
+              throw new Error("events unavailable");
+            },
+          },
+        },
+      },
+    } as unknown as BbPluginApi;
+    expect(await quietSincePark(bb, "thr", 5)).toBe(false);
   });
 });

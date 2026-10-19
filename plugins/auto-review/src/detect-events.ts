@@ -236,6 +236,34 @@ export async function firstUserTurnSince(
 }
 
 /**
+ * Whether no turn of any kind ran after the cursor: no request from any
+ * initiator (wake-ups, tells and background-task completions included), and no
+ * turn start or end either, since a request that arrived while the park
+ * snapshot was read can sit before the cursor with its turn after it. A read
+ * failure is not quiet.
+ */
+export async function quietSincePark(
+  bb: BbPluginApi,
+  threadId: string,
+  sinceSeq: number,
+): Promise<boolean> {
+  try {
+    if ((await turnRequestSince(bb, threadId, sinceSeq, () => true)) !== null) {
+      return false;
+    }
+    for (const type of ["turn/started", "turn/completed"] as const) {
+      const { value } = await eventsSince(bb, threadId, sinceSeq, type).next();
+      if (value !== undefined) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The seq of the request that started the turn running now, when that turn is
  * the user's: the latest request after the cursor that is not a steer, the
  * user's own or with a steer of the user's after it. Null when there is no such

@@ -1,0 +1,72 @@
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { describe, expect, it } from "vitest";
+import { branchHeadPushed } from "./detect-commits.js";
+
+const REF = "origin/feature/x";
+
+/** What `status` answers for `origin/<branch>`: HEAD at `head`, with the merge base and the commits ahead as given. */
+const status = (
+  over: Record<string, unknown> = {},
+  checkout: Record<string, unknown> = { kind: "branch", branchName: "feature/x", headSha: "head" },
+) => ({
+  outcome: "available",
+  workspace: {
+    checkout,
+    mergeBase: { files: [], mergeBaseBranch: REF, baseRef: "head", aheadCount: 0, commits: [], ...over },
+  },
+});
+
+async function pushed(answer: () => unknown, expectedHead = "head") {
+  const infos: string[] = [];
+  const bb = {
+    log: { info: (message: string) => infos.push(message) },
+    sdk: { environments: { status: async () => answer() } },
+  } as unknown as BbPluginApi;
+  return { result: await branchHeadPushed(bb, "env", "feature/x", expectedHead), infos };
+}
+
+describe("branchHeadPushed", () => {
+  it("holds when nothing is ahead of the remote branch and HEAD is its merge base", async () => {
+    expect(await pushed(() => status())).toEqual({ result: true, infos: [] });
+  });
+
+  const doubts: Array<[string, () => unknown, string]> = [
+    [
+      "commits are still ahead",
+      () => status({ aheadCount: 2, commits: [{ sha: "a" }, { sha: "b" }] }),
+      "2 commits are still ahead of it",
+    ],
+    [
+      "HEAD is missing from the commits ahead as patch-equivalent while older ones are unpushed",
+      () => status({ aheadCount: 1, commits: [{ sha: "older" }] }),
+      "1 commits are still ahead of it",
+    ],
+    ["HEAD is not the merge base", () => status({ baseRef: "base0" }), "HEAD is not an ancestor of it"],
+    ["the answer is for another ref", () => status({ mergeBaseBranch: "origin/other" }), "the answer was not for that ref"],
+    ["the base ref is null", () => status({ baseRef: null }), "the answer was not for that ref"],
+    [
+      "the checkout moved to another head",
+      () => status({}, { kind: "branch", branchName: "feature/x", headSha: "moved" }),
+      "the checkout moved while the remote base was checked",
+    ],
+    ["the status is unavailable", () => ({ outcome: "unavailable" }), `no ${REF} to compare against`],
+    [
+      "there is no merge base",
+      () => ({ outcome: "available", workspace: { checkout: {}, mergeBase: null } }),
+      `no ${REF} to compare against`,
+    ],
+    [
+      "the status call throws",
+      () => {
+        throw new Error("no ref");
+      },
+      "the status call failed",
+    ],
+  ];
+  it.each(doubts)("is false when %s", async (_name, answer, reason) => {
+    expect(await pushed(answer)).toEqual({
+      result: false,
+      infos: [`auto-review: not treating HEAD as pushed to ${REF}: ${reason}`],
+    });
+  });
+});

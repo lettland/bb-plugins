@@ -35,6 +35,8 @@ export const FIRE_REASONS = [
   "plan-review-unverified",
   "already-reviewed",
   "no-new-work",
+  "stale-park",
+  "already-pushed",
   "commit-plan",
 ] as const;
 export type FireReason = (typeof FIRE_REASONS)[number];

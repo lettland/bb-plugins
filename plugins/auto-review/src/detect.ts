@@ -11,6 +11,7 @@ export {
   NoTurnCompletedError,
   UnreadTurnError,
   firstUserTurnSince,
+  quietSincePark,
   stoppedByUser,
   tryCaptureSinceSeq,
   userTurnRunningSince,
@@ -24,7 +25,7 @@ export {
   MAX_HASHED_FILES,
   snapshotTree,
 } from "./detect-tree.js";
-export { MAX_NEW_COMMITS, turnCommits } from "./detect-commits.js";
+export { branchHeadPushed, MAX_NEW_COMMITS, turnCommits } from "./detect-commits.js";
 export { treeChangedPaths, turnChangedPaths } from "./detect-turn.js";
 export type {
   TreeChanges,

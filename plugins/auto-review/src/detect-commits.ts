@@ -325,6 +325,40 @@ export function remoteRef(base: string): string {
   return base.startsWith("origin/") ? base : `origin/${base}`;
 }
 
+type MergeBase = NonNullable<AvailableWorkspace["mergeBase"]>;
+
+/**
+ * The comparison of the checkout against `ref` that both remote checks need,
+ * trusted only when the ref resolved, the answer was for it, and the checkout
+ * is still at `expectedHead`; otherwise why not. Never logs: each caller words
+ * its own line.
+ */
+async function readRemoteComparison(
+  bb: BbPluginApi,
+  environmentId: string,
+  ref: string,
+  expectedHead: string | null,
+): Promise<{ mergeBase: MergeBase; head: string } | { reason: string }> {
+  let status: Awaited<ReturnType<BbPluginApi["sdk"]["environments"]["status"]>>;
+  try {
+    status = await bb.sdk.environments.status({ environmentId, mergeBaseBranch: ref });
+  } catch {
+    return { reason: "the status call failed" };
+  }
+  if (status.outcome !== "available" || status.workspace.mergeBase === null) {
+    return { reason: `no ${ref} to compare against` };
+  }
+  const { mergeBase } = status.workspace;
+  if (mergeBase.mergeBaseBranch !== ref || mergeBase.baseRef === null) {
+    return { reason: "the answer was not for that ref" };
+  }
+  const head = headShaOf(status.workspace);
+  if (head === null || head !== expectedHead) {
+    return { reason: "the checkout moved while the remote base was checked" };
+  }
+  return { mergeBase, head };
+}
+
 /**
  * The shas of `shas` the remote base already holds. Asks for the commits
  * ahead of `origin/<base>`: a turn commit missing from that list is reachable
@@ -348,23 +382,11 @@ export async function remoteReachableShas(
     bb.log.info(`auto-review: not checking whether the turn's commits came from ${ref}: ${reason}`);
     return new Set<string>();
   };
-  let status: Awaited<ReturnType<BbPluginApi["sdk"]["environments"]["status"]>>;
-  try {
-    status = await bb.sdk.environments.status({ environmentId, mergeBaseBranch: ref });
-  } catch {
-    return skip("the status call failed");
+  const read = await readRemoteComparison(bb, environmentId, ref, expectedHead);
+  if ("reason" in read) {
+    return skip(read.reason);
   }
-  if (status.outcome !== "available" || status.workspace.mergeBase === null) {
-    return skip(`no ${ref} to compare against`);
-  }
-  const { mergeBase } = status.workspace;
-  if (mergeBase.mergeBaseBranch !== ref || mergeBase.baseRef === null) {
-    return skip("the answer was not for that ref");
-  }
-  const head = headShaOf(status.workspace);
-  if (head === null || head !== expectedHead) {
-    return skip("the checkout moved while the remote base was checked");
-  }
+  const { mergeBase, head } = read;
   if (mergeBase.aheadCount !== mergeBase.commits.length) {
     return skip("the list of commits ahead is incomplete");
   }
@@ -373,4 +395,36 @@ export async function remoteReachableShas(
   }
   const ahead = new Set(mergeBase.commits.map(({ sha }) => sha));
   return new Set(shas.filter((sha) => !ahead.has(sha)));
+}
+
+/**
+ * Whether `origin/<branch>` already holds `expectedHead`: nothing is ahead of
+ * it and it is itself the merge base, so HEAD is an ancestor of the remote
+ * branch. "HEAD is missing from the ahead list" is not enough, since the host
+ * lists the commits ahead with `--cherry-pick`, which can leave HEAD out as
+ * patch-equivalent while older local commits are still unpushed. Any doubt is
+ * false.
+ */
+export async function branchHeadPushed(
+  bb: BbPluginApi,
+  environmentId: string,
+  branch: string,
+  expectedHead: string,
+): Promise<boolean> {
+  const ref = remoteRef(branch);
+  const read = await readRemoteComparison(bb, environmentId, ref, expectedHead);
+  if ("reason" in read) {
+    bb.log.info(`auto-review: not treating HEAD as pushed to ${ref}: ${read.reason}`);
+    return false;
+  }
+  const { mergeBase, head } = read;
+  if (mergeBase.aheadCount !== 0) {
+    bb.log.info(`auto-review: not treating HEAD as pushed to ${ref}: ${mergeBase.aheadCount} commits are still ahead of it`);
+    return false;
+  }
+  if (mergeBase.baseRef !== head) {
+    bb.log.info(`auto-review: not treating HEAD as pushed to ${ref}: HEAD is not an ancestor of it`);
+    return false;
+  }
+  return true;
 }

@@ -217,6 +217,10 @@ It ships enabled (opt-out).
   changes are left the turn stands down as `changed-while-parked` and scans nothing;
   `lastFire` and the log name the commits and up to five example paths. Something you commit
   while a turn waits is not reviewed by that turn: ask in a later turn to have it reviewed.
+  A turn released from a provider park that nothing ran on since stands down as `stale-park` when
+  it waited 30 minutes or more since its last park, and as `already-pushed` when its HEAD is on
+  `origin/<branch>`, none of its own paths is dirty again and no local merge would run (see
+  "Runs one review at a time per provider" below).
   Nothing is left out after any activity of the thread or its children since the park (checked
   again after the files are read), or work that may still be writing: a shell command that
   mentions a lone `&`, `nohup`, `setsid`, `disown`, `daemon`, `coproc`, `systemd-run`, `systemctl`,
@@ -417,9 +421,21 @@ It ships enabled (opt-out).
   child goes idle before bb queues its wake-up, the hold ends one idle early and that wake-up
   turn's fixes get one more review.
 - Runs one review at a time per provider across all projects, since those reviews share
-  the provider's usage limits. A turn ending behind another review is deferred, not
-  dropped, and fires when the blocking review ends. A question you send while the turn is
-  parked does not fire it: the parked work becomes carried work, and the next turn that
+  the provider's usage limits. A turn ending behind another review is deferred and fires
+  when the blocking review ends, unless it has gone stale or its work is already pushed.
+  It stands down as `stale-park` if it waited 30 minutes or more since it was last parked
+  (a release that loses a race re-parks it and restarts the clock). It stands down as
+  `already-pushed` if its HEAD is on `origin/<branch>`, nothing of its own is uncommitted, and
+  no local merge would run. Both apply only to a released provider park that nothing ran on
+  since it was parked: a turn you, a wake-up or a message started meanwhile is reviewed as
+  before. A turn behind a long review hold (child reviewers can hold up to 2 hours) will
+  usually go stale. A stale turn leaves behind: its commits are not reviewed and not
+  secret-scanned before you push; a feature branch it would have merged into a personal
+  mainline stays unmerged; and its uncommitted edits stay in the tree, where no later review
+  counts them because the next turn's snapshot already contains them, so ask the agent to
+  commit them, or touch them in a new turn. An already-pushed turn leaves behind commits that
+  are already public and are not reviewed or scanned afterwards. A question you send while the
+  turn is parked does not fire it: the parked work becomes carried work, and the next turn that
   changes something reviews it.
   When nothing disables it, a released turn leaves out what changed while it was parked (see
   `changed-while-parked` above).

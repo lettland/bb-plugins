@@ -9,7 +9,7 @@ import { familyClaims } from "./detect-claim.js";
 import type { ParkBaseline } from "./detect-upstream.js";
 import type { ThreadListEntry } from "./detect-workspace.js";
 import { refreshIdleSnapshot } from "./last-idle.js";
-import type { ThreadState, TurnStart } from "./state.js";
+import { STALE_PARK_MS, type ThreadState, type TurnStart } from "./state.js";
 import { keepCursor } from "./turn-end.js";
 
 /**
@@ -58,6 +58,41 @@ export function parkBaseline(state: ThreadState, release: ParkRelease): ParkBase
     return undefined;
   }
   return { startedAt: lastIdle.startedAt, tree: lastIdle.tree };
+}
+
+/**
+ * Whether a released provider park waited `STALE_PARK_MS` or more since its
+ * last park snapshot and nothing has run on the thread since (`quiet`): its
+ * review no longer follows the work. Pure; `now` is the caller's clock.
+ */
+export function staleRelease(park: ParkBaseline | undefined, quiet: boolean, now: number): boolean {
+  return park !== undefined && quiet && now - park.startedAt >= STALE_PARK_MS;
+}
+
+interface PushedReleaseInput {
+  park: ParkBaseline | undefined;
+  quiet: boolean;
+  /** The paths the turn changed. */
+  turnPaths: readonly string[];
+  /** The paths dirty in the working tree now. */
+  dirty: readonly string[];
+  /** Whether a local merge would run for this turn. */
+  merge: boolean;
+  /** Whether `origin/<branch>` already holds HEAD. */
+  headHeld: boolean;
+}
+
+/**
+ * Whether a released provider park has nothing left to review: the remote
+ * holds HEAD, none of the turn's own paths is dirty again, and no local merge
+ * would run. Dirty paths outside the turn do not count.
+ */
+export function pushedRelease({ park, quiet, turnPaths, dirty, merge, headHeld }: PushedReleaseInput): boolean {
+  if (park === undefined || !quiet || merge || !headHeld) {
+    return false;
+  }
+  const dirtySet = new Set(dirty);
+  return !turnPaths.some((path) => dirtySet.has(path));
 }
 
 /**
