@@ -19,12 +19,11 @@ import type { WakatimeSettings } from "./settings.js";
 
 /** Agent time: one heartbeat per thread about every 2 min while it is active. */
 export const AGENT_TICK_MS = 120_000;
-const LIST_PAGE_SIZE = 100;
 const USER_KEY = "user";
 
 export interface TrackerSdk extends ContextSdk {
   threads: ContextSdk["threads"] & {
-    list(args: { includeHidden: boolean; limit: number; offset: number }): Promise<ThreadLike[]>;
+    listRunning(): Promise<{ id: string }[]>;
   };
   projects: ContextSdk["projects"] & {
     list(args: { includePersonal: boolean }): Promise<ProjectLike[]>;
@@ -36,8 +35,8 @@ export interface TrackerDeps {
   settings: { get(): Promise<WakatimeSettings> };
   runner: Runner;
   log: PluginLogger;
-  /** The `--plugin` editor string. */
-  plugin: string;
+  /** The `--plugin` editor string, read per heartbeat so it can be filled in after load. */
+  plugin: () => string;
 }
 
 type Timer = ReturnType<typeof setInterval>;
@@ -52,6 +51,13 @@ export function createTracker(deps: TrackerDeps) {
   // Thread id -> token of the in-flight `experimental_thread.events`
   // confirmation. A stop event deletes it, which voids the confirmation.
   const confirming = new Map<string, symbol>();
+  // Threads known not to be timed (tracking off, project excluded, no context),
+  // so a stream of events payloads does not re-read them. Cleared per thread on
+  // activation and stop, and wholesale when settings change.
+  const notTimed = new Set<string>();
+  // Bumped when settings change, so a read that was already in flight cannot
+  // mark a thread from the old settings.
+  let settingsGeneration = 0;
   let checkedExcludes: string | null = null;
   let disposed = false;
 
@@ -60,6 +66,7 @@ export function createTracker(deps: TrackerDeps) {
     if (!settings.syncAiActivity) return;
     await runner.submit({
       key: "sync",
+      kind: "sync",
       cliPath: settings.cliPath,
       args: ["--sync-ai-activity"],
       timeoutMs: SYNC_TIMEOUT_MS,
@@ -84,9 +91,15 @@ export function createTracker(deps: TrackerDeps) {
     if (!throttle.allow({ key, category }, entity, project, timeMs, bypass)) return false;
     const args = buildArgv(
       { entity, project, branch: ctx.branch ?? undefined, category, timeMs },
-      deps.plugin,
+      deps.plugin(),
     );
-    void runner.submit({ key: `heartbeat:${key}`, cliPath: settings.cliPath, args, timeoutMs: HEARTBEAT_TIMEOUT_MS });
+    void runner.submit({
+      key: `heartbeat:${key}`,
+      kind: "heartbeat",
+      cliPath: settings.cliPath,
+      args,
+      timeoutMs: HEARTBEAT_TIMEOUT_MS,
+    });
     return true;
   }
 
@@ -105,7 +118,20 @@ export function createTracker(deps: TrackerDeps) {
     throttle.forget(id);
   }
 
+  /**
+   * Release a timer for a thread that should not be timed (tracking off or
+   * project excluded), and remember that unless settings changed since
+   * `generation` was read. Anything else, such as an unresolved context, only
+   * releases: the next payload may succeed.
+   */
+  function skip(id: string, own: Timer, generation: number): void {
+    if (timers.get(id) !== own) return;
+    release(id, own);
+    if (generation === settingsGeneration) notTimed.add(id);
+  }
+
   function stopLocal(id: string): void {
+    notTimed.delete(id);
     const timer = timers.get(id);
     if (timer !== undefined) clearInterval(timer);
     timers.delete(id);
@@ -139,11 +165,13 @@ export function createTracker(deps: TrackerDeps) {
   }
 
   async function beginAgentTime(thread: ThreadLike, own: Timer): Promise<void> {
+    const generation = settingsGeneration;
     try {
       const settings = await deps.settings.get();
-      if (!settings.trackAgentActivity) return release(thread.id, own);
+      if (!settings.trackAgentActivity) return skip(thread.id, own, generation);
       const ctx = await resolveContext(sdk, branches, { threadId: thread.id }, thread);
-      if (ctx === null || excluded(settings, ctx.project)) return release(thread.id, own);
+      if (ctx === null) return release(thread.id, own);
+      if (excluded(settings, ctx.project)) return skip(thread.id, own, generation);
       // An idle that landed during the awaits already cleared this timer.
       if (timers.get(thread.id) !== own) return;
       emit(settings, ctx, thread.id, settings.agentCategory, false);
@@ -156,10 +184,12 @@ export function createTracker(deps: TrackerDeps) {
     try {
       const thread = await confirmActive(id, own, () => true);
       if (thread === null) return;
+      const generation = settingsGeneration;
       const settings = await deps.settings.get();
-      if (!settings.trackAgentActivity) return release(id, own);
+      if (!settings.trackAgentActivity) return skip(id, own, generation);
       const ctx = await resolveContext(sdk, branches, { threadId: id }, thread);
-      if (ctx === null || excluded(settings, ctx.project)) return release(id, own);
+      if (ctx === null) return release(id, own);
+      if (excluded(settings, ctx.project)) return skip(id, own, generation);
       if (timers.get(id) !== own) return;
       // Already paced at the throttle window, so a tick that fires a
       // millisecond early must not be dropped.
@@ -182,7 +212,7 @@ export function createTracker(deps: TrackerDeps) {
     try {
       const settings = await deps.settings.get();
       const ctx = await resolveContext(sdk, branches, { threadId: thread.id }, thread);
-      if (ctx === null || excluded(settings, ctx.project)) return;
+      if (disposed || ctx === null || excluded(settings, ctx.project)) return;
       if (settings.trackAgentActivity) emit(settings, ctx, thread.id, settings.agentCategory, true);
       if (settings.syncAiActivity) sync.request();
     } catch (error) {
@@ -191,14 +221,26 @@ export function createTracker(deps: TrackerDeps) {
   }
 
   async function adopt(thread: ThreadLike): Promise<void> {
-    if (disposed || thread.status !== "active" || timers.has(thread.id) || confirming.has(thread.id)) return;
+    if (
+      disposed ||
+      thread.status !== "active" ||
+      timers.has(thread.id) ||
+      confirming.has(thread.id) ||
+      notTimed.has(thread.id)
+    ) {
+      return;
+    }
     const token = Symbol(thread.id);
     confirming.set(thread.id, token);
     const isCurrent = () => confirming.get(thread.id) === token;
+    const generation = settingsGeneration;
     try {
       // Payloads keep coming while a thread runs; skip the live read when nothing would be timed.
       const settings = await deps.settings.get();
-      if (!settings.trackAgentActivity || parseExcludeList(settings.excludeProjects).includes(thread.projectId)) return;
+      if (!settings.trackAgentActivity || parseExcludeList(settings.excludeProjects).includes(thread.projectId)) {
+        if (isCurrent() && generation === settingsGeneration) notTimed.add(thread.id);
+        return;
+      }
       const live = await confirmActive(thread.id, undefined, isCurrent);
       if (live !== null && isCurrent()) startTimer(live);
     } catch {
@@ -208,16 +250,20 @@ export function createTracker(deps: TrackerDeps) {
     }
   }
 
+  /** Threads running now, each confirmed active, get a timer; used at startup. */
   async function reconcile(): Promise<void> {
     try {
-      let offset = 0;
-      for (;;) {
-        const page = await sdk.threads.list({ includeHidden: true, limit: LIST_PAGE_SIZE, offset });
-        for (const thread of page) if (thread.status === "active") startTimer(thread);
-        // A short page is the last one; this also ends the loop if the host ignored `offset`.
-        if (page.length < LIST_PAGE_SIZE) break;
-        offset += page.length;
-      }
+      const running = await sdk.threads.listRunning();
+      await Promise.all(
+        running.map(async ({ id }) => {
+          try {
+            const thread = await sdk.threads.get({ threadId: id });
+            if (thread.status === "active") startTimer(thread);
+          } catch {
+            // A thread that vanished between the two calls is not running.
+          }
+        }),
+      );
     } catch (error) {
       log.warn(`could not list running threads: ${error instanceof Error ? error.name : "error"}`);
     }
@@ -231,10 +277,10 @@ export function createTracker(deps: TrackerDeps) {
 
   /** Warn once per distinct `excludeProjects` value, by entry position only. */
   async function checkExcludes(): Promise<void> {
-    const settings = await deps.settings.get();
-    if (settings.excludeProjects === checkedExcludes) return;
-    checkedExcludes = settings.excludeProjects;
     try {
+      const settings = await deps.settings.get();
+      if (settings.excludeProjects === checkedExcludes) return;
+      checkedExcludes = settings.excludeProjects;
       const unmatched = await unmatchedExcludes(settings);
       parseExcludeList(settings.excludeProjects).forEach((entry, index) => {
         if (unmatched.includes(entry)) log.warn(`excludeProjects entry #${index + 1} matches no project`);
@@ -244,8 +290,16 @@ export function createTracker(deps: TrackerDeps) {
     }
   }
 
+  /** Settings changed: a thread skipped under the old ones may now be timed. */
+  function onSettingsChanged(): void {
+    settingsGeneration += 1;
+    notTimed.clear();
+  }
+
   async function status(): Promise<WakatimeStatus> {
     const settings = await deps.settings.get();
+    // Check the path in the setting now, so the error shown is about it and not an older path.
+    await runner.verify(settings.cliPath);
     const health = runner.health();
     let unmatched: string[] = [];
     try {
@@ -254,8 +308,9 @@ export function createTracker(deps: TrackerDeps) {
       // The status page still shows the rest.
     }
     return {
-      cliPath: health.cliPath ?? expandHome(settings.cliPath),
-      lastSuccessAt: health.lastSuccessAt,
+      cliPath: expandHome(settings.cliPath),
+      lastHeartbeatAt: health.lastHeartbeatAt,
+      lastSyncAt: health.lastSyncAt,
       lastError: health.lastError,
       unmatchedExcludes: unmatched,
     };
@@ -266,6 +321,7 @@ export function createTracker(deps: TrackerDeps) {
     for (const timer of timers.values()) clearInterval(timer);
     timers.clear();
     confirming.clear();
+    notTimed.clear();
     throttle.clear();
     branches.clear();
     sync.dispose();
@@ -277,12 +333,22 @@ export function createTracker(deps: TrackerDeps) {
     checkExcludes,
     reconcile,
     dispose,
-    onActive: startTimer,
+    onActive(thread: ThreadLike) {
+      notTimed.delete(thread.id);
+      startTimer(thread);
+    },
+    onSettingsChanged,
     onStop: stop,
     onEvents: (payload: { thread: ThreadLike }) => void adopt(payload.thread),
     onGone: stopLocal,
     /** Test hooks: sizes of the per-thread state. */
-    stateSize: () => ({ timers: timers.size, confirming: confirming.size, throttle: throttle.size, branches: branches.size }),
+    stateSize: () => ({
+      timers: timers.size,
+      confirming: confirming.size,
+      notTimed: notTimed.size,
+      throttle: throttle.size,
+      branches: branches.size,
+    }),
   };
 }
 

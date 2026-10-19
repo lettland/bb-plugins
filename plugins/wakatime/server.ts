@@ -5,14 +5,14 @@ import { wakatimeRpcContract } from "./src/rpc-contract.js";
 import { defineWakatimeSettings } from "./src/settings.js";
 import { createTracker } from "./src/tracker.js";
 
-// The plugin SDK does not expose the host's version, so the editor string
-// carries the plugin's own version only.
-const PLUGIN_STRING = `bb/unknown bb-wakatime/${pkg.version}`;
+/** version() may contact npm; it is read in the background and bounded. */
+const VERSION_TIMEOUT_MS = 5000;
 
 export default async function plugin(bb: BbPluginApi) {
   const settings = defineWakatimeSettings(bb);
   const runner = createRunner({ log: bb.log });
-  const tracker = createTracker({ sdk: bb.sdk, settings, runner, log: bb.log, plugin: PLUGIN_STRING });
+  let editor = `bb/unknown bb-wakatime/${pkg.version}`;
+  const tracker = createTracker({ sdk: bb.sdk, settings, runner, log: bb.log, plugin: () => editor });
 
   bb.rpc.register(wakatimeRpcContract, {
     async heartbeat(input) {
@@ -29,9 +29,28 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("experimental_thread.events", (payload) => tracker.onEvents(payload));
 
   settings.onChange((next, prev) => {
+    tracker.onSettingsChanged();
     if (next.excludeProjects !== prev.excludeProjects) void tracker.checkExcludes();
   });
-  bb.onDispose(() => tracker.dispose());
+  bb.onDispose(() => {
+    tracker.dispose();
+    runner.dispose();
+  });
+
+  // Read once, in the background: heartbeats use `bb/unknown` until it answers
+  // (or for good if it fails), and never call it themselves.
+  void (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), VERSION_TIMEOUT_MS);
+    try {
+      const { currentVersion } = await bb.sdk.system.version({ signal: controller.signal });
+      editor = `bb/${currentVersion || "unknown"} bb-wakatime/${pkg.version}`;
+    } catch {
+      // Keep bb/unknown.
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
 
   void tracker.checkExcludes();
   void tracker.reconcile();

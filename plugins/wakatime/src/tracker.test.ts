@@ -14,7 +14,7 @@ import type { WakatimeSettings } from "./settings.js";
 const T0 = 1_700_000_000_000;
 const PROJECT = { id: "prj_1", name: "acme" };
 const PLUGIN = "bb/unknown bb-wakatime/0.1.0";
-const OK: ExecResult = { exitCode: 0, signal: null, spawnError: null, stderr: "" };
+const OK: ExecResult = { exitCode: 0, signal: null, spawnError: null };
 
 function thread(id: string, overrides: Partial<ThreadLike> = {}): ThreadLike {
   return {
@@ -34,7 +34,7 @@ function defaultSettings(overrides: Partial<WakatimeSettings> = {}): WakatimeSet
     trackUserActivity: true,
     userCategory: "coding",
     trackAgentActivity: true,
-    agentCategory: "ai coding",
+    agentCategory: "building",
     syncAiActivity: true,
     entity: "title",
     excludeProjects: "",
@@ -69,12 +69,16 @@ function harness(options: Options = {}) {
     settingsDelayMs: 0,
     settingsError: false,
     threadsListError: false,
-    listCalls: 0,
-    listIgnoresOffset: false,
+    listRunningCalls: 0,
+    runningIds: null as string[] | null,
+    projectGetCalls: 0,
+    projectGetFailures: 0,
+    verified: [] as string[],
+    onVerify: null as (() => void) | null,
     projectsListError: false,
     projectsListCalls: 0,
   };
-  const health: RunnerHealth = { cliPath: null, lastSuccessAt: null, lastError: null };
+  const health: RunnerHealth = { lastHeartbeatAt: null, lastSyncAt: null, lastError: null };
   const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
   const fakeRunner: Runner = {
@@ -84,6 +88,11 @@ function harness(options: Options = {}) {
       return Promise.resolve("ok");
     },
     health: () => ({ ...health }),
+    verify: async (cliPath) => {
+      state.verified.push(cliPath);
+      state.onVerify?.();
+    },
+    dispose: () => undefined,
   };
 
   const sdk: TrackerSdk = {
@@ -96,16 +105,20 @@ function harness(options: Options = {}) {
         if (state.getError || found === undefined) throw new Error("not found");
         return { ...found };
       },
-      async list({ offset, limit }) {
-        state.listCalls++;
+      async listRunning() {
+        state.listRunningCalls++;
         if (state.threadsListError) throw new Error("down");
-        const all = [...threads.values()];
-        if (state.listIgnoresOffset) return all.slice(0, 3);
-        return all.slice(offset, offset + limit);
+        const ids = state.runningIds ?? [...threads.values()].filter((t) => t.status === "active").map((t) => t.id);
+        return ids.map((id) => ({ id }));
       },
     },
     projects: {
       async get({ projectId }) {
+        state.projectGetCalls++;
+        if (state.projectGetFailures > 0) {
+          state.projectGetFailures--;
+          throw new Error("transient");
+        }
         const found = projects.find((p) => p.id === projectId);
         if (found === undefined) throw new Error("not found");
         return found;
@@ -137,7 +150,7 @@ function harness(options: Options = {}) {
     },
     runner: options.runner ?? fakeRunner,
     log,
-    plugin: PLUGIN,
+    plugin: () => PLUGIN,
   });
 
   return {
@@ -183,7 +196,7 @@ describe("agent time", () => {
       "--entity=Title thr_1",
       "--project=acme",
       "--alternate-branch=feat/x",
-      "--category=ai coding",
+      "--category=building",
       `--time=${(T0 / 1000).toFixed(3)}`,
       `--plugin=${PLUGIN}`,
       "--sync-ai-disabled",
@@ -365,7 +378,7 @@ describe("agent time", () => {
     h.tracker.onGone("thr_3");
     expect(h.tracker.stateSize()).toMatchObject({ timers: 1, throttle: 1 });
     h.tracker.dispose();
-    expect(h.tracker.stateSize()).toEqual({ timers: 0, confirming: 0, throttle: 0, branches: 0 });
+    expect(h.tracker.stateSize()).toEqual({ timers: 0, confirming: 0, notTimed: 0, throttle: 0, branches: 0 });
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(h.heartbeats().length).toBeLessThanOrEqual(5);
     const count = h.heartbeats().length;
@@ -425,25 +438,22 @@ describe("settings read failures", () => {
 });
 
 describe("startup reconciliation", () => {
-  it("pages through threads.list and starts timers only for active threads", async () => {
-    const idle = Array.from({ length: 120 }, (_, i) => thread(`thr_i${i}`, { status: "idle" }));
+  it("starts timers for running threads that threads.get confirms active", async () => {
     const h = harness({
-      threads: [...idle, thread("thr_a", { status: "active" }), thread("thr_e", { status: "error" })],
+      threads: [
+        thread("thr_a", { status: "active" }),
+        thread("thr_s", { status: "idle" }),
+        thread("thr_e", { status: "error" }),
+      ],
     });
+    // A starting thread is listed as running but is not active yet.
+    h.state.runningIds = ["thr_a", "thr_s", "thr_gone"];
     await h.tracker.reconcile();
     await settle();
-    expect(h.state.listCalls).toBe(2);
+    expect(h.state.listRunningCalls).toBe(1);
     expect(h.tracker.stateSize().timers).toBe(1);
     expect(h.heartbeats()).toHaveLength(1);
     expect(arg(h.heartbeats()[0]!, "--entity")).toBe("Title thr_a");
-  });
-
-  it("ends the loop when the host keeps returning the same short page", async () => {
-    const h = harness({ threads: [thread("thr_1", { status: "idle" }), thread("thr_2", { status: "active" })] });
-    h.state.listIgnoresOffset = true;
-    await h.tracker.reconcile();
-    expect(h.state.listCalls).toBe(1);
-    expect(h.tracker.stateSize().timers).toBe(1);
   });
 
   it("logs and carries on when the list fails", async () => {
@@ -618,7 +628,7 @@ describe("with the real runner", () => {
     expect(heartbeatCalls()).toHaveLength(1);
     calls[0]!.settle(OK);
     await until(() => heartbeatCalls().length === 2);
-    expect(heartbeatCalls()[1]!.args).toContain("--category=ai coding");
+    expect(heartbeatCalls()[1]!.args).toContain("--category=building");
   });
 
   it("caps 6 simultaneous ticks at 4 processes and keeps each heartbeat's creation time", async () => {
@@ -713,25 +723,40 @@ describe("AI sync", () => {
 });
 
 describe("status and exclude check", () => {
-  it("reports the resolved path, last success, last error kind and unmatched excludes", async () => {
+  it("reports the current cli path, both last successes, the last error and unmatched excludes", async () => {
     const h = harness({ settings: { excludeProjects: "prj_1, ghost\nacme,missing-too", cliPath: "/opt/wakatime-cli" } });
     expect(await h.tracker.status()).toEqual({
       cliPath: "/opt/wakatime-cli",
-      lastSuccessAt: null,
+      lastHeartbeatAt: null,
+      lastSyncAt: null,
       lastError: null,
       unmatchedExcludes: ["ghost", "missing-too"],
     });
-    h.health.cliPath = "/resolved/cli";
-    h.health.lastSuccessAt = 5;
-    h.health.lastError = { kind: "auth", exitCode: 104, at: 7 };
+    h.health.lastHeartbeatAt = 5;
+    h.health.lastSyncAt = 6;
+    h.health.lastError = { kind: "auth", job: "sync", exitCode: 104, at: 7 };
+    h.settings.cliPath = "/opt/other-cli";
     expect(await h.tracker.status()).toMatchObject({
-      cliPath: "/resolved/cli",
-      lastSuccessAt: 5,
-      lastError: { kind: "auth", exitCode: 104, at: 7 },
+      cliPath: "/opt/other-cli",
+      lastHeartbeatAt: 5,
+      lastSyncAt: 6,
+      lastError: { kind: "auth", job: "sync", exitCode: 104, at: 7 },
     });
   });
 
-  it("expands ~ in the reported path before the cli has been used", async () => {
+  it("checks the current cli path before reading the health state", async () => {
+    const h = harness({ settings: { cliPath: "/opt/new-cli" } });
+    h.health.lastError = { kind: "missing-cli", job: "heartbeat", exitCode: null, at: 1, problem: "not-found" };
+    h.state.onVerify = () => {
+      // The check of the fixed path clears the old path's error before status reads it.
+      h.health.lastError = null;
+    };
+    const status = await h.tracker.status();
+    expect(h.state.verified).toEqual(["/opt/new-cli"]);
+    expect(status.lastError).toBeNull();
+  });
+
+  it("expands ~ in the reported path", async () => {
     const h = harness({ settings: { cliPath: "~/.wakatime/wakatime-cli" } });
     expect((await h.tracker.status()).cliPath).toBe(path.join(os.homedir(), ".wakatime/wakatime-cli"));
   });
@@ -739,8 +764,8 @@ describe("status and exclude check", () => {
   it("still reports the rest of the status when the project list fails", async () => {
     const h = harness({ settings: { excludeProjects: "ghost" } });
     h.state.projectsListError = true;
-    h.health.lastSuccessAt = 9;
-    expect(await h.tracker.status()).toMatchObject({ lastSuccessAt: 9, unmatchedExcludes: [] });
+    h.health.lastHeartbeatAt = 9;
+    expect(await h.tracker.status()).toMatchObject({ lastHeartbeatAt: 9, unmatchedExcludes: [] });
   });
 
   it("warns once per distinct excludeProjects value, by entry position and never by name", async () => {
@@ -774,5 +799,164 @@ describe("status and exclude check", () => {
     h.state.projectsListError = false;
     await h.tracker.checkExcludes();
     expect(h.log.warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("threads that are not timed", () => {
+  async function payloads(h: ReturnType<typeof harness>, count: number) {
+    for (let i = 0; i < count; i++) {
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+  }
+
+  it("reads a name-excluded active thread once, however many payloads arrive", async () => {
+    const h = harness({ threads: [thread("thr_1")], settings: { excludeProjects: "acme" } });
+    await payloads(h, 1);
+    const reads = { get: h.state.getCalls, project: h.state.projectGetCalls, timers: h.tracker.stateSize().timers };
+    expect(reads).toEqual({ get: 1, project: 1, timers: 0 });
+    await payloads(h, 6);
+    expect(h.state.getCalls).toBe(reads.get);
+    expect(h.state.projectGetCalls).toBe(reads.project);
+    expect(h.tracker.stateSize()).toMatchObject({ timers: 0, confirming: 0, notTimed: 1 });
+    expect(h.jobs).toHaveLength(0);
+  });
+
+  it("also stops re-reading when tracking is off", async () => {
+    const off = harness({ threads: [thread("thr_1")], settings: { trackAgentActivity: false } });
+    await payloads(off, 4);
+    expect(off.state.getCalls).toBe(0);
+    expect(off.tracker.stateSize().notTimed).toBe(1);
+  });
+
+  it("does not mark a thread whose context cannot be resolved, so a later payload times it", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.state.projectGetFailures = 1;
+    await payloads(h, 1);
+    expect(h.tracker.stateSize()).toMatchObject({ timers: 0, notTimed: 0 });
+    await payloads(h, 1);
+    expect(h.tracker.stateSize()).toMatchObject({ timers: 1, notTimed: 0 });
+    expect(h.heartbeats()).toHaveLength(1);
+  });
+
+  it("does not mark a thread when a tick cannot resolve its context", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    h.state.projectGetFailures = 1;
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    expect(h.tracker.stateSize()).toMatchObject({ timers: 0, notTimed: 0 });
+    await payloads(h, 1);
+    expect(h.tracker.stateSize().timers).toBe(1);
+  });
+
+  it("does not mark a thread from settings that changed while a tick's read was pending", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    h.settings.trackAgentActivity = false;
+    h.state.settingsDelayMs = 10;
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    // The tick has confirmed the thread and is waiting on its settings read.
+    expect(h.tracker.stateSize().timers).toBe(1);
+    h.tracker.onSettingsChanged();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(h.tracker.stateSize()).toMatchObject({ timers: 0, notTimed: 0 });
+    expect(h.heartbeats()).toHaveLength(1);
+  });
+
+  it("does not mark a thread from settings that changed while the read was pending", async () => {
+    const adopting = harness({ threads: [thread("thr_1")], settings: { excludeProjects: "prj_1" } });
+    adopting.state.settingsDelayMs = 10;
+    adopting.tracker.onEvents({ thread: adopting.threads.get("thr_1")! });
+    await vi.advanceTimersByTimeAsync(1);
+    adopting.settings.excludeProjects = "";
+    adopting.tracker.onSettingsChanged();
+    await vi.advanceTimersByTimeAsync(20);
+    // The read saw the old exclusion, but it is stale, so nothing is remembered.
+    expect(adopting.tracker.stateSize().notTimed).toBe(0);
+
+    const starting = harness({ threads: [thread("thr_1")], settings: { trackAgentActivity: false } });
+    starting.state.settingsDelayMs = 10;
+    starting.tracker.onActive(starting.threads.get("thr_1")!);
+    await vi.advanceTimersByTimeAsync(1);
+    starting.tracker.onSettingsChanged();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(starting.tracker.stateSize()).toMatchObject({ timers: 0, notTimed: 0 });
+  });
+
+  it("marks a running timer's thread as not timed when a tick finds it excluded", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    h.settings.excludeProjects = "acme";
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    expect(h.tracker.stateSize()).toMatchObject({ timers: 0, notTimed: 1 });
+  });
+
+  it("does not mark a thread whose read merely failed", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.state.getError = true;
+    await payloads(h, 1);
+    expect(h.tracker.stateSize().notTimed).toBe(0);
+  });
+
+  it.each(["thread.active", "idle", "gone", "settings", "dispose"])("is cleared by %s", async (how) => {
+    const h = harness({ threads: [thread("thr_1")], settings: { excludeProjects: "acme" } });
+    await payloads(h, 1);
+    expect(h.tracker.stateSize().notTimed).toBe(1);
+    if (how === "thread.active") {
+      // No settings-change signal here: only the activation can clear the mark.
+      h.settings.excludeProjects = "";
+      h.tracker.onActive(h.threads.get("thr_1")!);
+      await settle();
+      expect(h.tracker.stateSize()).toMatchObject({ timers: 1, notTimed: 0 });
+      return;
+    }
+    if (how === "idle") await h.idle("thr_1");
+    if (how === "gone") h.tracker.onGone("thr_1");
+    if (how === "settings") h.tracker.onSettingsChanged();
+    if (how === "dispose") h.tracker.dispose();
+    expect(h.tracker.stateSize().notTimed).toBe(0);
+  });
+
+  it("times the thread again after the exclusion is removed and settings change", async () => {
+    const h = harness({ threads: [thread("thr_1")], settings: { excludeProjects: "acme" } });
+    await payloads(h, 1);
+    h.settings.excludeProjects = "";
+    h.tracker.onSettingsChanged();
+    await payloads(h, 1);
+    expect(h.tracker.stateSize().timers).toBe(1);
+    expect(h.heartbeats()).toHaveLength(1);
+  });
+});
+
+describe("failures at the edges", () => {
+  it("checkExcludes swallows a failing settings read and retries later", async () => {
+    const h = harness({ settings: { excludeProjects: "ghost" } });
+    h.state.settingsError = true;
+    await expect(h.tracker.checkExcludes()).resolves.toBeUndefined();
+    expect(h.log.warn).not.toHaveBeenCalled();
+    h.state.settingsError = false;
+    await h.tracker.checkExcludes();
+    expect(h.log.warn).toHaveBeenCalledWith("excludeProjects entry #1 matches no project");
+  });
+
+  it("sends no final heartbeat or sync when disposed while a stop is resolving", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.state.settingsDelayMs = 10;
+    const stopping = h.idle("thr_1");
+    h.tracker.dispose();
+    await vi.advanceTimersByTimeAsync(50);
+    await stopping;
+    expect(h.jobs).toHaveLength(0);
+  });
+
+  it("keeps going when one running thread cannot be read at startup", async () => {
+    const h = harness({ threads: [thread("thr_a")] });
+    h.state.runningIds = ["thr_missing", "thr_a"];
+    await h.tracker.reconcile();
+    await settle();
+    expect(h.tracker.stateSize().timers).toBe(1);
   });
 });

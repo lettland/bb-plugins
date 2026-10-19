@@ -60,6 +60,24 @@ describe("buildArgv", () => {
     expect(argv.join("")).not.toMatch(/[\r\n]/);
   });
 
+  it("strips bidi and zero-width format characters", () => {
+    const argv = buildArgv({ ...spec, entity: "Fix\u202Eevil\u200B login\u2066", project: "ac\u200Cme" }, PLUGIN);
+    expect(argv[1]).toBe("--entity=Fixevil login");
+    expect(argv[2]).toBe("--project=acme");
+    expect(argv.join("")).not.toMatch(/[\u200B-\u200C\u200E\u200F\u202A-\u202E\u2066-\u2069]/);
+  });
+
+  it("keeps U+200D so emoji sequences survive", () => {
+    const family = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}";
+    const argv = buildArgv({ ...spec, entity: `${family}\u200B work` }, PLUGIN);
+    expect(argv[1]).toBe(`--entity=${family} work`);
+  });
+
+  it("cleans the editor string too", () => {
+    const argv = buildArgv(spec, "bb/1.2\u202E.3\nbb-wakatime/0.1.0");
+    expect(argv).toContain("--plugin=bb/1.2.3 bb-wakatime/0.1.0");
+  });
+
   it("omits --project and --alternate-branch when absent", () => {
     const argv = buildArgv({ entity: APP_ENTITY, category: "coding", timeMs: 1000 }, PLUGIN);
     expect(argv.some((arg) => arg.startsWith("--project"))).toBe(false);

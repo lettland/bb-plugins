@@ -1,6 +1,33 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
 export const ENTITY_MODES = ["title", "threadId"] as const;
+/**
+ * The categories wakatime-cli accepts, minus "ai coding": wakatime-cli v2.27.5
+ * silently drops every externally submitted heartbeat with that category.
+ */
+export const CATEGORIES = [
+  "coding",
+  "building",
+  "indexing",
+  "debugging",
+  "learning",
+  "notes",
+  "meeting",
+  "planning",
+  "researching",
+  "communicating",
+  "supporting",
+  "advising",
+  "running tests",
+  "writing tests",
+  "manual testing",
+  "writing docs",
+  "code reviewing",
+  "browsing",
+  "translating",
+  "designing",
+] as const;
+
 export type EntityMode = (typeof ENTITY_MODES)[number];
 
 export function defineWakatimeSettings(bb: BbPluginApi) {
@@ -19,8 +46,9 @@ export function defineWakatimeSettings(bb: BbPluginApi) {
       default: true,
     },
     userCategory: {
-      type: "string",
+      type: "select",
       label: "Category for my activity",
+      options: [...CATEGORIES],
       default: "coding",
     },
     trackAgentActivity: {
@@ -31,9 +59,11 @@ export function defineWakatimeSettings(bb: BbPluginApi) {
       default: true,
     },
     agentCategory: {
-      type: "string",
+      type: "select",
       label: "Category for agent run time",
-      default: "ai coding",
+      description: '"ai coding" is not offered: wakatime-cli v2.27.5 silently drops externally submitted heartbeats with that category.',
+      options: [...CATEGORIES],
+      default: "building",
     },
     syncAiActivity: {
       type: "boolean",
@@ -45,7 +75,8 @@ export function defineWakatimeSettings(bb: BbPluginApi) {
     entity: {
       type: "select",
       label: "Entity sent to WakaTime",
-      description: "title: the thread title. threadId: the thread id only, for privacy.",
+      description:
+        "title: the thread title. threadId: the thread id only, for privacy. This changes the entity only; the project and branch are still sent.",
       options: [...ENTITY_MODES],
       default: "title",
     },

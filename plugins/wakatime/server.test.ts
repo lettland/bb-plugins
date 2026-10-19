@@ -16,9 +16,15 @@ let host: FakePluginHost;
 let execCalls: { file: string; args: string[] }[];
 let thread: ReturnType<typeof makeThreadResponse>;
 
-const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 30));
+// Captured before any test fakes timers.
+const realSetTimeout = globalThis.setTimeout;
+const flush = () => new Promise<void>((resolve) => realSetTimeout(resolve, 30));
+
+let versionCalls = 0;
+let version: () => Promise<{ currentVersion: string }>;
 
 async function start(settings: Record<string, string | boolean> = {}) {
+  versionCalls = 0;
   host = createFakePluginHost({
     pluginId: "wakatime",
     settings: { cliPath: cli, ...settings },
@@ -28,7 +34,7 @@ async function start(settings: Record<string, string | boolean> = {}) {
           if (threadId !== thread.id) throw new Error("not found");
           return thread;
         },
-        list: async ({ offset }: { offset?: number }) => ((offset ?? 0) === 0 ? [thread] : []),
+        listRunning: async () => (thread.status === "active" ? [{ id: thread.id, hostId: null }] : []),
       },
       projects: {
         get: async ({ projectId }: { projectId: string }) => {
@@ -36,6 +42,12 @@ async function start(settings: Record<string, string | boolean> = {}) {
           return PROJECT;
         },
         list: async () => [PROJECT],
+      },
+      system: {
+        version: async () => {
+          versionCalls++;
+          return version();
+        },
       },
       environments: {
         get: async () => ({ branchName: "feat/x" }),
@@ -53,6 +65,7 @@ beforeEach(() => {
   writeFileSync(cli, "#!/bin/sh\n");
   chmodSync(cli, 0o755);
   execCalls = [];
+  version = async () => ({ currentVersion: "9.8.7" });
   thread = makeThreadResponse({ id: "thr_1", projectId: PROJECT.id, title: "Fix login", status: "idle", environmentId: "env_1" });
   vi.mocked(execFile).mockImplementation(((file: string, args: string[], _o: unknown, cb: (e: null, o: string, s: string) => void) => {
     execCalls.push({ file, args });
@@ -77,7 +90,13 @@ describe("wakatime plugin", () => {
     );
     expect(d.cliPath).toMatchObject({ default: "~/.wakatime/wakatime-cli" });
     expect(d.entity).toMatchObject({ default: "title", options: ["title", "threadId"] });
-    expect(d.agentCategory).toMatchObject({ default: "ai coding" });
+    expect(d.agentCategory).toMatchObject({ type: "select", default: "building" });
+    expect(d.userCategory).toMatchObject({ type: "select", default: "coding" });
+    for (const key of ["userCategory", "agentCategory"]) {
+      const options = (d[key] as { options: string[] }).options;
+      expect(options).toHaveLength(20);
+      expect(options).not.toContain("ai coding");
+    }
   });
 
   it("serves a heartbeat RPC that spawns the cli with the plugin string", async () => {
@@ -88,7 +107,94 @@ describe("wakatime plugin", () => {
     expect(execCalls[0]!.file).toBe(cli);
     expect(execCalls[0]!.args).toContain("--entity=Fix login");
     expect(execCalls[0]!.args).toContain("--project=acme");
+    expect(execCalls[0]!.args).toContain(`--plugin=bb/9.8.7 bb-wakatime/${pkg.version}`);
+  });
+
+  it("reads the host version once at startup, not per heartbeat", async () => {
+    await start();
+    await host.harness.callRpc("heartbeat", { threadId: "thr_1" });
+    await host.harness.callRpc("heartbeat", { projectId: "prj_1" });
+    await flush();
+    expect(versionCalls).toBe(1);
+  });
+
+  it("falls back to bb/unknown when the version cannot be read", async () => {
+    version = async () => {
+      throw new Error("offline");
+    };
+    await start();
+    await host.harness.callRpc("heartbeat", { threadId: "thr_1" });
+    await flush();
     expect(execCalls[0]!.args).toContain(`--plugin=bb/unknown bb-wakatime/${pkg.version}`);
+  });
+
+  it("handles RPC calls and events while version() is still pending, then uses the version once it answers", async () => {
+    let answer!: (value: { currentVersion: string }) => void;
+    version = () => new Promise((resolve) => (answer = resolve));
+    await start();
+    // start() returned although version() has not answered.
+    expect(await host.harness.callRpc("heartbeat", { threadId: "thr_1" })).toEqual({ sent: true });
+    thread = { ...thread, status: "active" };
+    await host.harness.emitThreadEvent("thread.active", { thread });
+    await flush();
+    expect(execCalls.length).toBeGreaterThanOrEqual(2);
+    for (const call of execCalls) expect(call.args).toContain(`--plugin=bb/unknown bb-wakatime/${pkg.version}`);
+    answer({ currentVersion: "9.8.7" });
+    await flush();
+    execCalls.length = 0;
+    // A different entity passes the throttle.
+    await host.harness.callRpc("heartbeat", {});
+    await flush();
+    expect(execCalls[0]!.args).toContain(`--plugin=bb/9.8.7 bb-wakatime/${pkg.version}`);
+    expect(versionCalls).toBe(1);
+  });
+
+  it("says bb/unknown when the host reports an empty version", async () => {
+    version = async () => ({ currentVersion: "" });
+    await start();
+    await host.harness.callRpc("heartbeat", { threadId: "thr_1" });
+    await flush();
+    expect(execCalls[0]!.args).toContain(`--plugin=bb/unknown bb-wakatime/${pkg.version}`);
+  });
+
+  it("aborts the version call after 5000 ms", async () => {
+    let seen: AbortSignal | undefined;
+    version = (() => undefined) as never;
+    host = createFakePluginHost({
+      pluginId: "wakatime",
+      settings: { cliPath: cli },
+      sdk: {
+        threads: { listRunning: async () => [] },
+        projects: { list: async () => [] },
+        system: {
+          version: (args?: { signal?: AbortSignal }) => {
+            seen = args?.signal;
+            return new Promise(() => undefined);
+          },
+        },
+      } as never,
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await plugin(host.bb);
+      expect(seen).toBeInstanceOf(AbortSignal);
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(seen!.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(seen!.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("spawns nothing after the plugin is disposed", async () => {
+    await start();
+    await host.harness.callRpc("heartbeat", { threadId: "thr_1" });
+    await flush();
+    expect(execCalls).toHaveLength(1);
+    await host.harness.dispose();
+    await flush();
+    expect(execCalls).toHaveLength(1);
   });
 
   it("rejects a malformed or oversized id without sending anything", async () => {
@@ -129,7 +235,7 @@ describe("wakatime plugin", () => {
     const heartbeats = execCalls.filter((call) => !call.args.includes("--sync-ai-activity"));
     expect(heartbeats.length).toBeGreaterThanOrEqual(2);
     expect(execCalls.filter((call) => call.args.includes("--sync-ai-activity"))).toHaveLength(1);
-    for (const call of heartbeats) expect(call.args).toContain("--category=ai coding");
+    for (const call of heartbeats) expect(call.args).toContain("--category=building");
   });
 
   it("starts timers for threads already active when the plugin loads", async () => {

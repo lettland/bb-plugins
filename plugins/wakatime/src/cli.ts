@@ -4,7 +4,7 @@ import { access, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { PluginLogger } from "@get-bb/plugin-sdk";
-import type { ErrorKind } from "./rpc-contract.js";
+import type { ErrorKind, PathProblem } from "./rpc-contract.js";
 
 /** Above the CLI's own 120 s API timeout, leaving room for its offline-queue sync. */
 export const HEARTBEAT_TIMEOUT_MS = 150_000;
@@ -12,13 +12,19 @@ export const SYNC_TIMEOUT_MS = 10 * 60_000;
 export const MAX_CONCURRENT = 4;
 export const FAILURE_LOG_INTERVAL_MS = 10 * 60_000;
 
+// wakatime-cli always leaves stderr empty and logs to ~/.wakatime/wakatime.log,
+// so a failure is classified from the exit code alone.
+const EXIT_API = 102;
+const EXIT_CONFIG = 103;
+const EXIT_AUTH = 104;
+const EXIT_BACKOFF = 112;
+
 export interface ExecResult {
   exitCode: number | null;
   /** Set when the process was killed, which here means the timeout fired. */
   signal: string | null;
   /** A spawn failure code such as ENOENT; null when the process ran. */
   spawnError: string | null;
-  stderr: string;
 }
 
 export type Exec = (file: string, args: string[], options: { timeoutMs: number }) => Promise<ExecResult>;
@@ -30,9 +36,9 @@ export const defaultExec: Exec = (file, args, { timeoutMs }) =>
       file,
       args,
       { timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 1024 * 1024, windowsHide: true },
-      (error, _stdout, stderr) => {
+      (error) => {
         if (!error) {
-          resolve({ exitCode: 0, signal: null, spawnError: null, stderr: String(stderr) });
+          resolve({ exitCode: 0, signal: null, spawnError: null });
           return;
         }
         const code = error.code;
@@ -40,7 +46,6 @@ export const defaultExec: Exec = (file, args, { timeoutMs }) =>
           exitCode: typeof code === "number" ? code : null,
           signal: error.signal ?? null,
           spawnError: typeof code === "string" ? code : null,
-          stderr: String(stderr ?? ""),
         });
       },
     );
@@ -49,6 +54,8 @@ export const defaultExec: Exec = (file, args, { timeoutMs }) =>
 export interface Job {
   /** At most one job per key runs at a time; a newer queued job replaces an older one. */
   key: string;
+  kind: "heartbeat" | "sync";
+  /** The `cliPath` setting as typed; logs show this, never the expanded path. */
   cliPath: string;
   args: string[];
   timeoutMs: number;
@@ -57,14 +64,28 @@ export interface Job {
 export type JobOutcome = "ok" | "failed" | "skipped" | "superseded";
 
 export interface RunnerHealth {
-  cliPath: string | null;
-  lastSuccessAt: number | null;
-  lastError: { kind: ErrorKind; exitCode: number | null; at: number } | null;
+  lastHeartbeatAt: number | null;
+  lastSyncAt: number | null;
+  lastError: {
+    kind: ErrorKind;
+    job: Job["kind"];
+    exitCode: number | null;
+    at: number;
+    problem?: PathProblem;
+  } | null;
 }
 
 export interface Runner {
   submit(job: Job): Promise<JobOutcome>;
+  /**
+   * Run the path check for `cliPath` now, updating the health state the way a
+   * job would: a passing check clears a `missing-cli` error, a failing one
+   * records the problem.
+   */
+  verify(cliPath: string): Promise<void>;
   health(): RunnerHealth;
+  /** Resolves queued jobs as skipped and refuses new ones; in-flight jobs finish. */
+  dispose(): void;
 }
 
 export function expandHome(raw: string): string {
@@ -73,8 +94,6 @@ export function expandHome(raw: string): string {
   if (value.startsWith("~/")) return path.join(os.homedir(), value.slice(2));
   return value;
 }
-
-type PathProblem = "not-absolute" | "not-found" | "not-a-file" | "not-executable";
 
 async function checkCli(file: string): Promise<PathProblem | null> {
   if (!path.isAbsolute(file)) return "not-absolute";
@@ -91,30 +110,13 @@ async function checkCli(file: string): Promise<PathProblem | null> {
   return null;
 }
 
-// Plain substring checks on lowercased stderr: no regex, so nothing to backtrack.
-const AUTH_MARKERS = ["api key", "unauthorized", "401"];
-const NETWORK_MARKERS = [
-  "dial tcp",
-  "no such host",
-  "connection refused",
-  "connection reset",
-  "i/o timeout",
-  "deadline exceeded",
-  "tls",
-  "network",
-  "unreachable",
-];
-const STDERR_SCAN_LIMIT = 64 * 1024;
-const EXIT_AUTH = 104;
-
 export function classify(result: ExecResult): ErrorKind {
   if (result.spawnError === "ENOENT" || result.spawnError === "EACCES") return "missing-cli";
   if (result.spawnError !== null) return "other";
   if (result.signal !== null) return "timeout";
   if (result.exitCode === EXIT_AUTH) return "auth";
-  const text = result.stderr.slice(0, STDERR_SCAN_LIMIT).toLowerCase();
-  if (AUTH_MARKERS.some((marker) => text.includes(marker))) return "auth";
-  if (NETWORK_MARKERS.some((marker) => text.includes(marker))) return "network";
+  if (result.exitCode === EXIT_API || result.exitCode === EXIT_BACKOFF) return "network";
+  if (result.exitCode === EXIT_CONFIG) return "config";
   return "other";
 }
 
@@ -130,55 +132,75 @@ export function createRunner(options: { exec?: Exec; log: PluginLogger }): Runne
   const inFlightKeys = new Set<string>();
   const lastLoggedAt = new Map<ErrorKind, number>();
   const warnedPaths = new Set<string>();
-  const state: RunnerHealth = { cliPath: null, lastSuccessAt: null, lastError: null };
+  const state: RunnerHealth = { lastHeartbeatAt: null, lastSyncAt: null, lastError: null };
   // The last path that passed the check; cleared by a spawn error so it is re-checked.
   let verifiedPath: string | null = null;
+  // The last path reported as usable, to log a change once.
+  let reportedPath: string | null = null;
   let running = 0;
+  let disposed = false;
 
-  async function ensureUsable(file: string): Promise<boolean> {
-    if (verifiedPath === file) return true;
+  async function ensureUsable(
+    file: string,
+    job: Pick<Job, "cliPath" | "kind">,
+    recheck = false,
+  ): Promise<boolean> {
+    if (!recheck && verifiedPath === file) return true;
     const problem = await checkCli(file);
     if (problem === null) {
       verifiedPath = file;
       warnedPaths.delete(file);
+      // Only a path-check error: one from a real spawn failure (no `problem`)
+      // stays until a job succeeds.
+      if (state.lastError?.kind === "missing-cli" && state.lastError.problem !== undefined) state.lastError = null;
+      if (reportedPath !== null && reportedPath !== file) {
+        log.info(`wakatime-cli path changed to ${job.cliPath.trim()}`);
+      }
+      reportedPath = file;
       return true;
     }
     verifiedPath = null;
-    state.lastError = { kind: "missing-cli", exitCode: null, at: Date.now() };
+    // The same problem again keeps its job and time, so reading the status does not move them.
+    const last = state.lastError;
+    if (last?.kind !== "missing-cli" || last.problem !== problem) {
+      state.lastError = { kind: "missing-cli", job: job.kind, exitCode: null, at: Date.now(), problem };
+    }
     if (!warnedPaths.has(file)) {
       warnedPaths.add(file);
-      log.warn(`wakatime-cli is not usable at ${file} (${problem}); heartbeats are skipped until it is`);
+      log.warn(
+        `wakatime-cli is not usable at ${job.cliPath.trim()} (${problem}); heartbeats are skipped until it is`,
+      );
     }
     return false;
   }
 
-  function recordFailure(kind: ErrorKind, exitCode: number | null): void {
+  function recordFailure(job: Job, kind: ErrorKind, exitCode: number | null): void {
     const now = Date.now();
-    state.lastError = { kind, exitCode, at: now };
+    state.lastError = { kind, job: job.kind, exitCode, at: now };
     const last = lastLoggedAt.get(kind);
     if (last !== undefined && now - last < FAILURE_LOG_INTERVAL_MS) return;
     lastLoggedAt.set(kind, now);
-    log.warn(`wakatime-cli failed: kind=${kind} exit=${exitCode ?? "none"}`);
+    log.warn(`wakatime-cli failed: kind=${kind} exit=${exitCode ?? "none"}; see ~/.wakatime/wakatime.log`);
   }
 
   async function execute(job: Job): Promise<JobOutcome> {
     const file = expandHome(job.cliPath);
-    state.cliPath = file;
-    if (!(await ensureUsable(file))) return "skipped";
+    if (!(await ensureUsable(file, job))) return "skipped";
     let result: ExecResult;
     try {
       result = await exec(file, job.args, { timeoutMs: job.timeoutMs });
     } catch {
-      result = { exitCode: null, signal: null, spawnError: "EXEC_FAILED", stderr: "" };
+      result = { exitCode: null, signal: null, spawnError: "EXEC_FAILED" };
     }
     if (result.spawnError === null && result.signal === null && result.exitCode === 0) {
-      state.lastSuccessAt = Date.now();
+      if (job.kind === "sync") state.lastSyncAt = Date.now();
+      else state.lastHeartbeatAt = Date.now();
       lastLoggedAt.clear();
       return "ok";
     }
     const kind = classify(result);
     if (kind === "missing-cli") verifiedPath = null;
-    recordFailure(kind, result.exitCode);
+    recordFailure(job, kind, result.exitCode);
     return "failed";
   }
 
@@ -206,6 +228,7 @@ export function createRunner(options: { exec?: Exec; log: PluginLogger }): Runne
 
   return {
     submit(job) {
+      if (disposed) return Promise.resolve("skipped");
       const waiting = queue.find((entry) => entry.job.key === job.key);
       if (waiting !== undefined) {
         // Replace in place so the key keeps its queue position.
@@ -220,6 +243,13 @@ export function createRunner(options: { exec?: Exec; log: PluginLogger }): Runne
         pump();
       });
     },
+    async verify(cliPath) {
+      await ensureUsable(expandHome(cliPath), { cliPath, kind: "heartbeat" }, true);
+    },
     health: () => ({ ...state }),
+    dispose() {
+      disposed = true;
+      for (const entry of queue.splice(0)) entry.resolve("skipped");
+    },
   };
 }

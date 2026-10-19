@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ACTIVITY_INTERVAL_MS, trackActivity } from "./activity.js";
+import { ACTIVITY_INTERVAL_MS, NAVIGATION_GRACE_MS, trackActivity } from "./activity.js";
 import type { ActivityRoute, ActivityTracker } from "./activity.js";
 
 const ROUTE: ActivityRoute = { projectId: "prj_1", threadId: "thr_1" };
@@ -74,6 +74,8 @@ describe("trackActivity", () => {
     start();
     window.dispatchEvent(new Event("keydown"));
     const next = { projectId: "prj_1", threadId: "thr_2" };
+    // No activity in the last 2 s, so the change alone sends nothing.
+    clock += NAVIGATION_GRACE_MS + 1;
     tracker.setRoute(next);
     expect(sent).toHaveLength(1);
     window.dispatchEvent(new Event("keydown"));
@@ -84,6 +86,55 @@ describe("trackActivity", () => {
     window.dispatchEvent(new Event("wheel"));
     expect(sent).toHaveLength(3);
     expect(sent[2]).toEqual({ projectId: null, threadId: null });
+  });
+
+  describe("a click that navigates", () => {
+    const next = { projectId: "prj_1", threadId: "thr_2" };
+
+    it("credits the new view when the route changes within 2 s of the activity", () => {
+      start();
+      window.dispatchEvent(new Event("pointerdown"));
+      expect(sent).toEqual([ROUTE]);
+      clock += NAVIGATION_GRACE_MS;
+      tracker.setRoute(next);
+      expect(sent).toEqual([ROUTE, next]);
+      // The new view is now throttled like any other.
+      window.dispatchEvent(new Event("pointerdown"));
+      expect(sent).toHaveLength(2);
+    });
+
+    it("also credits it when the old view's activity was throttled", () => {
+      start();
+      window.dispatchEvent(new Event("keydown"));
+      clock += 60_000;
+      window.dispatchEvent(new Event("pointerdown"));
+      expect(sent).toHaveLength(1);
+      clock += 500;
+      tracker.setRoute(next);
+      expect(sent).toEqual([ROUTE, next]);
+    });
+
+    it("sends nothing when there was no recent activity, or the route did not change", () => {
+      start();
+      tracker.setRoute(next);
+      expect(sent).toEqual([]);
+      window.dispatchEvent(new Event("keydown"));
+      sent.length = 0;
+      tracker.setRoute(next);
+      expect(sent).toEqual([]);
+    });
+
+    it("still honours focus and visibility", () => {
+      start();
+      window.dispatchEvent(new Event("pointerdown"));
+      focused = false;
+      tracker.setRoute(next);
+      expect(sent).toEqual([ROUTE]);
+      focused = true;
+      visibility = "hidden";
+      tracker.setRoute({ projectId: null, threadId: null });
+      expect(sent).toEqual([ROUTE]);
+    });
   });
 
   it("removes its listeners on dispose", () => {

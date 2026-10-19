@@ -24,9 +24,15 @@ export interface ThreadLike {
   environmentId: string | null;
 }
 
-// Control characters (newlines included) would split a dashboard row or corrupt argv.
+// Control characters (newlines included) would split a dashboard row or corrupt
+// argv; format characters (bidi, zero-width) would disguise it. U+200D stays so
+// emoji sequences survive.
 function clean(value: string | null | undefined): string | null {
-  const text = (value ?? "").replace(/\p{Cc}+/gu, " ").trim();
+  const text = Array.from(value ?? "")
+    .filter((char) => char === "\u200D" || !/\p{Cf}/u.test(char))
+    .join("")
+    .replace(/\p{Cc}+/gu, " ")
+    .trim();
   return text.length > 0 ? text : null;
 }
 
@@ -46,7 +52,7 @@ export function buildArgv(spec: HeartbeatSpec, plugin: string): string[] {
   argv.push(
     `--category=${clean(spec.category) ?? "coding"}`,
     `--time=${(spec.timeMs / 1000).toFixed(3)}`,
-    `--plugin=${plugin}`,
+    `--plugin=${clean(plugin) ?? "bb"}`,
     "--sync-ai-disabled",
   );
   return argv;
