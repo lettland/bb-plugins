@@ -19,6 +19,7 @@ const okThread = {
   visibility: "visible",
   environmentId: "env_1",
   providerId: "claude-code",
+  archivedAt: null,
 };
 
 describe("passesThreadGate", () => {
@@ -42,6 +43,10 @@ describe("passesThreadGate", () => {
 
   it("skips threads without an environment", () => {
     expect(passesThreadGate({ ...okThread, environmentId: null })).toBe(false);
+  });
+
+  it("skips archived threads", () => {
+    expect(passesThreadGate({ ...okThread, archivedAt: 1 })).toBe(false);
   });
 });
 

@@ -12,9 +12,13 @@ export interface GateThread {
   visibility: string;
   environmentId: string | null;
   providerId: string;
+  archivedAt: number | null;
 }
 
 export function passesThreadGate(thread: GateThread): boolean {
+  if (thread.archivedAt !== null) {
+    return false;
+  }
   if (thread.parentThreadId !== null) {
     return false;
   }
