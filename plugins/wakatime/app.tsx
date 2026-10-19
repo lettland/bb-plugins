@@ -25,7 +25,41 @@ const PROBLEM_LABELS: Record<PathProblem, string> = {
   "not-executable": "the file is not executable",
 };
 
-const JOB_LABELS = { heartbeat: "heartbeat", sync: "AI sync" } as const;
+const DROP_LABELS: Record<keyof WakatimeStatus["droppedFiles"], string> = {
+  outOfScope: "outside the environment folder",
+  overflow: "buffer full",
+  filtered: "dropped by your fileActivity, entity, agent-tracking or exclusion settings",
+  failed: "wakatime-cli failed",
+};
+
+const formatTime = (at: number | null) => (at === null ? "none yet" : new Date(at).toLocaleString());
+
+/** File entries: the last batch sent, what waits in memory, and what was dropped and why. */
+function FileRows(props: { status: WakatimeStatus }) {
+  const { lastFileBatchAt, pendingFiles, droppedFiles } = props.status;
+  const dropped = (Object.keys(DROP_LABELS) as (keyof typeof DROP_LABELS)[]).filter((key) => droppedFiles[key] > 0);
+  return (
+    <>
+      <div>
+        <dt style={{ color: SOFT_INK }}>Last file entries sent</dt>
+        <dd style={{ margin: 0 }}>{formatTime(lastFileBatchAt)}</dd>
+      </div>
+      <div>
+        <dt style={{ color: SOFT_INK }}>File entries waiting</dt>
+        <dd style={{ margin: 0 }}>
+          {pendingFiles}
+          {pendingFiles === 0 ? "" : " (kept in memory until the thread's next heartbeat or turn)"}
+        </dd>
+      </div>
+      {dropped.map((key) => (
+        <div key={key}>
+          <dt style={{ color: SOFT_INK }}>File entries dropped: {DROP_LABELS[key]}</dt>
+          <dd style={{ margin: 0 }}>{droppedFiles[key]}</dd>
+        </div>
+      ))}
+    </>
+  );
+}
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -106,9 +140,8 @@ function StatusPanel() {
     );
   }
 
-  const { cliPath, lastHeartbeatAt, lastSyncAt, unmatchedExcludes } = status;
+  const { cliPath, lastHeartbeatAt, unmatchedExcludes } = status;
   const currentError = visibleError(status);
-  const formatTime = (at: number | null) => (at === null ? "none yet" : new Date(at).toLocaleString());
   return (
     <div>
       <dl style={{ margin: 0, display: "grid", gap: 6, fontSize: 12 }}>
@@ -120,14 +153,11 @@ function StatusPanel() {
           <dt style={{ color: SOFT_INK }}>Last successful heartbeat</dt>
           <dd style={{ margin: 0 }}>{formatTime(lastHeartbeatAt)}</dd>
         </div>
-        <div>
-          <dt style={{ color: SOFT_INK }}>Last successful AI sync</dt>
-          <dd style={{ margin: 0 }}>{formatTime(lastSyncAt)}</dd>
-        </div>
+        <FileRows status={status} />
         {currentError === null ? null : (
           <div>
             <dt style={{ color: SOFT_INK }}>
-              Last error ({JOB_LABELS[currentError.job]}, {new Date(currentError.at).toLocaleString()})
+              Last error ({new Date(currentError.at).toLocaleString()})
             </dt>
             <dd style={{ margin: 0, color: "var(--destructive-text)" }}>
               <span role="alert">

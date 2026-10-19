@@ -16,17 +16,25 @@ const statusSchema = z.object({
   /** The current `cliPath` setting with `~` expanded. */
   cliPath: z.string(),
   lastHeartbeatAt: z.number().nullable(),
-  lastSyncAt: z.number().nullable(),
-  /** The latest failure of either job; see `visibleError` for when it still matters. */
+  /** The latest failure; see `visibleError` for when it still matters. */
   lastError: z
     .object({
       kind: z.enum(ERROR_KINDS),
-      job: z.enum(["heartbeat", "sync"]),
       exitCode: z.number().nullable(),
       at: z.number(),
       problem: z.enum(PATH_PROBLEMS).optional(),
     })
     .nullable(),
+  lastFileBatchAt: z.number().nullable(),
+  /** File entries buffered in memory, waiting for their thread's next heartbeat. */
+  pendingFiles: z.number(),
+  /** File entries that never reached wakatime-cli, by reason. */
+  droppedFiles: z.object({
+    outOfScope: z.number(),
+    overflow: z.number(),
+    filtered: z.number(),
+    failed: z.number(),
+  }),
   /** `excludeProjects` entries that match no project, as typed in the setting. */
   unmatchedExcludes: z.array(z.string()),
 });

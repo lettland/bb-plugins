@@ -7,8 +7,10 @@ import type { WakatimeRpcContract, WakatimeStatus } from "./src/rpc-contract.js"
 const BASE: WakatimeStatus = {
   cliPath: "/opt/wakatime-cli",
   lastHeartbeatAt: 1_700_000_000_000,
-  lastSyncAt: null,
   lastError: null,
+  lastFileBatchAt: null,
+  pendingFiles: 0,
+  droppedFiles: { outOfScope: 0, overflow: 0, filtered: 0, failed: 0 },
   unmatchedExcludes: [],
 };
 
@@ -41,20 +43,38 @@ describe("StatusPanel", () => {
     expect(app.settingsSections.map((section) => section.id)).toEqual(["status"]);
   });
 
-  it("shows the path, both successes and the unmatched excludes", async () => {
-    render(() => ({ ...BASE, lastSyncAt: 1_700_000_100_000, unmatchedExcludes: ["ghost"] }));
+  it("shows the path, the last heartbeat, no file rows to speak of, and the unmatched excludes", async () => {
+    render(() => ({ ...BASE, unmatchedExcludes: ["ghost"] }));
     expect(await screen.findByText("/opt/wakatime-cli")).toBeTruthy();
     expect(screen.getByText("Last successful heartbeat")).toBeTruthy();
-    expect(screen.getByText("Last successful AI sync")).toBeTruthy();
+    expect(screen.getByText("Last file entries sent")).toBeTruthy();
+    expect(screen.getByText("File entries waiting")).toBeTruthy();
+    expect(screen.queryByText(/File entries dropped/)).toBeNull();
+    expect(screen.queryByText(/sync/i)).toBeNull();
     expect(screen.getByText("ghost")).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("labels the failed job, the problem and the exit code, in an alert span inside the dd", async () => {
+  it("shows the pending count with its note, and each non-zero drop reason with its description", async () => {
+    render(() => ({
+      ...BASE,
+      lastFileBatchAt: 1_700_000_300_000,
+      pendingFiles: 3,
+      droppedFiles: { outOfScope: 2, overflow: 0, filtered: 5, failed: 1 },
+    }));
+    await screen.findByText("/opt/wakatime-cli");
+    expect(screen.getByText(/3 \(kept in memory until the thread's next heartbeat or turn\)/)).toBeTruthy();
+    expect(screen.getByText("File entries dropped: outside the environment folder")).toBeTruthy();
+    expect(screen.getByText("File entries dropped: dropped by your fileActivity, entity, agent-tracking or exclusion settings")).toBeTruthy();
+    expect(screen.getByText("File entries dropped: wakatime-cli failed")).toBeTruthy();
+    expect(screen.queryByText(/buffer full/)).toBeNull();
+  });
+
+  it("labels the problem and the exit code, in an alert span inside the dd", async () => {
     render(() => ({
       ...BASE,
       lastHeartbeatAt: null,
-      lastError: { kind: "missing-cli", job: "heartbeat", exitCode: null, at: 1_700_000_200_000, problem: "not-executable" },
+      lastError: { kind: "missing-cli", exitCode: null, at: 1_700_000_200_000, problem: "not-executable" },
     }));
     const alert = await screen.findByRole("alert");
     expect(alert.tagName).toBe("SPAN");
@@ -62,40 +82,18 @@ describe("StatusPanel", () => {
     expect(alert.textContent).toContain("wakatime-cli not found or not executable");
     expect(alert.textContent).toContain("the file is not executable");
     expect(alert.textContent).toContain("~/.wakatime/wakatime.log");
-    expect(screen.getByText(/Last error \(heartbeat,/)).toBeTruthy();
+    expect(screen.getByText(/Last error \(/)).toBeTruthy();
   });
 
-  it("labels a sync error with its job and exit code", async () => {
-    render(() => ({ ...BASE, lastError: { kind: "config", job: "sync", exitCode: 103, at: 1_700_000_200_000 } }));
+  it("labels a config error with its exit code", async () => {
+    render(() => ({ ...BASE, lastError: { kind: "config", exitCode: 103, at: 1_800_000_000_000 } }));
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("rejected its arguments or config");
     expect(alert.textContent).toContain("(exit 103)");
-    expect(screen.getByText(/Last error \(AI sync,/)).toBeTruthy();
   });
 
-  it("hides a sync error its own job has recovered from, whatever the heartbeat did", async () => {
-    render(() => ({
-      ...BASE,
-      lastHeartbeatAt: 1_500_000_000_000,
-      lastSyncAt: 1_700_000_000_000,
-      lastError: { kind: "auth", job: "sync", exitCode: 104, at: 1_600_000_000_000 },
-    }));
-    await screen.findByText("/opt/wakatime-cli");
-    expect(screen.queryByRole("alert")).toBeNull();
-  });
-
-  it("shows a sync error newer than the sync's last success even if heartbeats are newer still", async () => {
-    render(() => ({
-      ...BASE,
-      lastHeartbeatAt: 1_800_000_000_000,
-      lastSyncAt: 1_500_000_000_000,
-      lastError: { kind: "auth", job: "sync", exitCode: 104, at: 1_600_000_000_000 },
-    }));
-    expect((await screen.findByRole("alert")).textContent).toContain("authentication failed");
-  });
-
-  it("hides an error older than the job's last success", async () => {
-    render(() => ({ ...BASE, lastError: { kind: "network", job: "heartbeat", exitCode: 112, at: 1_600_000_000_000 } }));
+  it("hides an error older than the last successful heartbeat", async () => {
+    render(() => ({ ...BASE, lastError: { kind: "network", exitCode: 112, at: 1_600_000_000_000 } }));
     await screen.findByText("/opt/wakatime-cli");
     expect(screen.queryByRole("alert")).toBeNull();
   });

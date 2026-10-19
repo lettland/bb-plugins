@@ -1,9 +1,8 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SYNC_WINDOW_MS } from "./ai-sync.js";
-import { createRunner, HEARTBEAT_TIMEOUT_MS, MAX_CONCURRENT, SYNC_TIMEOUT_MS } from "./cli.js";
+import { createRunner, HEARTBEAT_TIMEOUT_MS, MAX_CONCURRENT } from "./cli.js";
 import type { Exec, ExecResult, Job, JobOutcome, Runner, RunnerHealth } from "./cli.js";
 import { THROTTLE_MS } from "./heartbeat.js";
 import type { ThreadLike } from "./heartbeat.js";
@@ -35,14 +34,26 @@ function defaultSettings(overrides: Partial<WakatimeSettings> = {}): WakatimeSet
     userCategory: "coding",
     trackAgentActivity: true,
     agentCategory: "building",
-    syncAiActivity: true,
     entity: "title",
+    fileActivity: "edits-and-reads",
     excludeProjects: "",
     ...overrides,
   };
 }
 
 const settle = () => vi.advanceTimersByTimeAsync(0);
+
+// Captured before any test fakes timers: file scope checks wait on real I/O.
+const realSetTimeout = globalThis.setTimeout;
+
+interface EventRow {
+  seq: number;
+  createdAt: number;
+  data: unknown;
+}
+
+/** The environment folder the fake `environments.get` reports; a real directory, so scope checks hit the filesystem. */
+let repoDir: string;
 
 function arg(job: Job, flag: string): string | undefined {
   return job.args.find((value) => value.startsWith(`${flag}=`))?.slice(flag.length + 1);
@@ -60,9 +71,16 @@ function harness(options: Options = {}) {
   const threads = new Map((options.threads ?? []).map((t) => [t.id, t]));
   const projects = options.projects ?? [PROJECT];
   const jobs: Job[] = [];
-  const heldSync: ((outcome: JobOutcome) => void)[] = [];
-  let holdSync = false;
+  const held: ((outcome: JobOutcome) => void)[] = [];
+  const rows: EventRow[] = [];
+  const eventCalls: Record<string, unknown>[] = [];
   const state = {
+    hold: false,
+    outcome: "ok" as JobOutcome,
+    eventsError: false as boolean | "string",
+    eventsGate: null as Promise<void> | null,
+    seedFailures: 0,
+    envPath: repoDir as string | null,
     getCalls: 0,
     getError: false,
     gate: null as Promise<void> | null,
@@ -78,14 +96,14 @@ function harness(options: Options = {}) {
     projectsListError: false,
     projectsListCalls: 0,
   };
-  const health: RunnerHealth = { lastHeartbeatAt: null, lastSyncAt: null, lastError: null };
+  const health: RunnerHealth = { lastHeartbeatAt: null, lastError: null };
   const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
   const fakeRunner: Runner = {
     submit(job) {
       jobs.push(job);
-      if (job.key === "sync" && holdSync) return new Promise((resolve) => heldSync.push(resolve));
-      return Promise.resolve("ok");
+      if (state.hold) return new Promise((resolve) => held.push(resolve));
+      return Promise.resolve(state.outcome);
     },
     health: () => ({ ...health }),
     verify: async (cliPath) => {
@@ -104,6 +122,22 @@ function harness(options: Options = {}) {
         const found = threads.get(threadId);
         if (state.getError || found === undefined) throw new Error("not found");
         return { ...found };
+      },
+      events: {
+        async list(args) {
+          eventCalls.push({ ...args, signal: args.signal instanceof AbortSignal ? "AbortSignal" : args.signal });
+          if (state.eventsGate !== null) await state.eventsGate;
+          if (state.eventsError === "string") throw "events down";
+          if (state.eventsError) throw new Error("events down");
+          if (args.order === "desc") {
+            if (state.seedFailures > 0) {
+              state.seedFailures--;
+              throw new Error("seed failed");
+            }
+            return rows.slice(-1);
+          }
+          return rows.filter((row) => row.seq > Number(args.afterSeq)).slice(0, Number(args.limit));
+        },
       },
       async listRunning() {
         state.listRunningCalls++;
@@ -131,7 +165,7 @@ function harness(options: Options = {}) {
     },
     environments: {
       async get() {
-        return { branchName: "feat/x" };
+        return { branchName: "feat/x", path: state.envPath };
       },
       async status() {
         return { outcome: "unavailable" };
@@ -158,13 +192,13 @@ function harness(options: Options = {}) {
     settings,
     threads,
     jobs,
-    heldSync,
+    held,
+    rows,
+    eventCalls,
     state,
     health,
     log,
-    holdSync: (value: boolean) => (holdSync = value),
     heartbeats: () => jobs.filter((job) => job.key.startsWith("heartbeat:")),
-    syncs: () => jobs.filter((job) => job.key === "sync"),
     idle(id: string) {
       const t = threads.get(id)!;
       threads.set(id, { ...t, status: "idle" });
@@ -176,10 +210,12 @@ function harness(options: Options = {}) {
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout", "Date"] });
   vi.setSystemTime(T0);
+  repoDir = mkdtempSync(path.join(os.tmpdir(), "waka-env-"));
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  rmSync(repoDir, { recursive: true, force: true });
 });
 
 describe("agent time", () => {
@@ -205,7 +241,7 @@ describe("agent time", () => {
     expect(first.cliPath).toBe("/opt/wakatime-cli");
   });
 
-  it("stops on idle and failed, sending a final heartbeat and requesting a sync", async () => {
+  it("stops on idle and failed, sending a final heartbeat and no more after it", async () => {
     for (const _case of ["idle", "failed"]) {
       const h = harness({ threads: [thread("thr_1")] });
       h.tracker.onActive(h.threads.get("thr_1")!);
@@ -214,9 +250,7 @@ describe("agent time", () => {
       expect(h.heartbeats()).toHaveLength(2);
       await h.idle("thr_1");
       expect(h.heartbeats()).toHaveLength(3);
-      expect(h.syncs()).toHaveLength(1);
-      expect(h.syncs()[0]!.args).toEqual(["--sync-ai-activity"]);
-      expect(h.syncs()[0]!.timeoutMs).toBe(SYNC_TIMEOUT_MS);
+      expect(h.jobs.some((job) => job.args.includes("--sync-ai-activity"))).toBe(false);
       await vi.advanceTimersByTimeAsync(10 * 60_000);
       expect(h.heartbeats()).toHaveLength(3);
     }
@@ -358,12 +392,13 @@ describe("agent time", () => {
     const h = harness({ threads: [thread("thr_1")] });
     h.state.settingsDelayMs = 1;
     h.tracker.onActive(h.threads.get("thr_1")!);
-    await vi.advanceTimersByTimeAsync(1);
+    // Two settings reads of 1 ms each (start, then the send) precede the start heartbeat.
+    await vi.advanceTimersByTimeAsync(2);
     expect(h.heartbeats()).toHaveLength(1);
     h.state.settingsDelayMs = 0;
-    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS - 1);
-    // The tick landed 119 999 ms after the start heartbeat, inside the throttle window.
-    expect(AGENT_TICK_MS - 1).toBeLessThan(THROTTLE_MS);
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS - 2);
+    // The tick landed 119 998 ms after the start heartbeat, inside the throttle window.
+    expect(AGENT_TICK_MS - 2).toBeLessThan(THROTTLE_MS);
     expect(h.heartbeats()).toHaveLength(2);
   });
 
@@ -378,7 +413,14 @@ describe("agent time", () => {
     h.tracker.onGone("thr_3");
     expect(h.tracker.stateSize()).toMatchObject({ timers: 1, throttle: 1 });
     h.tracker.dispose();
-    expect(h.tracker.stateSize()).toEqual({ timers: 0, confirming: 0, notTimed: 0, throttle: 0, branches: 0 });
+    expect(h.tracker.stateSize()).toEqual({
+      timers: 0,
+      confirming: 0,
+      notTimed: 0,
+      throttle: 0,
+      branches: 0,
+      files: { threads: 0, buffered: 0, reads: 0 },
+    });
     await vi.advanceTimersByTimeAsync(10 * 60_000);
     expect(h.heartbeats().length).toBeLessThanOrEqual(5);
     const count = h.heartbeats().length;
@@ -481,39 +523,14 @@ describe("toggles and exclusion", () => {
     expect(h.tracker.stateSize().timers).toBe(0);
   });
 
-  it("still syncs after a turn when only trackAgentActivity is off", async () => {
-    const h = harness({ threads: [thread("thr_1")], settings: { trackAgentActivity: false } });
-    await h.idle("thr_1");
-    expect(h.heartbeats()).toHaveLength(0);
-    expect(h.syncs()).toHaveLength(1);
-  });
-
   it("sends nothing from the user RPC with trackUserActivity off", async () => {
     const h = harness({ threads: [thread("thr_1")], settings: { trackUserActivity: false } });
     expect(await h.tracker.userHeartbeat({ threadId: "thr_1" })).toBe(false);
     expect(h.jobs).toHaveLength(0);
   });
 
-  it("runs no sync with syncAiActivity off", async () => {
-    const h = harness({ threads: [thread("thr_1")], settings: { syncAiActivity: false } });
-    await h.idle("thr_1");
-    await vi.advanceTimersByTimeAsync(SYNC_WINDOW_MS * 2);
-    expect(h.heartbeats()).toHaveLength(1);
-    expect(h.syncs()).toHaveLength(0);
-  });
-
-  it("skips a sync already scheduled when the setting is switched off before it fires", async () => {
-    const h = harness({ threads: [thread("thr_1")] });
-    await h.idle("thr_1");
-    await h.idle("thr_1");
-    expect(h.syncs()).toHaveLength(1);
-    h.settings.syncAiActivity = false;
-    await vi.advanceTimersByTimeAsync(SYNC_WINDOW_MS);
-    expect(h.syncs()).toHaveLength(1);
-  });
-
   it.each([["id", "prj_1"], ["name", "acme"]])(
-    "an excluded project (%s) gets no timer, no heartbeats, and its idle triggers no sync",
+    "an excluded project (%s) gets no timer, no heartbeats, and its idle sends nothing",
     async (_label, entry) => {
       const h = harness({ threads: [thread("thr_1")], settings: { excludeProjects: `other\n${entry}` } });
       h.tracker.onActive(h.threads.get("thr_1")!);
@@ -621,14 +638,66 @@ describe("with the real runner", () => {
     const h = realHarness({ threads: [thread("thr_1")] });
     h.tracker.onActive(h.threads.get("thr_1")!);
     await until(() => calls.length === 1);
-    await h.idle("thr_1");
-    // The idle also starts a sync, which has its own key; the final heartbeat waits.
-    await until(() => calls.length === 2);
-    const heartbeatCalls = () => calls.filter((call) => !call.args.includes("--sync-ai-activity"));
-    expect(heartbeatCalls()).toHaveLength(1);
+    // The final stop waits for the start heartbeat's flush, then sends its own.
+    const stopping = h.idle("thr_1");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toHaveLength(1);
     calls[0]!.settle(OK);
-    await until(() => heartbeatCalls().length === 2);
-    expect(heartbeatCalls()[1]!.args).toContain("--category=building");
+    await until(() => calls.length === 2);
+    calls[1]!.settle(OK);
+    await stopping;
+    expect(calls[1]!.args).toContain("--category=building");
+  });
+
+  it("counts a batch as failed, and does not re-buffer it, when the spawn fails after a verified path", async () => {
+    const h = realHarness({ threads: [thread("thr_1")] });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await until(() => calls.length === 1);
+    calls[0]!.settle(OK);
+    await vi.advanceTimersByTimeAsync(0);
+    h.rows.push({
+      seq: 1,
+      createdAt: T0,
+      data: {
+        item: {
+          type: "fileChange",
+          status: "completed",
+          changes: [{ kind: "update", path: path.join(repoDir, "a.ts"), diff: "@@ -1 +1 @@\n-a\n+b\n" }],
+        },
+      },
+    });
+    h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+    for (let i = 0; i < 50; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    await until(() => calls.length === 2);
+    expect(calls[1]!.args).toContain("--extra-heartbeats");
+    calls[1]!.settle({ exitCode: null, signal: null, spawnError: "ENOENT" });
+    for (let i = 0; i < 50; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+    const status = await h.tracker.status();
+    expect(status.droppedFiles.failed).toBe(1);
+    expect(status.pendingFiles).toBe(0);
+  });
+
+  it("resolves the final stop with files still buffered when the cli path is missing", async () => {
+    const h = realHarness({ threads: [thread("thr_1")], settings: { cliPath: path.join(dir, "missing-cli") } });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    for (let i = 0; i < 50; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+    h.rows.push({
+      seq: 1,
+      createdAt: T0,
+      data: {
+        item: {
+          type: "fileChange",
+          status: "completed",
+          changes: [{ kind: "update", path: path.join(repoDir, "a.ts"), diff: "@@ -1 +1 @@\n-a\n+b\n" }],
+        },
+      },
+    });
+    h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+    for (let i = 0; i < 50; i++) await new Promise<void>((resolve) => setImmediate(resolve));
+    await h.idle("thr_1");
+    expect(calls).toHaveLength(0);
+    expect((await h.tracker.status()).pendingFiles).toBe(1);
   });
 
   it("caps 6 simultaneous ticks at 4 processes and keeps each heartbeat's creation time", async () => {
@@ -661,92 +730,31 @@ describe("with the real runner", () => {
   });
 });
 
-describe("AI sync", () => {
-  it("runs one sync at once and one trailing sync after the last idle of a burst", async () => {
-    const h = harness({ threads: [thread("thr_1")] });
-    await h.idle("thr_1");
-    expect(h.syncs()).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(60_000);
-    await h.idle("thr_1");
-    await vi.advanceTimersByTimeAsync(60_000);
-    await h.idle("thr_1");
-    expect(h.syncs()).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(SYNC_WINDOW_MS);
-    expect(h.syncs()).toHaveLength(2);
-    await vi.advanceTimersByTimeAsync(SYNC_WINDOW_MS * 3);
-    expect(h.syncs()).toHaveLength(2);
-  });
-
-  it("defers a request made right after the trailing run to the end of the new window", async () => {
-    const h = harness({ threads: [thread("thr_1")] });
-    await h.idle("thr_1");
-    await vi.advanceTimersByTimeAsync(1000);
-    await h.idle("thr_1");
-    await vi.advanceTimersByTimeAsync(SYNC_WINDOW_MS);
-    expect(h.syncs()).toHaveLength(2);
-    await vi.advanceTimersByTimeAsync(1000);
-    await h.idle("thr_1");
-    expect(h.syncs()).toHaveLength(2);
-    await vi.advanceTimersByTimeAsync(SYNC_WINDOW_MS - 3000);
-    expect(h.syncs()).toHaveLength(2);
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(h.syncs()).toHaveLength(3);
-  });
-
-  it("queues at most one follow-up while a run is in flight", async () => {
-    const h = harness({ threads: [thread("thr_1")] });
-    h.holdSync(true);
-    await h.idle("thr_1");
-    await vi.advanceTimersByTimeAsync(60_000);
-    await h.idle("thr_1");
-    await vi.advanceTimersByTimeAsync(SYNC_WINDOW_MS);
-    await h.idle("thr_1");
-    await vi.advanceTimersByTimeAsync(SYNC_WINDOW_MS);
-    await vi.advanceTimersByTimeAsync(SYNC_WINDOW_MS);
-    expect(h.syncs()).toHaveLength(1);
-    h.holdSync(false);
-    h.heldSync[0]!("ok");
-    await vi.advanceTimersByTimeAsync(0);
-    expect(h.syncs()).toHaveLength(2);
-    await vi.advanceTimersByTimeAsync(0);
-    expect(h.syncs()).toHaveLength(2);
-  });
-
-  it("stops scheduling after dispose", async () => {
-    const h = harness({ threads: [thread("thr_1")] });
-    await h.idle("thr_1");
-    await h.idle("thr_1");
-    h.tracker.dispose();
-    await vi.advanceTimersByTimeAsync(SYNC_WINDOW_MS * 2);
-    expect(h.syncs()).toHaveLength(1);
-  });
-});
-
 describe("status and exclude check", () => {
-  it("reports the current cli path, both last successes, the last error and unmatched excludes", async () => {
+  it("reports the current cli path, the last heartbeat, the last error and unmatched excludes", async () => {
     const h = harness({ settings: { excludeProjects: "prj_1, ghost\nacme,missing-too", cliPath: "/opt/wakatime-cli" } });
     expect(await h.tracker.status()).toEqual({
       cliPath: "/opt/wakatime-cli",
       lastHeartbeatAt: null,
-      lastSyncAt: null,
       lastError: null,
+      lastFileBatchAt: null,
+      pendingFiles: 0,
+      droppedFiles: { outOfScope: 0, overflow: 0, filtered: 0, failed: 0 },
       unmatchedExcludes: ["ghost", "missing-too"],
     });
     h.health.lastHeartbeatAt = 5;
-    h.health.lastSyncAt = 6;
-    h.health.lastError = { kind: "auth", job: "sync", exitCode: 104, at: 7 };
+    h.health.lastError = { kind: "auth", exitCode: 104, at: 7 };
     h.settings.cliPath = "/opt/other-cli";
     expect(await h.tracker.status()).toMatchObject({
       cliPath: "/opt/other-cli",
       lastHeartbeatAt: 5,
-      lastSyncAt: 6,
-      lastError: { kind: "auth", job: "sync", exitCode: 104, at: 7 },
+      lastError: { kind: "auth", exitCode: 104, at: 7 },
     });
   });
 
   it("checks the current cli path before reading the health state", async () => {
     const h = harness({ settings: { cliPath: "/opt/new-cli" } });
-    h.health.lastError = { kind: "missing-cli", job: "heartbeat", exitCode: null, at: 1, problem: "not-found" };
+    h.health.lastError = { kind: "missing-cli", exitCode: null, at: 1, problem: "not-found" };
     h.state.onVerify = () => {
       // The check of the fixed path clears the old path's error before status reads it.
       h.health.lastError = null;
@@ -958,5 +966,710 @@ describe("failures at the edges", () => {
     await h.tracker.reconcile();
     await settle();
     expect(h.tracker.stateSize().timers).toBe(1);
+  });
+});
+
+describe("file delivery", () => {
+  /** Real filesystem I/O sits behind the scope checks, so give the event loop real turns. */
+  async function drain(done?: () => boolean) {
+    for (let i = 0; i < (done === undefined ? 25 : 3000); i++) {
+      await vi.advanceTimersByTimeAsync(0);
+      await new Promise<void>((resolve) => (done === undefined ? setImmediate(resolve) : realSetTimeout(resolve, 1)));
+      if (done?.()) return;
+    }
+  }
+
+  async function drainUntil(done: () => Promise<boolean>) {
+    for (let i = 0; i < 5000; i++) {
+      await vi.advanceTimersByTimeAsync(0);
+      await new Promise<void>((resolve) => realSetTimeout(resolve, 1));
+      if (await done()) return;
+    }
+  }
+
+  const DIFF = "@@ -1 +1 @@\n-a\n+b\n";
+
+  function nextSeq(h: ReturnType<typeof harness>): number {
+    return (h.rows[h.rows.length - 1]?.seq ?? 0) + 1;
+  }
+
+  function edit(h: ReturnType<typeof harness>, file: string, createdAt = T0 + 1) {
+    h.rows.push({
+      seq: nextSeq(h),
+      createdAt,
+      data: {
+        item: {
+          type: "fileChange",
+          status: "completed",
+          changes: [{ kind: "update", path: path.join(repoDir, file), diff: DIFF }],
+        },
+      },
+    });
+  }
+
+  function read(h: ReturnType<typeof harness>, file: string, createdAt: number) {
+    h.rows.push({
+      seq: nextSeq(h),
+      createdAt,
+      data: { item: { type: "fileRead", status: "completed", path: path.join(repoDir, file) } },
+    });
+  }
+
+  function extras(job: Job): Record<string, unknown>[] {
+    return job.stdin === undefined ? [] : (JSON.parse(job.stdin) as Record<string, unknown>[]);
+  }
+
+  /** The files a job carries, relative to the environment folder. */
+  function files(job: Job): string[] {
+    return extras(job).map((extra) => path.relative(realpathSync(repoDir), String(extra.entity)));
+  }
+
+  const sentFiles = (h: ReturnType<typeof harness>) => h.heartbeats().flatMap(files);
+
+  async function start(h: ReturnType<typeof harness>, id = "thr_1") {
+    h.tracker.onActive(h.threads.get(id)!);
+    await drain();
+  }
+
+  async function tick() {
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    await drain();
+  }
+
+  const asc = (h: ReturnType<typeof harness>) => h.eventCalls.filter((call) => call.order === "asc");
+  const desc = (h: ReturnType<typeof harness>) => h.eventCalls.filter((call) => call.order === "desc");
+
+  describe("pulling", () => {
+    it("starts at the tip with a string afterSeq, never omitted, and does not replay history", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      edit(h, "old1.ts");
+      edit(h, "old2.ts");
+      await start(h);
+      edit(h, "new.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect(desc(h)).toEqual([expect.objectContaining({ threadId: "thr_1", order: "desc", limit: "1" })]);
+      expect(asc(h).length).toBeGreaterThan(0);
+      for (const call of asc(h)) {
+        expect(typeof call.afterSeq).toBe("string");
+        expect(call.types).toEqual(["item/completed"]);
+        expect(call.limit).toBe("200");
+        expect(call.signal).toBe("AbortSignal");
+      }
+      expect(asc(h)[0]!.afterSeq).toBe("2");
+      await tick();
+      expect(sentFiles(h)).toEqual(["new.ts"]);
+    });
+
+    it("does not replay history for a thread adopted mid-turn from an events payload", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      edit(h, "before.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      edit(h, "after.ts");
+      await tick();
+      expect(sentFiles(h)).toEqual(["after.ts"]);
+      expect(desc(h)).toHaveLength(1);
+    });
+
+    it("stops paging on a short page", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      for (let i = 0; i < 450; i++) edit(h, `f${i}.ts`);
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain(() => h.tracker.stateSize().files.buffered === 450);
+      await drain();
+      expect(asc(h).map((call) => call.afterSeq)).toEqual(["0", "0", "200", "400"]);
+      expect(h.tracker.stateSize().files.buffered).toBe(450);
+    });
+
+    it("makes no CLI call when it pulls", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      const before = h.jobs.length;
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect(h.jobs).toHaveLength(before);
+      expect(h.tracker.stateSize().files.buffered).toBe(1);
+    });
+
+    it("sends an empty buffer as the app heartbeat alone", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      await tick();
+      const last = h.heartbeats()[h.heartbeats().length - 1]!;
+      expect(last.stdin).toBeUndefined();
+      expect(last.args).not.toContain("--extra-heartbeats");
+    });
+
+    it("retries a failed seed on the next payload, pulling nothing before it, and does not send what landed in between", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      h.state.seedFailures = 1;
+      await start(h);
+      expect(desc(h)).toHaveLength(1);
+      expect(asc(h)).toHaveLength(0);
+      expect(h.log.warn).toHaveBeenCalledWith("could not read thread events: Error");
+      edit(h, "gap.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect(desc(h)).toHaveLength(2);
+      edit(h, "later.ts");
+      await tick();
+      expect(sentFiles(h)).toEqual(["later.ts"]);
+      expect((await h.tracker.status()).droppedFiles).toEqual({ outOfScope: 0, overflow: 0, filtered: 0, failed: 0 });
+    });
+
+    it("logs a failing events read once by error name, and keeps the chain going", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      h.state.eventsError = true;
+      for (let i = 0; i < 3; i++) {
+        h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+        await drain();
+      }
+      expect(h.log.warn).toHaveBeenCalledTimes(1);
+      expect(String(h.log.warn.mock.calls[0]![0])).toBe("could not read thread events: Error");
+      h.state.eventsError = false;
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect(h.tracker.stateSize().files.buffered).toBe(1);
+    });
+  });
+
+  describe("reads", () => {
+    it("throttles a repeated read of one path by createdAt, never a write", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      read(h, "a.ts", T0);
+      read(h, "a.ts", T0 + 119_999);
+      read(h, "a.ts", T0 + 120_000);
+      read(h, "b.ts", T0 + 1);
+      edit(h, "a.ts", T0 + 2);
+      edit(h, "a.ts", T0 + 3);
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      await tick();
+      const sent = extras(h.heartbeats()[h.heartbeats().length - 1]!);
+      expect(sent.map((e) => [path.basename(String(e.entity)), e.is_write, e.time])).toEqual([
+        ["a.ts", false, T0 / 1000],
+        ["a.ts", false, (T0 + 120_000) / 1000],
+        ["b.ts", false, (T0 + 1) / 1000],
+        ["a.ts", true, (T0 + 2) / 1000],
+        ["a.ts", true, (T0 + 3) / 1000],
+      ]);
+    });
+
+    it("sends no reads in edits mode, and counts the buffered ones as filtered when the mode changes", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      read(h, "r.ts", T0);
+      edit(h, "w.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect(h.tracker.stateSize().files.buffered).toBe(2);
+      h.settings.fileActivity = "edits";
+      await tick();
+      expect(sentFiles(h)).toEqual(["w.ts"]);
+      expect((await h.tracker.status()).droppedFiles.filtered).toBe(1);
+    });
+  });
+
+  describe("flushing", () => {
+    it("sends more than 200 specs in chunks of 200, in order, each awaited, at the final stop", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      for (let i = 0; i < 450; i++) edit(h, `f${String(i).padStart(3, "0")}.ts`);
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain(() => h.tracker.stateSize().files.buffered === 450);
+      const before = h.jobs.length;
+      expect(before).toBe(1);
+      h.state.hold = true;
+      const stopping = h.idle("thr_1");
+      for (let chunk = 0; chunk < 3; chunk++) {
+        for (let i = 0; i < 30 && h.jobs.length < before + chunk + 1; i++) await drain();
+        expect(h.jobs).toHaveLength(before + chunk + 1);
+        h.held[chunk]!("ok");
+      }
+      await stopping;
+      const final = h.jobs.slice(before);
+      expect(final.map((job) => files(job).length)).toEqual([200, 200, 50]);
+      expect(final.flatMap(files)).toEqual(Array.from({ length: 450 }, (_, i) => `f${String(i).padStart(3, "0")}.ts`));
+      expect(h.jobs).toHaveLength(before + 3);
+    });
+
+    it("re-buffers a batch the runner skipped or superseded, in order, and sends it next time", async () => {
+      for (const outcome of ["skipped", "superseded"] as const) {
+        const h = harness({ threads: [thread("thr_1")] });
+        await start(h);
+        edit(h, "a.ts");
+        edit(h, "b.ts");
+        h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+        await drain();
+        h.state.outcome = outcome;
+        await tick();
+        expect(h.tracker.stateSize().files.buffered).toBe(2);
+        edit(h, "c.ts");
+        h.state.outcome = "ok";
+        await tick();
+        expect(files(h.heartbeats()[h.heartbeats().length - 1]!)).toEqual(["a.ts", "b.ts", "c.ts"]);
+        expect((await h.tracker.status()).pendingFiles).toBe(0);
+      }
+    });
+
+    it("counts a failed batch under failed and does not re-buffer it", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      h.state.outcome = "failed";
+      await tick();
+      const status = await h.tracker.status();
+      expect(status.droppedFiles.failed).toBe(1);
+      expect(status.pendingFiles).toBe(0);
+      expect(status.lastFileBatchAt).toBeNull();
+    });
+
+    it("records the time of the last batch the CLI accepted", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      await tick();
+      expect((await h.tracker.status()).lastFileBatchAt).toBe(T0 + AGENT_TICK_MS);
+    });
+
+    it("submits nothing from a tick that finds a flush still in flight, and never has two submitters", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      h.state.hold = true;
+      h.tracker.onActive(h.threads.get("thr_1")!);
+      await drain();
+      expect(h.held).toHaveLength(1);
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      await tick();
+      await tick();
+      expect(h.jobs).toHaveLength(1);
+      expect(h.tracker.stateSize().files.buffered).toBeGreaterThanOrEqual(0);
+      h.state.hold = false;
+      h.held[0]!("ok");
+      await drain();
+      edit(h, "b.ts");
+      await tick();
+      expect(h.jobs).toHaveLength(2);
+      expect(sentFiles(h)).toEqual(["a.ts", "b.ts"]);
+    });
+
+    it("sends the activation and the final heartbeats through the same path, one in flight at a time", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      h.state.hold = true;
+      h.tracker.onActive(h.threads.get("thr_1")!);
+      await drain();
+      const stopping = h.idle("thr_1");
+      await drain();
+      // The activation heartbeat is still waiting on the runner, so the final one has not been submitted.
+      expect(h.jobs).toHaveLength(1);
+      h.state.hold = false;
+      h.held[0]!("ok");
+      await stopping;
+      expect(h.jobs).toHaveLength(2);
+      expect(new Set(h.jobs.map((job) => job.key))).toEqual(new Set(["heartbeat:thr_1"]));
+    });
+  });
+  describe("lifecycle", () => {
+    it("frees the pull state, buffer and read throttle on archive and on dispose", async () => {
+      for (const how of ["archive", "dispose"] as const) {
+        const h = harness({ threads: [thread("thr_1")] });
+        await start(h);
+        read(h, "a.ts", T0);
+        edit(h, "b.ts");
+        h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+        await drain();
+        expect(h.tracker.stateSize().files).toEqual({ threads: 1, buffered: 2, reads: 1 });
+        if (how === "archive") h.tracker.onGone("thr_1");
+        else h.tracker.dispose();
+        expect(h.tracker.stateSize().files).toEqual({ threads: 0, buffered: 0, reads: 0 });
+      }
+    });
+
+    it("keeps its state across idle, so idle then active replays and skips nothing", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      await h.idle("thr_1");
+      edit(h, "while-idle.ts");
+      h.threads.set("thr_1", thread("thr_1"));
+      await start(h);
+      edit(h, "b.ts");
+      await tick();
+      expect(sentFiles(h)).toEqual(["a.ts", "while-idle.ts", "b.ts"]);
+      expect(desc(h)).toHaveLength(1);
+      expect(h.tracker.stateSize().files.threads).toBe(1);
+    });
+
+    it("loses and replays nothing when the thread goes active again while its final pull is pending", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      edit(h, "b.ts");
+      let open!: () => void;
+      h.state.eventsGate = new Promise<void>((resolve) => (open = resolve));
+      const stopping = h.idle("thr_1");
+      h.tracker.onActive(h.threads.get("thr_1")!);
+      await drain();
+      open();
+      await stopping;
+      await drain();
+      expect(sentFiles(h).sort()).toEqual(["a.ts", "b.ts"]);
+      expect(desc(h)).toHaveLength(1);
+    });
+
+    it("loses and replays nothing when the thread goes active again while its final flush is pending", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      h.state.hold = true;
+      const stopping = h.idle("thr_1");
+      await drain();
+      expect(h.held).toHaveLength(1);
+      h.tracker.onActive(h.threads.get("thr_1")!);
+      await drain();
+      expect(h.jobs).toHaveLength(2);
+      h.state.hold = false;
+      h.held[0]!("ok");
+      await stopping;
+      await drain();
+      expect(sentFiles(h)).toEqual(["a.ts"]);
+      expect(desc(h)).toHaveLength(1);
+    });
+
+    it("resolves the final stop and still sends the app heartbeat when the final pull is rejected", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      h.state.eventsError = true;
+      const before = h.jobs.length;
+      await h.idle("thr_1");
+      expect(h.jobs).toHaveLength(before + 1);
+    });
+
+    it("resolves the final stop with files left buffered when the runner skips (a missing cli)", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      for (let i = 0; i < 450; i++) edit(h, `f${i}.ts`);
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain(() => h.tracker.stateSize().files.buffered === 450);
+      const before = h.jobs.length;
+      h.state.outcome = "skipped";
+      await h.idle("thr_1");
+      expect(h.jobs).toHaveLength(before + 1);
+      expect(h.tracker.stateSize().files.buffered).toBe(450);
+    });
+
+    it("resolves the final stop when the plugin is disposed while a chunk is in flight", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      h.state.hold = true;
+      const stopping = h.idle("thr_1");
+      await drain();
+      h.tracker.dispose();
+      h.held[0]!("skipped");
+      await stopping;
+      expect(h.jobs).toHaveLength(2);
+      expect(h.tracker.stateSize().files.buffered).toBe(0);
+    });
+
+    it("leaves nothing behind when the thread is archived while its final pull or flush is in flight", async () => {
+      for (const stage of ["pull", "flush"] as const) {
+        const h = harness({ threads: [thread("thr_1")] });
+        await start(h);
+        edit(h, "a.ts");
+        h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+        await drain();
+        edit(h, "b.ts");
+        let open!: () => void;
+        if (stage === "pull") h.state.eventsGate = new Promise<void>((resolve) => (open = resolve));
+        else h.state.hold = true;
+        const stopping = h.idle("thr_1");
+        await drain();
+        h.tracker.onGone("thr_1");
+        if (stage === "pull") open();
+        else h.held[0]!("skipped");
+        await stopping;
+        await drain();
+        expect(h.tracker.stateSize().files).toEqual({ threads: 0, buffered: 0, reads: 0 });
+        expect((await h.tracker.status()).pendingFiles).toBe(0);
+      }
+    });
+  });
+
+  describe("privacy", () => {
+    it.each([
+      ["the project is excluded", { excludeProjects: "prj_1" }],
+      ["agent tracking is turned off", { trackAgentActivity: false }],
+      ["file activity is turned off", { fileActivity: "off" }],
+      ["the entity becomes the thread id", { entity: "threadId" }],
+    ] as const)("discards what is buffered when %s, and starts at the new tip when it is turned back on", async (_label, change) => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "buffered.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect(h.tracker.stateSize().files.buffered).toBe(1);
+      const restore = Object.fromEntries(Object.keys(change).map((key) => [key, h.settings[key as keyof WakatimeSettings]]));
+      Object.assign(h.settings, change);
+      h.tracker.onSettingsChanged();
+      await drain();
+      expect(h.tracker.stateSize().files.buffered).toBe(0);
+      expect((await h.tracker.status()).droppedFiles.filtered).toBe(1);
+      edit(h, "untracked.ts");
+      Object.assign(h.settings, restore);
+      h.tracker.onSettingsChanged();
+      // The first send after re-enabling reads the tip; only what lands after it is sent.
+      await tick();
+      edit(h, "tracked.ts");
+      await tick();
+      const sent = sentFiles(h);
+      expect(sent).not.toContain("buffered.ts");
+      expect(sent).not.toContain("untracked.ts");
+      expect(sent).toContain("tracked.ts");
+    });
+
+    it("applies a privacy change at the next flush even when the settings-change signal was missed", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      read(h, "b.ts", T0);
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      h.settings.fileActivity = "off";
+      await tick();
+      expect(sentFiles(h)).toEqual([]);
+      expect((await h.tracker.status()).droppedFiles.filtered).toBe(2);
+    });
+
+    it("keeps the app heartbeat flowing, through the flush path, with file activity off or the entity a thread id", async () => {
+      for (const change of [{ fileActivity: "off" }, { entity: "threadId" }] as const) {
+        const h = harness({ threads: [thread("thr_1")], settings: change });
+        await start(h);
+        edit(h, "a.ts");
+        h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+        await tick();
+        await tick();
+        expect(h.heartbeats()).toHaveLength(3);
+        expect(sentFiles(h)).toEqual([]);
+        expect(h.eventCalls).toHaveLength(0);
+        expect(h.tracker.stateSize().files.buffered).toBe(0);
+      }
+    });
+
+    it("sends no file specs for an excluded thread, and reads no events", async () => {
+      const h = harness({ threads: [thread("thr_1")], settings: { excludeProjects: "acme" } });
+      edit(h, "a.ts");
+      h.tracker.onActive(h.threads.get("thr_1")!);
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await tick();
+      expect(h.jobs).toHaveLength(0);
+      expect(h.eventCalls).toHaveLength(0);
+      expect(h.tracker.stateSize().files.threads).toBe(0);
+    });
+
+    it("does not let a batch in flight come back after file activity was switched off", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      h.state.hold = true;
+      await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+      await drain();
+      expect(h.held).toHaveLength(1);
+      expect(files(h.jobs[h.jobs.length - 1]!)).toEqual(["a.ts"]);
+      h.settings.fileActivity = "off";
+      h.tracker.onSettingsChanged();
+      await drain();
+      // The next tick finds the flush still in flight: nothing is submitted, so nothing is superseded.
+      const submitted = h.jobs.length;
+      await tick();
+      expect(h.jobs).toHaveLength(submitted);
+      h.state.hold = false;
+      h.held[0]!("skipped");
+      await drain();
+      const status = await h.tracker.status();
+      expect(status.droppedFiles.filtered).toBe(1);
+      expect(status.pendingFiles).toBe(0);
+      await tick();
+      expect(files(h.jobs[h.jobs.length - 1]!)).toEqual([]);
+    });
+
+    it("keeps pulling without a replay when excludeProjects changes for another project mid-turn", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      h.settings.excludeProjects = "prj_other";
+      h.tracker.onSettingsChanged();
+      await drain();
+      edit(h, "b.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      await tick();
+      expect(sentFiles(h)).toEqual(["a.ts", "b.ts"]);
+      expect(desc(h)).toHaveLength(1);
+    });
+  });
+
+  describe("limits", () => {
+    it("caps the buffer at 2000, dropping the oldest and counting them as overflow", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      for (let i = 0; i < 2100; i++) edit(h, `f${i}.ts`);
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drainUntil(async () => (await h.tracker.status()).droppedFiles.overflow === 100);
+      const status = await h.tracker.status();
+      expect(status.pendingFiles).toBe(2000);
+      expect(status.droppedFiles.overflow).toBe(100);
+    });
+
+    it("counts the excess as overflow when a skipped batch is put back on a buffer that grew meanwhile", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      for (let i = 0; i < 300; i++) edit(h, `f${i}.ts`);
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain(() => h.tracker.stateSize().files.buffered === 300);
+      h.state.hold = true;
+      await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+      await drain();
+      expect(h.held).toHaveLength(1);
+      expect(h.tracker.stateSize().files.buffered).toBe(100);
+      for (let i = 0; i < 1950; i++) edit(h, `g${i}.ts`);
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drainUntil(async () => (await h.tracker.status()).droppedFiles.overflow === 50);
+      expect(h.tracker.stateSize().files.buffered).toBe(2000);
+      h.state.hold = false;
+      h.held[0]!("skipped");
+      await drain();
+      const status = await h.tracker.status();
+      expect(status.pendingFiles).toBe(2000);
+      // 50 over the cap while pulling, then 200 more when the skipped batch goes back.
+      expect(status.droppedFiles.overflow).toBe(250);
+    });
+  });
+  describe("races", () => {
+    it("sends nothing from a tick whose thread stopped while it was pulling", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      let open!: () => void;
+      h.state.eventsGate = new Promise<void>((resolve) => (open = resolve));
+      await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+      await drain();
+      h.tracker.onGone("thr_1");
+      open();
+      await drain();
+      expect(h.jobs).toHaveLength(1);
+    });
+
+    it("sends nothing at the final stop when the thread is archived while it resolves", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      const stopping = h.idle("thr_1");
+      h.tracker.onGone("thr_1");
+      await stopping;
+      await drain();
+      expect(h.jobs).toHaveLength(1);
+      expect(h.tracker.stateSize().files.threads).toBe(0);
+    });
+
+    it("keeps a retired state until its flush settles, then forgets it", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      h.state.hold = true;
+      await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+      await drain();
+      expect(h.held).toHaveLength(1);
+      h.settings.excludeProjects = "prj_1";
+      h.tracker.onSettingsChanged();
+      await drain();
+      expect(h.tracker.stateSize().files.threads).toBe(1);
+      h.state.hold = false;
+      h.held[0]!("ok");
+      await drain();
+      expect(h.tracker.stateSize().files.threads).toBe(0);
+    });
+
+    it("stops a send whose thread stopped being timed while the tick was pulling", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      edit(h, "a.ts");
+      let open!: () => void;
+      h.state.eventsGate = new Promise<void>((resolve) => (open = resolve));
+      await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+      await drain();
+      h.settings.trackAgentActivity = false;
+      open();
+      await drain();
+      expect(h.jobs).toHaveLength(1);
+      expect(h.tracker.stateSize().files.threads).toBe(0);
+    });
+
+    it("counts files of a thread with no environment folder as out of scope", async () => {
+      const h = harness({ threads: [thread("thr_1", { environmentId: null })] });
+      await start(h);
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      const status = await h.tracker.status();
+      expect(status.droppedFiles.outOfScope).toBe(1);
+      expect(status.pendingFiles).toBe(0);
+    });
+
+    it("forgets a thread archived while its first read of the tip is pending", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      let open!: () => void;
+      h.state.eventsGate = new Promise<void>((resolve) => (open = resolve));
+      h.tracker.onActive(h.threads.get("thr_1")!);
+      await drain();
+      h.tracker.onGone("thr_1");
+      open();
+      await drain();
+      expect(h.tracker.stateSize().files.threads).toBe(0);
+      edit(h, "a.ts");
+      expect(asc(h)).toHaveLength(0);
+    });
+
+    it("forgets a thread archived while a pull is reading settings", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      const reads = asc(h).length;
+      h.state.settingsDelayMs = 10;
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await vi.advanceTimersByTimeAsync(1);
+      h.tracker.onGone("thr_1");
+      await vi.advanceTimersByTimeAsync(20);
+      await drain();
+      expect(h.tracker.stateSize().files.threads).toBe(0);
+      expect(asc(h)).toHaveLength(reads);
+    });
+
+    it("logs a rejected events read that is not an Error by the generic name", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      h.state.eventsError = "string";
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect(h.log.warn).toHaveBeenCalledWith("could not read thread events: error");
+    });
   });
 });

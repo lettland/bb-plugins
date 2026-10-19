@@ -43,7 +43,7 @@ export function entityFor(thread: ThreadLike | null, mode: EntityMode): string {
 }
 
 /** `--flag=value` form throughout, so a value starting with `-` is never read as a flag. */
-export function buildArgv(spec: HeartbeatSpec, plugin: string): string[] {
+export function buildArgv(spec: HeartbeatSpec, plugin: string, extraHeartbeats = false): string[] {
   const argv = [`--entity-type=app`, `--entity=${clean(spec.entity) ?? APP_ENTITY}`];
   const project = clean(spec.project);
   if (project !== null) argv.push(`--project=${project}`);
@@ -55,6 +55,8 @@ export function buildArgv(spec: HeartbeatSpec, plugin: string): string[] {
     `--plugin=${clean(plugin) ?? "bb"}`,
     "--sync-ai-disabled",
   );
+  // The extra heartbeats (file entries) arrive as a JSON array on stdin.
+  if (extraHeartbeats) argv.push("--extra-heartbeats");
   return argv;
 }
 
@@ -142,7 +144,7 @@ export class TtlCache<V> {
 }
 
 export interface EnvironmentSdk {
-  get(args: { environmentId: string }): Promise<{ branchName: string | null }>;
+  get(args: { environmentId: string }): Promise<{ branchName: string | null; path: string | null }>;
   status(args: { environmentId: string }): Promise<{
     outcome: string;
     workspace?: { branch: { currentBranch: string | null } };
@@ -160,20 +162,28 @@ export interface ContextSdk {
   environments: EnvironmentSdk;
 }
 
+/** What an environment contributes to a heartbeat: its branch and its folder. */
+export interface EnvInfo {
+  branch: string | null;
+  path: string | null;
+}
+
 export interface ResolvedContext {
   thread: ThreadLike | null;
   project: ProjectLike | null;
   branch: string | null;
+  /** The environment's folder on the bb server host, when it has one. */
+  path: string | null;
 }
 
 /**
  * Resolve what a heartbeat describes through `sdk`. Null when an id was given
  * but cannot be resolved, so nothing is sent for it. The thread is always read
- * fresh; only the branch is cached.
+ * fresh; only the environment (branch and folder) is cached.
  */
 export async function resolveContext(
   sdk: ContextSdk,
-  branches: TtlCache<string | null>,
+  environments: TtlCache<EnvInfo>,
   ids: { projectId?: string; threadId?: string },
   knownThread?: ThreadLike,
 ): Promise<ResolvedContext | null> {
@@ -194,27 +204,29 @@ export async function resolveContext(
       return null;
     }
   }
-  const branch = thread?.environmentId ? await branchOf(sdk.environments, branches, thread.environmentId) : null;
-  return { thread, project, branch };
+  const env = thread?.environmentId ? await envInfoOf(sdk.environments, environments, thread.environmentId) : null;
+  return { thread, project, branch: env?.branch ?? null, path: env?.path ?? null };
 }
 
-async function branchOf(
+export async function envInfoOf(
   environments: EnvironmentSdk,
-  cache: TtlCache<string | null>,
+  cache: TtlCache<EnvInfo>,
   environmentId: string,
-): Promise<string | null> {
+): Promise<EnvInfo> {
   const cached = cache.get(environmentId, Date.now());
   if (cached !== undefined) return cached;
   try {
-    let branch = (await environments.get({ environmentId })).branchName;
+    const env = await environments.get({ environmentId });
+    let branch = env.branchName;
     if (branch === null) {
       const status = await environments.status({ environmentId });
       branch = status.outcome === "available" ? (status.workspace?.branch.currentBranch ?? null) : null;
     }
-    cache.set(environmentId, branch, Date.now());
-    return branch;
+    const info = { branch, path: env.path };
+    cache.set(environmentId, info, Date.now());
+    return info;
   } catch {
     // Not cached: the next heartbeat tries again.
-    return null;
+    return { branch: null, path: null };
   }
 }

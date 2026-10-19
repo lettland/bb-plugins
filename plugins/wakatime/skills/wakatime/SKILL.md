@@ -1,53 +1,64 @@
 ---
 name: wakatime
-description: Understand and configure bb's WakaTime plugin — what it sends to WakaTime, its settings, project exclusion, and how to read its status and failures.
+description: Understand and configure bb's WakaTime plugin — what it sends to WakaTime (thread time and the files agents touch), its settings, project exclusion, and how to read its status and failures.
 ---
 
 # WakaTime
 
-The wakatime plugin runs `wakatime-cli` on the bb server host and sends heartbeats for two kinds of time:
+The wakatime plugin runs `wakatime-cli` on the bb server host and reports only what bb itself knows, the same way for every provider (Claude Code, Codex, ACP, any other). It sends:
 
 1. **Your activity in bb:** you interact with a focused bb window. Heartbeats carry the bb project, thread, and branch of the view you are in.
-2. **Agent run time:** a thread's status is `active`, whether or not you are watching.
+2. **Agent run time:** a thread's status is `active`, whether or not you are watching. One heartbeat per thread about every 2 minutes.
+3. **Agent file activity:** the files an agent edited or read inside the thread's environment folder, sent with the thread's heartbeats.
 
-It also runs one debounced `wakatime-cli --sync-ai-activity` after agent turns.
+The data comes from the thread lifecycle events, the thread event log (completed file changes and file reads), and your window activity. The plugin parses no provider transcripts and runs no `--sync-ai-activity`.
+
+## Changed in this version
+
+**File paths inside the project are now sent by default. Set `fileActivity` to `off` to stop.**
+
+- The transcript sync is removed (`syncAiActivity` is gone), so `claude-code` sessions no longer get `ai coding` time from it.
+- File activity arrives under `agentCategory` (`building` by default), for every provider alike.
+- Excluding a project stops all of its bb uploads. Turning file activity off stops only its file entries; per-thread agent time continues. Nothing from either period is sent later, even after you turn it back on.
 
 ## What leaves the machine
 
-Everything below goes to WakaTime's cloud through `wakatime-cli`:
+Everything below goes to WakaTime's cloud through `wakatime-cli`.
 
-- the bb project name
-- the entity: the thread title (default), or the thread id only when the `entity` setting is `threadId`
-- the branch of the thread's environment
-- the category, the time, and the editor string (`bb/<bb version> bb-wakatime/<plugin version>`, sent in the User-Agent header; the bb version is read once in the background after load; it is `unknown` until that answers, or for good if it fails)
-- whatever `wakatime-cli --sync-ai-activity` uploads from AI transcripts
+Per thread: the bb project name, the entity (the thread title, or the thread id only when `entity` is `threadId`), the branch of the thread's environment, the category and the time.
 
-The API key is read by `wakatime-cli` from `~/.wakatime.cfg`. The plugin never passes `--key`, never stores the key, and never logs argv, titles, project names, or the CLI's raw output.
+Per file (when `fileActivity` is on and `entity` is `title`): the file path (only inside the environment folder, symlinks resolved, `node_modules` and `.git` skipped), whether it was written or only read, the number of changed lines for edits (counted from the diff; the diff itself is not sent), and the time. For files that exist on the bb server host, `wakatime-cli` also derives and uploads the line count and the dependencies by reading the file.
+
+File **contents never leave the machine**; file **names do** (a file such as `.env.production` is uploaded as a name). The editor string `bb/<bb version> bb-wakatime/<plugin version>` goes in the User-Agent header; the bb version is read once in the background after load, so it is `bb/unknown` until that answers, or for good if it fails.
+
+The API key is read by `wakatime-cli` from `~/.wakatime.cfg`. The plugin never passes `--key`, never stores the key, and never logs argv, titles, project names, file paths, or the CLI's raw output.
 
 ## Requirements
 
-`wakatime-cli` must be installed on the bb server host with a working `~/.wakatime.cfg`. Tested with `wakatime-cli` v2.27.5: the plugin relies on its `--sync-ai-disabled` and `--sync-ai-activity` flags and on its category list. A bb client on another machine, or a remote client, counts as the server owner's activity.
+`wakatime-cli` must be installed on the bb server host with a working `~/.wakatime.cfg`. Tested with `wakatime-cli` v2.27.5: the plugin relies on its `--sync-ai-disabled` and `--extra-heartbeats` flags and on its category list. A bb client on another machine, or a remote client, counts as the server owner's activity.
 
 ## Settings
 
 - `cliPath`: absolute path to the executable (a leading `~` is expanded). A relative path, a directory, or a non-executable file is rejected without running anything. Anyone who can edit plugin settings can make the plugin run that binary on the server host.
 - `trackUserActivity` (on) and `userCategory` (`coding`): one of the categories below
-- `trackAgentActivity` (on) and `agentCategory` (`building`): one of the categories below
-- `syncAiActivity` (on)
-- `entity`: `title` (default) or `threadId`. This changes the entity only; the project and branch are still sent.
+- `trackAgentActivity` (on) and `agentCategory` (`building`): one of the categories below. Off sends nothing about agent threads, files included.
+- `fileActivity` (`edits-and-reads`): `edits-and-reads`, `edits`, or `off`. File entries reach the dashboard up to about 2 minutes late (they go with the thread's next heartbeat), and a change takes effect at the next send.
+- `entity`: `title` (default) or `threadId`. This changes the entity only; the project and branch are still sent. With `threadId`, no file entries are sent at all, whatever `fileActivity` says.
 - `excludeProjects`: bb project ids or names, one per line or comma-separated. Find project ids with `bb project list`.
 
 `ai coding` is not offered for either category: `wakatime-cli` v2.27.5 silently drops every externally submitted heartbeat with that category (it logs "skipping ai coding heartbeat" and exits 0), so the heartbeat would never reach WakaTime. The choices are the CLI's other categories: `coding`, `building`, `indexing`, `debugging`, `learning`, `notes`, `meeting`, `planning`, `researching`, `communicating`, `supporting`, `advising`, `running tests`, `writing tests`, `manual testing`, `writing docs`, `code reviewing`, `browsing`, `translating`, `designing`.
 
 ## Excluding projects
 
-A matching project sends no bb heartbeats: no user heartbeats, no agent timers, and its idles never trigger the AI sync. Prefer ids; ids survive renames and names do not. Find project ids with `bb project list`. The WakaTime status panel lists entries that match no project, and the server log warns about each by position (`entry #N`), never by name.
+A matching project sends no bb heartbeats: no user heartbeats, no agent timers, no file entries. Prefer ids; ids survive renames and names do not. Find project ids with `bb project list`. The WakaTime status panel lists entries that match no project, and the server log warns about each by position (`entry #N`), never by name.
 
-Exclusion covers bb heartbeats only. The host-wide `--sync-ai-activity` can still upload that project's transcripts. The sure way to stop that is to turn `syncAiActivity` off. `wakatime-cli` also documents its own path filters (`exclude`, `--exclude-ai`); this plugin has not tested them.
+## How file activity is delivered
 
-## AI sync
+A thread starts at the current end of its event log, so history is never replayed. Completed file changes and reads are collected in memory; each 2-minute tick and the final stop send them, up to 200 files per `wakatime-cli` call, in order, with at most one send per thread in flight. A read of the same path within 2 minutes of the previous one is sent once; writes are never thinned. Pending entries live only in the bb server's memory until the thread's next tick or turn, and are discarded when the thread is archived or deleted and when the plugin reloads. At most 2000 are kept; past that the oldest are dropped.
 
-`wakatime-cli` decides which transcript roots `--sync-ai-activity` reads and may change them when it updates itself. `syncAiActivity` is the off-switch. The CLI keeps its state in `~/.wakatime/wakatime-internal-ai-parsing.json`, which shows which sessions the sync has parsed. Every heartbeat the plugin sends carries `--sync-ai-disabled`, so the debounced sync is the only path that parses transcripts: the first request runs at once, and requests in the following 5 minutes schedule one more run at the end of that window.
+When `fileActivity` is turned off, `entity` becomes `threadId`, agent tracking is turned off, or the project is excluded, what is buffered is dropped and the thread starts again at the current end of its log when tracking resumes: nothing from the untracked period is ever uploaded later.
+
+A file counts as saved (and `wakatime-cli` reads it) only when the environment folder exists on the bb server host and the path is a regular file there. A deleted file, a remote environment, or anything else is sent as unsaved. Edge case: a remote environment whose folder also exists locally under the same layout is treated as local.
 
 ## Agent time and your other editors
 
@@ -58,10 +69,17 @@ Overlapping heartbeats share wall-clock time rather than adding up. Agent heartb
 
 ## Failures and where to see them
 
-The WakaTime status panel (Settings) shows the CLI path in use, the last successful heartbeat and the last successful AI sync (kept separately), and the last error, with a Refresh button. An error shows only while it is newer than the last success of the job that failed, so a bad API key stays until a later run succeeds. A path problem (not absolute, not found, not a file, not executable) is the exception: it is not compared with a success and stays until a path check passes. The panel re-checks the current `cliPath` whenever it reads the status, so fixing the path clears the error. A failed refresh is shown next to the button.
+The WakaTime status panel (Settings) shows the CLI path in use, the last successful heartbeat, the last error, and the file pipeline: when file entries were last sent, how many wait in memory (they go with the thread's next tick or turn), and how many were dropped, by reason (outside the environment folder; buffer full; dropped by your `fileActivity`, `entity`, agent-tracking or exclusion settings; `wakatime-cli` failed). It has a Refresh button, and a failed refresh is shown next to it.
+
+An error shows only while it is newer than the last successful heartbeat, so a bad API key stays until a later run succeeds. A path problem (not absolute, not found, not a file, not executable) is the exception: it is not compared with a success and stays until a path check passes. The panel re-checks the current `cliPath` whenever it reads the status, so fixing the path clears the error.
 
 `wakatime-cli` always leaves stderr empty and writes its details to `~/.wakatime/wakatime.log`, so failures are classified from the exit code alone: 104 `auth`, 102 and 112 `network`, 103 `config` (invalid arguments or config, such as a rejected category), a missing or non-executable binary `missing-cli`, a killed process `timeout`, anything else `other`. Log lines carry the exit code and the kind, at most one per kind every 10 minutes, and point to `~/.wakatime/wakatime.log`. A missing CLI path logs one warning per path (as typed in the setting, never expanded) and heartbeats are skipped until it exists.
 
+A batch of file entries whose `wakatime-cli` call failed is counted as dropped: network failures may sit in the CLI's own offline queue, but timeouts, kills, and config or auth errors are lost. Gaps that are not counted: if reading a thread's event log fails at the start, the plugin retries on the next event or tick, and anything that landed in between is neither sent nor counted; entries still pending when the plugin is disposed are discarded.
+
 ## Hidden names in `~/.wakatime.cfg`
 
-`hide_file_names`, `hide_project_names`, and `hide_branch_names` in `~/.wakatime.cfg` do apply to this plugin's `--entity-type=app` heartbeats (checked with `wakatime-cli` v2.27.5): `hide_file_names` sends the entity as `HIDDEN`, `hide_project_names` sends an empty project, and `hide_branch_names` drops the branch. Because `hide_project_names` blanks the project, the bb project grouping is lost on the dashboard.
+`~/.wakatime.cfg` applies to every editor on the machine and to this plugin's calls too (checked with `wakatime-cli` v2.27.5 against a local listener):
+
+- `hide_file_names = true` sends the app heartbeat's entity as `HIDDEN` and every file entry's entity as `HIDDEN` plus its extension (`HIDDEN.ts`). File entries still carry the project, the write flag and `ai_line_changes`. In that run the branch was also left out.
+- `hide_project_names` sends an empty project, and `hide_branch_names` drops the branch. Because `hide_project_names` blanks the project, the bb project grouping is lost on the dashboard.

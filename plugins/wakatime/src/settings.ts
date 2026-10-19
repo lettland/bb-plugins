@@ -1,6 +1,8 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
 export const ENTITY_MODES = ["title", "threadId"] as const;
+export const FILE_MODES = ["edits-and-reads", "edits", "off"] as const;
+export type FileMode = (typeof FILE_MODES)[number];
 /**
  * The categories wakatime-cli accepts, minus "ai coding": wakatime-cli v2.27.5
  * silently drops every externally submitted heartbeat with that category.
@@ -55,7 +57,7 @@ export function defineWakatimeSettings(bb: BbPluginApi) {
       type: "boolean",
       label: "Track agent run time",
       description:
-        "Send heartbeats while a thread is active, whether or not you are watching. Overlapping time is shared with your other editors, so this can relabel their time.",
+        "Send the thread's project, entity, branch, category and time about every 2 minutes while a thread is active, whether or not you are watching. Overlapping time is shared with your other editors, so this can relabel their time. Off sends nothing about agent threads, files included.",
       default: true,
     },
     agentCategory: {
@@ -65,20 +67,21 @@ export function defineWakatimeSettings(bb: BbPluginApi) {
       options: [...CATEGORIES],
       default: "building",
     },
-    syncAiActivity: {
-      type: "boolean",
-      label: "Sync AI activity after agent turns",
-      description:
-        "Run one debounced `wakatime-cli --sync-ai-activity` after agent turns. wakatime-cli decides which transcripts it uploads; this is the off-switch for that upload.",
-      default: true,
-    },
     entity: {
       type: "select",
       label: "Entity sent to WakaTime",
       description:
-        "title: the thread title. threadId: the thread id only, for privacy. This changes the entity only; the project and branch are still sent.",
+        "title: the thread title is the entity of the per-thread heartbeat. threadId: the thread id is the entity, and no file entries are sent at all, whatever File activity says. This changes the entity only; the project and branch are still sent.",
       options: [...ENTITY_MODES],
       default: "title",
+    },
+    fileActivity: {
+      type: "select",
+      label: "File activity",
+      description:
+        "edits-and-reads: send the path of every file an agent edited or read inside the thread's environment folder, with AI line counts for edits. edits: edits only. off: no file entries; per-thread agent time continues. File entries reach WakaTime up to about 2 minutes late (they are sent with the thread's next heartbeat), and a change takes effect at the next send. File contents never leave the machine, but file names do.",
+      options: [...FILE_MODES],
+      default: "edits-and-reads",
     },
     excludeProjects: {
       type: "string",

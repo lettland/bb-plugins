@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   classify,
@@ -39,7 +40,7 @@ afterEach(() => {
 });
 
 function job(key: string, overrides: Partial<Job> = {}): Job {
-  return { key, kind: "heartbeat", cliPath: cli, args: [`--time=${key}`], timeoutMs: HEARTBEAT_TIMEOUT_MS, ...overrides };
+  return { key, cliPath: cli, args: [`--time=${key}`], timeoutMs: HEARTBEAT_TIMEOUT_MS, ...overrides };
 }
 
 /** An exec whose calls stay pending until the test settles them. */
@@ -87,6 +88,47 @@ describe("defaultExec", () => {
   });
 });
 
+describe("defaultExec stdin", () => {
+  function mockChild() {
+    const stdin = new PassThrough();
+    const end = vi.spyOn(stdin, "end");
+    const run = vi.mocked(execFile) as unknown as ReturnType<typeof vi.fn>;
+    run.mockClear();
+    run.mockImplementation((_f: string, _a: string[], _o: unknown, cb: (e: unknown, o: string, s: string) => void) => {
+      queueMicrotask(() => cb(null, "", ""));
+      return { stdin };
+    });
+    return { stdin, end, run };
+  }
+
+  afterEach(() => {
+    vi.mocked(execFile).mockImplementation(() => {
+      throw new Error("real execFile called under vitest");
+    });
+  });
+
+  it("writes the JSON with a trailing newline, still without a shell", async () => {
+    const { end, run } = mockChild();
+    expect(await defaultExec("/x", ["--extra-heartbeats"], { timeoutMs: 5, stdin: '[{"a":1}]' })).toMatchObject({ exitCode: 0 });
+    expect(end).toHaveBeenCalledWith('[{"a":1}]\n');
+    expect(run.mock.calls[0]![1]).toEqual(["--extra-heartbeats"]);
+    expect((run.mock.calls[0]![2] as { shell?: unknown }).shell).toBeUndefined();
+  });
+
+  it("does not throw when the process closes stdin early (an error is emitted on it)", async () => {
+    const { stdin } = mockChild();
+    const done = defaultExec("/x", [], { timeoutMs: 5, stdin: "[]" });
+    expect(() => stdin.emit("error", Object.assign(new Error("write EPIPE"), { code: "EPIPE" }))).not.toThrow();
+    await done;
+  });
+
+  it("touches no stdin when there is none to write", async () => {
+    const { end } = mockChild();
+    await defaultExec("/x", [], { timeoutMs: 5 });
+    expect(end).not.toHaveBeenCalled();
+  });
+});
+
 describe("expandHome", () => {
   it("expands ~ and ~/ and leaves other paths alone", () => {
     expect(expandHome("~")).toBe(os.homedir());
@@ -121,14 +163,15 @@ describe("runner", () => {
     calls[0]!.settle(OK);
     expect(await done).toBe("ok");
     expect(runner.health().lastHeartbeatAt).not.toBeNull();
-    expect(runner.health().lastSyncAt).toBeNull();
   });
 
-  it("tracks sync and heartbeat successes separately", async () => {
-    const runner = createRunner({ exec: vi.fn<Exec>().mockResolvedValue(OK), log: fakeLog() });
-    await runner.submit(job("sync", { kind: "sync" }));
-    expect(runner.health()).toMatchObject({ lastHeartbeatAt: null });
-    expect(runner.health().lastSyncAt).not.toBeNull();
+  it("hands a job's stdin to exec, and omits it for a job without one", async () => {
+    const exec = vi.fn<Exec>().mockResolvedValue(OK);
+    const runner = createRunner({ exec, log: fakeLog() });
+    await runner.submit(job("a", { stdin: '[{"entity":"/x"}]' }));
+    await runner.submit(job("b"));
+    expect(exec.mock.calls[0]![2]).toEqual({ timeoutMs: HEARTBEAT_TIMEOUT_MS, stdin: '[{"entity":"/x"}]' });
+    expect(exec.mock.calls[1]![2]).toEqual({ timeoutMs: HEARTBEAT_TIMEOUT_MS });
   });
 
   it("on dispose resolves queued jobs as skipped, refuses new ones and lets in-flight ones finish", async () => {
@@ -218,7 +261,7 @@ describe("runner", () => {
       expect(await runner.submit(job("a", { cliPath: missing }))).toBe("skipped");
       expect(exec).not.toHaveBeenCalled();
       expect(log.warn).toHaveBeenCalledTimes(1);
-      expect(runner.health().lastError).toMatchObject({ kind: "missing-cli", job: "heartbeat", problem: "not-found" });
+      expect(runner.health().lastError).toMatchObject({ kind: "missing-cli", problem: "not-found" });
       writeFileSync(missing, "#!/bin/sh\n");
       chmodSync(missing, 0o755);
       expect(await runner.submit(job("a", { cliPath: missing }))).toBe("ok");
@@ -255,21 +298,21 @@ describe("runner", () => {
       expect(runner.health().lastError).toMatchObject({ kind: "missing-cli", exitCode: null });
     });
 
-    it("keeps the job and time of an identical path problem across verifies and jobs", async () => {
+    it("keeps the time of an identical path problem across verifies and jobs", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(1_000);
       const runner = createRunner({ exec: vi.fn<Exec>().mockResolvedValue(OK), log: fakeLog() });
       const missing = path.join(dir, "nope");
-      await runner.submit(job("sync", { kind: "sync", cliPath: missing }));
+      await runner.submit(job("a", { cliPath: missing }));
       const first = runner.health().lastError;
-      expect(first).toMatchObject({ job: "sync", at: 1_000, problem: "not-found" });
+      expect(first).toMatchObject({ at: 1_000, problem: "not-found" });
       vi.setSystemTime(9_000);
       await runner.verify(missing);
       await runner.submit(job("a", { cliPath: missing }));
       expect(runner.health().lastError).toEqual(first);
       // A different problem is a new error.
       await runner.verify(dir);
-      expect(runner.health().lastError).toMatchObject({ job: "heartbeat", at: 9_000, problem: "not-a-file" });
+      expect(runner.health().lastError).toMatchObject({ at: 9_000, problem: "not-a-file" });
     });
 
     it("verify keeps a non-path error", async () => {
@@ -422,7 +465,7 @@ describe("runner", () => {
           expect(line).not.toContain(secret);
         }
         expect(JSON.stringify(runner.health())).not.toContain(SECRET);
-        expect(runner.health().lastError).toMatchObject({ kind, job: "heartbeat" });
+        expect(runner.health().lastError).toMatchObject({ kind });
       }
     });
 

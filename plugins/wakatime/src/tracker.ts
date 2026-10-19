@@ -1,7 +1,10 @@
 import type { PluginLogger } from "@get-bb/plugin-sdk";
-import { createSyncScheduler } from "./ai-sync.js";
-import { expandHome, HEARTBEAT_TIMEOUT_MS, SYNC_TIMEOUT_MS } from "./cli.js";
-import type { Runner } from "./cli.js";
+import { expandHome, HEARTBEAT_TIMEOUT_MS } from "./cli.js";
+import type { Job, Runner } from "./cli.js";
+import { toExtraHeartbeat } from "./file-activity.js";
+import type { FileSpec } from "./file-activity.js";
+import { FileDelivery } from "./file-delivery.js";
+import type { FileSdk } from "./file-delivery.js";
 import {
   buildArgv,
   BRANCH_TTL_MS,
@@ -12,7 +15,7 @@ import {
   TtlCache,
   unmatchedEntries,
 } from "./heartbeat.js";
-import type { ContextSdk, ProjectLike, ResolvedContext, ThreadLike } from "./heartbeat.js";
+import type { ContextSdk, EnvInfo, ProjectLike, ResolvedContext, ThreadLike } from "./heartbeat.js";
 import type { WakatimeStatus } from "./rpc-contract.js";
 import { entityModeOf, parseExcludeList } from "./settings.js";
 import type { WakatimeSettings } from "./settings.js";
@@ -22,9 +25,10 @@ export const AGENT_TICK_MS = 120_000;
 const USER_KEY = "user";
 
 export interface TrackerSdk extends ContextSdk {
-  threads: ContextSdk["threads"] & {
-    listRunning(): Promise<{ id: string }[]>;
-  };
+  threads: ContextSdk["threads"] &
+    FileSdk["threads"] & {
+      listRunning(): Promise<{ id: string }[]>;
+    };
   projects: ContextSdk["projects"] & {
     list(args: { includePersonal: boolean }): Promise<ProjectLike[]>;
   };
@@ -51,9 +55,9 @@ export class Tracker {
   private readonly log: PluginLogger;
   private readonly settings: TrackerDeps["settings"];
   private readonly plugin: TrackerDeps["plugin"];
-  private readonly sync: ReturnType<typeof createSyncScheduler>;
+  private readonly files: FileDelivery;
   private readonly throttle = new Throttle();
-  private readonly branches = new TtlCache<string | null>(BRANCH_TTL_MS);
+  private readonly branches = new TtlCache<EnvInfo>(BRANCH_TTL_MS);
   // Thread id -> its agent-time interval. The registered timer is the only
   // record that a thread is being timed.
   private readonly timers = new Map<string, Timer>();
@@ -64,6 +68,9 @@ export class Tracker {
   // so a stream of events payloads does not re-read them. Cleared per thread on
   // activation and stop, and wholesale when settings change.
   private readonly notTimed = new Set<string>();
+  // Thread id -> token of a final stop still resolving; archiving the thread
+  // deletes it, so the stop does not bring the thread's file state back.
+  private readonly stopping = new Map<string, symbol>();
   // Bumped when settings change, so a read that was already in flight cannot
   // mark a thread from the old settings.
   private settingsGeneration = 0;
@@ -76,16 +83,12 @@ export class Tracker {
     this.log = deps.log;
     this.settings = deps.settings;
     this.plugin = deps.plugin;
-    this.sync = createSyncScheduler(async () => {
-      const settings = await this.settings.get();
-      if (!settings.syncAiActivity) return;
-      await this.runner.submit({
-        key: "sync",
-        kind: "sync",
-        cliPath: settings.cliPath,
-        args: ["--sync-ai-activity"],
-        timeoutMs: SYNC_TIMEOUT_MS,
-      });
+    this.files = new FileDelivery({
+      sdk: deps.sdk,
+      settings: deps.settings,
+      runner: deps.runner,
+      log: deps.log,
+      environments: this.branches,
     });
   }
 
@@ -93,30 +96,60 @@ export class Tracker {
     return project !== null && isExcluded(parseExcludeList(settings.excludeProjects), project);
   }
 
-  /** Queue one heartbeat unless the throttle holds it back. `bypass` skips the throttle. */
-  private emit(
+  /**
+   * The CLI call for one heartbeat, with `chunk` as its file entries; null when
+   * the throttle holds it back. `bypass` skips the throttle, and only the first
+   * call of a send consults it.
+   */
+  private heartbeatJob(
     settings: WakatimeSettings,
     ctx: ResolvedContext,
     key: string,
     category: string,
     bypass: boolean,
-  ): boolean {
+    chunk: FileSpec[] = [],
+    first = true,
+  ): Job | null {
     const entity = entityFor(ctx.thread, entityModeOf(settings.entity));
     const project = ctx.project?.name;
     const timeMs = Date.now();
-    if (!this.throttle.allow({ key, category }, entity, project, timeMs, bypass)) return false;
+    if (first && !this.throttle.allow({ key, category }, entity, project, timeMs, bypass)) return null;
     const args = buildArgv(
       { entity, project, branch: ctx.branch ?? undefined, category, timeMs },
       this.plugin(),
+      chunk.length > 0,
     );
-    void this.runner.submit({
+    const extras = chunk.map((spec) => toExtraHeartbeat(spec, { project, branch: ctx.branch, category }));
+    return {
       key: `heartbeat:${key}`,
-      kind: "heartbeat",
       cliPath: settings.cliPath,
       args,
+      ...(chunk.length > 0 ? { stdin: JSON.stringify(extras) } : {}),
       timeoutMs: HEARTBEAT_TIMEOUT_MS,
+    };
+  }
+
+  /** A context resolved from a thread always carries its project: `resolveContext` returns null otherwise. */
+  private projectOf(ctx: ResolvedContext & { thread: ThreadLike }): ProjectLike {
+    return ctx.project!;
+  }
+
+  /** Send a thread's heartbeat through the file pipeline, the only submitter for its key. */
+  private deliver(
+    settings: WakatimeSettings,
+    ctx: ResolvedContext & { thread: ThreadLike },
+    bypass: boolean,
+    final: boolean,
+  ): Promise<void> {
+    const { thread } = ctx;
+    return this.files.deliver({
+      id: thread.id,
+      project: this.projectOf(ctx),
+      environmentId: thread.environmentId,
+      final,
+      build: (chunk, first) =>
+        this.heartbeatJob(settings, ctx, thread.id, settings.agentCategory, bypass, chunk, first),
     });
-    return true;
   }
 
   async userHeartbeat(ids: { projectId?: string; threadId?: string }): Promise<boolean> {
@@ -124,7 +157,10 @@ export class Tracker {
     if (!settings.trackUserActivity) return false;
     const ctx = await resolveContext(this.sdk, this.branches, ids);
     if (ctx === null || this.excluded(settings, ctx.project)) return false;
-    return this.emit(settings, ctx, USER_KEY, settings.userCategory, false);
+    const job = this.heartbeatJob(settings, ctx, USER_KEY, settings.userCategory, false);
+    if (job === null) return false;
+    void this.runner.submit(job);
+    return true;
   }
 
   private release(id: string, own: Timer): void {
@@ -143,10 +179,12 @@ export class Tracker {
   private skip(id: string, own: Timer, generation: number): void {
     if (this.timers.get(id) !== own) return;
     this.release(id, own);
+    this.files.untime(id);
     if (generation === this.settingsGeneration) this.notTimed.add(id);
   }
 
-  private stopLocal(id: string): void {
+  /** The thread's interval timer and its marks; the file pipeline is kept for its next turn. */
+  private clearTimer(id: string): void {
     this.notTimed.delete(id);
     const timer = this.timers.get(id);
     if (timer !== undefined) clearInterval(timer);
@@ -190,7 +228,9 @@ export class Tracker {
       if (this.excluded(settings, ctx.project)) return this.skip(thread.id, own, generation);
       // An idle that landed during the awaits already cleared this timer.
       if (this.timers.get(thread.id) !== own) return;
-      this.emit(settings, ctx, thread.id, settings.agentCategory, false);
+      this.files.attach(thread.id, this.projectOf({ ...ctx, thread }), thread.environmentId);
+      void this.files.pull(thread.id);
+      await this.deliver(settings, { ...ctx, thread }, false, false);
     } catch {
       this.release(thread.id, own);
     }
@@ -207,9 +247,12 @@ export class Tracker {
       if (ctx === null) return this.release(id, own);
       if (this.excluded(settings, ctx.project)) return this.skip(id, own, generation);
       if (this.timers.get(id) !== own) return;
+      this.files.attach(id, this.projectOf({ ...ctx, thread }), thread.environmentId);
+      await this.files.pull(id);
+      if (this.timers.get(id) !== own) return;
       // Already paced at the throttle window, so a tick that fires a
       // millisecond early must not be dropped.
-      this.emit(settings, ctx, id, settings.agentCategory, true);
+      await this.deliver(settings, { ...ctx, thread }, true, false);
     } catch {
       this.release(id, own);
     }
@@ -224,15 +267,22 @@ export class Tracker {
   }
 
   private async stop(thread: ThreadLike): Promise<void> {
-    this.stopLocal(thread.id);
+    this.clearTimer(thread.id);
+    const token = Symbol(thread.id);
+    this.stopping.set(thread.id, token);
     try {
       const settings = await this.settings.get();
       const ctx = await resolveContext(this.sdk, this.branches, { threadId: thread.id }, thread);
       if (this.disposed || ctx === null || this.excluded(settings, ctx.project)) return;
-      if (settings.trackAgentActivity) this.emit(settings, ctx, thread.id, settings.agentCategory, true);
-      if (settings.syncAiActivity) this.sync.request();
+      if (!settings.trackAgentActivity || this.stopping.get(thread.id) !== token) return;
+      // Chained behind every earlier pull, so a thread that starts again meanwhile never re-seeds.
+      this.files.attach(thread.id, this.projectOf({ ...ctx, thread }), thread.environmentId);
+      await this.files.pull(thread.id);
+      await this.deliver(settings, { ...ctx, thread }, true, true);
     } catch (error) {
       this.log.warn(`could not finish thread time: ${error instanceof Error ? error.name : "error"}`);
+    } finally {
+      if (this.stopping.get(thread.id) === token) this.stopping.delete(thread.id);
     }
   }
 
@@ -310,6 +360,7 @@ export class Tracker {
   onSettingsChanged(): void {
     this.settingsGeneration += 1;
     this.notTimed.clear();
+    void this.files.applySettings();
   }
 
   async status(): Promise<WakatimeStatus> {
@@ -326,8 +377,8 @@ export class Tracker {
     return {
       cliPath: expandHome(settings.cliPath),
       lastHeartbeatAt: health.lastHeartbeatAt,
-      lastSyncAt: health.lastSyncAt,
       lastError: health.lastError,
+      ...this.files.stats(),
       unmatchedExcludes: unmatched,
     };
   }
@@ -338,9 +389,10 @@ export class Tracker {
     this.timers.clear();
     this.confirming.clear();
     this.notTimed.clear();
+    this.stopping.clear();
     this.throttle.clear();
     this.branches.clear();
-    this.sync.dispose();
+    this.files.dispose();
   }
 
   onActive(thread: ThreadLike): void {
@@ -353,11 +405,15 @@ export class Tracker {
   }
 
   onEvents(payload: { thread: ThreadLike }): void {
-    void this.adopt(payload.thread);
+    // A timed thread's new events are pulled into its buffer; others may start a timer.
+    if (this.timers.has(payload.thread.id)) void this.files.pull(payload.thread.id);
+    else void this.adopt(payload.thread);
   }
 
   onGone(id: string): void {
-    this.stopLocal(id);
+    this.clearTimer(id);
+    this.stopping.delete(id);
+    this.files.drop(id);
   }
 
   /** Test hooks: sizes of the per-thread state. */
@@ -368,6 +424,7 @@ export class Tracker {
       notTimed: this.notTimed.size,
       throttle: this.throttle.size,
       branches: this.branches.size,
+      files: this.files.size(),
     };
   }
 }

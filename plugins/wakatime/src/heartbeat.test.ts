@@ -10,7 +10,7 @@ import {
   TtlCache,
   unmatchedEntries,
 } from "./heartbeat.js";
-import type { ContextSdk, ThreadLike } from "./heartbeat.js";
+import type { ContextSdk, EnvInfo, ThreadLike } from "./heartbeat.js";
 
 const PLUGIN = "bb/unknown bb-wakatime/0.1.0";
 
@@ -65,6 +65,11 @@ describe("buildArgv", () => {
     expect(argv[1]).toBe("--entity=Fixevil login");
     expect(argv[2]).toBe("--project=acme");
     expect(argv.join("")).not.toMatch(/[\u200B-\u200C\u200E\u200F\u202A-\u202E\u2066-\u2069]/);
+  });
+
+  it("adds --extra-heartbeats only when file entries follow on stdin", () => {
+    expect(buildArgv(spec, PLUGIN)).not.toContain("--extra-heartbeats");
+    expect(buildArgv(spec, PLUGIN, true)).toContain("--extra-heartbeats");
   });
 
   it("keeps U+200D so emoji sequences survive", () => {
@@ -178,7 +183,10 @@ describe("resolveContext", () => {
         get: async () => {
           calls.env++;
           if (overrides.envError) throw new Error("down");
-          return { branchName: overrides.branchName === undefined ? "feat/x" : overrides.branchName };
+          return {
+            branchName: overrides.branchName === undefined ? "feat/x" : overrides.branchName,
+            path: "/work/proj",
+          };
         },
         status: async () => {
           calls.status++;
@@ -198,11 +206,12 @@ describe("resolveContext", () => {
     expect(ctx?.thread?.id).toBe("thr_1");
     expect(ctx?.project?.name).toBe("acme");
     expect(ctx?.branch).toBe("feat/x");
+    expect(ctx?.path).toBe("/work/proj");
   });
 
   it("returns an empty context for a view with no ids", async () => {
     const { api } = sdk();
-    expect(await resolveContext(api, new TtlCache(60_000), {})).toEqual({ thread: null, project: null, branch: null });
+    expect(await resolveContext(api, new TtlCache(60_000), {})).toEqual({ thread: null, project: null, branch: null, path: null });
   });
 
   it("resolves a project-only view", async () => {
@@ -213,7 +222,7 @@ describe("resolveContext", () => {
   });
 
   it("returns null when an id cannot be resolved", async () => {
-    const cache = new TtlCache<string | null>(60_000);
+    const cache = new TtlCache<EnvInfo>(60_000);
     expect(await resolveContext(sdk({ thread: new Error("404") }).api, cache, { threadId: "thr_x" })).toBeNull();
     expect(await resolveContext(sdk({ project: new Error("404") }).api, cache, { projectId: "prj_x" })).toBeNull();
   });
@@ -227,7 +236,7 @@ describe("resolveContext", () => {
   it("caches the branch for 60 s and falls back to the checked-out branch", async () => {
     vi.useFakeTimers();
     try {
-      const cache = new TtlCache<string | null>(60_000);
+      const cache = new TtlCache<EnvInfo>(60_000);
       const { api, calls } = sdk({ branchName: null, currentBranch: "main" });
       expect((await resolveContext(api, cache, { threadId: "thr_1" }))?.branch).toBe("main");
       await resolveContext(api, cache, { threadId: "thr_1" });
@@ -241,11 +250,11 @@ describe("resolveContext", () => {
   });
 
   it("gives no branch when the environment is unavailable, and does not cache a failure", async () => {
-    const cache = new TtlCache<string | null>(60_000);
+    const cache = new TtlCache<EnvInfo>(60_000);
     expect((await resolveContext(sdk({ branchName: null, outcome: "unavailable" }).api, cache, { threadId: "t" }))?.branch).toBeNull();
     const failing = sdk({ envError: true });
     expect((await resolveContext(failing.api, new TtlCache(60_000), { threadId: "t" }))?.branch).toBeNull();
-    const fresh = new TtlCache<string | null>(60_000);
+    const fresh = new TtlCache<EnvInfo>(60_000);
     await resolveContext(failing.api, fresh, { threadId: "t" });
     expect(fresh.size).toBe(0);
   });

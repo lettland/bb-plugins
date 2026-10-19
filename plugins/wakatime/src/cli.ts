@@ -8,7 +8,6 @@ import type { ErrorKind, PathProblem } from "./rpc-contract.js";
 
 /** Above the CLI's own 120 s API timeout, leaving room for its offline-queue sync. */
 export const HEARTBEAT_TIMEOUT_MS = 150_000;
-export const SYNC_TIMEOUT_MS = 10 * 60_000;
 export const MAX_CONCURRENT = 4;
 export const FAILURE_LOG_INTERVAL_MS = 10 * 60_000;
 
@@ -27,12 +26,16 @@ export interface ExecResult {
   spawnError: string | null;
 }
 
-export type Exec = (file: string, args: string[], options: { timeoutMs: number }) => Promise<ExecResult>;
+export type Exec = (
+  file: string,
+  args: string[],
+  options: { timeoutMs: number; stdin?: string },
+) => Promise<ExecResult>;
 
 /** No shell: every argument reaches the process as one argv entry. */
-export const defaultExec: Exec = (file, args, { timeoutMs }) =>
+export const defaultExec: Exec = (file, args, { timeoutMs, stdin }) =>
   new Promise((resolve) => {
-    execFile(
+    const child = execFile(
       file,
       args,
       { timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 1024 * 1024, windowsHide: true },
@@ -49,15 +52,21 @@ export const defaultExec: Exec = (file, args, { timeoutMs }) =>
         });
       },
     );
+    if (stdin !== undefined) {
+      // A process that exits before reading its stdin must not crash the server with EPIPE.
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(`${stdin}\n`);
+    }
   });
 
 export interface Job {
   /** At most one job per key runs at a time; a newer queued job replaces an older one. */
   key: string;
-  kind: "heartbeat" | "sync";
   /** The `cliPath` setting as typed; logs show this, never the expanded path. */
   cliPath: string;
   args: string[];
+  /** Written to the process's stdin, newline-terminated (the `--extra-heartbeats` JSON). */
+  stdin?: string;
   timeoutMs: number;
 }
 
@@ -65,10 +74,8 @@ export type JobOutcome = "ok" | "failed" | "skipped" | "superseded";
 
 export interface RunnerHealth {
   lastHeartbeatAt: number | null;
-  lastSyncAt: number | null;
   lastError: {
     kind: ErrorKind;
-    job: Job["kind"];
     exitCode: number | null;
     at: number;
     problem?: PathProblem;
@@ -132,7 +139,7 @@ export class CliRunner implements Runner {
   private readonly inFlightKeys = new Set<string>();
   private readonly lastLoggedAt = new Map<ErrorKind, number>();
   private readonly warnedPaths = new Set<string>();
-  private readonly state: RunnerHealth = { lastHeartbeatAt: null, lastSyncAt: null, lastError: null };
+  private readonly state: RunnerHealth = { lastHeartbeatAt: null, lastError: null };
   // The last path that passed the check; cleared by a spawn error so it is re-checked.
   private verifiedPath: string | null = null;
   // The last path reported as usable, to log a change once.
@@ -147,7 +154,7 @@ export class CliRunner implements Runner {
 
   private async ensureUsable(
     file: string,
-    job: Pick<Job, "cliPath" | "kind">,
+    job: Pick<Job, "cliPath">,
     recheck = false,
   ): Promise<boolean> {
     if (!recheck && this.verifiedPath === file) return true;
@@ -167,10 +174,10 @@ export class CliRunner implements Runner {
       return true;
     }
     this.verifiedPath = null;
-    // The same problem again keeps its job and time, so reading the status does not move them.
+    // The same problem again keeps its time, so reading the status does not move them.
     const last = this.state.lastError;
     if (last?.kind !== "missing-cli" || last.problem !== problem) {
-      this.state.lastError = { kind: "missing-cli", job: job.kind, exitCode: null, at: Date.now(), problem };
+      this.state.lastError = { kind: "missing-cli", exitCode: null, at: Date.now(), problem };
     }
     if (!this.warnedPaths.has(file)) {
       this.warnedPaths.add(file);
@@ -181,9 +188,9 @@ export class CliRunner implements Runner {
     return false;
   }
 
-  private recordFailure(job: Job, kind: ErrorKind, exitCode: number | null): void {
+  private recordFailure(kind: ErrorKind, exitCode: number | null): void {
     const now = Date.now();
-    this.state.lastError = { kind, job: job.kind, exitCode, at: now };
+    this.state.lastError = { kind, exitCode, at: now };
     const last = this.lastLoggedAt.get(kind);
     if (last !== undefined && now - last < FAILURE_LOG_INTERVAL_MS) return;
     this.lastLoggedAt.set(kind, now);
@@ -195,19 +202,21 @@ export class CliRunner implements Runner {
     if (!(await this.ensureUsable(file, job))) return "skipped";
     let result: ExecResult;
     try {
-      result = await this.exec(file, job.args, { timeoutMs: job.timeoutMs });
+      result = await this.exec(file, job.args, {
+        timeoutMs: job.timeoutMs,
+        ...(job.stdin === undefined ? {} : { stdin: job.stdin }),
+      });
     } catch {
       result = { exitCode: null, signal: null, spawnError: "EXEC_FAILED" };
     }
     if (result.spawnError === null && result.signal === null && result.exitCode === 0) {
-      if (job.kind === "sync") this.state.lastSyncAt = Date.now();
-      else this.state.lastHeartbeatAt = Date.now();
+      this.state.lastHeartbeatAt = Date.now();
       this.lastLoggedAt.clear();
       return "ok";
     }
     const kind = classify(result);
     if (kind === "missing-cli") this.verifiedPath = null;
-    this.recordFailure(job, kind, result.exitCode);
+    this.recordFailure(kind, result.exitCode);
     return "failed";
   }
 
@@ -251,7 +260,7 @@ export class CliRunner implements Runner {
   }
 
   async verify(cliPath: string): Promise<void> {
-    await this.ensureUsable(expandHome(cliPath), { cliPath, kind: "heartbeat" }, true);
+    await this.ensureUsable(expandHome(cliPath), { cliPath }, true);
   }
 
   health(): RunnerHealth {

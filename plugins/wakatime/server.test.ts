@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import type { FakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,7 +14,9 @@ const PROJECT = { id: "prj_1", name: "acme" };
 let dir: string;
 let cli: string;
 let host: FakePluginHost;
-let execCalls: { file: string; args: string[] }[];
+let execCalls: { file: string; args: string[]; stdin: string | null }[];
+let eventRows: { seq: number; createdAt: number; data: unknown }[];
+let repoDir: string;
 let thread: ReturnType<typeof makeThreadResponse>;
 
 // Captured before any test fakes timers.
@@ -35,6 +38,12 @@ async function start(settings: Record<string, string | boolean> = {}) {
           return thread;
         },
         listRunning: async () => (thread.status === "active" ? [{ id: thread.id, hostId: null }] : []),
+        events: {
+          list: async (args: { afterSeq?: string; order: string; limit: string }) => {
+            if (args.order === "desc") return eventRows.slice(-1);
+            return eventRows.filter((row) => row.seq > Number(args.afterSeq)).slice(0, Number(args.limit));
+          },
+        },
       },
       projects: {
         get: async ({ projectId }: { projectId: string }) => {
@@ -50,7 +59,7 @@ async function start(settings: Record<string, string | boolean> = {}) {
         },
       },
       environments: {
-        get: async () => ({ branchName: "feat/x" }),
+        get: async () => ({ branchName: "feat/x", path: repoDir }),
         status: async () => ({ outcome: "unavailable" }),
       },
     } as never,
@@ -65,11 +74,18 @@ beforeEach(() => {
   writeFileSync(cli, "#!/bin/sh\n");
   chmodSync(cli, 0o755);
   execCalls = [];
+  eventRows = [];
+  repoDir = mkdtempSync(path.join(os.tmpdir(), "waka-repo-"));
   version = async () => ({ currentVersion: "9.8.7" });
   thread = makeThreadResponse({ id: "thr_1", projectId: PROJECT.id, title: "Fix login", status: "idle", environmentId: "env_1" });
   vi.mocked(execFile).mockImplementation(((file: string, args: string[], _o: unknown, cb: (e: null, o: string, s: string) => void) => {
-    execCalls.push({ file, args });
+    const call: (typeof execCalls)[number] = { file, args, stdin: null };
+    execCalls.push(call);
+    const stdin = new PassThrough();
+    stdin.setEncoding("utf8");
+    stdin.on("data", (text: string) => (call.stdin = (call.stdin ?? "") + text));
     cb(null, "", "");
+    return { stdin };
   }) as never);
 });
 
@@ -79,6 +95,7 @@ afterEach(async () => {
     throw new Error("real execFile called under vitest");
   });
   rmSync(dir, { recursive: true, force: true });
+  rmSync(repoDir, { recursive: true, force: true });
 });
 
 describe("wakatime plugin", () => {
@@ -86,10 +103,11 @@ describe("wakatime plugin", () => {
     await start();
     const d = host.harness.registrations.settingsDescriptors;
     expect(Object.keys(d).sort()).toEqual(
-      ["agentCategory", "cliPath", "entity", "excludeProjects", "syncAiActivity", "trackAgentActivity", "trackUserActivity", "userCategory"],
+      ["agentCategory", "cliPath", "entity", "excludeProjects", "fileActivity", "trackAgentActivity", "trackUserActivity", "userCategory"],
     );
     expect(d.cliPath).toMatchObject({ default: "~/.wakatime/wakatime-cli" });
     expect(d.entity).toMatchObject({ default: "title", options: ["title", "threadId"] });
+    expect(d.fileActivity).toMatchObject({ type: "select", default: "edits-and-reads", options: ["edits-and-reads", "edits", "off"] });
     expect(d.agentCategory).toMatchObject({ type: "select", default: "building" });
     expect(d.userCategory).toMatchObject({ type: "select", default: "coding" });
     for (const key of ["userCategory", "agentCategory"]) {
@@ -224,7 +242,7 @@ describe("wakatime plugin", () => {
     expect(status.unmatchedExcludes).toEqual(["ghost"]);
   });
 
-  it("times an active thread from thread.active to thread.idle and syncs once", async () => {
+  it("times an active thread from thread.active to thread.idle, with no transcript sync", async () => {
     await start();
     thread = { ...thread, status: "active" };
     await host.harness.emitThreadEvent("thread.active", { thread });
@@ -232,10 +250,65 @@ describe("wakatime plugin", () => {
     thread = { ...thread, status: "idle" };
     await host.harness.emitThreadEvent("thread.idle", { thread, lastAssistantText: null });
     await flush();
-    const heartbeats = execCalls.filter((call) => !call.args.includes("--sync-ai-activity"));
-    expect(heartbeats.length).toBeGreaterThanOrEqual(2);
-    expect(execCalls.filter((call) => call.args.includes("--sync-ai-activity"))).toHaveLength(1);
-    for (const call of heartbeats) expect(call.args).toContain("--category=building");
+    expect(execCalls.length).toBeGreaterThanOrEqual(2);
+    for (const call of execCalls) {
+      expect(call.args).toContain("--category=building");
+      expect(call.args).toContain("--sync-ai-disabled");
+      expect(call.args).not.toContain("--sync-ai-activity");
+    }
+  });
+
+  it("sends the files an agent edited with the final heartbeat, as extras on stdin", async () => {
+    await start();
+    thread = { ...thread, status: "active" };
+    await host.harness.emitThreadEvent("thread.active", { thread });
+    await flush();
+    writeFileSync(path.join(repoDir, "a.ts"), "x");
+    eventRows = [
+      {
+        seq: 7,
+        createdAt: 1_700_000_000_500,
+        data: {
+          item: {
+            type: "fileChange",
+            status: "completed",
+            changes: [
+              { kind: "update", path: path.join(repoDir, "a.ts"), diff: "--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-x\n+y\n" },
+              { kind: "update", path: "/elsewhere/secret.txt", diff: "@@ -1 +1 @@\n-a\n+b\n" },
+            ],
+          },
+        },
+      },
+    ];
+    thread = { ...thread, status: "idle" };
+    await host.harness.emitThreadEvent("thread.idle", { thread, lastAssistantText: null });
+    await flush();
+    const withFiles = execCalls.filter((call) => call.args.includes("--extra-heartbeats"));
+    expect(withFiles).toHaveLength(1);
+    const extras = JSON.parse(withFiles[0]!.stdin!) as Record<string, unknown>[];
+    expect(extras).toEqual([
+      {
+        entity: path.join(realpathSync(repoDir), "a.ts"),
+        type: "file",
+        category: "building",
+        time: 1_700_000_000.5,
+        project: "acme",
+        alternate_branch: "feat/x",
+        is_write: true,
+        ai_line_changes: 2,
+      },
+    ]);
+    expect(withFiles[0]!.stdin!.endsWith("\n")).toBe(true);
+    expect(JSON.stringify(extras)).not.toContain("secret");
+  });
+
+  it("ignores a stored value for the removed syncAiActivity setting", async () => {
+    await start({ syncAiActivity: true });
+    expect(await host.harness.callRpc("heartbeat", {})).toEqual({ sent: true });
+    const settings = host.harness.registrations.settingsDescriptors;
+    expect(Object.keys(settings)).not.toContain("syncAiActivity");
+    await flush();
+    for (const call of execCalls) expect(call.args).not.toContain("--sync-ai-activity");
   });
 
   it("starts timers for threads already active when the plugin loads", async () => {
@@ -264,7 +337,7 @@ describe("wakatime plugin", () => {
     expect(execCalls).toHaveLength(1);
     await host.harness.emitThreadEvent("thread.failed", { thread: { ...thread, status: "error" }, error: null });
     await flush();
-    expect(execCalls.filter((call) => !call.args.includes("--sync-ai-activity"))).toHaveLength(2);
+    expect(execCalls).toHaveLength(2);
   });
 
   it("consumes experimental_thread.events payloads", async () => {
