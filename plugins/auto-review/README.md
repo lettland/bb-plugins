@@ -433,7 +433,9 @@ It ships enabled (opt-out).
   secret-scanned before you push; a feature branch it would have merged into a personal
   mainline stays unmerged; and its uncommitted edits stay in the tree, where no later review
   counts them because the next turn's snapshot already contains them, so ask the agent to
-  commit them, or touch them in a new turn. An already-pushed turn leaves behind commits that
+  commit them, or touch them in a new turn. The stand-down record names the commits it skipped:
+  `bb auto-review status` lists them under `lastFire.skippedCommits`, and the agent can be asked in a
+  new turn to review or merge them. An already-pushed turn leaves behind commits that
   are already public and are not reviewed or scanned afterwards. A question you send while the
   turn is parked does not fire it: the parked work becomes carried work, and the next turn that
   changes something reviews it.
@@ -492,13 +494,13 @@ All commands accept `--json`.
 
 | Command | What it does |
 |---|---|
-| `bb auto-review status` | Effective state (including `planGate`, whether this thread's plan review is served here by the native ExitPlanMode gate), last-fire outcome, and the last review's reported outcome with open/re-raised finding counts (`reviewResult`, plus `omittedFromPrompt`: open findings the next review's prompt cannot list) for the current thread |
+| `bb auto-review status` | Effective state (including `planGate`, whether this thread's plan review is served here by the native ExitPlanMode gate), last-fire outcome (naming the commits a `stale-park` or `already-pushed` stand-down skipped, as `lastFire.skippedCommits`), a `last parked` line for a turn parked behind another review (`lastParkedAt` in `--json`), and the last review's reported outcome with open/re-raised finding counts (`reviewResult`, plus `omittedFromPrompt`: open findings the next review's prompt cannot list) for the current thread |
 | `bb auto-review show` | Global defaults, project override and resolved settings for the current project |
 | `bb auto-review enable [--global \| --project <id>]` | Turn it on; bare `enable` is global |
 | `bb auto-review disable [--global \| --project <id>]` | Turn it off, same scoping |
 | `bb auto-review auto-approve <on\|off> --project <id>` | Approve reviewed plans automatically for one project (off by default); `--project` is required and must exist, and `on` is refused from inside a bb thread (an accident guard, not a security boundary) |
 | `bb auto-review findings [thread-id] [--clear]` | List what a thread's reviews reported (finding chains, flagging high/blocker ones dismissed more than once, and incidents). `--clear` drops the chains only; it is refused inside a bb thread and needs an explicit thread id |
-| `bb auto-review reset <thread-id>` | Clear a wedged loop-guard latch on an idle thread, and discard its carried work; refused while the thread is running or holds a `deferred` turn (its review runs when the hold clears) |
+| `bb auto-review reset <thread-id>` | Clear a wedged loop-guard latch on an idle thread, and discard its carried work; refused while the thread is running or holds a `deferred` turn (its review runs when the hold clears, unless it stands down as `stale-park` or `already-pushed`) |
 
 The agent-hooks plugin's `review-plan-before-exit.sh` reads `planGate` from
 `bb auto-review status --json` and stands down where it is true, so a plan is reviewed

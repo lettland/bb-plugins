@@ -924,7 +924,7 @@ describe("auto-review cli: status", () => {
       const text = await host.run(["status", THREAD_ID]);
       expect(text.stdout).toContain("phase: deferred\ndeferred for: 7 min — ");
       expect(text.stdout).toContain(
-        "It fires when that review ends, unless 30 minutes have passed since it was last parked or its work is already pushed.",
+        "It fires when that review ends, but may stand down instead if 30 or more minutes have passed since it was last parked or its work is already pushed.",
       );
       expect(text.stdout).not.toContain("reset");
 
@@ -933,32 +933,71 @@ describe("auto-review cli: status", () => {
     });
   });
 
+  const parkTree = { headSha: "h0", files: {}, commits: [] };
+
   it("shows when a provider park was last parked, whether or not it has a deferral time", async () => {
     await withHost({}, async (host) => {
       const startedAt = Date.now() - 12 * 60_000 - 5_000;
-      Object.assign(host.metadataFor(THREAD_ID), { phase: "deferred", lastIdle: { sinceSeq: 1, startedAt } });
+      Object.assign(host.metadataFor(THREAD_ID), {
+        phase: "deferred",
+        turnStart: { sinceSeq: 1, startedAt: 1, tree: parkTree },
+        lastIdle: { sinceSeq: 5, startedAt, tree: parkTree },
+      });
       const text = await host.run(["status", THREAD_ID]);
-      expect(text.stdout).toContain("phase: deferred\nlast parked: 12 min ago (stands down at 30)\nlastFire: never\n");
+      expect(text.stdout).toContain(
+        "phase: deferred\nlast parked: 12 min ago (may stand down if released 30+ min after)\nlastFire: never\n",
+      );
 
       const payload = await host.run(["status", THREAD_ID, "--json"]);
       expect(parse(payload.stdout)).toMatchObject({ lastParkedAt: startedAt });
     });
   });
 
-  it("omits the last parked line for a child-held park and for one with no park time", async () => {
+  it("says so once a provider park is past the cutoff", async () => {
     await withHost({}, async (host) => {
       Object.assign(host.metadataFor(THREAD_ID), {
         phase: "deferred",
+        turnStart: { sinceSeq: 1, startedAt: 1, tree: parkTree },
+        lastIdle: { sinceSeq: 5, startedAt: Date.now() - 45 * 60_000 - 5_000, tree: parkTree },
+      });
+      const text = await host.run(["status", THREAD_ID]);
+      expect(text.stdout).toContain("last parked: 45 min ago (past 30 min: may stand down when released)\n");
+    });
+  });
+
+  it("omits the last parked line for a child-held park, and for one a stand-down could not use", async () => {
+    await withHost({}, async (host) => {
+      const startedAt = Date.now() - 12 * 60_000;
+      Object.assign(host.metadataFor(THREAD_ID), {
+        phase: "deferred",
         heldBy: ["child-1"],
-        lastIdle: { sinceSeq: 1, startedAt: Date.now() - 12 * 60_000 },
+        turnStart: { sinceSeq: 1, startedAt: 1, tree: parkTree },
+        lastIdle: { sinceSeq: 5, startedAt, tree: parkTree },
       });
       const held = await host.run(["status", THREAD_ID]);
       expect(held.stdout).not.toContain("last parked");
       expect(parse((await host.run(["status", THREAD_ID, "--json"])).stdout)).toMatchObject({ lastParkedAt: null });
 
-      Object.assign(host.metadataFor(THREAD_ID), { heldBy: undefined, lastIdle: { sinceSeq: 1 } });
-      const unstamped = await host.run(["status", THREAD_ID]);
-      expect(unstamped.stdout).not.toContain("last parked");
+      Object.assign(host.metadataFor(THREAD_ID), { heldBy: undefined, lastIdle: { sinceSeq: 5 } });
+      expect((await host.run(["status", THREAD_ID])).stdout).not.toContain("last parked");
+
+      Object.assign(host.metadataFor(THREAD_ID), { lastIdle: { sinceSeq: 5, startedAt, tree: parkTree }, turnStart: { sinceSeq: 1, startedAt: 1 } });
+      expect((await host.run(["status", THREAD_ID])).stdout).not.toContain("last parked");
+
+      Object.assign(host.metadataFor(THREAD_ID), { lastIdle: { sinceSeq: 5, startedAt }, turnStart: { sinceSeq: 1, startedAt: 1, tree: parkTree } });
+      expect((await host.run(["status", THREAD_ID])).stdout).not.toContain("last parked");
+    });
+  });
+
+  it("shows the commits a stand-down skipped, from a stored last fire that parses through the schema", async () => {
+    await withHost({}, async (host) => {
+      const stored = lastFire({ outcome: "stood-down", reason: "stale-park", skippedCommits: ["abcdef1234567890", "1234567890abcdef"] });
+      expect(lastFireSchema.safeParse(stored).success).toBe(true);
+      await host.kv.set(`lastfire:${PROJECT_ID}:${THREAD_ID}`, stored);
+      const text = await host.run(["status", THREAD_ID]);
+      expect(text.stdout).toContain("lastFire: stood-down (stale-park) at 2026-01-02T03:04:05.000Z, commit(s) abcdef1, 1234567 not reviewed\n");
+      const payload = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(payload.stdout)).toMatchObject({ lastFire: { skippedCommits: ["abcdef1234567890", "1234567890abcdef"] } });
     });
   });
 

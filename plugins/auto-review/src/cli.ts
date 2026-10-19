@@ -14,7 +14,7 @@ import {
 } from "./config.js";
 import { setAutoApprove } from "./cli-auto-approve.js";
 import { reviewStatusView, showFindings } from "./cli-findings.js";
-import { lastParkedAtOf, lastParkedLine } from "./cli-park.js";
+import { lastParkedAtOf, lastParkedLine, PROVIDER_PARK_RELEASE_TEXT, skippedText } from "./cli-park.js";
 import { json } from "./cli-result.js";
 import { removeDeferral } from "./deferrals.js";
 import { isBusyStatus, planGateServes } from "./gate.js";
@@ -87,7 +87,7 @@ function lastFireLine(lastFire: LastFire | null): string {
     lastFire.parkedCommits?.length ? `commit(s) ${lastFire.parkedCommits.map((sha) => sha.slice(0, 7)).join(", ")}` : "",
   ].filter(Boolean);
   const parked = parts.length === 0 ? "" : `, ${parts.join(" and ")} made while this turn waited`;
-  return `${lastFire.outcome} (${lastFire.reason}) at ${new Date(lastFire.at).toISOString()}${unclaimed}${parked}`;
+  return `${lastFire.outcome} (${lastFire.reason}) at ${new Date(lastFire.at).toISOString()}${unclaimed}${parked}${skippedText(lastFire.skippedCommits)}`;
 }
 
 /** What releases a deferred turn, for `status`. */
@@ -104,7 +104,7 @@ function deferredWaitText(heldBy: string[] | undefined): string {
   }
   return (
     "waiting for another auto-review on the same provider to finish.\n" +
-    "  It fires when that review ends, unless 30 minutes have passed since it was last parked or its work is already pushed.\n"
+    `  ${PROVIDER_PARK_RELEASE_TEXT}`
   );
 }
 

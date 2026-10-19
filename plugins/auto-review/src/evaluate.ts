@@ -48,7 +48,7 @@ import {
   type ThreadState,
   type TurnStart,
 } from "./state.js";
-import { pushedStandDown, quietPark, staleStandDown } from "./park-stand-down.js";
+import { parkStandDown } from "./park-stand-down.js";
 import { keepCursor, standDown } from "./turn-end.js";
 
 /**
@@ -323,10 +323,6 @@ export async function evaluate(
   });
   const release = await parkRelease(ctx, thread, state);
   const park = parkBaseline(state, release);
-  const quiet = await quietPark(bb, thread.id, state, park);
-  if (await staleStandDown(ctx, thread, state, park, quiet)) {
-    return;
-  }
   if (await noNewWork(ctx, thread, state, environmentId, workspace, threadEntries, release)) {
     return;
   }
@@ -342,7 +338,16 @@ export async function evaluate(
     isDedicatedWorktree: reviewed.isWorktree,
     mergeEligibleMainlines: config.mergeEligibleMainlines,
   });
-  if (await pushedStandDown(ctx, thread, state, { environmentId, workspace, turnPaths: reviewed.turn.paths, merge: decision.merge, park, quiet })) {
+  if (
+    await parkStandDown(ctx, thread, state, {
+      environmentId,
+      workspace,
+      turn: reviewed.turn,
+      scope: reviewed.scope,
+      merge: decision.merge,
+      park,
+    })
+  ) {
     return;
   }
   await dispatchReview(ctx, {

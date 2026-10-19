@@ -2,11 +2,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { lastFireSchema } from "./config.js";
 import { recordFire } from "./context.js";
 import { parkedFire } from "./detect-park.js";
-import { pushedStandDown, staleStandDown } from "./park-stand-down.js";
+import { parkStandDown } from "./park-stand-down.js";
 import { noNewWork, parkBaseline, parkRelease, pushedRelease, staleRelease } from "./no-new-work.js";
 import type { ThreadState } from "./state.js";
 
-const lookups = vi.hoisted(() => ({ branchHeadPushed: vi.fn(), firstUserTurnSince: vi.fn(), turnChangedPaths: vi.fn() }));
+const lookups = vi.hoisted(() => ({
+  branchHeadPushed: vi.fn(),
+  firstUserTurnSince: vi.fn(),
+  quietSincePark: vi.fn(),
+  turnChangedPaths: vi.fn(),
+}));
 vi.mock("./detect.js", async (original) => ({ ...(await original<typeof import("./detect.js")>()), ...lookups }));
 
 const tree = { headSha: "h0", files: {}, commits: [] };
@@ -33,6 +38,7 @@ function context() {
 beforeEach(() => {
   lookups.branchHeadPushed.mockReset();
   lookups.firstUserTurnSince.mockReset();
+  lookups.quietSincePark.mockReset();
   lookups.turnChangedPaths.mockReset();
 });
 
@@ -118,67 +124,136 @@ describe("pushedRelease", () => {
   });
 });
 
-describe("staleStandDown", () => {
-  const park = { startedAt: Date.now() - 31 * 60_000, tree };
-  const idle = { phase: "idle" } as unknown as ThreadState;
-
-  it("warns and records a stale-park stand-down for a quiet park that waited 30 minutes", async () => {
-    const { ctx, warnings, writes } = context();
-    expect(await staleStandDown(ctx, thread, idle, park, true)).toBe(true);
-    expect(warnings).toEqual(["auto-review: standing thr down as stale-park; it waited 31 min since it was parked"]);
-    expect(writes).toMatchObject([{ outcome: "stood-down", reason: "stale-park" }]);
-  });
-
-  it.each([
-    ["it is not a released provider park", undefined, true],
-    ["a turn ran since the park", park, false],
-    ["it waited under 30 minutes", { startedAt: Date.now() - 5 * 60_000, tree }, true],
-  ])("leaves the turn alone when %s", async (_name, baseline, quiet) => {
-    const { ctx, warnings, writes } = context();
-    expect(await staleStandDown(ctx, thread, idle, baseline, quiet)).toBe(false);
-    expect(warnings).toEqual([]);
-    expect(writes).toEqual([]);
-  });
-});
-
-describe("pushedStandDown", () => {
-  const park = { startedAt: 2_000, tree };
-  const idle = { phase: "idle" } as unknown as ThreadState;
+describe("parkStandDown", () => {
+  const MIN = 60_000;
+  const fresh = { startedAt: Date.now() - 5 * MIN, tree };
+  const stale = { startedAt: Date.now() - 31 * MIN, tree };
   const workspace = {
-    branch: { currentBranch: "feature/x" },
+    branch: { currentBranch: "feature/x", defaultBranch: "master" },
     checkout: { kind: "branch", branchName: "feature/x", headSha: "head" },
-    workingTree: { files: [{ path: "src/other.ts" }] },
+    mergeBase: { mergeBaseBranch: "master" },
+    workingTree: { files: [{ path: "src/a.ts" }] },
   } as never;
-  const input = { environmentId: "env", workspace, turnPaths: ["src/a.ts"], merge: false, park, quiet: true };
+  const input = {
+    environmentId: "env",
+    workspace,
+    turn: { paths: ["src/a.ts"], commits: ["c1c1c1c1c1", "c2c2c2c2c2"] } as never,
+    scope: ["src/a.ts"],
+    merge: false,
+    park: fresh as typeof fresh | undefined,
+  };
 
-  function contextWithInfos() {
+  function harness(phase: "idle" | "deferred" = "idle") {
+    const warnings: string[] = [];
     const infos: string[] = [];
-    const base = context();
-    const ctx = { bb: { ...(base.ctx as { bb: object }).bb, log: { warn: () => undefined, info: (message: string) => infos.push(message) } } } as never;
-    return { ctx, infos, writes: base.writes };
+    const writes: unknown[] = [];
+    const metadata: unknown[] = [];
+    const deleted: string[] = [];
+    const ctx = {
+      bb: {
+        log: { warn: (message: string) => warnings.push(message), info: (message: string) => infos.push(message) },
+        storage: {
+          kv: { set: async (_key: string, value: unknown) => writes.push(value), get: async () => undefined, delete: async (key: string) => deleted.push(key) },
+        },
+        sdk: { threads: { updatePluginMetadata: async (args: unknown) => metadata.push(args) } },
+        realtime: { publish: async () => undefined },
+      },
+    } as never;
+    const state = { phase, lastIdle: { sinceSeq: 5, startedAt: 2_000, tree } } as unknown as ThreadState;
+    return { ctx, state, warnings, infos, writes, metadata, deleted };
   }
 
-  it("records an already-pushed stand-down when the remote holds HEAD and the turn's paths are clean", async () => {
-    lookups.branchHeadPushed.mockResolvedValue(true);
-    const { ctx, infos, writes } = contextWithInfos();
-    expect(await pushedStandDown(ctx, thread, idle, input)).toBe(true);
+  it("reads nothing for a turn that is not a released provider park", async () => {
+    const { ctx, state, writes } = harness();
+    expect(await parkStandDown(ctx, thread, state, { ...input, park: undefined })).toBe(false);
+    expect(lookups.quietSincePark).not.toHaveBeenCalled();
+    expect(lookups.branchHeadPushed).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+  });
+
+  it("leaves a park alone when a turn ran since it, or it has no cursor to read from", async () => {
+    lookups.quietSincePark.mockResolvedValue(false);
+    const { ctx, state, writes } = harness();
+    expect(await parkStandDown(ctx, thread, state, { ...input, park: stale })).toBe(false);
+    expect(lookups.quietSincePark).toHaveBeenCalledWith(expect.anything(), "thr", 5);
+    expect(await parkStandDown(ctx, thread, { ...state, lastIdle: undefined } as ThreadState, { ...input, park: stale })).toBe(false);
+    expect(lookups.branchHeadPushed).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+  });
+
+  it("stands a stale park down as stale-park, recording the skipped commits, scope and merge, with no remote read", async () => {
+    lookups.quietSincePark.mockResolvedValue(true);
+    const { ctx, state, warnings, writes } = harness();
+    expect(await parkStandDown(ctx, thread, state, { ...input, park: stale, merge: true })).toBe(true);
+    expect(warnings).toEqual([
+      "auto-review: standing thr down as stale-park after 31 min; 2 commit(s) not reviewed or secret-scanned: c1c1c1c, c2c2c2c; merge into master skipped",
+    ]);
+    expect(writes).toMatchObject([
+      { outcome: "stood-down", reason: "stale-park", skippedCommits: ["c1c1c1c1c1", "c2c2c2c2c2"], scopePaths: ["src/a.ts"], merge: true },
+    ]);
+    expect(lastFireSchema.safeParse(writes[0]).success).toBe(true);
+    expect(lookups.branchHeadPushed).not.toHaveBeenCalled();
+  });
+
+  it("names only the example commits and omits the parts that do not apply", async () => {
+    lookups.quietSincePark.mockResolvedValue(true);
+    const { ctx, state, warnings } = harness();
+    const commits = Array.from({ length: 7 }, (_, at) => `${at}abcdefabc`);
+    await parkStandDown(ctx, thread, state, { ...input, park: stale, turn: { paths: [], commits } as never });
+    expect(warnings).toEqual([
+      "auto-review: standing thr down as stale-park after 31 min; 7 commit(s) not reviewed or secret-scanned: 0abcdef, 1abcdef, 2abcdef, 3abcdef, 4abcdef",
+    ]);
+    const bare = harness();
+    await parkStandDown(bare.ctx, thread, bare.state, { ...input, park: stale, turn: { paths: [], commits: [] } as never });
+    expect(bare.warnings).toEqual(["auto-review: standing thr down as stale-park after 31 min"]);
+  });
+
+  it("unparks a deferred turn it stands down", async () => {
+    lookups.quietSincePark.mockResolvedValue(true);
+    const { ctx, state, metadata, deleted } = harness("deferred");
+    expect(await parkStandDown(ctx, thread, state, { ...input, park: stale })).toBe(true);
+    expect(metadata).toMatchObject([{ threadId: "thr", set: { phase: "idle" }, remove: expect.arrayContaining(["deferredSince", "heldBy"]) }]);
+    expect(deleted).toHaveLength(1);
+  });
+
+  it("stands a fresh park down as already-pushed when the remote holds HEAD, using the fresh dirty paths", async () => {
+    lookups.quietSincePark.mockResolvedValue(true);
+    lookups.branchHeadPushed.mockResolvedValue(["src/other.ts"]);
+    const { ctx, state, infos, writes, deleted } = harness("deferred");
+    expect(await parkStandDown(ctx, thread, state, input)).toBe(true);
     expect(lookups.branchHeadPushed).toHaveBeenCalledWith(expect.anything(), "env", "feature/x", "head");
     expect(infos).toEqual(["auto-review: standing thr down as already-pushed; head is on the remote branch"]);
-    expect(writes).toMatchObject([{ outcome: "stood-down", reason: "already-pushed" }]);
+    expect(writes).toMatchObject([
+      { outcome: "stood-down", reason: "already-pushed", skippedCommits: ["c1c1c1c1c1", "c2c2c2c2c2"], scopePaths: ["src/a.ts"], merge: false },
+    ]);
+    expect(deleted).toHaveLength(1);
+  });
+
+  it("does not use the stale snapshot's dirty paths: a turn path dirty in the fresh read keeps the turn", async () => {
+    lookups.quietSincePark.mockResolvedValue(true);
+    lookups.branchHeadPushed.mockResolvedValue(["src/a.ts"]);
+    const { ctx, state, writes } = harness();
+    expect(await parkStandDown(ctx, thread, state, { ...input, workspace: { ...(workspace as object), workingTree: { files: [] } } as never })).toBe(false);
+    expect(writes).toEqual([]);
+  });
+
+  it("keeps the turn when the remote does not hold HEAD", async () => {
+    lookups.quietSincePark.mockResolvedValue(true);
+    lookups.branchHeadPushed.mockResolvedValue(null);
+    const { ctx, state, writes } = harness();
+    expect(await parkStandDown(ctx, thread, state, input)).toBe(false);
+    expect(writes).toEqual([]);
   });
 
   it.each([
-    ["the remote does not hold HEAD", { ...input }, false],
-    ["a local merge would run", { ...input, merge: true }, true],
-    ["a turn ran since the park", { ...input, quiet: false }, true],
-    ["it is not a released provider park", { ...input, park: undefined }, true],
-    ["the checkout is detached from a branch", { ...input, workspace: { ...(workspace as object), branch: { currentBranch: null } } as never }, true],
-    ["the checkout has no head", { ...input, workspace: { ...(workspace as object), checkout: { kind: "unborn" } } as never }, true],
-    ["a turn path is dirty again", { ...input, workspace: { ...(workspace as object), workingTree: { files: [{ path: "src/a.ts" }] } } as never }, true],
-  ])("leaves the turn alone when %s", async (_name, over, pushed) => {
-    lookups.branchHeadPushed.mockResolvedValue(pushed);
-    const { ctx, writes } = contextWithInfos();
-    expect(await pushedStandDown(ctx, thread, idle, over)).toBe(false);
+    ["a local merge would run", { merge: true }],
+    ["there is no current branch", { workspace: { ...(workspace as object), branch: { currentBranch: null } } as never }],
+    ["the checkout has no head", { workspace: { ...(workspace as object), checkout: { kind: "unborn" } } as never }],
+  ])("asks the remote nothing and keeps the turn when %s", async (_name, over) => {
+    lookups.quietSincePark.mockResolvedValue(true);
+    const { ctx, state, writes } = harness();
+    expect(await parkStandDown(ctx, thread, state, { ...input, ...over })).toBe(false);
+    expect(lookups.branchHeadPushed).not.toHaveBeenCalled();
     expect(writes).toEqual([]);
   });
 });

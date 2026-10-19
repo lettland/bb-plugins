@@ -64,6 +64,8 @@ export const lastFireSchema = z.object({
   parkedCount: z.number().int().nonnegative().optional(),
   parkedCommits: z.array(z.string()).optional(),
   parkedPaths: z.array(z.string()).optional(),
+  /** The turn's commits a parked stand-down left unreviewed and unscanned. */
+  skippedCommits: z.array(z.string()).optional(),
 });
 export type LastFire = z.infer<typeof lastFireSchema>;
 

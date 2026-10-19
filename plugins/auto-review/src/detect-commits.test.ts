@@ -8,10 +8,12 @@ const REF = "origin/feature/x";
 const status = (
   over: Record<string, unknown> = {},
   checkout: Record<string, unknown> = { kind: "branch", branchName: "feature/x", headSha: "head" },
+  dirty: string[] = [],
 ) => ({
   outcome: "available",
   workspace: {
     checkout,
+    workingTree: { files: dirty.map((path) => ({ path })) },
     mergeBase: { files: [], mergeBaseBranch: REF, baseRef: "head", aheadCount: 0, commits: [], ...over },
   },
 });
@@ -26,8 +28,12 @@ async function pushed(answer: () => unknown, expectedHead = "head") {
 }
 
 describe("branchHeadPushed", () => {
-  it("holds when nothing is ahead of the remote branch and HEAD is its merge base", async () => {
-    expect(await pushed(() => status())).toEqual({ result: true, infos: [] });
+  it("returns the fresh dirty paths when nothing is ahead of the remote branch and HEAD is its merge base", async () => {
+    expect(await pushed(() => status())).toEqual({ result: [], infos: [] });
+    expect(await pushed(() => status({}, undefined, ["src/a.ts", "src/b.ts"]))).toEqual({
+      result: ["src/a.ts", "src/b.ts"],
+      infos: [],
+    });
   });
 
   const doubts: Array<[string, () => unknown, string]> = [
@@ -39,7 +45,7 @@ describe("branchHeadPushed", () => {
     [
       "HEAD is missing from the commits ahead as patch-equivalent while older ones are unpushed",
       () => status({ aheadCount: 1, commits: [{ sha: "older" }] }),
-      "1 commits are still ahead of it",
+      "1 commit is still ahead of it",
     ],
     ["HEAD is not the merge base", () => status({ baseRef: "base0" }), "HEAD is not an ancestor of it"],
     ["the answer is for another ref", () => status({ mergeBaseBranch: "origin/other" }), "the answer was not for that ref"],
@@ -63,9 +69,9 @@ describe("branchHeadPushed", () => {
       "the status call failed",
     ],
   ];
-  it.each(doubts)("is false when %s", async (_name, answer, reason) => {
+  it.each(doubts)("is null when %s", async (_name, answer, reason) => {
     expect(await pushed(answer)).toEqual({
-      result: false,
+      result: null,
       infos: [`auto-review: not treating HEAD as pushed to ${REF}: ${reason}`],
     });
   });

@@ -338,7 +338,7 @@ async function readRemoteComparison(
   environmentId: string,
   ref: string,
   expectedHead: string | null,
-): Promise<{ mergeBase: MergeBase; head: string } | { reason: string }> {
+): Promise<{ mergeBase: MergeBase; head: string; dirty: string[] } | { reason: string }> {
   let status: Awaited<ReturnType<BbPluginApi["sdk"]["environments"]["status"]>>;
   try {
     status = await bb.sdk.environments.status({ environmentId, mergeBaseBranch: ref });
@@ -356,7 +356,7 @@ async function readRemoteComparison(
   if (head === null || head !== expectedHead) {
     return { reason: "the checkout moved while the remote base was checked" };
   }
-  return { mergeBase, head };
+  return { mergeBase, head, dirty: status.workspace.workingTree.files.map((file) => file.path) };
 }
 
 /**
@@ -398,33 +398,34 @@ export async function remoteReachableShas(
 }
 
 /**
- * Whether `origin/<branch>` already holds `expectedHead`: nothing is ahead of
- * it and it is itself the merge base, so HEAD is an ancestor of the remote
- * branch. "HEAD is missing from the ahead list" is not enough, since the host
+ * The paths dirty in the checkout now when `origin/<branch>` already holds
+ * `expectedHead` (nothing is ahead of it and it is itself the merge base, so
+ * HEAD is an ancestor of the remote branch), read with the same status call;
+ * null otherwise. "HEAD is missing from the ahead list" is not enough, since the host
  * lists the commits ahead with `--cherry-pick`, which can leave HEAD out as
  * patch-equivalent while older local commits are still unpushed. Any doubt is
- * false.
+ * null.
  */
 export async function branchHeadPushed(
   bb: BbPluginApi,
   environmentId: string,
   branch: string,
   expectedHead: string,
-): Promise<boolean> {
+): Promise<string[] | null> {
   const ref = remoteRef(branch);
   const read = await readRemoteComparison(bb, environmentId, ref, expectedHead);
   if ("reason" in read) {
     bb.log.info(`auto-review: not treating HEAD as pushed to ${ref}: ${read.reason}`);
-    return false;
+    return null;
   }
-  const { mergeBase, head } = read;
+  const { mergeBase, head, dirty } = read;
   if (mergeBase.aheadCount !== 0) {
-    bb.log.info(`auto-review: not treating HEAD as pushed to ${ref}: ${mergeBase.aheadCount} commits are still ahead of it`);
-    return false;
+    bb.log.info(`auto-review: not treating HEAD as pushed to ${ref}: ${mergeBase.aheadCount} ${mergeBase.aheadCount === 1 ? "commit is" : "commits are"} still ahead of it`);
+    return null;
   }
   if (mergeBase.baseRef !== head) {
     bb.log.info(`auto-review: not treating HEAD as pushed to ${ref}: HEAD is not an ancestor of it`);
-    return false;
+    return null;
   }
-  return true;
+  return dirty;
 }
