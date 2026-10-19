@@ -39,7 +39,7 @@ export async function parkStandDown(
   }
   const skipped = { skippedCommits: turn.commits, scopePaths: scope };
   const now = Date.now();
-  if (staleRelease(park, true, now)) {
+  if (staleRelease(park, now)) {
     const shas = turn.commits.slice(0, WARNED_COMMITS).map((sha) => sha.slice(0, 7)).join(", ");
     // The turn's commits lose their review and pre-push secret scan, hence a warning.
     bb.log.warn(
@@ -56,7 +56,7 @@ export async function parkStandDown(
     return false;
   }
   const dirty = await branchHeadPushed(bb, environmentId, branch, head);
-  if (dirty === null || !pushedRelease({ park, quiet: true, turnPaths: turn.paths, dirty, merge, headHeld: true })) {
+  if (dirty === null || !pushedRelease(turn.paths, dirty)) {
     return false;
   }
   bb.log.info(`auto-review: standing ${thread.id} down as already-pushed; ${head} is on the remote branch`);

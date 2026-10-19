@@ -14,7 +14,7 @@ import {
 } from "./config.js";
 import { setAutoApprove } from "./cli-auto-approve.js";
 import { reviewStatusView, showFindings } from "./cli-findings.js";
-import { lastParkedAtOf, lastParkedLine, PROVIDER_PARK_RELEASE_TEXT, skippedText } from "./cli-park.js";
+import { lastParkedAtOf, lastParkedLine, providerParkReleaseText, skippedText } from "./cli-park.js";
 import { json } from "./cli-result.js";
 import { removeDeferral } from "./deferrals.js";
 import { isBusyStatus, planGateServes } from "./gate.js";
@@ -87,11 +87,11 @@ function lastFireLine(lastFire: LastFire | null): string {
     lastFire.parkedCommits?.length ? `commit(s) ${lastFire.parkedCommits.map((sha) => sha.slice(0, 7)).join(", ")}` : "",
   ].filter(Boolean);
   const parked = parts.length === 0 ? "" : `, ${parts.join(" and ")} made while this turn waited`;
-  return `${lastFire.outcome} (${lastFire.reason}) at ${new Date(lastFire.at).toISOString()}${unclaimed}${parked}${skippedText(lastFire.skippedCommits)}`;
+  return `${lastFire.outcome} (${lastFire.reason}) at ${new Date(lastFire.at).toISOString()}${unclaimed}${parked}${skippedText(lastFire)}`;
 }
 
 /** What releases a deferred turn, for `status`. */
-function deferredWaitText(heldBy: string[] | undefined): string {
+function deferredWaitText(heldBy: string[] | undefined, canStandDown: boolean): string {
   if (heldBy !== undefined) {
     return (
       `held by child threads (as of the last check): ${heldBy.join(", ")}\n` +
@@ -104,7 +104,7 @@ function deferredWaitText(heldBy: string[] | undefined): string {
   }
   return (
     "waiting for another auto-review on the same provider to finish.\n" +
-    `  ${PROVIDER_PARK_RELEASE_TEXT}`
+    `  ${providerParkReleaseText(canStandDown)}`
   );
 }
 
@@ -376,7 +376,7 @@ export function registerAutoReviewCli(
         const deferredText =
           state.phase === "deferred" && state.deferredSince !== undefined
             ? `deferred for: ${Math.floor((Date.now() - state.deferredSince) / 60_000)} min — ` +
-              deferredWaitText(state.heldBy)
+              deferredWaitText(state.heldBy, lastParkedAt !== null)
             : "";
         const lastParkedText = lastParkedLine(lastParkedAt);
         return {

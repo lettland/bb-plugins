@@ -434,8 +434,10 @@ It ships enabled (opt-out).
   mainline stays unmerged; and its uncommitted edits stay in the tree, where no later review
   counts them because the next turn's snapshot already contains them, so ask the agent to
   commit them, or touch them in a new turn. The stand-down record names the commits it skipped:
-  `bb auto-review status` lists them under `lastFire.skippedCommits`, and the agent can be asked in a
-  new turn to review or merge them. An already-pushed turn leaves behind commits that
+  `bb auto-review status` lists them under `lastFire.skippedCommits` (and says `merge skipped` when a
+  merge was), `lastFire.scopePaths` lists the turn's files, uncommitted ones included, and
+  `lastFire.merge` is true when a merge was skipped; the agent can be asked in a new turn to review or
+  merge them. An already-pushed turn leaves behind commits that
   are already public and are not reviewed or scanned afterwards. A question you send while the
   turn is parked does not fire it: the parked work becomes carried work, and the next turn that
   changes something reviews it.

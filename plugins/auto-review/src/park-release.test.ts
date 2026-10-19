@@ -93,34 +93,20 @@ describe("staleRelease", () => {
   const park = { startedAt: 1_000_000, tree };
 
   it.each([
-    ["there is no park baseline", undefined, true, 1_000_000 + 60 * 60_000, false],
-    ["a turn ran since the park (a wake-up or a tell)", park, false, 1_000_000 + 60 * 60_000, false],
-    ["it waited 29 minutes 59 seconds", park, true, 1_000_000 + 30 * 60_000 - 1_000, false],
-    ["it waited exactly 30 minutes", park, true, 1_000_000 + 30 * 60_000, true],
-  ])("is judged on %s", (_name, baseline, quiet, now, expected) => {
-    expect(staleRelease(baseline, quiet, now)).toBe(expected);
-  });
-
-  it("is never true for a turn with no park baseline, however old the park", () => {
-    expect(staleRelease(parkBaseline(parked, "none"), true, 2_000 + 2 * 60 * 60_000)).toBe(false);
-    expect(staleRelease(parkBaseline(parked, "unreadable"), true, 2_000 + 2 * 60 * 60_000)).toBe(false);
+    ["29 minutes 59 seconds", 1_000_000 + 30 * 60_000 - 1_000, false],
+    ["exactly 30 minutes", 1_000_000 + 30 * 60_000, true],
+  ])("is judged on a park that waited %s", (_name, now, expected) => {
+    expect(staleRelease(park, now)).toBe(expected);
   });
 });
 
 describe("pushedRelease", () => {
-  const park = { startedAt: 2_000, tree };
-  const input = { park, quiet: true, turnPaths: ["src/a.ts"], dirty: [], merge: false, headHeld: true };
-
   it.each([
-    ["every condition holds", {}, true],
-    ["a dirty path is not the turn's", { dirty: ["src/other.ts"] }, true],
-    ["there is no park baseline", { park: undefined }, false],
-    ["a turn ran since the park", { quiet: false }, false],
-    ["a local merge would run", { merge: true }, false],
-    ["the remote does not hold HEAD", { headHeld: false }, false],
-    ["a turn path is dirty again after it was committed", { dirty: ["src/a.ts", "src/other.ts"] }, false],
-  ])("is judged on: %s", (_name, over, expected) => {
-    expect(pushedRelease({ ...input, ...over })).toBe(expected);
+    ["no turn path is dirty", [], true],
+    ["a dirty path is not the turn's", ["src/other.ts"], true],
+    ["a turn path is dirty again after it was committed", ["src/a.ts", "src/other.ts"], false],
+  ])("is judged on: %s", (_name, dirty, expected) => {
+    expect(pushedRelease(["src/a.ts"], dirty)).toBe(expected);
   });
 });
 

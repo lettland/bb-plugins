@@ -62,35 +62,19 @@ export function parkBaseline(state: ThreadState, release: ParkRelease): ParkBase
 
 /**
  * Whether a released provider park waited `STALE_PARK_MS` or more since its
- * last park snapshot and nothing has run on the thread since (`quiet`): its
- * review no longer follows the work. Pure; `now` is the caller's clock.
+ * last park snapshot: its review no longer follows the work. Pure; `now` is
+ * the caller's clock.
  */
-export function staleRelease(park: ParkBaseline | undefined, quiet: boolean, now: number): boolean {
-  return park !== undefined && quiet && now - park.startedAt >= STALE_PARK_MS;
-}
-
-interface PushedReleaseInput {
-  park: ParkBaseline | undefined;
-  quiet: boolean;
-  /** The paths the turn changed. */
-  turnPaths: readonly string[];
-  /** The paths dirty in the working tree now. */
-  dirty: readonly string[];
-  /** Whether a local merge would run for this turn. */
-  merge: boolean;
-  /** Whether `origin/<branch>` already holds HEAD. */
-  headHeld: boolean;
+export function staleRelease(park: ParkBaseline, now: number): boolean {
+  return now - park.startedAt >= STALE_PARK_MS;
 }
 
 /**
- * Whether a released provider park has nothing left to review: the remote
- * holds HEAD, none of the turn's own paths is dirty again, and no local merge
- * would run. Dirty paths outside the turn do not count.
+ * Whether none of the turn's own paths (`turnPaths`) is dirty again (`dirty`),
+ * so a remote that holds HEAD holds all of its work. A file committed, pushed
+ * and then edited again is dirty; dirty paths outside the turn do not count.
  */
-export function pushedRelease({ park, quiet, turnPaths, dirty, merge, headHeld }: PushedReleaseInput): boolean {
-  if (park === undefined || !quiet || merge || !headHeld) {
-    return false;
-  }
+export function pushedRelease(turnPaths: readonly string[], dirty: readonly string[]): boolean {
   const dirtySet = new Set(dirty);
   return !turnPaths.some((path) => dirtySet.has(path));
 }

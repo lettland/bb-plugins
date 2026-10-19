@@ -1,3 +1,4 @@
+import type { LastFire } from "./config.js";
 import { STALE_PARK_MS, type ThreadState } from "./state.js";
 
 const STALE_PARK_MIN = STALE_PARK_MS / 60_000;
@@ -22,11 +23,18 @@ export function lastParkedLine(lastParkedAt: number | null): string {
     : `last parked: ${min} min ago (may stand down if released ${STALE_PARK_MIN}+ min after)\n`;
 }
 
-/** What releases a turn parked behind another review, for `status`. */
-export const PROVIDER_PARK_RELEASE_TEXT =
-  `It fires when that review ends, but may stand down instead if ${STALE_PARK_MIN} or more minutes have passed since it was last parked or its work is already pushed.\n`;
+/** What releases a turn parked behind another review, for `status`; the stand-down rules only when this park can use them (`canStandDown`). */
+export function providerParkReleaseText(canStandDown: boolean): string {
+  return canStandDown
+    ? `It fires when that review ends, but may stand down instead if ${STALE_PARK_MIN} or more minutes have passed since it was last parked or its work is already pushed.\n`
+    : "It fires automatically as soon as that review ends.\n";
+}
 
-/** The commits a parked stand-down skipped, for the `lastFire` line. */
-export function skippedText(skippedCommits: readonly string[] | undefined): string {
-  return skippedCommits?.length ? `, commit(s) ${skippedCommits.map((sha) => sha.slice(0, 7)).join(", ")} not reviewed` : "";
+/** What a parked stand-down left to act on, for the `lastFire` line: the commits it skipped, and a merge it skipped. */
+export function skippedText(lastFire: LastFire): string {
+  const { skippedCommits, reason, merge } = lastFire;
+  return (
+    (skippedCommits?.length ? `, commit(s) ${skippedCommits.map((sha) => sha.slice(0, 7)).join(", ")} not reviewed` : "") +
+    (reason === "stale-park" && merge ? ", merge skipped" : "")
+  );
 }

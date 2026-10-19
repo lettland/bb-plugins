@@ -923,9 +923,8 @@ describe("auto-review cli: status", () => {
       Object.assign(host.metadataFor(THREAD_ID), { phase: "deferred", deferredSince });
       const text = await host.run(["status", THREAD_ID]);
       expect(text.stdout).toContain("phase: deferred\ndeferred for: 7 min — ");
-      expect(text.stdout).toContain(
-        "It fires when that review ends, but may stand down instead if 30 or more minutes have passed since it was last parked or its work is already pushed.",
-      );
+      expect(text.stdout).toContain("It fires automatically as soon as that review ends.");
+      expect(text.stdout).not.toContain("stand down");
       expect(text.stdout).not.toContain("reset");
 
       const payload = await host.run(["status", THREAD_ID, "--json"]);
@@ -935,18 +934,23 @@ describe("auto-review cli: status", () => {
 
   const parkTree = { headSha: "h0", files: {}, commits: [] };
 
-  it("shows when a provider park was last parked, whether or not it has a deferral time", async () => {
+  it("shows when a provider park was last parked, and the stand-down wait text", async () => {
     await withHost({}, async (host) => {
       const startedAt = Date.now() - 12 * 60_000 - 5_000;
       Object.assign(host.metadataFor(THREAD_ID), {
         phase: "deferred",
+        deferredSince: Date.now() - 20 * 60_000,
         turnStart: { sinceSeq: 1, startedAt: 1, tree: parkTree },
         lastIdle: { sinceSeq: 5, startedAt, tree: parkTree },
       });
       const text = await host.run(["status", THREAD_ID]);
       expect(text.stdout).toContain(
-        "phase: deferred\nlast parked: 12 min ago (may stand down if released 30+ min after)\nlastFire: never\n",
+        "last parked: 12 min ago (may stand down if released 30+ min after)\nlastFire: never\n",
       );
+      expect(text.stdout).toContain(
+        "It fires when that review ends, but may stand down instead if 30 or more minutes have passed since it was last parked or its work is already pushed.",
+      );
+      expect(text.stdout).not.toContain("as soon as that review ends");
 
       const payload = await host.run(["status", THREAD_ID, "--json"]);
       expect(parse(payload.stdout)).toMatchObject({ lastParkedAt: startedAt });
@@ -986,6 +990,20 @@ describe("auto-review cli: status", () => {
 
       Object.assign(host.metadataFor(THREAD_ID), { lastIdle: { sinceSeq: 5, startedAt }, turnStart: { sinceSeq: 1, startedAt: 1, tree: parkTree } });
       expect((await host.run(["status", THREAD_ID])).stdout).not.toContain("last parked");
+    });
+  });
+
+  it("says a merge was skipped only for a stale-park stand-down", async () => {
+    await withHost({}, async (host) => {
+      const key = `lastfire:${PROJECT_ID}:${THREAD_ID}`;
+      await host.kv.set(key, lastFire({ outcome: "stood-down", reason: "stale-park", merge: true, skippedCommits: ["abcdef1234567890"] }));
+      expect((await host.run(["status", THREAD_ID])).stdout).toContain(
+        "lastFire: stood-down (stale-park) at 2026-01-02T03:04:05.000Z, commit(s) abcdef1 not reviewed, merge skipped\n",
+      );
+      await host.kv.set(key, lastFire({ outcome: "stood-down", reason: "stale-park", merge: true }));
+      expect((await host.run(["status", THREAD_ID])).stdout).toContain("(stale-park) at 2026-01-02T03:04:05.000Z, merge skipped\n");
+      await host.kv.set(key, lastFire({ outcome: "fired", reason: "fired", merge: true }));
+      expect((await host.run(["status", THREAD_ID])).stdout).not.toContain("merge skipped");
     });
   });
 
