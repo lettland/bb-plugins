@@ -62,7 +62,7 @@ function reportOutcomes(decision: Decision, overflow: boolean): string {
     ...(canCommit ? ["`committed` (the work is committed)"] : []),
     ...(canCommit && decision.merge ? ["`merged` (committed and merged into the mainline)"] : []),
     "`uncommitted` (reviewed changes were left uncommitted — by policy, because the checks failed, or because the work is unfinished)",
-    "`blocked` (you had to stop: a secret, a missing review workflow, a failed commit or merge)",
+    "`blocked` (you had to stop: a secret, a missing review workflow, a failed commit or merge, or the user asked to stop the review)",
     "`no-changes` (the review needed no changes and nothing was left to commit)",
   ].join("; ");
 }

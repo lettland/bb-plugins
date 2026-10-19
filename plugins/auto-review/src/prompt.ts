@@ -171,6 +171,27 @@ function reviewStep(mode: ReviewMode, committedSince: string | null, aislopScan:
   }
 }
 
+/**
+ * What a post-turn review does with the user's messages while its reviewers
+ * run, in the terms of `END_TURN_WHILE_REVIEWERS_RUN`. The user's own work
+ * during that time is not part of this review: auto-review reviews it when the
+ * review ends, so it is kept out of this one's commits, and `commitClause`
+ * says what that later review does with it.
+ */
+function reviewerMessageRules(decision: Decision, scope: ScopeRendering): string {
+  const commitClause = isNoCommit(decision, scope)
+    ? decision.commit
+      ? "reviews it after this review but does not commit it, as this review's own file list is too long to commit automatically"
+      : "reviews it after this review but does not commit it, as this project's auto-review policy leaves reviewed changes uncommitted"
+    : "reviews it after this review and commits it then, as this project's auto-review policy commits";
+  const merge = decision.commit && decision.merge ? " While that work is uncommitted in the tree, skip the merge step and say why." : "";
+  return [
+    "If the user asks you to stop the review, call the ReportReview tool with outcome `blocked`, a summary that starts with exactly `Stopped by the user.`, and the findings so far, tell the user that work from their own messages during the review, if it changed files, is still reviewed once any child threads of theirs finish unless they pressed stop during it, then end your turn.",
+    "A user message that directs this review (for example \"skip C2\" or \"also fix X\") is part of the review: a finding the user tells you to skip is reported `open` with the reason \"skipped at the user's request\", never dropped silently.",
+    `Any other task in a user message is not part of this review, and it is not the work this thread set out to do in the step that judges that: while the review is open, do not commit that task's work, even under a standing instruction to commit as you go. If the message itself asks for a commit, tell the user that auto-review ${commitClause}. auto-review reviews that work separately once this review ends. If that work edited a file on the list above, leave that file uncommitted, including this review's own fixes to it, which wait for that review, and say so in the ReportReview summary.${merge}`,
+  ].join(" ");
+}
+
 /** The sha when it is shaped like a commit, else null. */
 function allowedSha(sha: string | null | undefined): string | null {
   return sha !== null && sha !== undefined && COMMIT_SHA_ALLOW.test(sha) ? sha : null;
@@ -238,6 +259,7 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
   if (noCommit) {
     lines.push(codeBaselineParagraph(reviewMode, input.codeBaseline ?? []), "");
   }
+  lines.push(reviewerMessageRules(decision, scope), "");
   lines.push(`1. ${reviewStep(reviewMode, committedSince, input.aislopScan ?? false)}`);
   lines.push(
     `2. Apply the fixes the review reports. If it asks for a re-run, re-run only over the changes since its previous pass (devkit's closure rule); a self-review is one pass.`,

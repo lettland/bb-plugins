@@ -82,6 +82,19 @@ export const threadStateSchema = z.object({
   /** The timeline cursor at that moment; a stop after it ended the review. */
   reviewDeliveredSeq: z.number().int().nonnegative().optional(),
   /**
+   * The cursor of the first turn the user ran while the review's children
+   * worked; the follow-up review of the user's own work starts there.
+   */
+  userTurnStart: turnStartSchema.optional(),
+  /** A user turn during the hold changed files. Once set, it stays set until the hold ends. */
+  userTurnAuthored: z.literal(true).optional(),
+  /**
+   * The timeline cursor at the idle of the latest user turn during the hold. A
+   * stop at or before it happened inside that turn, stopped only that turn's
+   * work, and does not end the review.
+   */
+  userStopFloorSeq: z.number().int().nonnegative().optional(),
+  /**
    * The timeline cursor when the last code review was sent. No further code
    * review fires until the user sends a turn of their own after it. Durable:
    * not a latch key, so an idle reset keeps it; only `bb auto-review reset` clears it.
@@ -212,6 +225,9 @@ export const LATCH_KEYS: readonly string[] = [
   "heldBy",
   "reviewDeliveredAt",
   "reviewDeliveredSeq",
+  "userTurnStart",
+  "userTurnAuthored",
+  "userStopFloorSeq",
 ];
 
 /** Native plan-gate keys, cleared together whenever that gate disarms. */

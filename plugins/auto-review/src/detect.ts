@@ -7,6 +7,7 @@ export {
 } from "./detect-timeline.js";
 export {
   captureSinceSeq,
+  endedTurnIsUsers,
   firstUserTurnSince,
   stoppedByUser,
   tryCaptureSinceSeq,

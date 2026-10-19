@@ -27,12 +27,18 @@ const NOT_REPORTED_HINTS = {
     "The thread failed or was archived during the review, before it called ReportReview; its commit and merge may still have happened.",
 } as const;
 
+/**
+ * Whether the user stopped the review after it was delivered. A stop inside a
+ * turn of the user's own during the hold, at or before `userStopFloorSeq`, was
+ * aimed at that turn and does not count.
+ */
 export async function userStoppedReview(
   bb: BbPluginApi,
   threadId: string,
   state: ThreadState,
 ): Promise<boolean> {
-  const sinceSeq = state.reviewDeliveredSeq ?? state.turnStart?.sinceSeq;
+  const floors = [state.reviewDeliveredSeq, state.userStopFloorSeq].filter((seq) => seq !== undefined);
+  const sinceSeq = floors.length === 0 ? state.turnStart?.sinceSeq : Math.max(...floors);
   if (sinceSeq === undefined) {
     return false;
   }

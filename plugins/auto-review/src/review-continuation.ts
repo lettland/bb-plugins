@@ -1,6 +1,6 @@
 import type { ReviewContext } from "./context.js";
-import { firstUserTurnSince, spawnedDescendantIds } from "./detect.js";
-import { REVIEW_CONTINUATION_CAP_MS, type ThreadState } from "./state.js";
+import { endedTurnIsUsers, spawnedDescendantIds } from "./detect.js";
+import { REVIEW_CONTINUATION_CAP_MS, type ThreadState, type TurnStart } from "./state.js";
 
 /**
  * Whether the review is still being carried on by its children: one running,
@@ -49,30 +49,27 @@ export async function reviewContinuationPending(
 }
 
 /**
- * The seq of the first turn of the user's own requested since the review was
- * delivered (or, with no delivery cursor, since this turn's start), or null.
- * The cursor is the one a stop is read against: a turn's request is logged
- * before the `thread.active` that takes `turnStart`, so that alone could miss
- * it. A failed lookup warns and answers null — the latch must never stick on
- * an error.
+ * Whether the turn that has just ended during the hold was the user's, read
+ * from the requests that started it (see `endedTurnIsUsers`). The cursor is the
+ * one taken before the review was sent where there is one, so the review's own
+ * turn is read like any other. A turn that cannot be read counts as the user's: a
+ * follow-up review that finds nothing costs less than an edit nobody reviewed.
  */
-export async function userTurnSinceDelivery(
+export async function userTurnEnded(
   bb: ReviewContext["bb"],
   threadId: string,
   state: ThreadState,
-): Promise<number | null> {
-  const sinceSeq = state.reviewDeliveredSeq ?? state.turnStart?.sinceSeq;
-  if (sinceSeq === undefined) {
-    return null;
-  }
+  turnStart: TurnStart,
+): Promise<boolean> {
+  const sinceSeq = state.lastCodeReviewSeq ?? state.reviewDeliveredSeq ?? turnStart.sinceSeq;
   try {
-    return await firstUserTurnSince(bb, threadId, sinceSeq);
+    return await endedTurnIsUsers(bb, threadId, sinceSeq);
   } catch (error) {
     bb.log.warn(
-      `auto-review: could not read whether the user started a turn in ${threadId}; ${
+      `auto-review: could not read whether the turn that ended in ${threadId} was the user's; counting it as theirs: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
-    return null;
+    return true;
   }
 }

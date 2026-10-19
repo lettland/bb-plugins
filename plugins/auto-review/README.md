@@ -406,10 +406,13 @@ It ships enabled (opt-out).
 - A review that hands its work to child threads stays in flight while one of them is
   running or a due wake-up from one is queued, until the first idle 2 hours after the review
   was delivered. The wake-up turns that apply its fixes are part of that review and are not
-  reviewed again. A stop by you ends it. A turn of your own during the hold ends it too and
-  is reviewed normally, once the children finish; a message steered into the review or a
-  wake-up turn counts as part of the review. Other reviews on the provider wait behind
-  the hold, up to that cap. Residual race: if a child goes idle before bb queues its wake-up,
+  reviewed again. A message you send during the hold does not end it: the agent answers
+  while the reviewers keep running, and only an explicit request to stop the review ends it
+  (reported as `blocked`, "Stopped by the user."). A stop pressed in a review or wake-up turn
+  ends it too; pressed during your own turn it stops that turn only. Your own turns that
+  changed files are reviewed together once the children finish, and not if you stopped one of
+  them; a message steered into the review or a wake-up turn counts as part of the review.
+  Other reviews on the provider wait behind the hold, up to that cap. Residual race: if a child goes idle before bb queues its wake-up,
   the hold ends one idle early and that wake-up turn's fixes get one more review.
 - Runs one review at a time per provider across all projects, since those reviews share
   the provider's usage limits. A turn ending behind another review is deferred, not

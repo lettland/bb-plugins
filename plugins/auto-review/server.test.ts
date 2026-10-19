@@ -89,6 +89,8 @@ interface HostOptions {
   turnEventsThrow?: boolean;
   /** Listing `client/turn/requested` events fails, so no user turn can be read. */
   turnRequestsThrow?: boolean;
+  /** Listing `turn/input/accepted` events fails, so no turn can be anchored to its requests. */
+  turnInputsThrow?: boolean;
   /** Resolving a `user_answer` (only) fails — the global `resolveThrows` would also break the deny. */
   resolveUserAnswerThrows?: boolean;
   /** A real tool call lands during the deny's own resolve round-trip (races the cursor capture). */
@@ -126,6 +128,20 @@ interface TurnRequest {
   steer?: boolean;
   /** An `auto` request that expects a running turn: it steers that turn if active, else starts one. */
   auto?: boolean;
+  /**
+   * The turn the provider accepts the request into. Requests batched into one
+   * turn share it. Default: a request of its own turn (`turn-<seq>`), the latest
+   * earlier turn for a steer, `turn-1` for an `auto` request (it found that turn running).
+   */
+  turnId?: string;
+  /** The turn an `auto` or `steer` request expects to be running. Default: the turn it is accepted into for a steer, `turn-1` for `auto`. */
+  expectedTurnId?: string;
+  /** The request has no `client/turn/requested` row, though the provider accepted an input for it. */
+  unlogged?: boolean;
+  /** The request is queued behind a running turn: logged, but no turn has accepted it yet. */
+  queued?: boolean;
+  /** Where the provider's `turn/input/accepted` is logged, when later than the request (a queued one, once its turn starts). */
+  acceptedAt?: number;
 }
 
 interface ItemStartedEvent {
@@ -203,6 +219,19 @@ function fakeMergeBase(
     mergeBaseBranch: ref ?? "master",
     baseRef: "abc123",
   };
+}
+
+/** The turn a request lands in, as the provider reports it in `turn/input/accepted`. */
+function acceptedTurnId(requests: readonly TurnRequest[], request: TurnRequest): string {
+  if (request.turnId !== undefined) {
+    return request.turnId;
+  }
+  if (request.steer === true) {
+    const earlier = requests.filter((other) => other.seq < request.seq && other.steer !== true && other.auto !== true);
+    const turn = earlier.sort((left, right) => right.seq - left.seq)[0];
+    return turn === undefined ? "turn-1" : acceptedTurnId(requests, turn);
+  }
+  return request.auto === true ? "turn-1" : `turn-${request.seq}`;
 }
 
 function createHost(options: HostOptions = {}) {
@@ -411,7 +440,7 @@ function createHost(options: HostOptions = {}) {
             }
             rows.push(
               ...(turnRequests[args.threadId] ?? [])
-                .filter((request) => request.seq > after)
+                .filter((request) => request.seq > after && request.unlogged !== true)
                 .map((request) => ({
                   id: `ev-${args.threadId}-req-${request.seq}`,
                   scope: { kind: "thread" },
@@ -420,15 +449,38 @@ function createHost(options: HostOptions = {}) {
                   createdAt: 1_000,
                   type: "client/turn/requested",
                   data: {
+                    requestId: `creq-${request.seq}`,
                     initiator: request.initiator,
                     target:
                       request.steer === true
-                        ? { kind: "steer", expectedTurnId: null }
+                        ? {
+                            kind: "steer",
+                            expectedTurnId: request.expectedTurnId ?? acceptedTurnId(turnRequests[args.threadId] ?? [], request),
+                          }
                         : request.auto === true
-                          ? { kind: "auto", expectedTurnId: "turn-1" }
+                          ? { kind: "auto", expectedTurnId: request.expectedTurnId ?? "turn-1" }
                           : { kind: "new-turn" },
                     input: [{ type: "text", text: request.text, mentions: [] }],
                   },
+                })),
+            );
+          }
+          if (args.types?.includes("turn/input/accepted") === true) {
+            if (options.turnInputsThrow === true) {
+              throw new Error("inputs unavailable");
+            }
+            const requests = turnRequests[args.threadId] ?? [];
+            rows.push(
+              ...requests
+                .filter((request) => request.queued !== true && (request.acceptedAt ?? request.seq) > after)
+                .map((request) => ({
+                  id: `ev-${args.threadId}-accepted-${request.seq}`,
+                  scope: { kind: "turn", turnId: acceptedTurnId(requests, request) },
+                  threadId: args.threadId,
+                  seq: request.acceptedAt ?? request.seq,
+                  createdAt: 1_000,
+                  type: "turn/input/accepted",
+                  data: { providerThreadId: "pt-1", clientRequestId: `creq-${request.seq}` },
                 })),
             );
           }
@@ -488,6 +540,17 @@ function createHost(options: HostOptions = {}) {
           throw new Error("send failed");
         }
         sends.push(args);
+        // The turn the send starts is logged like any other request, one seq after the cursor taken before it.
+        const [part] = args.input as Array<{ text: string }>;
+        if (options.sendDelivery !== "queued" && part !== undefined) {
+          turnRequests = {
+            ...turnRequests,
+            [args.threadId]: [
+              ...(turnRequests[args.threadId] ?? []),
+              { seq: maxSeq + 1, initiator: "user", text: part.text },
+            ],
+          };
+        }
         return options.sendDelivery === "queued"
           ? { ok: true, delivery: "queued", queuedMessage: { id: "qm-1" } }
           : { ok: true, delivery: "sent" };
@@ -664,6 +727,19 @@ function createHost(options: HostOptions = {}) {
     /** Record a `client/turn/requested` event: a turn someone asked the thread to start. */
     requestTurn: (request: TurnRequest, threadId: string = THREAD_ID) => {
       turnRequests = { ...turnRequests, [threadId]: [...(turnRequests[threadId] ?? []), request] };
+    },
+    /** From now on, listing `client/turn/requested` events fails (or works again). */
+    setTurnRequestsThrow: (next: boolean) => {
+      options.turnRequestsThrow = next;
+    },
+    /** A queued request's turn starts: the provider accepts it into that turn now. */
+    startQueuedTurn: (seq: number, acceptedAt: number, threadId: string = THREAD_ID) => {
+      turnRequests = {
+        ...turnRequests,
+        [threadId]: (turnRequests[threadId] ?? []).map((request) =>
+          request.seq === seq ? { ...request, queued: false, acceptedAt } : request,
+        ),
+      };
     },
     setQueuedRows: (next: QueuedRow[]) => {
       queuedRows = next;
@@ -1662,6 +1738,7 @@ describe("auto-review plugin", () => {
         { id: "child-1", status: "idle", parentThreadId: THREAD_ID },
       ]);
       // The child's wake-up turn applies its fixes, so the tree changes.
+      host.requestTurn({ seq: 110, initiator: "system", text: "child-1 finished" });
       await emitActive(host);
       host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/fix.ts" }]);
       await emitIdle(host);
@@ -1683,6 +1760,7 @@ describe("auto-review plugin", () => {
       expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeTruthy();
 
       host.setQueuedRows([]);
+      host.requestTurn({ seq: 110, initiator: "system", text: "child-1 finished" });
       await emitActive(host);
       host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/fix.ts" }]);
       await emitIdle(host);
@@ -1742,27 +1820,329 @@ describe("auto-review plugin", () => {
       await host.harness.dispose();
     });
 
-    it("ends the review on a user's own turn during the hold, and reviews that turn once the child finishes", async () => {
-      const host = createHost({ envThreads: runningChild });
+    /**
+     * A turn that runs while the review holds: its request (the user's, or a
+     * wake-up from bb), its start, then its idle with the tree as given.
+     */
+    async function holdTurn(host: Host, request: TurnRequest, tree?: string[]) {
+      host.requestTurn(request);
+      host.setMaxSeq(request.acceptedAt ?? request.seq + 10);
+      await emitActive(host);
+      if (tree !== undefined) {
+        host.setWorkingTree(tree.map((path) => ({ path })));
+      }
+      host.setMaxSeq((request.acceptedAt ?? request.seq) + 20);
+      await emitIdle(host);
+    }
+
+    const userRequest = (seq: number, extra: Partial<TurnRequest> = {}): TurnRequest => ({
+      seq,
+      initiator: "user",
+      text: "also do the thing",
+      ...extra,
+    });
+    const wakeUp = (seq: number, extra: Partial<TurnRequest> = {}): TurnRequest => ({
+      seq,
+      initiator: "system",
+      text: "child-1 finished",
+      ...extra,
+    });
+
+    /** A host whose user turn edits `src/user.ts` (row at seq 135) and whose wake-up turn edits `src/fix.ts` (row at 165). */
+    function editingHost(options: HostOptions = {}) {
+      return createHost({
+        envThreads: runningChild,
+        authoredRows: [fileChangeRow("src/user.ts", 135), fileChangeRow("src/fix.ts", 165)],
+        workingTreeFiles: [],
+        ...options,
+      });
+    }
+
+    const warned = (host: Host, text: string) => warnings(host).some((message) => message.includes(text));
+
+    it("keeps the review through a user's own turn, and reviews that turn once the children finish", async () => {
+      const host = editingHost();
       await plugin(host.bb);
       await delivered(host);
-      host.requestTurn({ seq: 120, initiator: "user", text: "also do the thing" });
-      host.setMaxSeq(130);
-      await emitActive(host);
-      await emitIdle(host);
-      expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeFalsy();
-      expect(host.metadata.phase).toBe("deferred");
-      expect(host.metadata.heldBy).toEqual(["child-1"]);
-      expect(host.metadata.reviewDeliveredAt).toBeUndefined();
-      expect(await lastReportOutcome(host)).toBe("not-reported");
-      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "children-active" });
+      await holdTurn(host, userRequest(120), ["src/user.ts"]);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeTruthy();
+      expect(host.sends).toHaveLength(0);
+      expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 130 });
+      expect(host.metadata.userTurnAuthored).toBe(true);
+      expect(host.metadata.userStopFloorSeq).toBe(140);
+      const userCursor = { ...(host.metadata.userTurnStart as object) };
+
+      // The wake-up turn applies a fix while its sibling reviewer still runs.
+      await holdTurn(host, wakeUp(150), ["src/user.ts", "src/fix.ts"]);
+      expect(host.metadata.phase).toBe("awaiting-review");
       expect(host.sends).toHaveLength(0);
 
       host.setEnvThreads(idleChild);
-      await emitActive(host);
-      await emitIdle(host);
+      await holdTurn(host, wakeUp(180));
       expect(host.sends).toHaveLength(1);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
+      expect((await lastFire(host)).scopePaths).toContain("src/user.ts");
+      expect(host.metadata.turnStart).toEqual(userCursor);
+      expect(host.metadata.userTurnStart).toBeUndefined();
+      expect(host.metadata.userTurnAuthored).toBeUndefined();
+      expect(host.metadata.userStopFloorSeq).toBeUndefined();
+      expect(await lastReportOutcome(host)).toBe("not-reported");
+      await host.harness.dispose();
+    });
+
+    it("sends no follow-up for a user turn that only chatted", async () => {
+      const host = editingHost({ authoredRows: [], envThreads: runningChild });
+      await plugin(host.bb);
+      await delivered(host);
+      await holdTurn(host, userRequest(120));
       expect(host.metadata.phase).toBe("awaiting-review");
+      expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 130 });
+      expect(host.metadata.userTurnAuthored).toBeUndefined();
+
+      host.setEnvThreads(idleChild);
+      await holdTurn(host, wakeUp(150));
+      expect(host.metadata.phase).toBe("idle");
+      expect(host.metadata.userTurnStart).toBeUndefined();
+      expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeFalsy();
+      expect(host.sends).toHaveLength(0);
+      await host.harness.dispose();
+    });
+
+    it("reviews from the first user turn's cursor when only a later one changed files", async () => {
+      const host = editingHost({ authoredRows: [fileChangeRow("src/second.ts", 165)] });
+      await plugin(host.bb);
+      await delivered(host);
+      await holdTurn(host, userRequest(120));
+      await holdTurn(host, userRequest(150), ["src/second.ts"]);
+      expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 130 });
+      expect(host.metadata.userTurnAuthored).toBe(true);
+      expect(host.sends).toHaveLength(0);
+
+      host.setEnvThreads(idleChild);
+      await holdTurn(host, wakeUp(180));
+      expect(host.sends).toHaveLength(1);
+      expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 130 });
+      expect((await lastFire(host)).scopePaths).toContain("src/second.ts");
+      await host.harness.dispose();
+    });
+
+    it("attributes shell-only edits in a user turn through the turn's own tree", async () => {
+      const host = createHost({ envThreads: runningChild, authoredRows: [shellRow()], workingTreeFiles: [] });
+      await plugin(host.bb);
+      await delivered(host);
+      await holdTurn(host, userRequest(120), ["src/generated.ts"]);
+      expect(host.metadata.userTurnAuthored).toBe(true);
+
+      host.setEnvThreads(idleChild);
+      await holdTurn(host, wakeUp(150));
+      expect(host.sends).toHaveLength(1);
+      expect((await lastFire(host)).scopePaths).toEqual(["src/generated.ts"]);
+      await host.harness.dispose();
+    });
+
+    it("does not end the hold for a stop inside a user turn, first or second", async () => {
+      const host = editingHost({ authoredRows: [] });
+      await plugin(host.bb);
+      await delivered(host);
+      host.interrupt({ seq: 135, reason: "manual-stop" });
+      await holdTurn(host, userRequest(120));
+      expect(host.metadata.phase).toBe("awaiting-review");
+      expect(host.metadata.userStopFloorSeq).toBe(140);
+
+      host.interrupt({ seq: 165, reason: "manual-stop" });
+      await holdTurn(host, userRequest(150));
+      expect(host.metadata.phase).toBe("awaiting-review");
+      expect(host.metadata.userStopFloorSeq).toBe(170);
+      expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeTruthy();
+      await host.harness.dispose();
+    });
+
+    it("still ends the hold for a stop inside a wake-up turn", async () => {
+      const host = editingHost({ authoredRows: [] });
+      await plugin(host.bb);
+      await delivered(host);
+      await holdTurn(host, userRequest(120));
+      host.interrupt({ seq: 155, reason: "manual-stop" });
+      await holdTurn(host, wakeUp(150));
+      expect(host.metadata.phase).toBe("idle");
+      expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeFalsy();
+      expect(await lastReportOutcome(host)).toBe("stopped");
+      await host.harness.dispose();
+    });
+
+    it("drops the follow-up as user-stopped when a user turn that changed files was stopped", async () => {
+      const host = editingHost();
+      await plugin(host.bb);
+      await delivered(host);
+      host.interrupt({ seq: 138, reason: "manual-stop" });
+      await holdTurn(host, userRequest(120), ["src/user.ts"]);
+      expect(host.metadata.phase).toBe("awaiting-review");
+
+      host.setEnvThreads(idleChild);
+      await holdTurn(host, wakeUp(150));
+      expect(host.metadata.phase).toBe("idle");
+      expect(host.sends).toHaveLength(0);
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "user-stopped" });
+      await host.harness.dispose();
+    });
+
+    it("drops the follow-up as user-stopped when the review itself is stopped after a user turn changed files", async () => {
+      const host = editingHost();
+      await plugin(host.bb);
+      await delivered(host);
+      await holdTurn(host, userRequest(120), ["src/user.ts"]);
+      host.interrupt({ seq: 155, reason: "manual-stop" });
+      await holdTurn(host, wakeUp(150));
+      expect(host.metadata.phase).toBe("idle");
+      expect(host.sends).toHaveLength(0);
+      expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "user-stopped" });
+      expect(await lastReportOutcome(host)).toBe("stopped");
+      await host.harness.dispose();
+    });
+
+    it("reviews the follow-up when a later chat-only user turn is the one that ends the hold", async () => {
+      const host = editingHost();
+      await plugin(host.bb);
+      await delivered(host);
+      await holdTurn(host, userRequest(120), ["src/user.ts"]);
+      host.setEnvThreads(idleChild);
+      await holdTurn(host, userRequest(180, { text: "stop the review" }));
+      expect(host.sends).toHaveLength(1);
+      expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 130 });
+      expect((await lastFire(host)).scopePaths).toContain("src/user.ts");
+      await host.harness.dispose();
+    });
+
+    it("tells each turn apart by its own accepted input when a user request and a wake-up were queued together", async () => {
+      const host = editingHost({ authoredRows: [fileChangeRow("src/user.ts", 195)] });
+      await plugin(host.bb);
+      await delivered(host);
+      // Both are logged while the first wake-up turn runs; neither has a turn yet.
+      host.requestTurn(userRequest(120, { queued: true }));
+      host.requestTurn(wakeUp(125, { queued: true }));
+      await holdTurn(host, wakeUp(110));
+      expect(host.metadata.userTurnStart).toBeUndefined();
+      expect(host.metadata.phase).toBe("awaiting-review");
+
+      host.startQueuedTurn(120, 190);
+      await holdTurn(host, { ...userRequest(120), queued: false, acceptedAt: 190 }, ["src/user.ts"]);
+      expect(host.metadata.userTurnAuthored).toBe(true);
+
+      host.startQueuedTurn(125, 220);
+      host.setEnvThreads(idleChild);
+      await holdTurn(host, { ...wakeUp(125), acceptedAt: 220 });
+      expect(host.sends).toHaveLength(1);
+      await host.harness.dispose();
+    });
+
+    it("classifies a wake-up logged during a chat-only user turn as a wake-up, and a stop in it ends the review", async () => {
+      const edit = async (stopInWakeUp: boolean) => {
+        const host = editingHost({ envThreads: idleChild, authoredRows: [shellRow()] });
+        await plugin(host.bb);
+        await delivered(host);
+        host.requestTurn(wakeUp(125, { queued: true }));
+        host.setEnvThreads(runningChild);
+        await holdTurn(host, userRequest(120));
+        expect(host.metadata.userTurnAuthored).toBeUndefined();
+
+        host.setEnvThreads(idleChild);
+        host.startQueuedTurn(125, 150);
+        if (stopInWakeUp) {
+          host.interrupt({ seq: 160, reason: "manual-stop" });
+        }
+        await holdTurn(host, { ...wakeUp(125), acceptedAt: 150 }, ["src/fix.ts"]);
+        return host;
+      };
+
+      const edited = await edit(false);
+      expect(edited.metadata.phase).toBe("idle");
+      expect(edited.sends).toHaveLength(0);
+      await edited.harness.dispose();
+
+      const stopped = await edit(true);
+      expect(stopped.metadata.phase).toBe("idle");
+      expect(await lastReportOutcome(stopped)).toBe("stopped");
+      await stopped.harness.dispose();
+    });
+
+    it("records a review as not-reported, not stopped, when the stop was inside the user's turn", async () => {
+      const host = editingHost({ authoredRows: [] });
+      await plugin(host.bb);
+      await delivered(host);
+      host.interrupt({ seq: 135, reason: "manual-stop" });
+      await holdTurn(host, userRequest(120));
+      host.setEnvThreads(idleChild);
+      await holdTurn(host, wakeUp(150));
+      expect(host.metadata.phase).toBe("idle");
+      expect(await lastReportOutcome(host)).toBe("not-reported");
+      const saved = (await host.bb.storage.kv.get(`findings:${THREAD_ID}`)) as {
+        incidents: Array<{ kind: string }>;
+      } | null;
+      expect(saved?.incidents).toMatchObject([{ kind: "not-reported" }]);
+      await host.harness.dispose();
+    });
+
+    it("counts several inputs batched into one turn as the user's when any of them is", async () => {
+      const host = editingHost();
+      await plugin(host.bb);
+      await delivered(host);
+      host.requestTurn(wakeUp(112, { turnId: "turn-batch" }));
+      await holdTurn(host, userRequest(115, { turnId: "turn-batch" }), ["src/user.ts"]);
+      expect(host.metadata.userTurnAuthored).toBe(true);
+      await host.harness.dispose();
+    });
+
+    it("does not make a wake-up turn the user's when only wake-ups were batched into it", async () => {
+      const host = editingHost();
+      await plugin(host.bb);
+      await delivered(host);
+      host.requestTurn(wakeUp(112, { turnId: "turn-batch" }));
+      await holdTurn(host, wakeUp(115, { turnId: "turn-batch" }), ["src/user.ts"]);
+      expect(host.metadata.userTurnStart).toBeUndefined();
+      await host.harness.dispose();
+    });
+
+    it("does not make a wake-up turn the user's when the user steered into it", async () => {
+      for (const steer of [{ steer: true }, { auto: true, expectedTurnId: "turn-110", turnId: "turn-110" }]) {
+        const host = editingHost();
+        await plugin(host.bb);
+        await delivered(host);
+        host.requestTurn(userRequest(115, steer));
+        await holdTurn(host, wakeUp(110), ["src/user.ts"]);
+        expect(host.metadata.userTurnStart).toBeUndefined();
+        expect(host.metadata.phase).toBe("awaiting-review");
+        await host.harness.dispose();
+      }
+    });
+
+    it("counts a user steer that landed in a turn of its own, its expected turn having ended, as the user's turn", async () => {
+      const host = editingHost();
+      await plugin(host.bb);
+      await delivered(host);
+      await holdTurn(host, userRequest(120, { steer: true, expectedTurnId: "turn-110", turnId: "turn-120" }), ["src/user.ts"]);
+      expect(host.metadata.userTurnAuthored).toBe(true);
+      await host.harness.dispose();
+    });
+
+    it("counts an auto request that found no running turn as the user's, since it started one", async () => {
+      const host = editingHost();
+      await plugin(host.bb);
+      await delivered(host);
+      await holdTurn(host, userRequest(120, { auto: true, turnId: "turn-120" }), ["src/user.ts"]);
+      expect(host.metadata.userTurnAuthored).toBe(true);
+      await host.harness.dispose();
+    });
+
+    it("defers the follow-up behind a child still running past the cap", async () => {
+      const host = editingHost();
+      await plugin(host.bb);
+      await delivered(host, Date.now() - REVIEW_CONTINUATION_CAP_MS - 60_000);
+      await holdTurn(host, userRequest(120), ["src/user.ts"]);
+      expect(host.sends).toHaveLength(0);
+      expect(host.metadata.phase).toBe("deferred");
+      expect(host.metadata.heldBy).toEqual(["child-1"]);
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "children-active" });
       await host.harness.dispose();
     });
 
@@ -1786,10 +2166,11 @@ describe("auto-review plugin", () => {
       const host = createHost({ authoredRows: [shellRow()], workingTreeFiles: [] });
       await plugin(host.bb);
       await delivered(host);
+      host.requestTurn({ seq: 110, initiator: "user", text: `${AUTO_REVIEW_MARKER} review the changes` });
       await emitActive(host);
       // The review's own fix, and the user's message already logged at its idle.
       host.setWorkingTree([{ path: "src/fix.ts" }]);
-      host.requestTurn({ seq: 120, initiator: "user", text: "also do the thing" });
+      host.requestTurn({ seq: 120, initiator: "user", text: "also do the thing", queued: true });
       await emitIdle(host);
       expect(host.metadata.phase).toBe("idle");
       expect(host.metadata.turnStart).toBeUndefined();
@@ -1798,6 +2179,7 @@ describe("auto-review plugin", () => {
       expect(host.sends).toHaveLength(0);
 
       host.setMaxSeq(130);
+      host.startQueuedTurn(120, 130);
       await emitActive(host);
       expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 130 });
       host.setWorkingTree([{ path: "src/fix.ts" }, { path: "src/user.ts" }]);
@@ -1811,9 +2193,11 @@ describe("auto-review plugin", () => {
       const host = createHost({ envThreads: runningChild, authoredRows: [], workingTreeFiles: [] });
       await plugin(host.bb);
       await delivered(host);
+      host.requestTurn(wakeUp(105));
+      host.requestTurn({ seq: 110, initiator: "user", text: "steered in", steer: true });
       await emitActive(host);
       host.setWorkingTree([{ path: "src/fix.ts" }]);
-      host.requestTurn({ seq: 110, initiator: "user", text: "steered in" });
+      host.setEnvThreads(idleChild);
       await emitIdle(host);
       expect(host.metadata.phase).toBe("idle");
       expect(host.metadata.turnStart).toBeUndefined();
@@ -1824,18 +2208,52 @@ describe("auto-review plugin", () => {
       await host.harness.dispose();
     });
 
-    it("warns and falls through to the hold when the user's turn requests cannot be read", async () => {
-      const host = createHost({ envThreads: runningChild, turnRequestsThrow: true });
+    it("warns and counts the turn as the user's when its inputs cannot be read", async () => {
+      const host = editingHost({ turnInputsThrow: true });
       await plugin(host.bb);
       await delivered(host);
-      await emitIdle(host);
+      await holdTurn(host, wakeUp(120), ["src/user.ts"]);
+      expect(warned(host, "could not read whether the turn that ended")).toBe(true);
+      expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 130 });
+      expect(host.metadata.userTurnAuthored).toBe(true);
       expect(host.metadata.phase).toBe("awaiting-review");
-      expect(
-        host.harness.logEntries.some(
-          (entry) =>
-            entry.level === "warn" && entry.message.includes("could not read whether the user started a turn"),
-        ),
-      ).toBe(true);
+      await host.harness.dispose();
+    });
+
+    it("warns and counts the turn as the user's when an accepted input has no request row", async () => {
+      const host = editingHost();
+      await plugin(host.bb);
+      await delivered(host);
+      await holdTurn(host, wakeUp(120, { unlogged: true }), ["src/user.ts"]);
+      expect(warned(host, "could not read whether the turn that ended")).toBe(true);
+      expect(host.metadata.userTurnAuthored).toBe(true);
+      await host.harness.dispose();
+    });
+
+    it("warns and counts the user's turn as authored when the check cannot be made", async () => {
+      const host = editingHost({ authoredRows: [], statusUnavailable: true });
+      await plugin(host.bb);
+      await delivered(host);
+      await holdTurn(host, userRequest(120));
+      expect(warned(host, "could not read whether the user's turn")).toBe(true);
+      expect(host.metadata.userTurnAuthored).toBe(true);
+      await host.harness.dispose();
+    });
+
+    it("warns and leaves the stop floor unset when the cursor cannot be read, so a stop inside the turn ends the review", async () => {
+      const host = editingHost({ authoredRows: [] });
+      await plugin(host.bb);
+      await delivered(host);
+      host.requestTurn(userRequest(120));
+      host.setMaxSeq(130);
+      await emitActive(host);
+      host.interrupt({ seq: 135, reason: "manual-stop" });
+      host.failTimelineRead(1);
+      await emitIdle(host);
+      expect(warned(host, "could not capture a timeline cursor for the stop floor")).toBe(true);
+      expect(host.metadata.userStopFloorSeq).toBeUndefined();
+      expect(host.metadata.phase).toBe("idle");
+      expect(await lastReportOutcome(host)).toBe("stopped");
       await host.harness.dispose();
     });
 
@@ -5153,7 +5571,8 @@ describe("auto-review plugin: one code review per user message", () => {
   });
 
   it("reviews anyway, with a warning, when the turn requests cannot be read", async () => {
-    const host = await wakeUpAfterReview({ turnRequestsThrow: true });
+    const host = await wakeUpAfterReview();
+    host.setTurnRequestsThrow(true);
     await emitIdle(host);
     expect(host.sends).toHaveLength(2);
     expect(
@@ -5403,6 +5822,7 @@ describe("auto-review plugin: review baselines", () => {
       (await host.bb.storage.kv.get(`baseline:code:${THREAD_ID}`)) as {
         copies: Record<string, { content: string; headSha: string }>;
         pending?: { headSha: string; files: Record<string, string | null> };
+        clean?: boolean;
       } | null;
 
     async function protectedHost(content: string) {
@@ -5469,6 +5889,25 @@ describe("auto-review plugin: review baselines", () => {
         outcome: "blocked",
         findings: [{ key: "b", title: "t", file: "src/a.ts", severity: "blocker", status: "open" }],
       });
+      await emitIdle(host);
+      const record = await codeRecord(host);
+      expect(record?.pending).toBeUndefined();
+      expect(record?.copies["src/a.ts"]?.content).toBe("one\ntwo\n");
+      await host.harness.dispose();
+    });
+
+    it("drops the pending file when the user stopped the review: blocked, with no open finding", async () => {
+      const host = await protectedHost("one\ntwo\n");
+      await reviewTurn(host, 2);
+      await reportClean(host);
+      await emitIdle(host);
+
+      host.setWorkingTree([{ path: "src/a.ts", content: "one\nTWO\n" }]);
+      host.requestTurn({ seq: 120, initiator: "user", text: "next" });
+      host.setMaxSeq(130);
+      await reviewTurn(host);
+      await reportClean(host, { outcome: "blocked", summary: "Stopped by the user.", findings: [] });
+      expect((await codeRecord(host))?.clean).toBe(false);
       await emitIdle(host);
       const record = await codeRecord(host);
       expect(record?.pending).toBeUndefined();

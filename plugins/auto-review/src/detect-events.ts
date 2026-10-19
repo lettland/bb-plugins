@@ -59,17 +59,56 @@ export const EVENT_PAGE_MAX = 100;
 /** Bounds the walk through a thread with a very long run of turn requests: 50 pages of 100. */
 const TURN_REQUEST_MAX_PAGES = 50;
 
-type TurnRequestData = Extract<
-  Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["events"]["list"]>>[number],
-  { type: "client/turn/requested" }
->["data"];
+type EventPage = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["events"]["list"]>>;
+type EventOf<T extends EventPage[number]["type"]> = Extract<EventPage[number], { type: T }>;
+type TurnRequestData = EventOf<"client/turn/requested">["data"];
+
+/**
+ * The events of one type after the cursor, oldest first. The event log is paged,
+ * so a long run of them could push the one that matters past the first page;
+ * this walks the pages, and throws if the walk hits its cap rather than let the
+ * caller conclude "none" from a log it did not finish reading.
+ */
+async function* eventsSince<T extends EventPage[number]["type"]>(
+  bb: BbPluginApi,
+  threadId: string,
+  sinceSeq: number,
+  type: T,
+): AsyncGenerator<EventOf<T>> {
+  let afterSeq = sinceSeq;
+  for (let page = 0; page < TURN_REQUEST_MAX_PAGES; page += 1) {
+    const events = await bb.sdk.threads.events.list({
+      threadId,
+      afterSeq: String(afterSeq),
+      types: [type],
+      order: "asc",
+      limit: String(EVENT_PAGE_MAX),
+    });
+    for (const event of events) {
+      if (event.type === type) {
+        yield event as EventOf<T>;
+      }
+    }
+    const last = events.at(-1);
+    if (last === undefined || events.length < EVENT_PAGE_MAX) {
+      return;
+    }
+    afterSeq = last.seq;
+  }
+  throw new Error(`more than ${TURN_REQUEST_MAX_PAGES * EVENT_PAGE_MAX} ${type} events since seq ${sinceSeq}`);
+}
+
+async function collect<T>(events: AsyncGenerator<T>): Promise<T[]> {
+  const found: T[] = [];
+  for await (const event of events) {
+    found.push(event);
+  }
+  return found;
+}
 
 /**
  * The seq of the first (or, with `latest`, the last) turn request after the
- * cursor that `counts` accepts, or null when there is none. The event log is
- * paged, so a long run of wake-up requests could push the one that counts past
- * the first page; this walks the pages, oldest first, and throws if the walk
- * hits its cap rather than answer "none" for a log it did not finish reading.
+ * cursor that `counts` accepts, or null when there is none.
  */
 async function turnRequestSince(
   bb: BbPluginApi,
@@ -78,31 +117,16 @@ async function turnRequestSince(
   counts: (data: TurnRequestData) => boolean | Promise<boolean>,
   latest = false,
 ): Promise<number | null> {
-  let afterSeq = sinceSeq;
   let found: number | null = null;
-  for (let page = 0; page < TURN_REQUEST_MAX_PAGES; page += 1) {
-    const events = await bb.sdk.threads.events.list({
-      threadId,
-      afterSeq: String(afterSeq),
-      types: ["client/turn/requested"],
-      order: "asc",
-      limit: String(EVENT_PAGE_MAX),
-    });
-    for (const event of events) {
-      if (event.type === "client/turn/requested" && (await counts(event.data))) {
-        if (!latest) {
-          return event.seq;
-        }
-        found = event.seq;
+  for await (const event of eventsSince(bb, threadId, sinceSeq, "client/turn/requested")) {
+    if (await counts(event.data)) {
+      if (!latest) {
+        return event.seq;
       }
+      found = event.seq;
     }
-    const last = events.at(-1);
-    if (last === undefined || events.length < EVENT_PAGE_MAX) {
-      return found;
-    }
-    afterSeq = last.seq;
   }
-  throw new Error(`more than ${TURN_REQUEST_MAX_PAGES * EVENT_PAGE_MAX} turn requests since seq ${sinceSeq}`);
+  return found;
 }
 
 function isUserRequest(data: TurnRequestData): boolean {
@@ -110,6 +134,56 @@ function isUserRequest(data: TurnRequestData): boolean {
     data.initiator === "user" &&
     !data.input.some((part) => part.type === "text" && part.text.startsWith(AUTO_REVIEW_MARKER))
   );
+}
+
+/**
+ * Whether the turn that has just ended was started by the user. The turn is the
+ * one the latest `turn/input/accepted` after the cursor names; the requests
+ * that started it are those accepted into it that are not steers, found by
+ * `clientRequestId` among the `client/turn/requested` rows since the cursor,
+ * which a queued request's row, logged before the turn it waited behind ended,
+ * is inside. The accepted event is always turn-scoped, so whether a request
+ * steered is read from where it landed, whatever its kind: it steered iff its
+ * target names an expected turn and that is the turn it was accepted into. A
+ * `steer` or `auto` request whose expected turn had ended landed in a turn of
+ * its own, so it began that turn. If inputs were batched into one turn, any of
+ * them being the user's makes it the user's. A turn whose only inputs since the
+ * cursor are steers began before it, such as one the review prompt was steered
+ * into, and is not the user's.
+ *
+ * Throws when no turn input was accepted since the cursor, or an accepted input
+ * has no request row, so the caller decides what an unreadable turn counts as.
+ */
+export async function endedTurnIsUsers(
+  bb: BbPluginApi,
+  threadId: string,
+  sinceSeq: number,
+): Promise<boolean> {
+  const accepted = await collect(eventsSince(bb, threadId, sinceSeq, "turn/input/accepted"));
+  const ended = accepted.at(-1)?.scope;
+  if (ended === undefined || ended.kind !== "turn") {
+    throw new Error(`no turn input was accepted since seq ${sinceSeq}`);
+  }
+  const requests = new Map(
+    (await collect(eventsSince(bb, threadId, sinceSeq, "client/turn/requested"))).map((event) => [
+      event.data.requestId,
+      event.data,
+    ]),
+  );
+  let users = false;
+  for (const { data, scope } of accepted) {
+    if (scope.kind !== "turn" || scope.turnId !== ended.turnId) {
+      continue;
+    }
+    const request = requests.get(data.clientRequestId);
+    if (request === undefined) {
+      throw new Error(`no turn request ${data.clientRequestId} for the input accepted into turn ${ended.turnId}`);
+    }
+    const { target } = request;
+    const steers = "expectedTurnId" in target && target.expectedTurnId === ended.turnId;
+    users ||= !steers && isUserRequest(request);
+  }
+  return users;
 }
 
 /**

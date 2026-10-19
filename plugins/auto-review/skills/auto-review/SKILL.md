@@ -388,13 +388,33 @@ while the tree holds changes this turn did not make.
 A review turn that hands its lens reviews or fixes to child threads stays in flight, not
 ended, while one of them is running or a due wake-up from one is queued, until the first idle
 2 hours after the review was delivered: bb's wake-up turns that apply those fixes are the
-review's own continuation and are not reviewed again. A user stop ends the review. A turn of
-the user's own during the hold ends it and is reviewed normally, once the children finish; a
-message of theirs steered into the review's or a wake-up turn is part of that review. Another
-plugin's queued message neither extends the hold nor ends it.
+review's own continuation and are not reviewed again. A turn of the user's own during the
+hold does not end it: the agent answers the message while the reviewers keep running. Only an
+explicit request to stop the review ends it. The agent stops the reviewers it spawned,
+reports `blocked` with a summary starting "Stopped by the user." (the agent's claim; the
+plugin does not verify it) and the panel shows "Blocked". A stop pressed in a review or
+wake-up turn ends the review too. The stop button pressed during the user's own turn stops
+that turn only: the review goes on, and, as with any stopped turn, that turn's work is not
+auto-reviewed afterwards. A message steered into the review's or a wake-up turn is part of
+that review. Another plugin's queued message neither extends the hold nor ends it.
+The user's own turns that changed files are reviewed together, once the hold ends, as one
+follow-up review from the first of those turns. That follow-up can start right after a stop,
+or wait while a queued reviewer wake-up or a child of the user's own task is still running.
 Other reviews on the provider wait behind the hold, up to that cap. Residual race: if a
 child goes idle before bb queues its wake-up, the hold ends one idle early and that wake-up
-turn's fixes get one more review.
+turn's fixes get one more review. Known limits:
+
+- The follow-up window starts at the first user turn, so review-fix commits from later
+  wake-up turns fall inside it and are looked at once more. This happens only when a user
+  turn changed files.
+- Whether a user turn changed files counts the whole thread family, as attribution does
+  everywhere in this plugin: a child that edits the checkout while a chat-only user turn
+  runs can mark that turn as authored.
+- Child threads the user's own turn spawns count toward the hold. They can keep it open, and
+  sibling reviews waiting, for up to the 2-hour cap.
+- A turn whose requests cannot be read is counted as the user's, since a follow-up review
+  that finds nothing costs less than an unreviewed edit. A stop pressed in a wake-up turn
+  that was misread this way does not end the review; a typed request to stop still does.
 
 What auto-review also limits is how many reviews run at once **per provider**, because
 reviews on one provider share that provider's usage limits: a Claude Code review here and a

@@ -17,6 +17,7 @@ import {
   mainlineBase,
   runningChildIds,
   stoppedByUser,
+  tryCaptureSinceSeq,
   turnChangedPaths,
   type AvailableWorkspace,
   type TurnChanges,
@@ -30,7 +31,7 @@ import { lastIdleFloor, refreshIdleSnapshot, refreshLastIdle } from "./last-idle
 import { noNewWork, parkBaseline, parkRelease } from "./no-new-work.js";
 import {
   reviewContinuationPending,
-  userTurnSinceDelivery,
+  userTurnEnded,
 } from "./review-continuation.js";
 import {
   deliveredPatch,
@@ -349,6 +350,70 @@ export async function evaluate(
   });
 }
 
+/**
+ * Whether a turn of the user's own during the hold changed files, by the same
+ * attribution a review uses. A check that cannot be made warns and counts as
+ * authored: the follow-up review stands down on its own when nothing changed.
+ */
+async function userTurnAuthored(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  turnStart: TurnStart,
+): Promise<boolean> {
+  const { bb } = ctx;
+  try {
+    const { environmentId } = thread;
+    const workspace = environmentId === null ? null : await fetchWorkspace(bb, environmentId);
+    if (environmentId === null || workspace === null) {
+      throw new Error("the workspace is unavailable");
+    }
+    const threadEntries = await bb.sdk.threads.list({ environmentId, includeHidden: true });
+    const turn = await turnChangedPaths(bb, {
+      threadId: thread.id,
+      environmentId,
+      turnStart,
+      workspace,
+      threadEntries,
+    });
+    return turn.paths.length > 0;
+  } catch (error) {
+    bb.log.warn(
+      `auto-review: could not read whether the user's turn in ${thread.id} changed files; counting it as authored: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return true;
+  }
+}
+
+/**
+ * What the idle that just ended a turn during the hold adds to the state, when
+ * the turn was the user's: where their work began, whether any of it changed
+ * files, and the cursor a stop inside the turn is read against. Written before
+ * the stop check; the returned state includes it.
+ */
+async function noteUserTurn(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  state: ThreadState,
+): Promise<ThreadState> {
+  const { bb } = ctx;
+  const { turnStart } = state;
+  if (turnStart === undefined || !(await userTurnEnded(bb, thread.id, state, turnStart))) {
+    return state;
+  }
+  const floor = await tryCaptureSinceSeq(bb, thread.id, `the stop floor of the user's turn in ${thread.id}`);
+  const patch: Partial<ThreadState> = {
+    ...(state.userTurnStart === undefined ? { userTurnStart: turnStart } : {}),
+    ...(state.userTurnAuthored === true || !(await userTurnAuthored(ctx, thread, turnStart))
+      ? {}
+      : { userTurnAuthored: true as const }),
+    ...(floor === undefined ? {} : { userStopFloorSeq: floor }),
+  };
+  await writeState(bb, thread.id, patch);
+  return { ...state, ...patch };
+}
+
 export async function handleIdle(ctx: ReviewContext, thread: GateThreadLike): Promise<void> {
   const { bb } = ctx;
   const state = await readState(bb, thread.id);
@@ -357,41 +422,37 @@ export async function handleIdle(ctx: ReviewContext, thread: GateThreadLike): Pr
     // its own turn while they run. Each child's wake-up turn is the review's
     // continuation, so it stays in flight until none are running or queued —
     // otherwise the turns that apply its fixes would be reviewed again, round
-    // after round. The user's own say ends it first: a stop, or a turn of theirs.
-    const stopped = await userStoppedReview(bb, thread.id, state);
-    const userRequestSeq = stopped ? null : await userTurnSinceDelivery(bb, thread.id, state);
-    if (userRequestSeq !== null) {
-      await recordUnfinishedReview(bb, thread.id, state, "idle");
-      await removeReview(bb, thread.id);
-      if (state.turnStart !== undefined && state.turnStart.sinceSeq >= userRequestSeq) {
-        // The cursor `onThreadActive` took for the user's turn stays, so the
-        // normal path reviews it, parked behind any child still running.
-        await writeState(
-          bb,
-          thread.id,
-          { phase: "idle" },
-          LATCH_KEYS.filter((key) => key !== "turnStart"),
-        );
-        await evaluate(ctx, thread);
-        return;
-      }
-      // The cursor is the review's or a wake-up turn's, older than the user's
-      // request: the user's turn is queued behind this idle, or was steered
-      // into the running turn. Evaluating from that cursor would review the
-      // review's own fixes again. Start clean: that turn takes a fresh cursor
-      // in `onThreadActive`, and its own idle reviews it. A steered message's
-      // edits inside the review or wake-up turn count as part of the review.
+    // after round. A turn of the user's own does not end it: the user can keep
+    // working while the reviewers run, and what they changed is reviewed on
+    // its own once the hold ends. Only a stop that was not inside such a turn
+    // ends it first.
+    const held = await noteUserTurn(ctx, thread, state);
+    const stopped = await userStoppedReview(bb, thread.id, held);
+    if (!stopped && (await reviewContinuationPending(ctx, held, thread.id))) {
+      return;
+    }
+    await recordUnfinishedReview(bb, thread.id, held, "idle");
+    await removeReview(bb, thread.id);
+    if (stopped || held.userTurnStart === undefined || held.userTurnAuthored !== true) {
       const { set, remove } = resetToIdlePatch();
       await writeState(bb, thread.id, set, remove);
+      if (stopped && held.userTurnAuthored === true) {
+        // A stopped turn's work is never reviewed on its own.
+        await recordFire(ctx, thread.projectId, thread.id, "stood-down", "user-stopped");
+      }
       return;
     }
-    if (!stopped && (await reviewContinuationPending(ctx, state, thread.id))) {
-      return;
-    }
-    await recordUnfinishedReview(bb, thread.id, state, "idle");
-    const { set, remove } = resetToIdlePatch();
-    await writeState(bb, thread.id, set, remove);
-    await removeReview(bb, thread.id);
+    // The user's own turns changed files: review them from the first one's
+    // cursor, parked behind any child still running. A stop pressed inside
+    // one of those turns still suppresses it (`eligibleTurnStart`), as it
+    // does for any stopped turn.
+    await writeState(
+      bb,
+      thread.id,
+      { phase: "idle", turnStart: held.userTurnStart },
+      LATCH_KEYS.filter((key) => key !== "turnStart"),
+    );
+    await evaluate(ctx, thread);
     return;
   }
   if (state.phase === "pending-dispatch") {

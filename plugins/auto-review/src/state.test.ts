@@ -123,6 +123,9 @@ describe("resetToIdlePatch", () => {
       "heldBy",
       "reviewDeliveredAt",
       "reviewDeliveredSeq",
+      "userTurnStart",
+      "userTurnAuthored",
+      "userStopFloorSeq",
     ]);
   });
 
