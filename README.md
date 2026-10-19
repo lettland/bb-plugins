@@ -19,6 +19,7 @@ The root [`.bb/plugins.json`](.bb/plugins.json) collection manifest indexes them
 | [Model instructions](plugins/model-instructions) | `model-instructions` | `@lettland/bb-plugin-model-instructions` |
 | [Shared Runtime](plugins/shared-runtime) | `shared-runtime` | `@lettland/bb-plugin-shared-runtime` |
 | [Taskboard](plugins/taskboard) | `taskboard` | `@lettland/bb-plugin-taskboard` |
+| [WakaTime](plugins/wakatime) | `wakatime` | `@lettland/bb-plugin-wakatime` |
 
 ## Install a plugin
 
