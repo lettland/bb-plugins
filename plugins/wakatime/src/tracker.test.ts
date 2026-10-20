@@ -989,12 +989,21 @@ describe("failures at the edges", () => {
 });
 
 describe("file delivery", () => {
-  /** Real filesystem I/O sits behind the scope checks, so give the event loop real turns. */
+  /** Pending `fs/promises` requests; their threadpool work finishes whenever the machine gets to it. */
+  const fsInFlight = () => process.getActiveResourcesInfo().filter((resource) => resource === "FSReqPromise").length;
+
+  /**
+   * Real filesystem I/O sits behind the scope checks, so give the event loop real turns: until `done`, or
+   * (without one) at least 25 turns and until no request has been in flight for a few turns in a row.
+   */
   async function drain(done?: () => boolean) {
-    for (let i = 0; i < (done === undefined ? 25 : 3000); i++) {
+    let quiet = 0;
+    for (let i = 0; i < 3000; i++) {
       await vi.advanceTimersByTimeAsync(0);
       await new Promise<void>((resolve) => (done === undefined ? setImmediate(resolve) : realSetTimeout(resolve, 1)));
       if (done?.()) return;
+      quiet = fsInFlight() === 0 ? quiet + 1 : 0;
+      if (done === undefined && i >= 24 && quiet >= 5) return;
     }
   }
 
