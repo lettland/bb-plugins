@@ -1,0 +1,199 @@
+{
+  "$schema": "https://getbb.app/schemas/marketplace.schema.json",
+  "schemaVersion": 1,
+  "name": "lettland-plugins",
+  "displayName": "Lettland plugins",
+  "description": "Lettland's bb plugins: agent hooks, auto review, devkit and more.",
+  "plugins": [
+    {
+      "id": "agent-hooks",
+      "displayName": "Agent hooks",
+      "description": "bb owns the tool-call safety hooks and installs them into each provider; providers only execute them.",
+      "icon": "ShieldCheck",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/agent-hooks",
+          "range": "0.x",
+          "tagPrefix": "agent-hooks/"
+        }
+      }
+    },
+    {
+      "id": "aislop",
+      "displayName": "aislop",
+      "description": "Run the aislop quality scan from bb, scoped by default to what the current branch changed against its root.",
+      "icon": "ScanSearch",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/aislop",
+          "range": "0.x",
+          "tagPrefix": "aislop/"
+        }
+      }
+    },
+    {
+      "id": "auto-review",
+      "displayName": "Auto review",
+      "description": "Review, commit, and locally merge into a personal mainline (e.g. master) the changes an agent made this turn.",
+      "icon": "GitMerge",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/auto-review",
+          "range": "0.x",
+          "tagPrefix": "auto-review/"
+        }
+      }
+    },
+    {
+      "id": "devkit",
+      "displayName": "devkit",
+      "description": "Locate and load devkit's skill library on demand, plus calibrated multi-perspective review.",
+      "icon": "Sparkles",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/devkit",
+          "range": "0.x",
+          "tagPrefix": "devkit/"
+        }
+      }
+    },
+    {
+      "id": "dir-skills",
+      "displayName": "Directory skills",
+      "description": "Skills scoped to a directory tree: a skill listed in scopes.json is injected only into threads whose workspace (or project checkout) is under that directory. A scope can also switch Claude Code threads to its own Claude profile. Skills work for every provider.",
+      "icon": "FolderTree",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/dir-skills",
+          "range": "0.x",
+          "tagPrefix": "dir-skills/"
+        }
+      }
+    },
+    {
+      "id": "model-instructions",
+      "displayName": "Model instructions",
+      "description": "Custom instructions per provider, model, and project, optionally only for top-level or only for child threads — e.g. Opus plans and supervises, Sonnet worker threads implement.",
+      "icon": "SlidersHorizontal",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/model-instructions",
+          "range": "0.x",
+          "tagPrefix": "model-instructions/"
+        }
+      }
+    },
+    {
+      "id": "shared-runtime",
+      "displayName": "Shared Runtime",
+      "description": "Typed, project-confined shared container runtime for BB worktrees, driven by each repository's .bb-runtime.json",
+      "icon": "Container",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/shared-runtime",
+          "range": "0.x",
+          "tagPrefix": "shared-runtime/"
+        }
+      }
+    },
+    {
+      "id": "triage",
+      "displayName": "Triage",
+      "description": "Keep agent tasks, progress, and work that needs your attention in one board.",
+      "icon": "ListTodo",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/triage",
+          "range": "0.x",
+          "tagPrefix": "triage/"
+        }
+      }
+    },
+    {
+      "id": "typesafe",
+      "displayName": "TypeSafe decisions",
+      "description": "Typed Choice/Noul/Score decisions from TypeSafe's Jev model for agents — a typesafe_decide tool plus optional opening-request triage.",
+      "icon": "Scale",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/typesafe",
+          "range": "0.x",
+          "tagPrefix": "typesafe/"
+        }
+      }
+    },
+    {
+      "id": "wakatime",
+      "displayName": "WakaTime",
+      "description": "Send WakaTime heartbeats for your activity in bb and for agent run time, tagged with the bb project, thread, and branch.",
+      "icon": "Clock",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/wakatime",
+          "range": "0.x",
+          "tagPrefix": "wakatime/"
+        }
+      }
+    }
+  ]
+}

@@ -9,26 +9,34 @@ The root [`.bb/plugins.json`](.bb/plugins.json) collection manifest indexes them
 
 ## Plugins
 
-| Plugin | ID | npm |
-|---|---|---|
-| [Agent hooks](plugins/agent-hooks) | `agent-hooks` | `@lettland/bb-plugin-agent-hooks` |
-| [aislop](plugins/aislop) | `aislop` | `@lettland/bb-plugin-aislop` |
-| [Auto review](plugins/auto-review) | `auto-review` | `@lettland/bb-plugin-auto-review` |
-| [devkit](plugins/devkit) | `devkit` | `@lettland/bb-plugin-devkit` |
-| [Directory skills](plugins/dir-skills) | `dir-skills` | `@lettland/bb-plugin-dir-skills` |
-| [Model instructions](plugins/model-instructions) | `model-instructions` | `@lettland/bb-plugin-model-instructions` |
-| [Shared Runtime](plugins/shared-runtime) | `shared-runtime` | `@lettland/bb-plugin-shared-runtime` |
-| [Triage](plugins/triage) | `triage` | `@lettland/bb-plugin-triage` |
-| [TypeSafe decisions](plugins/typesafe) | `typesafe` | `@lettland/bb-plugin-typesafe` |
-| [WakaTime](plugins/wakatime) | `wakatime` | `@lettland/bb-plugin-wakatime` |
+| Plugin | ID |
+|---|---|
+| [Agent hooks](plugins/agent-hooks) | `agent-hooks` |
+| [aislop](plugins/aislop) | `aislop` |
+| [Auto review](plugins/auto-review) | `auto-review` |
+| [devkit](plugins/devkit) | `devkit` |
+| [Directory skills](plugins/dir-skills) | `dir-skills` |
+| [Model instructions](plugins/model-instructions) | `model-instructions` |
+| [Shared Runtime](plugins/shared-runtime) | `shared-runtime` |
+| [Triage](plugins/triage) | `triage` |
+| [TypeSafe decisions](plugins/typesafe) | `typesafe` |
+| [WakaTime](plugins/wakatime) | `wakatime` |
 
 ## Install a plugin
 
-From npm (per-plugin, tracks compatible releases):
+From this repo's marketplace (tracks compatible releases):
 
 ```sh
-bb plugin install npm:@lettland/bb-plugin-auto-review
+bb marketplace add git:https://github.com/lettland/bb-plugins.git@master
+bb plugin install auto-review@lettland-plugins
 ```
+
+The `@lettland-plugins` qualifier is required: the reviewed bb-community
+marketplace already lists different `triage` and `wakatime` plugins, so a bare
+id can be ambiguous or resolve to someone else's plugin. Already installed
+from git? Keep it; switching to the marketplace means `bb plugin remove <id>`
+(which deletes that plugin's settings, secrets and schedules) and then the
+marketplace install.
 
 From this repo over git (select one plugin from the collection):
 
@@ -88,18 +96,30 @@ the default. A manual run accepts an explicit `release_type` (`patch`, `minor`,
 `major`, or `prerelease`) and an optional single `plugin` to restrict the
 release; `prerelease` is reachable only through such a dispatch.
 
-Because every changed plugin cuts at least a stable `patch`, its npm `latest`
-resolves after the first release that actually publishes — `npm install
-@lettland/bb-plugin-<name>` works once a run with `NPM_TOKEN` has published it (see
-the note above). A `prerelease` dispatch publishes to the `next` dist-tag instead;
-install those with `@next` or an exact version.
+npm publishing is not set up yet, so install from the marketplace or over git;
+every changed plugin still cuts its stable `<plugin>/vX.Y.Z` tag and GitHub
+Release. Marketplace installs never receive prereleases — try a beta by its
+exact tag over git, e.g. `bb plugin install
+git:https://github.com/lettland/bb-plugins.git@<id>/vX.Y.Z-beta.N --subdirectory
+plugins/<id>`.
+
+A `[major]` release reaches new marketplace installs once `marketplace.json` is
+regenerated — the bump lands in the release bot's commit, so pull, then run `node
+scripts/marketplace.mjs`. Existing installs keep the range they were installed
+with and stay on the old major; moving them means `bb plugin remove` plus
+reinstalling, which costs settings.
 
 To add a new plugin, create `plugins/<name>/` with a `package.json` (name
 `@lettland/bb-plugin-<name>`, `publishConfig.access: public`) and a `bb`
 manifest, add it to `.bb/plugins.json`, and add its ID to the `plugin` matrix in
 [`.github/workflows/test.yml`](.github/workflows/test.yml) (plus its Coveralls
 `carryforward` list when it reports coverage). The release workflow picks it up
-with no edits.
+with no edits. After adding the entry to `.bb/plugins.json`, run `node
+scripts/marketplace.mjs` to regenerate `marketplace.json`, and run it again
+whenever a plugin's `bb.name`, `bb.description` or `bb.branding.icon` changes —
+CI's `marketplace` job fails with that hint when the file is stale. A new entry
+becomes installable only after its first `<id>/vX.Y.Z` release tag exists
+(`--check` does not look at tags).
 
 ## License
 
