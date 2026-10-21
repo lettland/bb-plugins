@@ -283,12 +283,23 @@ function elapsedBeyond(
 }
 
 /**
- * True once a plan review has been armed for longer than the stale window. A
- * review still queued that long is not going to be dispatched, and holding the
- * thread's plans behind it any longer would only keep denying them.
+ * True once a plan review has been armed for longer than its window. A review
+ * still queued that long is not going to be dispatched, and holding the
+ * thread's plans behind it any longer would only keep denying them. A review
+ * that was delivered legitimately runs across many turns while its reviewers
+ * work, so it gets the same bound as a code review: the continuation cap. The
+ * stale window also covers a delivery this plugin never saw or could not
+ * record — with no delivery cursor there is nothing saying the review left.
  */
 export function planHoldExpired(state: ThreadState, now: number): boolean {
-  return elapsedBeyond(state.planReviewArmedAt, now, STALE_WINDOW_MS);
+  const delivered =
+    state.planReviewEntryId === undefined &&
+    state.planReviewDeliveredSeq !== undefined;
+  return elapsedBeyond(
+    state.planReviewArmedAt,
+    now,
+    delivered ? REVIEW_CONTINUATION_CAP_MS : STALE_WINDOW_MS,
+  );
 }
 
 /**
@@ -315,9 +326,11 @@ export function isStale(state: ThreadState, now: number): boolean {
 }
 
 /**
- * True while a `PresentPlan` arm is still within the stale window AND for the
- * exact plan path this call presents — a call for a different path is a
- * different plan to review, not a release of whatever was armed before.
+ * True while a `PresentPlan` arm is still within its window AND for the exact
+ * plan path this call presents — a call for a different path is a different
+ * plan to review, not a release of whatever was armed before. The review is
+ * delivered as the first call's tool result, so the arm is bounded by the
+ * continuation cap a delivered review gets, not the stale window.
  */
 export function presentPlanArmed(
   state: ThreadState,
@@ -327,6 +340,6 @@ export function presentPlanArmed(
   return (
     state.presentPlanArmedAt !== undefined &&
     state.presentPlanArmedPath === planFilePath &&
-    !elapsedBeyond(state.presentPlanArmedAt, now, STALE_WINDOW_MS)
+    !elapsedBeyond(state.presentPlanArmedAt, now, REVIEW_CONTINUATION_CAP_MS)
   );
 }

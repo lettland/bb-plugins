@@ -10,7 +10,7 @@ import {
   reviewSkillLoaded,
   userQuestionOf,
 } from "./plan.js";
-import { STALE_WINDOW_MS } from "./state.js";
+import { REVIEW_CONTINUATION_CAP_MS, STALE_WINDOW_MS } from "./state.js";
 
 function approval(overrides: Record<string, unknown> = {}, subject: Record<string, unknown> = {}) {
   return {
@@ -220,6 +220,32 @@ describe("planGateAction", () => {
     expect(
       planGateAction(
         { phase: "idle", planReviewArmedAt: NOW - STALE_WINDOW_MS - 1 },
+        NOW,
+      ),
+    ).toBe("review");
+  });
+
+  it("releases the reviewed plan even when the arm is older than the stale window", () => {
+    expect(
+      planGateAction(
+        {
+          phase: "idle",
+          planReviewArmedAt: NOW - STALE_WINDOW_MS - 1,
+          planReviewDeliveredSeq: 100,
+        },
+        NOW,
+      ),
+    ).toBe("release");
+  });
+
+  it("treats a presentation past the continuation cap of a delivered review as a fresh review", () => {
+    expect(
+      planGateAction(
+        {
+          phase: "idle",
+          planReviewArmedAt: NOW - REVIEW_CONTINUATION_CAP_MS - 1,
+          planReviewDeliveredSeq: 100,
+        },
         NOW,
       ),
     ).toBe("review");

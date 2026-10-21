@@ -355,7 +355,8 @@ export type PlanGateAction = "review" | "hold" | "release";
  *
  * A presentation with no review queued (`planReviewEntryId` undefined) is
  * normally the reviewed plan coming back — released once. But an arm older
- * than the stale window (`planHoldExpired`) means whatever review was queued
+ * than its window (`planHoldExpired`: the stale window, or the continuation
+ * cap once the review was delivered) means whatever review was queued
  * is long gone and never re-presented anything (a crashed review turn, a
  * dispatch this plugin never saw): that presentation was never reviewed, so
  * treating it as "release" would hand the user a plan auto-review never

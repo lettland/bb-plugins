@@ -4169,7 +4169,9 @@ describe("auto-review plugin", () => {
     });
 
     describe("a new review cycle after an expired arm", () => {
-      const EXPIRED = () => Date.now() - STALE_WINDOW_MS - 1_000;
+      // The leftover arm records a delivery (cursor 50), so it is a delivered
+      // review: it only expires past the continuation cap.
+      const EXPIRED = () => Date.now() - REVIEW_CONTINUATION_CAP_MS - 1_000;
       const STALE_DENIED = { at: 1, sinceSeq: 40 };
 
       async function expiredHost() {
@@ -4358,6 +4360,23 @@ describe("auto-review plugin", () => {
         host.completeItem({ seq: 103, item: SUBAGENT });
         await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
       }
+
+      it("releases the reviewed plan re-presented past the stale window, instead of reviewing it again", async () => {
+        const host = await devkitHost({}, false);
+        await holdAndDispatch(host);
+        host.completeItem({ seq: 101, item: LOAD });
+        host.completeItem({ seq: 102, item: { ...READ, status: "completed" } });
+        // A delivered review legitimately runs past the stale window while its
+        // reviewers work, so the arm is not expired and the plan is not held
+        // again for a second full review.
+        host.metadata.planReviewArmedAt = Date.now() - STALE_WINDOW_MS - 1_000;
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions).toEqual([DENY]);
+        expect(host.sends).toHaveLength(1);
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+        expect(host.metadata.planReviewArmedAt).toBeUndefined();
+        await host.harness.dispose();
+      });
 
       it("sends a plan back once, with the redo prompt, when the agent never loaded the skill", async () => {
         const host = await devkitHost();
@@ -4683,7 +4702,7 @@ describe("auto-review plugin", () => {
       const host = createHost();
       await plugin(host.bb);
       await host.harness.callAgentTool("PresentPlan", { planFilePath: "docs/plans/p.md" }, ctx);
-      host.metadata.presentPlanArmedAt = Date.now() - STALE_WINDOW_MS - 1_000;
+      host.metadata.presentPlanArmedAt = Date.now() - REVIEW_CONTINUATION_CAP_MS - 1_000;
       const result = await host.harness.callAgentTool(
         "PresentPlan",
         { planFilePath: "docs/plans/p.md" },
@@ -4691,6 +4710,24 @@ describe("auto-review plugin", () => {
       );
       expect(result).toContain("Nobody rejected it");
       expect(typeof host.metadata.presentPlanArmedAt).toBe("number");
+      await host.harness.dispose();
+    });
+
+    it("releases on a second call past the stale window — the review may run that long", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await host.harness.callAgentTool("PresentPlan", { planFilePath: "docs/plans/p.md" }, ctx);
+      host.metadata.presentPlanArmedAt = Date.now() - STALE_WINDOW_MS - 1_000;
+      const result = await host.harness.callAgentTool(
+        "PresentPlan",
+        { planFilePath: "docs/plans/p.md" },
+        ctx,
+      );
+      expect(result).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+      expect(await lastFireOf(host)).toMatchObject({
+        outcome: "stood-down",
+        reason: "plan-reviewed",
+      });
       await host.harness.dispose();
     });
 
@@ -4951,7 +4988,7 @@ describe("auto-review plugin", () => {
         it("clears a stale redo flag when a new arm starts, so the new plan still gets its redo", async () => {
           const host = await devkitArmed();
           host.metadata.presentPlanRedone = true;
-          host.metadata.presentPlanArmedAt = Date.now() - STALE_WINDOW_MS - 1_000;
+          host.metadata.presentPlanArmedAt = Date.now() - REVIEW_CONTINUATION_CAP_MS - 1_000;
           // The expired arm is not a release: this call arms a fresh review.
           const first = await host.harness.callAgentTool("PresentPlan", path, ctx);
           expect(first).toContain("Nobody rejected it");

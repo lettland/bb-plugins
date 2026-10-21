@@ -42,8 +42,11 @@ event log or the timeline cursor is unreadable, or more rows than the scan reads
 first) the plan is released with no auto-approve and no redo (`plan-review-unverified`).
 `self` mode, and `auto` without a running devkit, check nothing. If the redo cannot be sent,
 or is cancelled, the plan stays with the user as for any failed hold, with no disclosure
-line. A review that runs past the 30-minute stale window re-presents into a new cycle,
-which finds an empty delta, loads the skill and passes: one extra short cycle, not a loop.
+line. A review that has been delivered runs as long as it needs: its arm expires only past
+the 2-hour continuation cap (the same bound a code review gets), so the re-presented plan
+is still released as reviewed. An arm past its window — a review still queued 30 minutes
+after it was armed, a delivery this plugin never saw, or an arm past the cap — re-presents
+into a new cycle rather than releasing a plan auto-review never touched.
 Upgrading: in `devkit` and `auto` (with devkit) modes every plan whose review never loaded
 `review-code` now gets one redo, auto-approve or not, and with auto-approve on such a plan
 is no longer approved automatically. Set the review mode to `self` to opt out.

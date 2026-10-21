@@ -11,6 +11,7 @@ import {
   PRESENT_PLAN_KEYS,
   readState,
   resetToIdlePatch,
+  REVIEW_CONTINUATION_CAP_MS,
   STALE_WINDOW_MS,
   threadStateSchema,
   withThreadLock,
@@ -147,7 +148,7 @@ describe("planHoldExpired", () => {
     expect(planHoldExpired({ phase: "idle" }, Date.now())).toBe(false);
   });
 
-  it("is false inside the window and true past it", () => {
+  it("is false inside the window and true past it for a queued arm", () => {
     const now = STALE_WINDOW_MS * 10;
     expect(
       planHoldExpired({ phase: "idle", planReviewArmedAt: now - 1_000 }, now),
@@ -155,6 +156,37 @@ describe("planHoldExpired", () => {
     expect(
       planHoldExpired(
         { phase: "idle", planReviewArmedAt: now - STALE_WINDOW_MS - 1 },
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  it("lets a delivered arm run to the continuation cap, not the stale window", () => {
+    const now = REVIEW_CONTINUATION_CAP_MS * 10;
+    const state = {
+      phase: "idle" as const,
+      planReviewArmedAt: now - STALE_WINDOW_MS - 1,
+      planReviewDeliveredSeq: 100,
+    };
+    expect(planHoldExpired(state, now)).toBe(false);
+    expect(
+      planHoldExpired(
+        { ...state, planReviewArmedAt: now - REVIEW_CONTINUATION_CAP_MS - 1 },
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps the stale window while the review is recorded as queued, delivery cursor or not", () => {
+    const now = STALE_WINDOW_MS * 10;
+    expect(
+      planHoldExpired(
+        {
+          phase: "idle",
+          planReviewArmedAt: now - STALE_WINDOW_MS - 1,
+          planReviewEntryId: "qm-1",
+          planReviewDeliveredSeq: 100,
+        },
         now,
       ),
     ).toBe(true);
@@ -191,10 +223,23 @@ describe("presentPlanArmed", () => {
   });
 
   it("is true inside the window and false past it, for the armed path", () => {
-    const now = STALE_WINDOW_MS * 10;
+    const now = REVIEW_CONTINUATION_CAP_MS * 10;
     expect(
       presentPlanArmed(
         { phase: "idle", presentPlanArmedAt: now - 1_000, presentPlanArmedPath: "a.md" },
+        "a.md",
+        now,
+      ),
+    ).toBe(true);
+    // The review rides the first call's tool result, so it gets the
+    // continuation cap: still armed past the stale window.
+    expect(
+      presentPlanArmed(
+        {
+          phase: "idle",
+          presentPlanArmedAt: now - STALE_WINDOW_MS - 1,
+          presentPlanArmedPath: "a.md",
+        },
         "a.md",
         now,
       ),
@@ -203,7 +248,7 @@ describe("presentPlanArmed", () => {
       presentPlanArmed(
         {
           phase: "idle",
-          presentPlanArmedAt: now - STALE_WINDOW_MS - 1,
+          presentPlanArmedAt: now - REVIEW_CONTINUATION_CAP_MS - 1,
           presentPlanArmedPath: "a.md",
         },
         "a.md",

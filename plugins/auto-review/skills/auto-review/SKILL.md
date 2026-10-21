@@ -80,10 +80,13 @@ gate for the thread's next plan. A re-presentation that arrives before the revie
 been delivered is denied again, so the user never gets an unreviewed plan (and auto-approve never approves one
 that did not complete the review cycle) — but only while that review is actually still in the queue. If it has already left the queue
 (its dispatch event was missed), the re-presentation is the reviewed plan and goes to the
-user — unless the gate has been armed for longer than the 30-minute stale window, in which
+user — unless the gate has been armed past its window, in which
 case whatever review was queued is long gone and never re-presented anything (a crashed
 review turn, a dispatch this plugin never saw): that presentation is treated as a fresh plan
-and held for review instead of released unreviewed. If it is still queued after 30 minutes,
+and held for review instead of released unreviewed. The window is the 30-minute stale
+window while the review is still queued or its delivery was never seen, and the 2-hour
+continuation cap once it was delivered — a delivered review legitimately runs across many
+turns while its reviewers work. If it is still queued after 30 minutes,
 auto-review withdraws it and releases the plan (reason `plan-hold-expired`), so a stuck
 review can never turn into a permanent deny. Once the plan is approved and implemented, the
 normal post-turn code review runs on turn end.
@@ -99,7 +102,9 @@ same path. The **second** call releases the review (reason `plan-reviewed`) and 
 agent to end its turn with the revised plan and a short summary of what changed, then wait
 for the user's own, explicit approval — a tool result is never treated as that approval,
 except the auto-approve case below. An
-arm left for more than the 30-minute stale window is treated as gone (a crashed turn, a
+arm left for more than the 2-hour continuation cap — the review is delivered as the first
+call's tool result, so it gets that cap, not the 30-minute stale window — is treated as gone
+(a crashed turn, a
 session that never came back): the next call reviews again rather than releasing
 unreviewed. The claude-code family (`claude-code`, `claude-code-<slug>`) never gets `PresentPlan`, and no other provider gets the native
 gate's instructions, so the two review paths can never land on the same plan.
@@ -192,9 +197,13 @@ not proof that a review ran: it does not look at how many reviewers were used. `
 
 An expired arm is never checked. A redo whose send or deny fails, or whose queued review is
 cancelled, leaves the plan with the user as any failed hold does (reason `send-failed`, or
-nothing for a cancel), without the disclosure line. The stale window is still 30 minutes: a
-review (child threads) that runs longer re-presents into a new cycle, which finds an empty delta,
-loads the skill and passes, so the cost is one extra short cycle, not a loop. Upgrading: in
+nothing for a cancel), without the disclosure line. A delivered review is not bounded by
+the stale window: it may run long past 30 minutes (child threads reporting back), and its
+arm only expires past the 2-hour continuation cap, so the re-presented plan is still
+released as reviewed. An arm past its window — still queued after 30 minutes, a delivery
+this plugin never saw, or past the cap — is expired: it is never checked, and the
+re-presentation starts a new cycle rather than releasing a plan auto-review never touched.
+Upgrading: in
 `devkit` and `auto` (with devkit) modes every plan whose review never loaded `review-code` now
 gets one redo, auto-approve or not, and with auto-approve on such a plan is no longer approved
 automatically. Set the review mode to `self` to opt out.
@@ -213,7 +222,8 @@ which it asks the user first.
 What counts as a completed review cycle:
 
 - Native gate (Claude Code): the review was delivered to the agent (dispatched from the
-  queue, or sent straight into the turn), the arm is within the 30-minute stale window, and
+  queue, or sent straight into the turn), the arm is within the 2-hour continuation cap
+  (delivered reviews are bounded by that, not by the 30-minute stale window), and
   the agent completed at least one tool call of its own (not ExitPlanMode, EnterPlanMode or
   AskUserQuestion, and not a subagent's call) after the delivery with no turn ending since —
   a steered message reaches the model only after a tool result, so that is the proof the
