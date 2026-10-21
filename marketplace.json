@@ -144,9 +144,7 @@
       "description": "Keep agent tasks, progress, and work that needs your attention in one board.",
       "icon": "ListTodo",
       "author": {
-        "name": "Lettland",
-        "github": "lettland",
-        "url": "https://github.com/lettland"
+        "name": "Mayank Bansal"
       },
       "source": {
         "git": {
