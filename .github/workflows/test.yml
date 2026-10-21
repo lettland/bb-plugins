@@ -22,11 +22,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [agent-hooks, aislop, auto-review, devkit, dir-skills, model-instructions, shared-runtime, typesafe, wakatime]
+        plugin: [agent-hooks, aislop, auto-review, devkit, dir-skills, model-instructions, shared-runtime, triage, typesafe, wakatime]
         include:
           - coverage: true
           # dir-skills has no runtime tests; its `npm test` is a type-check.
           - plugin: dir-skills
+            coverage: false
+          # triage has no `test:coverage` script; its tests run via `tsx --test`.
+          - plugin: triage
             coverage: false
     defaults:
       run:

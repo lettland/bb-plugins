@@ -1,0 +1,1574 @@
+/* ---------------------------------------------------------------------------
+   Tokens
+
+   Declared on :root rather than on the board so portalled surfaces — popovers,
+   dialogs, dropdowns — inherit them too. Every value is derived from the host
+   theme, so Triage follows light and dark without a second palette.
+   ------------------------------------------------------------------------ */
+:root {
+  --triage-line: color-mix(in oklch, var(--ink) 9%, transparent);
+  --triage-line-strong: color-mix(in oklch, var(--ink) 15%, transparent);
+  --triage-sunken: color-mix(in oklch, var(--ink) 3%, transparent);
+  --triage-dim: color-mix(in oklch, var(--ink) 7%, transparent);
+  /* Stronger than the built-in curves; entrances need the early punch. */
+  --triage-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+/* ---------------------------------------------------------------------------
+   Shell and toolbar
+   ------------------------------------------------------------------------ */
+.triage-shell {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  background: var(--background);
+}
+
+.triage-error {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+}
+
+.triage-toolbar {
+  display: flex;
+  align-items: center;
+  /* Wraps rather than letting the filters ride over the scope pickers when
+     the panel is narrower than both groups together. */
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--triage-line);
+}
+
+.triage-toolbar-group {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The trailing group keeps its intrinsic width and drops to its own row
+   instead of shrinking its controls into each other. */
+.triage-toolbar-group.justify-end {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.triage-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.triage-connection {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  gap: 6px;
+  padding-inline: 8px 10px;
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.triage-connection:not([data-connected]) {
+  background: color-mix(in oklch, var(--warning) 12%, transparent);
+  color: var(--warning);
+}
+
+/* ---------------------------------------------------------------------------
+   Board and columns
+   ------------------------------------------------------------------------ */
+.triage-board-viewport {
+  min-height: 0;
+  flex: 1;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
+  scrollbar-gutter: stable;
+}
+
+.triage-board {
+  display: flex;
+  /* Share available width, with readable limits for both sparse and busy boards.
+     Extra stages overflow into the viewport's horizontal scroller. */
+  height: 100%;
+  min-height: 0;
+  align-items: stretch;
+}
+
+.triage-board-viewport::-webkit-scrollbar {
+  height: 10px;
+}
+
+.triage-board-viewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.triage-board-viewport::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--ink) 18%, transparent);
+  background-clip: padding-box;
+}
+
+.triage-column {
+  display: flex;
+  flex: 1 0 288px;
+  min-width: 0;
+  max-width: 480px;
+  min-height: 0;
+  flex-direction: column;
+  padding: 12px 10px 0;
+  border-right: 1px solid var(--triage-line);
+  transition: background-color 160ms ease;
+}
+
+.triage-column:last-child {
+  border-right: 0;
+}
+
+.triage-column[data-dropping] {
+  background: color-mix(in oklch, var(--primary) 5%, transparent);
+}
+
+.triage-column-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px 10px;
+}
+
+.triage-column-name {
+  overflow: hidden;
+  color: color-mix(in oklch, var(--foreground) 80%, transparent);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.triage-column-count {
+  margin-left: auto;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  opacity: 0.65;
+}
+
+.triage-column-scroll {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  padding-bottom: 40px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--ink) 18%, transparent) transparent;
+}
+
+.triage-column-empty {
+  border-radius: 12px;
+  border: 1px dashed transparent;
+  padding: 26px 12px;
+  color: color-mix(in oklch, var(--foreground) 34%, transparent);
+  font-size: 11.5px;
+  text-align: center;
+  transition:
+    border-color 150ms ease,
+    color 150ms ease;
+}
+
+.triage-column-empty[data-dragging] {
+  border-color: color-mix(in oklch, var(--primary) 34%, transparent);
+  color: color-mix(in oklch, var(--primary) 82%, var(--foreground));
+}
+
+/* ---------------------------------------------------------------------------
+   Cards
+   ------------------------------------------------------------------------ */
+.triage-card {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  cursor: grab;
+  border: 1px solid var(--triage-line);
+  border-radius: 12px;
+  background: var(--card);
+  padding: 11px 12px 12px;
+  transition:
+    opacity 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 150ms var(--triage-ease-out);
+}
+
+.triage-card[data-read] { opacity: 0.58; }
+.triage-card[data-unread] { border-color: color-mix(in oklch, var(--primary) 28%, var(--triage-line)); }
+.triage-card[data-unread] .triage-card-title { font-weight: 650; }
+
+.triage-card[data-tone="danger"] {
+  border-color: color-mix(in oklch, var(--destructive) 26%, transparent);
+}
+
+.triage-card[data-tone="unread"] {
+  border-color: color-mix(in oklch, var(--primary) 26%, transparent);
+}
+
+.triage-card:active {
+  cursor: grabbing;
+  transform: scale(0.985);
+}
+
+.triage-card-head {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.triage-card-title {
+  display: -webkit-box;
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.38;
+  letter-spacing: -0.005em;
+  text-align: left;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* Stretch the title's hit area over the whole card so anywhere is clickable,
+   while the action cluster stays above it. */
+.triage-card-title::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  border-radius: inherit;
+  inset: 0;
+}
+
+.triage-card-title:focus-visible {
+  outline: none;
+}
+
+.triage-card-title:focus-visible::after {
+  outline: 1px solid var(--ring);
+  outline-offset: -1px;
+}
+
+.triage-card-meta {
+  display: grid;
+  gap: 5px;
+}
+
+.triage-card-meta-line {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.triage-card-meta-line [data-icon] {
+  opacity: 0.7;
+}
+
+/* The agent's brand mark is a logo, not an affordance glyph: it carries the
+   line's meaning, so it keeps full contrast where the field icons recede. */
+.triage-card-meta-line .triage-card-brand {
+  margin-right: -1px;
+  color: color-mix(in oklch, var(--foreground) 80%, transparent);
+  opacity: 1;
+}
+
+.triage-card-meta-sep {
+  width: 1px;
+  height: 10px;
+  flex: 0 0 auto;
+  margin-inline: 1px;
+  background: var(--triage-line-strong);
+}
+
+.triage-card-attention-note {
+  display: -webkit-box;
+  overflow: hidden;
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--destructive) 10%, transparent);
+  padding: 6px 8px;
+  color: var(--destructive);
+  font-size: 11px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.triage-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid color-mix(in oklch, var(--ink) 7%, transparent);
+  padding-top: 9px;
+}
+
+.triage-card-status {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  color: color-mix(in oklch, var(--foreground) 64%, transparent);
+  font-size: 11px;
+}
+
+.triage-card-time {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  opacity: 0.72;
+}
+
+/* A layout sibling of the title, not an overlay: the space is reserved even
+   while the button is invisible, so hovering never covers the first line and
+   never reflows the card. */
+.triage-card-actions {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  margin: -3px -4px 0 0;
+}
+
+/* ---------------------------------------------------------------------------
+   Skeletons
+   ------------------------------------------------------------------------ */
+.bb-skeleton {
+  background: var(--triage-dim);
+  animation: bb-skeleton-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes bb-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.triage-card-skeleton {
+  cursor: default;
+  box-shadow: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Segmented control
+   ------------------------------------------------------------------------ */
+.bb-segmented {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--triage-line);
+  border-radius: 9px;
+  background: var(--triage-sunken);
+  padding: 3px;
+}
+
+.bb-segmented[data-size="sm"] {
+  border-radius: 8px;
+  padding: 2px;
+}
+
+.bb-segmented-indicator {
+  position: absolute;
+  z-index: 0;
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--foreground) 16%, var(--background));
+  pointer-events: none;
+  transition:
+    transform 220ms var(--triage-ease-out),
+    width 220ms var(--triage-ease-out);
+}
+
+.bb-segmented[data-size="sm"] .bb-segmented-indicator {
+  top: 2px;
+  bottom: 2px;
+}
+
+.bb-segmented-item {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  height: 28px;
+  min-width: 0;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding-inline: 10px;
+  /* The dim resting state is the point: only the active tab is bright. */
+  color: color-mix(in oklch, var(--foreground) 45%, transparent);
+  font: inherit;
+  font-size: 0.78125rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    color 160ms ease,
+    transform 140ms var(--triage-ease-out);
+}
+
+.bb-segmented[data-size="sm"] .bb-segmented-item {
+  height: 26px;
+  padding-inline: 9px;
+}
+
+.bb-segmented-item[data-state="active"] {
+  color: var(--foreground);
+}
+
+.bb-segmented-item:active {
+  transform: scale(0.97);
+}
+
+.bb-segmented-item:focus-visible {
+  outline: 1px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.bb-segmented-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.bb-segmented-count {
+  color: currentcolor;
+  font-size: 10.5px;
+  opacity: 0.55;
+}
+
+/* ---------------------------------------------------------------------------
+   Status dots — colour is the category, motion is "right now"
+   ------------------------------------------------------------------------ */
+.bb-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--ink) 30%, transparent);
+}
+
+.bb-status-dot[data-size="sm"] {
+  width: 6px;
+  height: 6px;
+}
+
+.bb-status-dot[data-tone="ongoing"] {
+  background: var(--primary);
+}
+
+.bb-status-dot[data-tone="ongoing"][data-pulse] {
+  animation: bb-status-pulse 1.9s var(--triage-ease-out) infinite;
+}
+
+@keyframes bb-status-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 34%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 5px color-mix(in oklab, var(--primary) 0%, transparent);
+  }
+}
+
+.bb-status-dot[data-tone="pending"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px color-mix(in oklch, var(--ink) 36%, transparent);
+}
+
+.bb-status-dot[data-tone="scheduled"] {
+  background: var(--warning);
+}
+
+.bb-status-dot[data-tone="unread"] {
+  background: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 16%, transparent);
+}
+
+.bb-status-dot[data-tone="done"] {
+  background: var(--success);
+}
+
+.bb-status-dot[data-tone="danger"] {
+  background: var(--destructive);
+}
+
+/* ---------------------------------------------------------------------------
+   Notifications
+   ------------------------------------------------------------------------ */
+.triage-notification-icon {
+  position: relative;
+  display: inline-flex;
+}
+
+.triage-notification-badge {
+  position: absolute;
+  z-index: 1;
+  top: -6px;
+  right: -7px;
+  display: inline-flex;
+  min-width: 15px;
+  height: 15px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--destructive);
+  padding-inline: 4px;
+  color: var(--destructive-foreground);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.triage-notification-panel {
+  width: min(440px, calc(100vw - 24px));
+  overflow: hidden;
+  padding: 0;
+}
+
+/* The panel's first answer to "what is going on": three live tallies that
+   double as lenses over the cards behind them. */
+.triage-notification-digest {
+  overflow-x: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-bottom: 1px solid var(--triage-line);
+  padding: 7px 10px;
+}
+
+.triage-notification-lens {
+  display: flex;
+  min-width: 0;
+  flex: 1 0 auto;
+  white-space: nowrap;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--triage-sunken);
+  padding: 5px 7px;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.triage-notification-lens:disabled {
+  cursor: default;
+  opacity: 0.52;
+}
+
+.triage-notification-lens[data-state="active"] {
+  border-color: color-mix(in oklch, var(--primary) 34%, transparent);
+  background: color-mix(in oklch, var(--primary) 10%, transparent);
+  color: var(--foreground);
+}
+
+.triage-notification-lens-count {
+  flex: 0 0 auto;
+  color: var(--foreground);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.triage-notification-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--triage-line);
+  padding: 9px 8px 9px 14px;
+}
+
+.triage-notification-optin {
+  display: flex;
+  width: 100%;
+  align-items: flex-start;
+  gap: 9px;
+  border: 0;
+  border-top: 1px solid var(--triage-line);
+  background: transparent;
+  padding: 10px 14px;
+  color: var(--muted-foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.triage-notification-scroll {
+  max-height: min(400px, 58vh);
+  overflow-y: auto;
+  padding-bottom: 4px;
+  overscroll-behavior-y: contain;
+}
+
+.triage-notification-bucket {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--popover);
+  padding: 9px 14px 4px;
+  color: color-mix(in oklch, var(--foreground) 42%, transparent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* The one group that is a standing state rather than a day of history. */
+.triage-notification-bucket[data-pinned] {
+  color: var(--destructive);
+}
+
+.triage-notification-bucket-count {
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--ink) 8%, transparent);
+  padding: 0 5px;
+  letter-spacing: 0;
+}
+
+.triage-notification-bucket[data-pinned] .triage-notification-bucket-count {
+  background: color-mix(in oklch, var(--destructive) 14%, transparent);
+}
+
+.triage-notification-row {
+  position: relative;
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  align-items: stretch;
+  background: transparent;
+  transition: background-color 120ms ease;
+}
+
+.triage-notification-row-main {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 6px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  border: 0;
+  background: transparent;
+  padding: 13px 4px 13px 14px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.triage-notification-row-main > .bb-status-dot {
+  margin-top: 5px;
+}
+
+.triage-notification-row-main:disabled {
+  cursor: default;
+}
+
+.triage-notification-row-main:focus-visible {
+  outline: 1px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.triage-notification-trailing {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  place-items: start center;
+  padding: 14px 10px 0 0;
+}
+
+.triage-notification-time,
+.triage-notification-delete {
+  grid-area: 1 / 1;
+}
+
+.triage-notification-delete {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  margin-top: -4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  opacity: 0;
+  cursor: pointer;
+  pointer-events: none;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    opacity 120ms ease;
+}
+
+.triage-notification-delete:focus-visible {
+  outline: 1px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.triage-notification-delete:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.triage-notification-row:hover .triage-notification-delete,
+.triage-notification-row:focus-within .triage-notification-delete {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.triage-notification-row:has(.triage-notification-delete):hover .triage-notification-time,
+.triage-notification-row:has(.triage-notification-delete):focus-within
+  .triage-notification-time {
+  opacity: 0;
+}
+
+/* A touch device has no hover to reveal the delete with, so the affordance is
+   simply always present there — same principle as the card actions above. */
+@media (hover: none) and (pointer: coarse) {
+  .triage-notification-row:has(.triage-notification-delete) .triage-notification-delete {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .triage-notification-row:has(.triage-notification-delete) .triage-notification-time {
+    opacity: 0;
+  }
+}
+
+.triage-notification-unread-dot {
+  width: 5px;
+  height: 5px;
+  margin-top: 7px;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.triage-notification-row[data-unread] .triage-notification-unread-dot {
+  background: var(--primary);
+}
+
+.triage-notification-row + .triage-notification-row {
+  border-top: 1px solid var(--triage-line);
+}
+
+.triage-notification-action {
+  display: flex;
+  align-items: center;
+  color: var(--foreground);
+  font-size: 0.78125rem;
+  font-weight: 500;
+}
+
+.triage-notification-action-text {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.45;
+}
+
+.triage-notification-row:not([data-unread]) .triage-notification-action {
+  color: color-mix(in oklch, var(--foreground) 76%, transparent);
+  font-weight: 400;
+}
+
+/* A repeat is one fact with a multiplier, not a stack of rows. */
+.triage-notification-tally {
+  flex: 0 0 auto;
+  margin-left: 5px;
+  border-radius: 999px;
+  background: var(--triage-dim);
+  padding: 0 5px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.triage-notification-target {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.triage-notification-metadata {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 9px;
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+}
+
+.triage-notification-meta-item {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 45%;
+  gap: 4px;
+}
+
+.triage-notification-meta-item > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.triage-notification-metadata svg {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+
+.triage-notification-agent {
+  display: inline-flex;
+  align-items: center;
+}
+
+.triage-notification-agent svg {
+  width: 15px;
+  height: 15px;
+}
+
+.triage-notification-number {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Leads the line so truncation eats the title before it eats the state. */
+.triage-notification-state {
+  color: color-mix(in oklch, var(--foreground) 74%, transparent);
+  font-weight: 500;
+}
+
+.triage-notification-missing {
+  font-style: italic;
+  opacity: 0.75;
+}
+
+/* The failure text itself, which used to hide in a title attribute. */
+.triage-notification-reason {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 3px;
+  color: var(--destructive);
+  font-size: 11px;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.triage-notification-time {
+  width: 100%;
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  line-height: 1.4;
+  text-align: center;
+  opacity: 0.7;
+  transition: opacity 120ms ease;
+}
+
+/* ---------------------------------------------------------------------------
+   Forms and dialogs
+   ------------------------------------------------------------------------ */
+.bb-field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.bb-field-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--foreground);
+  font-size: 0.78125rem;
+  font-weight: 500;
+}
+
+.bb-field-optional {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.bb-field-hint {
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.bb-field-row {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+}
+
+.bb-field-group {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--triage-line);
+  border-radius: 12px;
+  background: var(--triage-sunken);
+  padding: 12px;
+}
+
+.bb-field-group-header {
+  display: grid;
+  gap: 2px;
+}
+
+.bb-field-group-title {
+  font-size: 0.78125rem;
+  font-weight: 600;
+}
+
+.bb-field-group-description {
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+}
+
+.triage-edit-body,
+.triage-detail-body {
+  display: grid;
+  max-height: min(64vh, 620px);
+  gap: 14px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.triage-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid var(--triage-line);
+  padding-top: 14px;
+}
+
+.triage-locked-field {
+  display: flex;
+  height: 36px;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border: 1px dashed var(--triage-line-strong);
+  border-radius: 8px;
+  padding-inline: 12px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.triage-detail-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted-foreground);
+  font-size: 11.5px;
+}
+
+.triage-detail-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.triage-detail-prompt {
+  color: color-mix(in oklch, var(--foreground) 88%, transparent);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.triage-detail-attention {
+  display: flex;
+  gap: 10px;
+  border: 1px solid color-mix(in oklch, var(--destructive) 30%, transparent);
+  border-radius: 10px;
+  background: color-mix(in oklch, var(--destructive) 10%, transparent);
+  padding: 10px 12px;
+  color: var(--destructive);
+  font-size: 13px;
+}
+
+.triage-detail-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--triage-line);
+  border-radius: 12px;
+  background: var(--triage-sunken);
+  padding: 14px;
+}
+
+.triage-detail-row {
+  min-width: 0;
+}
+
+.triage-detail-row dt {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.triage-detail-row dd {
+  margin: 3px 0 0;
+  font-size: 13px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.triage-stage-list {
+  display: grid;
+  max-height: min(48vh, 420px);
+  gap: 6px;
+  overflow-y: auto;
+}
+
+.triage-stage-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--triage-line);
+  border-radius: 10px;
+  background: var(--card);
+  padding: 6px 6px 6px 10px;
+}
+
+.triage-stage-handle { cursor: grab; touch-action: none; }
+.triage-stage-handle:active { cursor: grabbing; }
+.triage-stage-row { position: relative; transition: transform 160ms ease; }
+.triage-stage-row[data-dragging] {
+  z-index: 1;
+  transition: none;
+  box-shadow: 0 8px 20px rgb(0 0 0 / 30%);
+}
+.triage-sidebar-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid var(--triage-line);
+  padding-top: 16px;
+  font-size: 14px;
+}
+
+.triage-sidebar-switch {
+  appearance: none;
+  position: relative;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--muted);
+  cursor: pointer;
+}
+
+.triage-sidebar-switch::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--foreground);
+}
+
+.triage-sidebar-switch:checked { background: var(--primary); }
+.triage-sidebar-switch:checked::before { transform: translateX(16px); background: var(--primary-foreground); }
+.triage-sidebar-switch:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+.triage-sidebar-switch:disabled { opacity: 0.5; cursor: default; }
+
+@media (prefers-reduced-motion: reduce) {
+  .triage-stage-row { transition: none; }
+}
+
+.triage-composer-shell {
+  min-width: 0;
+}
+
+.triage-create-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.42fr);
+  gap: 12px;
+  align-items: start;
+}
+
+/* ---------------------------------------------------------------------------
+   Schedule picker
+   ------------------------------------------------------------------------ */
+.triage-schedule-popover {
+  transform-origin: var(--radix-popover-content-transform-origin);
+  max-height: min(560px, var(--radix-popover-content-available-height, 75dvh));
+  max-width: calc(100vw - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.triage-schedule-panel {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.triage-schedule-calendar {
+  width: 280px;
+  background: transparent;
+}
+
+.triage-schedule-calendar [data-slot="calendar"] {
+  width: 100%;
+}
+
+.triage-schedule-calendar button[data-day] {
+  width: 34px;
+  height: 34px;
+  min-width: 34px;
+  border-radius: 7px;
+  font-size: 0.8125rem;
+}
+
+.triage-schedule-calendar button[data-day][data-selected-single="true"] {
+  background: var(--foreground);
+  color: var(--background);
+}
+
+.triage-schedule-calendar button[data-day]:not([data-selected-single="true"]):active {
+  transform: scale(0.94);
+}
+
+.triage-schedule-time {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.triage-schedule-time-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.triage-schedule-time-label span:last-child {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.bb-time-picker {
+  display: grid;
+  grid-template-columns: 52px 8px 52px minmax(0, 1fr);
+  align-items: center;
+  gap: 5px;
+}
+
+.bb-time-picker-field {
+  height: 32px;
+  min-width: 0;
+  padding-inline: 5px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  appearance: textfield;
+}
+
+.bb-time-picker-field::-webkit-inner-spin-button,
+.bb-time-picker-field::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.bb-time-picker-separator {
+  color: var(--muted-foreground);
+  text-align: center;
+}
+
+.bb-time-picker-period {
+  width: 100%;
+}
+
+.bb-time-picker-period .bb-segmented-item {
+  flex: 1;
+  padding-inline: 6px;
+}
+
+.bb-time-picker[data-invalid] .bb-time-picker-field {
+  border-color: var(--destructive);
+}
+
+.triage-schedule-presets {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* ---------------------------------------------------------------------------
+   Pointer-dependent affordances
+
+   Hover reveals are gated so a touch device never has to guess: on coarse
+   pointers the card actions are simply always present.
+   ------------------------------------------------------------------------ */
+@media (hover: hover) and (pointer: fine) {
+  .triage-card:hover {
+    border-color: var(--triage-line-strong);
+    box-shadow: 0 2px 10px color-mix(in oklab, var(--ink) 8%, transparent);
+  }
+
+  .triage-card-actions {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 140ms ease;
+  }
+
+  .triage-card:is(:hover, :focus-within) .triage-card-actions,
+  .triage-card:has([data-state="open"]) .triage-card-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .bb-segmented-item:not([data-state="active"]):hover {
+    color: color-mix(in oklch, var(--foreground) 72%, transparent);
+  }
+
+  .triage-notification-row:hover {
+    background: var(--state-hover);
+  }
+
+  .triage-notification-row[data-unread]:hover {
+    background: color-mix(in oklch, var(--primary) 9%, transparent);
+  }
+
+  .triage-notification-delete:not(:disabled):hover {
+    background: color-mix(in oklch, var(--destructive) 10%, transparent);
+    color: var(--destructive);
+  }
+
+  .triage-notification-optin:hover {
+    background: var(--state-hover);
+  }
+
+  .triage-notification-lens:not(:disabled, [data-state="active"]):hover {
+    background: var(--state-hover);
+    color: var(--foreground);
+  }
+
+  .triage-schedule-calendar button[data-day]:not([data-selected-single="true"]):hover {
+    background: color-mix(in oklch, var(--ink) 7%, transparent);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Host-owned composer
+
+   The new-thread composer portals its pickers back into this plugin's CSS
+   scope. Keep long desktop menus inside Radix's measured collision area and
+   make the content itself the wheel/trackpad scroller.
+   ------------------------------------------------------------------------ */
+[role="menu"][data-side] {
+  max-height: min(26rem, var(--radix-dropdown-menu-content-available-height, calc(100vh - 1rem)));
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+}
+
+/* Model and reasoning are separate sections in one popover. The model list
+   already scrolls on its own, but the reasoning section can still push the
+   outer popover past the viewport, so the whole picker needs a final scroll
+   boundary as well. */
+[role="dialog"][data-side]:has([aria-label="Models"]) {
+  max-height: min(32rem, var(--radix-popover-content-available-height, calc(100vh - 1rem)));
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+}
+
+/* ---------------------------------------------------------------------------
+   Narrow viewports
+   ------------------------------------------------------------------------ */
+@media (max-width: 900px) {
+  .triage-connection-label {
+    display: none;
+  }
+}
+
+@media (max-width: 780px) {
+  .triage-column {
+    flex-basis: 260px;
+    max-width: min(480px, 84vw);
+  }
+
+  .triage-create-meta {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .bb-field-row,
+  .triage-detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Reduced motion — keep the colour cues, drop the movement
+   ------------------------------------------------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  .triage-card,
+  .triage-column,
+  .triage-column-empty,
+  .bb-segmented-item,
+  .triage-card-actions {
+    transition-duration: 1ms;
+  }
+
+  .bb-segmented-indicator {
+    transition: none;
+  }
+
+  .bb-skeleton,
+  .bb-status-dot[data-pulse] {
+    animation: none;
+  }
+
+  .bb-status-dot[data-tone="ongoing"][data-pulse] {
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 20%, transparent);
+  }
+}
+
+
+/* ---------------------------------------------------------------------------
+   Sidebar list
+
+   An accessory above BB's own thread list, so every value is one step quieter
+   than the board's: the heading is a label rather than a title, rows are a
+   single line, and nothing is allowed to widen a 200px sidebar.
+   ------------------------------------------------------------------------ */
+.triage-sidebar {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  flex-direction: column;
+  padding: 2px 4px 6px;
+  border-bottom: 1px solid var(--triage-line);
+}
+
+.triage-sidebar-heading {
+  margin: 0;
+  font: inherit;
+}
+
+.triage-sidebar-toggle {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 5px 6px;
+  color: color-mix(in oklch, var(--foreground) 42%, transparent);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.triage-sidebar-chevron {
+  flex: 0 0 auto;
+  opacity: 0.7;
+  transition: transform 140ms var(--triage-ease-out);
+}
+
+.triage-sidebar-toggle[aria-expanded="false"] .triage-sidebar-chevron {
+  transform: rotate(-90deg);
+}
+
+.triage-sidebar-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.triage-sidebar-count {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 6px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0;
+  opacity: 0.8;
+}
+
+.triage-sidebar-list {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.triage-sidebar-row,
+.triage-sidebar-more {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 7px;
+  color: color-mix(in oklch, var(--foreground) 76%, transparent);
+  font: inherit;
+  font-size: 0.78125rem;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.triage-sidebar-row[data-active] {
+  background: color-mix(in oklch, var(--primary) 10%, transparent);
+  color: var(--foreground);
+  font-weight: 500;
+}
+
+.triage-sidebar-row:focus-visible,
+.triage-sidebar-more:focus-visible,
+.triage-sidebar-toggle:focus-visible {
+  outline: 1px solid var(--ring);
+  outline-offset: -1px;
+}
+
+.triage-sidebar-number {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+/* The one element allowed to give up space, so a long title ellipses instead
+   of pushing the stamp out of the sidebar. */
+.triage-sidebar-label {
+  overflow: hidden;
+  min-width: 0;
+  flex: 1 1 auto;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.triage-sidebar-time {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  opacity: 0.7;
+}
+
+.triage-sidebar-more {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.triage-sidebar-more [data-icon] {
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+
+/* Coarse pointers get a taller target; the row is the whole affordance, so it
+   has to be reachable with a thumb. */
+.triage-sidebar[data-compact] .triage-sidebar-row,
+.triage-sidebar[data-compact] .triage-sidebar-more {
+  padding-block: 8px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .triage-sidebar-toggle:hover,
+  .triage-sidebar-more:hover {
+    color: var(--foreground);
+  }
+
+  .triage-sidebar-row:hover {
+    background: var(--state-hover);
+  }
+
+  .triage-sidebar-row[data-active]:hover {
+    background: color-mix(in oklch, var(--primary) 14%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .triage-sidebar-row,
+  .triage-sidebar-more {
+    transition-duration: 1ms;
+  }
+
+  .triage-sidebar-chevron {
+    transition: none;
+  }
+}

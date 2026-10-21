@@ -18,6 +18,7 @@ The root [`.bb/plugins.json`](.bb/plugins.json) collection manifest indexes them
 | [Directory skills](plugins/dir-skills) | `dir-skills` | `@lettland/bb-plugin-dir-skills` |
 | [Model instructions](plugins/model-instructions) | `model-instructions` | `@lettland/bb-plugin-model-instructions` |
 | [Shared Runtime](plugins/shared-runtime) | `shared-runtime` | `@lettland/bb-plugin-shared-runtime` |
+| [Triage](plugins/triage) | `triage` | `@lettland/bb-plugin-triage` |
 | [TypeSafe decisions](plugins/typesafe) | `typesafe` | `@lettland/bb-plugin-typesafe` |
 | [WakaTime](plugins/wakatime) | `wakatime` | `@lettland/bb-plugin-wakatime` |
 
@@ -61,7 +62,8 @@ suite on pushes and pull requests to `master`. Plugins with runtime tests run
 `npm run test:coverage` (vitest's v8 provider, or Node's built-in coverage for
 `shared-runtime`) and upload `lcov.info` to Coveralls as one flag per plugin of a
 parallel build; a final job closes it, carrying forward flags a run did not
-report. Uploads never fail the run.
+report. Uploads never fail the run. triage runs plain `npm test`
+(`tsc --noEmit` plus a `tsx --test` suite) without coverage.
 
 ## Releasing
 
@@ -103,4 +105,5 @@ with no edits.
 
 BSD-2-Clause ([`LICENSE`](LICENSE)). devkit includes third-party content
 under Apache-2.0 and MIT
-([`plugins/devkit/THIRD_PARTY_NOTICES.md`](plugins/devkit/THIRD_PARTY_NOTICES.md)).
+([`plugins/devkit/THIRD_PARTY_NOTICES.md`](plugins/devkit/THIRD_PARTY_NOTICES.md)),
+and triage is MIT ([`plugins/triage/LICENSE`](plugins/triage/LICENSE)).
