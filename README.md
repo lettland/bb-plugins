@@ -18,6 +18,7 @@ The root [`.bb/plugins.json`](.bb/plugins.json) collection manifest indexes them
 | [Directory skills](plugins/dir-skills) | `dir-skills` | `@lettland/bb-plugin-dir-skills` |
 | [Model instructions](plugins/model-instructions) | `model-instructions` | `@lettland/bb-plugin-model-instructions` |
 | [Shared Runtime](plugins/shared-runtime) | `shared-runtime` | `@lettland/bb-plugin-shared-runtime` |
+| [TypeSafe decisions](plugins/typesafe) | `typesafe` | `@lettland/bb-plugin-typesafe` |
 | [WakaTime](plugins/wakatime) | `wakatime` | `@lettland/bb-plugin-wakatime` |
 
 ## Install a plugin

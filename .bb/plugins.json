@@ -10,6 +10,7 @@
     { "name": "dir-skills", "source": "./plugins/dir-skills" },
     { "name": "model-instructions", "source": "./plugins/model-instructions" },
     { "name": "shared-runtime", "source": "./plugins/shared-runtime" },
+    { "name": "typesafe", "source": "./plugins/typesafe" },
     { "name": "wakatime", "source": "./plugins/wakatime" }
   ]
 }
