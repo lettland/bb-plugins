@@ -57,7 +57,7 @@ export function defineWakatimeSettings(bb: BbPluginApi) {
       type: "boolean",
       label: "Track agent run time",
       description:
-        "Send the thread's project, entity, branch, category and time about every 2 minutes while a thread is active, whether or not you are watching. Overlapping time is shared with your other editors, so this can relabel their time. Off sends nothing about agent threads, files included.",
+        "Send the thread's project, entity, branch, category and time about every 2 minutes while a thread is active and not waiting on you or its machine, whether or not you are watching. Overlapping time is shared with your other editors, so this can relabel their time. Off sends nothing about agent threads, files included.",
       default: true,
     },
     agentCategory: {

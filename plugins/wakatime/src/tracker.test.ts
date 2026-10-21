@@ -23,6 +23,7 @@ function thread(id: string, overrides: Partial<ThreadLike> = {}): ThreadLike {
     title: `Title ${id}`,
     titleFallback: null,
     environmentId: "env_1",
+    runtime: { displayStatus: "active" },
     ...overrides,
   };
 }
@@ -82,11 +83,15 @@ function harness(options: Options = {}) {
         );
   const rows: EventRow[] = [];
   const eventCalls: Record<string, unknown>[] = [];
+  const interactionCalls: Record<string, unknown>[] = [];
   const state = {
     hold: false,
     outcome: "ok" as JobOutcome,
     eventsError: false as boolean | "string",
     eventsGate: null as Promise<void> | null,
+    interactionsRows: [] as { turnId: string | null }[],
+    interactionsError: false,
+    interactionsGate: null as Promise<void> | null,
     seedFailures: 0,
     envPath: repoDir as string | null,
     envGetFailures: 0,
@@ -152,6 +157,14 @@ function harness(options: Options = {}) {
           return rows.filter((row) => row.seq > Number(args.afterSeq)).slice(0, Number(args.limit));
         },
       },
+      interactions: {
+        async list(args) {
+          interactionCalls.push({ ...args, signal: args.signal instanceof AbortSignal ? "AbortSignal" : args.signal });
+          if (state.interactionsGate !== null) await state.interactionsGate;
+          if (state.interactionsError) throw new Error("interactions down");
+          return state.interactionsRows.map((row) => ({ ...row }));
+        },
+      },
       async listRunning() {
         state.listRunningCalls++;
         if (state.threadsListError) throw new Error("down");
@@ -213,6 +226,7 @@ function harness(options: Options = {}) {
     held,
     rows,
     eventCalls,
+    interactionCalls,
     state,
     health,
     log,
@@ -465,6 +479,204 @@ describe("agent time", () => {
     h.settings.entity = "threadId";
     await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
     expect(arg(h.heartbeats()[2]!, "--entity")).toBe("thr_1");
+  });
+});
+
+describe("waiting for a pending interaction", () => {
+  it("pauses a tick while an interaction holds the turn, keeping the timer, and resumes when it clears", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    expect(h.heartbeats()).toHaveLength(1);
+    h.state.interactionsRows = [{ turnId: "turn_1" }];
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    expect(h.heartbeats()).toHaveLength(1);
+    expect(h.tracker.stateSize().timers).toBe(1);
+    h.state.interactionsRows = [];
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    expect(h.heartbeats()).toHaveLength(2);
+  });
+
+  it("sends the heartbeat when the pending interaction is a plugin one without a turn", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.state.interactionsRows = [{ turnId: null }];
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    expect(h.heartbeats()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    expect(h.heartbeats()).toHaveLength(2);
+  });
+
+  it("pauses on a waiting displayStatus without asking about interactions, and resumes when it clears", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    const calls = h.interactionCalls.length;
+    h.threads.set("thr_1", thread("thr_1", { runtime: { displayStatus: "waiting-for-host" } }));
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    expect(h.heartbeats()).toHaveLength(1);
+    expect(h.interactionCalls).toHaveLength(calls);
+    expect(h.tracker.stateSize().timers).toBe(1);
+    h.threads.set("thr_1", thread("thr_1"));
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    expect(h.heartbeats()).toHaveLength(2);
+    expect(h.interactionCalls).toHaveLength(calls + 1);
+  });
+
+  it("times a thread whose payload carries no runtime", async () => {
+    const h = harness({ threads: [thread("thr_1", { runtime: undefined })] });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    expect(h.heartbeats()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    expect(h.heartbeats()).toHaveLength(2);
+  });
+
+  it("pauses a thread that is provisioning but times one with a displayStatus it does not know", async () => {
+    const paused = harness({ threads: [thread("thr_1", { runtime: { displayStatus: "provisioning" } })] });
+    paused.tracker.onActive(paused.threads.get("thr_1")!);
+    const working = harness({ threads: [thread("thr_1", { runtime: { displayStatus: "future-state" } })] });
+    working.tracker.onActive(working.threads.get("thr_1")!);
+    await settle();
+    expect(paused.heartbeats()).toHaveLength(0);
+    expect(paused.interactionCalls).toHaveLength(0);
+    expect(paused.tracker.stateSize().timers).toBe(1);
+    expect(working.heartbeats()).toHaveLength(1);
+  });
+
+  it("times a thread when the interactions read fails, warning once until a read succeeds", async () => {
+    const h = harness({ threads: [thread("thr_1"), thread("thr_2")] });
+    h.state.interactionsError = true;
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    expect(h.heartbeats()).toHaveLength(1);
+    expect(h.log.warn).toHaveBeenCalledTimes(1);
+    expect(h.log.warn).toHaveBeenCalledWith("could not read pending interactions: Error");
+    expect(String(h.log.warn.mock.calls[0]![0])).not.toContain("interactions down");
+    // A failure on another thread, and on a later tick, adds no warning.
+    h.tracker.onActive(h.threads.get("thr_2")!);
+    await settle();
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    expect(h.log.warn).toHaveBeenCalledTimes(1);
+    // The next success re-arms the warning for the failure after it.
+    h.state.interactionsError = false;
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    h.state.interactionsError = true;
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    expect(h.log.warn).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks for the thread's pending interactions with an abort signal", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    expect(h.interactionCalls).toEqual([expect.objectContaining({ threadId: "thr_1", signal: "AbortSignal" })]);
+  });
+
+  it("sends only the closing heartbeat when the thread idles during a tick's pending read", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    let open!: () => void;
+    h.state.interactionsGate = new Promise<void>((resolve) => (open = resolve));
+    const before = h.jobs.length;
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    await settle();
+    await h.idle("thr_1");
+    expect(h.jobs).toHaveLength(before + 1);
+    open();
+    await settle();
+    expect(h.jobs).toHaveLength(before + 1);
+    expect(h.tracker.stateSize()).toMatchObject({ timers: 0, confirming: 0 });
+  });
+
+  it("sends nothing when the thread is archived during a tick's pending read", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    let open!: () => void;
+    h.state.interactionsGate = new Promise<void>((resolve) => (open = resolve));
+    const before = h.jobs.length;
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    await settle();
+    h.tracker.onGone("thr_1");
+    open();
+    await settle();
+    expect(h.jobs).toHaveLength(before);
+    expect(h.tracker.stateSize()).toMatchObject({ timers: 0, confirming: 0 });
+    expect(h.tracker.stateSize().files.threads).toBe(0);
+  });
+
+  it("sends only the closing heartbeat when the thread idles during its first pending read", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    let open!: () => void;
+    h.state.interactionsGate = new Promise<void>((resolve) => (open = resolve));
+    const before = h.jobs.length;
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    // The start heartbeat is the one the pending read holds back.
+    expect(h.jobs).toHaveLength(before);
+    await h.idle("thr_1");
+    expect(h.jobs).toHaveLength(before + 1);
+    open();
+    await settle();
+    expect(h.jobs).toHaveLength(before + 1);
+    expect(h.tracker.stateSize()).toMatchObject({ timers: 0, confirming: 0 });
+  });
+
+  it("sends nothing when the thread is archived during the first pending read at startup", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    let open!: () => void;
+    h.state.interactionsGate = new Promise<void>((resolve) => (open = resolve));
+    const before = h.jobs.length;
+    await h.tracker.reconcile();
+    await settle();
+    expect(h.tracker.stateSize().timers).toBe(1);
+    expect(h.interactionCalls).toHaveLength(1);
+    expect(h.jobs).toHaveLength(before);
+    h.tracker.onGone("thr_1");
+    open();
+    await settle();
+    expect(h.jobs).toHaveLength(before);
+    expect(h.tracker.stateSize()).toMatchObject({ timers: 0, confirming: 0 });
+    expect(h.tracker.stateSize().files.threads).toBe(0);
+  });
+
+  it("logs a deleted thread's failed read once, by name only, and leaves no per-thread state", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    let open!: () => void;
+    h.state.interactionsGate = new Promise<void>((resolve) => (open = resolve));
+    h.state.interactionsError = true;
+    const before = h.jobs.length;
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    await settle();
+    h.tracker.onGone("thr_1");
+    open();
+    await settle();
+    expect(h.jobs).toHaveLength(before);
+    expect(h.tracker.stateSize()).toMatchObject({
+      timers: 0,
+      confirming: 0,
+      notTimed: 0,
+      throttle: 0,
+      files: { threads: 0, buffered: 0, reads: 0 },
+    });
+    expect(h.log.warn).toHaveBeenCalledTimes(1);
+    expect(h.log.warn).toHaveBeenCalledWith("could not read pending interactions: Error");
+  });
+
+  it("sends the closing heartbeat of a stop made while the thread is waiting", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.state.interactionsRows = [{ turnId: "turn_1" }];
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    expect(h.heartbeats()).toHaveLength(0);
+    expect(h.tracker.stateSize().timers).toBe(1);
+    await h.idle("thr_1");
+    expect(h.heartbeats()).toHaveLength(1);
+    expect(h.tracker.stateSize().timers).toBe(0);
   });
 });
 
@@ -1163,6 +1375,28 @@ describe("file delivery", () => {
       h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
       await drain();
       expect(h.tracker.stateSize().files.buffered).toBe(1);
+    });
+  });
+
+  describe("a turn held by an interaction", () => {
+    it("seeds the read position while the start heartbeat waits, and sends later files when the wait clears", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      edit(h, "old.ts");
+      h.state.interactionsRows = [{ turnId: "turn_1" }];
+      await h.tracker.reconcile();
+      await drain();
+      expect(h.tracker.stateSize()).toMatchObject({ timers: 1, files: { threads: 1, buffered: 0 } });
+      expect(h.heartbeats()).toHaveLength(0);
+      h.state.interactionsRows = [];
+      edit(h, "a.ts");
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect(h.tracker.stateSize().files.buffered).toBe(1);
+      // Both pulls started at the tip the waiting start had read up to.
+      expect(asc(h).map((call) => call.afterSeq)).toEqual(["1", "1"]);
+      await tick();
+      expect(h.heartbeats()).toHaveLength(1);
+      expect(files(h.heartbeats()[0]!)).toEqual(["a.ts"]);
     });
   });
 

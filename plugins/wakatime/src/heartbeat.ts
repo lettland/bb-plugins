@@ -22,6 +22,8 @@ export interface ThreadLike {
   title: string | null;
   titleFallback: string | null;
   environmentId: string | null;
+  /** Absent on older bb; missing means the thread is not waiting on its machine. */
+  runtime?: { displayStatus: string };
 }
 
 // Control characters (newlines included) would split a dashboard row or corrupt

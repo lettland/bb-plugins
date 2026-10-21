@@ -3,7 +3,7 @@ import { expandHome, HEARTBEAT_TIMEOUT_MS } from "./cli.js";
 import type { Job, Runner } from "./cli.js";
 import { toExtraHeartbeat } from "./file-activity.js";
 import type { FileSpec } from "./file-activity.js";
-import { FileDelivery } from "./file-delivery.js";
+import { EVENTS_TIMEOUT_MS, FileDelivery } from "./file-delivery.js";
 import type { FileSdk } from "./file-delivery.js";
 import {
   buildArgv,
@@ -23,12 +23,17 @@ import type { WakatimeSettings } from "./settings.js";
 
 /** Agent time: one heartbeat per thread about every 2 min while it is active. */
 export const AGENT_TICK_MS = 120_000;
+/** `displayStatus` values that mean the thread's machine is not ready; any other value counts as working. */
+const WAITING_DISPLAY_STATUS = new Set(["provisioning", "waiting-for-host", "host-reconnecting"]);
 const USER_KEY = "user";
 
 export interface TrackerSdk extends ContextSdk {
   threads: ContextSdk["threads"] &
     FileSdk["threads"] & {
       listRunning(): Promise<{ id: string }[]>;
+      interactions: {
+        list(args: { threadId: string; signal: AbortSignal }): Promise<{ turnId: string | null }[]>;
+      };
     };
   projects: ContextSdk["projects"] & {
     list(args: { includePersonal: boolean }): Promise<ProjectLike[]>;
@@ -76,6 +81,8 @@ export class Tracker {
   // mark a thread from the old settings.
   private settingsGeneration = 0;
   private checkedExcludes: string | null = null;
+  // Set while a failed interactions read has been warned about; the next success clears it.
+  private warnedInteractions = false;
   private disposed = false;
 
   constructor(deps: TrackerDeps) {
@@ -216,6 +223,29 @@ export class Tracker {
     return thread;
   }
 
+  /**
+   * True while the thread cannot make progress: its machine is not ready, or an
+   * interaction holds its turn. A read that fails counts as working, with the
+   * failure warned about once until a read succeeds again.
+   */
+  private async waiting(thread: ThreadLike): Promise<boolean> {
+    if (WAITING_DISPLAY_STATUS.has(thread.runtime?.displayStatus ?? "")) return true;
+    try {
+      const rows = await this.sdk.threads.interactions.list({
+        threadId: thread.id,
+        signal: AbortSignal.timeout(EVENTS_TIMEOUT_MS),
+      });
+      this.warnedInteractions = false;
+      return rows.some((row) => row.turnId !== null);
+    } catch (error) {
+      if (!this.warnedInteractions) {
+        this.warnedInteractions = true;
+        this.log.warn(`could not read pending interactions: ${error instanceof Error ? error.name : "error"}`);
+      }
+      return false;
+    }
+  }
+
   private async beginAgentTime(thread: ThreadLike, own: Timer): Promise<void> {
     const generation = this.settingsGeneration;
     try {
@@ -228,6 +258,10 @@ export class Tracker {
       if (this.timers.get(thread.id) !== own) return;
       this.files.attach(thread.id, ctx.project!, thread.environmentId);
       void this.files.pull(thread.id);
+      // Re-checked after the interactions read: a thread archived meanwhile must
+      // not get a non-final send, which would re-attach its dropped state.
+      if (await this.waiting(thread)) return;
+      if (this.timers.get(thread.id) !== own) return;
       await this.deliver({ ...ctx, thread }, false, false);
     } catch {
       this.release(thread.id, own);
@@ -247,6 +281,7 @@ export class Tracker {
       if (this.timers.get(id) !== own) return;
       this.files.attach(id, ctx.project!, thread.environmentId);
       await this.files.pull(id);
+      if (await this.waiting(thread)) return;
       if (this.timers.get(id) !== own) return;
       // Already paced at the throttle window, so a tick that fires a
       // millisecond early must not be dropped.

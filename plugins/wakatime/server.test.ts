@@ -8,6 +8,7 @@ import type { FakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import pkg from "./package.json" with { type: "json" };
 import plugin from "./server.js";
+import { AGENT_TICK_MS } from "./src/tracker.js";
 
 const PROJECT = { id: "prj_1", name: "acme" };
 
@@ -16,6 +17,7 @@ let cli: string;
 let host: FakePluginHost;
 let execCalls: { file: string; args: string[]; stdin: string | null }[];
 let eventRows: { seq: number; createdAt: number; data: unknown }[];
+let pendingInteractions: { turnId: string | null }[] = [];
 let repoDir: string;
 let thread: ReturnType<typeof makeThreadResponse>;
 
@@ -43,6 +45,9 @@ async function start(settings: Record<string, string | boolean> = {}) {
             if (args.order === "desc") return eventRows.slice(-1);
             return eventRows.filter((row) => row.seq > Number(args.afterSeq)).slice(0, Number(args.limit));
           },
+        },
+        interactions: {
+          list: async () => pendingInteractions.map((row) => ({ ...row })),
         },
       },
       projects: {
@@ -75,6 +80,7 @@ beforeEach(() => {
   chmodSync(cli, 0o755);
   execCalls = [];
   eventRows = [];
+  pendingInteractions = [];
   repoDir = mkdtempSync(path.join(os.tmpdir(), "waka-repo-"));
   version = async () => ({ currentVersion: "9.8.7" });
   thread = makeThreadResponse({ id: "thr_1", projectId: PROJECT.id, title: "Fix login", status: "idle", environmentId: "env_1" });
@@ -325,6 +331,29 @@ describe("wakatime plugin", () => {
       expect(vi.getTimerCount()).toBe(1);
       await host.harness.dispose();
       expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("makes no cli calls while an active thread's turn waits on an interaction", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      await start();
+      pendingInteractions = [{ turnId: "turn_1" }];
+      thread = {
+        ...thread,
+        status: "active",
+        runtime: { displayStatus: "active", hostReconnectGraceExpiresAt: null },
+      };
+      await host.harness.emitThreadEvent("thread.active", { thread });
+      await flush();
+      expect(execCalls).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+      await flush();
+      expect(execCalls).toHaveLength(0);
+      // The timer is kept while the thread waits.
+      expect(vi.getTimerCount()).toBe(1);
     } finally {
       vi.useRealTimers();
     }

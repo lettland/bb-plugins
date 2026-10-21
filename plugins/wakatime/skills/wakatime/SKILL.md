@@ -8,12 +8,16 @@ description: Understand and configure bb's WakaTime plugin — what it sends to 
 The wakatime plugin runs `wakatime-cli` on the bb server host and reports only what bb itself knows, the same way for every provider (Claude Code, Codex, ACP, any other). It sends:
 
 1. **Your activity in bb:** you interact with a focused bb window. Heartbeats carry the bb project, thread, and branch of the view you are in.
-2. **Agent run time:** a thread's status is `active`, whether or not you are watching. One heartbeat per thread about every 2 minutes.
+2. **Agent run time:** a thread's status is `active`, whether or not you are watching. Agent time pauses while the thread waits on a permission request, question, or plan approval, or on its machine (not connected, or still being set up). One heartbeat per thread about every 2 minutes.
 3. **Agent file activity:** the files an agent edited or read inside the thread's environment folder, sent with the thread's heartbeats.
 
 The data comes from the thread lifecycle events, the thread event log (completed file changes and file reads), and your window activity. The plugin parses no provider transcripts and runs no `--sync-ai-activity`.
 
 ## Changed in this version
+
+**Agent time now pauses while a thread waits on a permission request, question, or plan approval, or on its machine.**
+
+Earlier, in 0.1.2:
 
 **File paths inside the project are now sent by default. Set `fileActivity` to `off` to stop.**
 
@@ -69,6 +73,8 @@ Overlapping heartbeats share wall-clock time rather than adding up. Agent heartb
 - Turn `trackAgentActivity` off to remove the effect entirely.
 - A different `agentCategory` only changes the label; the time still moves from the other editor's file and project rows to bb thread rows.
 
+While a thread waits on a permission request, question, or plan approval, or on its machine, its agent time pauses. Each pause edge is seen at tick granularity (at most 2 minutes late): WakaTime still counts a wait shorter than its **Keystroke Timeout** preference (15 minutes by default), because the heartbeats on either side of the pause are close enough. Lowering that preference on wakatime.com stops shorter waits from counting; keep it well above this plugin's 2-minute interval (5 minutes, for example), and it applies to all your editors, not only bb. While such a prompt is pending, background commands or subagents in that thread are not counted either; a plugin form that lets the agent keep working does not pause time.
+
 ## Failures and where to see them
 
 The WakaTime status panel (Settings) shows the CLI path in use, the last successful heartbeat, the last error, and the file pipeline: when file entries were last sent, how many wait in memory (they go with the thread's next tick or turn), and how many were dropped since the plugin loaded, by reason (outside the environment folder, or the thread has no environment folder; buffer full; dropped by your `fileActivity`, `entity`, agent-tracking or exclusion settings; `wakatime-cli` failed). It has a Refresh button, and a failed refresh is shown next to it.
@@ -80,6 +86,8 @@ An error shows only while it is newer than the last successful heartbeat, so a b
 A batch of file entries whose `wakatime-cli` call failed is counted as dropped: network failures may sit in the CLI's own offline queue, but timeouts, kills, and config or auth errors are lost. If a thread's environment cannot be read, its file pipeline holds at the same read position and retries on the next event or tick, so nothing is skipped or dropped; the panel shows "Waiting on environment lookup: N thread(s)" and the server log says so once. The indicator clears when a read succeeds or when file activity stops for the thread.
 
 Gaps that are not counted: if reading a thread's event log fails at the start, the plugin retries on the next event or tick, and anything that landed in between is neither sent nor counted; events between a thread becoming active and the first read of its event log after the plugin loads are not sent; entries still pending when the plugin is disposed, or when the thread is archived or deleted, are discarded.
+
+If bb cannot report pending prompts (an older bb, or a failed read), agent time counts as before and one warning is logged.
 
 ## Hidden names in `~/.wakatime.cfg`
 
