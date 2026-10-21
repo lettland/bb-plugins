@@ -91,9 +91,12 @@ resolves after the first release that actually publishes — `npm install
 the note above). A `prerelease` dispatch publishes to the `next` dist-tag instead;
 install those with `@next` or an exact version.
 
-Adding a new plugin needs no workflow edits: create `plugins/<name>/` with a
-`package.json` (name `@lettland/bb-plugin-<name>`, `publishConfig.access: public`)
-and a `bb` manifest, add it to `.bb/plugins.json`, and CI picks it up.
+To add a new plugin, create `plugins/<name>/` with a `package.json` (name
+`@lettland/bb-plugin-<name>`, `publishConfig.access: public`) and a `bb`
+manifest, add it to `.bb/plugins.json`, and add its ID to the `plugin` matrix in
+[`.github/workflows/test.yml`](.github/workflows/test.yml) (plus its Coveralls
+`carryforward` list when it reports coverage). The release workflow picks it up
+with no edits.
 
 ## License
 

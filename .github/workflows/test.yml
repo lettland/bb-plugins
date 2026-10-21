@@ -82,5 +82,5 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           parallel-finished: true
-          carryforward: agent-hooks,auto-review,devkit,shared-runtime,wakatime
+          carryforward: agent-hooks,aislop,auto-review,devkit,model-instructions,shared-runtime,wakatime
           fail-on-error: false
