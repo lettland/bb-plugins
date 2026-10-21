@@ -18,7 +18,6 @@ The root [`.bb/plugins.json`](.bb/plugins.json) collection manifest indexes them
 | [Directory skills](plugins/dir-skills) | `dir-skills` | `@lettland/bb-plugin-dir-skills` |
 | [Model instructions](plugins/model-instructions) | `model-instructions` | `@lettland/bb-plugin-model-instructions` |
 | [Shared Runtime](plugins/shared-runtime) | `shared-runtime` | `@lettland/bb-plugin-shared-runtime` |
-| [Taskboard](plugins/taskboard) | `taskboard` | `@lettland/bb-plugin-taskboard` |
 | [WakaTime](plugins/wakatime) | `wakatime` | `@lettland/bb-plugin-wakatime` |
 
 ## Install a plugin
@@ -98,7 +97,6 @@ and a `bb` manifest, add it to `.bb/plugins.json`, and CI picks it up.
 
 ## License
 
-BSD-2-Clause ([`LICENSE`](LICENSE)). taskboard is MIT
-([`plugins/taskboard/LICENSE`](plugins/taskboard/LICENSE)); devkit includes
-third-party content under Apache-2.0 and MIT
+BSD-2-Clause ([`LICENSE`](LICENSE)). devkit includes third-party content
+under Apache-2.0 and MIT
 ([`plugins/devkit/THIRD_PARTY_NOTICES.md`](plugins/devkit/THIRD_PARTY_NOTICES.md)).
