@@ -16,7 +16,7 @@
 // Verified safe: all three configs store each hook as a single command string, and
 // no existing neighbour uses that prefix.
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, copyFileSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, copyFileSync, constants } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
@@ -83,12 +83,16 @@ export function writeConfigAtomic(file, data) {
   renameSync(tmp, file);
 }
 
-/** Timestamped backup beside the config, taken before the first write. */
+/** Timestamped backup beside the config, taken before the first write. Never
+ *  overwrites an earlier backup: install and uninstall can land in the same
+ *  millisecond (fast CI), so a colliding name gets -1, -2, ... appended, and
+ *  COPYFILE_EXCL keeps a race from clobbering the pre-install copy. */
 export function backupConfig(file) {
   if (!existsSync(file)) return null;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const dest = `${file}.agent-hooks-backup-${stamp}`;
-  copyFileSync(file, dest);
+  let dest = `${file}.agent-hooks-backup-${stamp}`;
+  for (let n = 1; existsSync(dest); n += 1) dest = `${file}.agent-hooks-backup-${stamp}-${n}`;
+  copyFileSync(file, dest, constants.COPYFILE_EXCL);
   return dest;
 }
 

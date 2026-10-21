@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -169,6 +169,30 @@ describe("file safety", () => {
     const backup = backupConfig(f);
     expect(backup).toBeTruthy();
     expect(JSON.parse(readFileSync(backup!, "utf8"))).toEqual({ theme: "dark" });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("never overwrites an earlier backup taken in the same millisecond", () => {
+    // Regression: install and uninstall can both call backupConfig within one
+    // millisecond (fast CI), and copyFileSync silently replaced the first
+    // backup with the second, losing the pre-install copy.
+    const dir = tmp();
+    const f = path.join(dir, "settings.json");
+    writeFileSync(f, JSON.stringify({ theme: "dark" }));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    try {
+      const first = backupConfig(f)!;
+      writeFileSync(f, JSON.stringify({ theme: "light" }));
+      const second = backupConfig(f)!;
+      expect(second).not.toBe(first);
+      // The first backup still holds what the config held at that moment --
+      // the second call did not clobber it.
+      expect(JSON.parse(readFileSync(first, "utf8"))).toEqual({ theme: "dark" });
+      expect(JSON.parse(readFileSync(second, "utf8"))).toEqual({ theme: "light" });
+    } finally {
+      vi.useRealTimers();
+    }
     rmSync(dir, { recursive: true, force: true });
   });
 });
