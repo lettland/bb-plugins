@@ -1,9 +1,11 @@
 import type { PluginLogger } from "@get-bb/plugin-sdk";
 import { expandHome, HEARTBEAT_TIMEOUT_MS } from "./cli.js";
 import type { Job, Runner } from "./cli.js";
+import { ExcludeCheck } from "./excludes.js";
+import type { ProjectListSdk } from "./excludes.js";
 import { toExtraHeartbeat } from "./file-activity.js";
 import type { FileSpec } from "./file-activity.js";
-import { EVENTS_TIMEOUT_MS, FileDelivery } from "./file-delivery.js";
+import { FileDelivery } from "./file-delivery.js";
 import type { FileSdk } from "./file-delivery.js";
 import {
   buildArgv,
@@ -14,30 +16,25 @@ import {
   resolveContext,
   Throttle,
   TtlCache,
-  unmatchedEntries,
 } from "./heartbeat.js";
 import type { ContextSdk, EnvInfo, ProjectLike, ResolvedContext, ThreadLike } from "./heartbeat.js";
 import type { WakatimeStatus } from "./rpc-contract.js";
 import { entityModeOf, parseExcludeList } from "./settings.js";
 import type { WakatimeSettings } from "./settings.js";
+import { WaitCheck } from "./waiting.js";
+import type { InteractionsSdk } from "./waiting.js";
 
 /** Agent time: one heartbeat per thread about every 2 min while it is active. */
 export const AGENT_TICK_MS = 120_000;
-/** `displayStatus` values that mean the thread's machine is not ready; any other value counts as working. */
-const WAITING_DISPLAY_STATUS = new Set(["provisioning", "waiting-for-host", "host-reconnecting"]);
 const USER_KEY = "user";
 
 export interface TrackerSdk extends ContextSdk {
   threads: ContextSdk["threads"] &
-    FileSdk["threads"] & {
+    FileSdk["threads"] &
+    InteractionsSdk["threads"] & {
       listRunning(): Promise<{ id: string }[]>;
-      interactions: {
-        list(args: { threadId: string; signal: AbortSignal }): Promise<{ turnId: string | null }[]>;
-      };
     };
-  projects: ContextSdk["projects"] & {
-    list(args: { includePersonal: boolean }): Promise<ProjectLike[]>;
-  };
+  projects: ContextSdk["projects"] & ProjectListSdk["projects"];
 }
 
 export interface TrackerDeps {
@@ -62,6 +59,8 @@ export class Tracker {
   private readonly settings: TrackerDeps["settings"];
   private readonly plugin: TrackerDeps["plugin"];
   private readonly files: FileDelivery;
+  private readonly waits: WaitCheck;
+  private readonly excludes: ExcludeCheck;
   private readonly throttle = new Throttle();
   private readonly branches = new TtlCache<EnvInfo>(BRANCH_TTL_MS);
   // Thread id -> its agent-time interval. The registered timer is the only
@@ -80,9 +79,6 @@ export class Tracker {
   // Bumped when settings change, so a read that was already in flight cannot
   // mark a thread from the old settings.
   private settingsGeneration = 0;
-  private checkedExcludes: string | null = null;
-  // Set while a failed interactions read has been warned about; the next success clears it.
-  private warnedInteractions = false;
   private disposed = false;
 
   constructor(deps: TrackerDeps) {
@@ -98,6 +94,8 @@ export class Tracker {
       log: deps.log,
       environments: this.branches,
     });
+    this.waits = new WaitCheck({ sdk: deps.sdk, log: deps.log });
+    this.excludes = new ExcludeCheck({ sdk: deps.sdk, settings: deps.settings, log: deps.log });
   }
 
   private excluded(settings: WakatimeSettings, project: ProjectLike | null): boolean {
@@ -223,29 +221,6 @@ export class Tracker {
     return thread;
   }
 
-  /**
-   * True while the thread cannot make progress: its machine is not ready, or an
-   * interaction holds its turn. A read that fails counts as working, with the
-   * failure warned about once until a read succeeds again.
-   */
-  private async waiting(thread: ThreadLike): Promise<boolean> {
-    if (WAITING_DISPLAY_STATUS.has(thread.runtime?.displayStatus ?? "")) return true;
-    try {
-      const rows = await this.sdk.threads.interactions.list({
-        threadId: thread.id,
-        signal: AbortSignal.timeout(EVENTS_TIMEOUT_MS),
-      });
-      this.warnedInteractions = false;
-      return rows.some((row) => row.turnId !== null);
-    } catch (error) {
-      if (!this.warnedInteractions) {
-        this.warnedInteractions = true;
-        this.log.warn(`could not read pending interactions: ${error instanceof Error ? error.name : "error"}`);
-      }
-      return false;
-    }
-  }
-
   private async beginAgentTime(thread: ThreadLike, own: Timer): Promise<void> {
     const generation = this.settingsGeneration;
     try {
@@ -260,7 +235,7 @@ export class Tracker {
       void this.files.pull(thread.id);
       // Re-checked after the interactions read: a thread archived meanwhile must
       // not get a non-final send, which would re-attach its dropped state.
-      if (await this.waiting(thread)) return;
+      if (await this.waits.waiting(thread)) return;
       if (this.timers.get(thread.id) !== own) return;
       await this.deliver({ ...ctx, thread }, false, false);
     } catch {
@@ -281,7 +256,7 @@ export class Tracker {
       if (this.timers.get(id) !== own) return;
       this.files.attach(id, ctx.project!, thread.environmentId);
       await this.files.pull(id);
-      if (await this.waiting(thread)) return;
+      if (await this.waits.waiting(thread)) return;
       if (this.timers.get(id) !== own) return;
       // Already paced at the throttle window, so a tick that fires a
       // millisecond early must not be dropped.
@@ -373,25 +348,8 @@ export class Tracker {
     }
   }
 
-  private async unmatchedExcludes(settings: WakatimeSettings): Promise<string[]> {
-    const entries = parseExcludeList(settings.excludeProjects);
-    if (entries.length === 0) return [];
-    return unmatchedEntries(entries, await this.sdk.projects.list({ includePersonal: true }));
-  }
-
-  /** Warn once per distinct `excludeProjects` value, by entry position only. */
   async checkExcludes(): Promise<void> {
-    try {
-      const settings = await this.settings.get();
-      if (settings.excludeProjects === this.checkedExcludes) return;
-      this.checkedExcludes = settings.excludeProjects;
-      const unmatched = await this.unmatchedExcludes(settings);
-      parseExcludeList(settings.excludeProjects).forEach((entry, index) => {
-        if (unmatched.includes(entry)) this.log.warn(`excludeProjects entry #${index + 1} matches no project`);
-      });
-    } catch {
-      this.checkedExcludes = null;
-    }
+    return this.excludes.check();
   }
 
   /** Settings changed: a thread skipped under the old ones may now be timed. */
@@ -408,7 +366,7 @@ export class Tracker {
     const health = this.runner.health();
     let unmatched: string[] = [];
     try {
-      unmatched = await this.unmatchedExcludes(settings);
+      unmatched = await this.excludes.unmatched(settings);
     } catch {
       // The status page still shows the rest.
     }
