@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [agent-hooks, aislop, auto-review, devkit, dir-skills, model-instructions, shared-runtime, wakatime]
+        plugin: [agent-hooks, aislop, auto-review, devkit, dir-skills, model-instructions, shared-runtime, typesafe, wakatime]
         include:
           - coverage: true
           # dir-skills has no runtime tests; its `npm test` is a type-check.
@@ -82,5 +82,5 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           parallel-finished: true
-          carryforward: agent-hooks,aislop,auto-review,devkit,model-instructions,shared-runtime,wakatime
+          carryforward: agent-hooks,aislop,auto-review,devkit,model-instructions,shared-runtime,typesafe,wakatime
           fail-on-error: false

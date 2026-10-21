@@ -1,0 +1,46 @@
+{
+  "name": "@lettland/bb-plugin-typesafe",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Typed Choice/Noul/Score decisions from TypeSafe's Jev model for agents — a typesafe_decide tool plus optional opening-request triage.",
+  "license": "BSD-2-Clause",
+  "engines": {
+    "bb": ">=0.46",
+    "bbPluginSdk": ">=0.6.39"
+  },
+  "bb": {
+    "name": "TypeSafe decisions",
+    "description": "Typed Choice/Noul/Score decisions from TypeSafe's Jev model for agents — a typesafe_decide tool plus optional opening-request triage.",
+    "branding": {
+      "icon": "Scale"
+    },
+    "server": "./server.ts",
+    "skills": [
+      "skills"
+    ]
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.config.ts --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.39",
+    "@types/node": "^22.20.4",
+    "@vitest/coverage-v8": "^4.1.11",
+    "better-sqlite3": "^13.0.3",
+    "cron-parser": "^5.5.0",
+    "hono": "^4.13.9",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}
