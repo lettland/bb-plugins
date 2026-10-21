@@ -281,7 +281,7 @@ export async function reviewSkillLoaded(
   }
   return firstSkillLoad(bb, threadId, sinceSeq).catch((error: unknown): SkillLoad => {
     bb.log.warn(
-      `auto-review: could not read events to check review-code was loaded in ${threadId}; the plan review cannot be verified: ${
+      `auto-review: could not read events to check review-code was loaded in ${threadId}; the review cannot be verified: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );

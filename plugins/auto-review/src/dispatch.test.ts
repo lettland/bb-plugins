@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { commitScanHead, committedSinceHead, devkitRunning } from "./dispatch.js";
-import { buildReviewPrompt, renderScope } from "./prompt.js";
+import { createFakePluginHost, type CreateFakePluginHostOptions } from "@get-bb/plugin-sdk/testing";
+import { createReviewContext, type EffectiveConfig } from "./context.js";
+import { commitScanHead, committedSinceHead, devkitRunning, dispatchReview } from "./dispatch.js";
+import { buildReviewPrompt, renderScope, type ReviewMode } from "./prompt.js";
 import type { ThreadState } from "./state.js";
 
 const state = {
@@ -185,5 +187,105 @@ describe("devkitRunning", () => {
     expect(await devkitRunning(bb)).toBe("unknown");
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("could not list plugins");
+  });
+});
+
+describe("the review-code latch in sendReview", () => {
+  const THREAD_ID = "thr_1";
+  type MetadataCall = { set?: Record<string, unknown>; remove?: string[] };
+  const devkit = { enabled: true, status: "running", cliCommand: { name: "devkit" } };
+
+  async function withDispatch(
+    options: { reviewMode: ReviewMode; plugins: unknown[] | "throws" },
+    body: (calls: MetadataCall[]) => Promise<void>,
+  ) {
+    const calls: MetadataCall[] = [];
+    const sdk = {
+      plugins: {
+        list: async () => {
+          if (options.plugins === "throws") {
+            throw new Error("plugin list unavailable");
+          }
+          return { plugins: options.plugins };
+        },
+      },
+      threads: {
+        timeline: async () => ({ rows: [], maxSeq: 500 }),
+        updatePluginMetadata: async (args: MetadataCall) => {
+          calls.push(args);
+          return {};
+        },
+        send: async () => ({ delivery: "queued", queuedMessage: { id: "qm-1" } }),
+      },
+    } as unknown as CreateFakePluginHostOptions["sdk"];
+    const host = createFakePluginHost({ pluginId: "auto-review", sdk, agentSkillIds: ["auto-review"] });
+    try {
+      await dispatchReview(await createReviewContext(host.bb), {
+        thread: {
+          parentThreadId: null,
+          originPluginId: null,
+          visibility: "public",
+          environmentId: null,
+          providerId: "prov-1",
+          archivedAt: null,
+          id: THREAD_ID,
+          projectId: "project-1",
+        },
+        state: {} as ThreadState,
+        environmentId: "env-1",
+        config: { reviewMode: options.reviewMode } as EffectiveConfig,
+        decision: { commit: true, merge: false },
+        base: "main",
+        isWorktree: false,
+        scope: ["a.ts"],
+        turn: { paths: ["a.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [], parkedCommits: [], parkedPaths: [] },
+      });
+      await body(calls);
+    } finally {
+      await host.harness.dispose();
+    }
+  }
+
+  it("latches reviewSkillRequired in devkit mode, with the cursor in the same write", async () => {
+    await withDispatch({ reviewMode: "devkit", plugins: [] }, async (calls) => {
+      expect(calls[0].set).toMatchObject({
+        phase: "awaiting-review",
+        dispatchedAt: expect.any(Number),
+        lastCodeReviewSeq: 500,
+        reviewSkillRequired: true,
+      });
+      expect(calls[0].remove).not.toContain("reviewSkillRequired");
+    });
+  });
+
+  it("latches reviewSkillRequired when auto mode finds devkit running", async () => {
+    await withDispatch({ reviewMode: "auto", plugins: [devkit] }, async (calls) => {
+      expect(calls[0].set).toMatchObject({ phase: "awaiting-review", lastCodeReviewSeq: 500, reviewSkillRequired: true });
+      expect(calls[0].remove).not.toContain("reviewSkillRequired");
+    });
+  });
+
+  it("clears reviewSkillRequired when auto mode finds devkit absent", async () => {
+    await withDispatch({ reviewMode: "auto", plugins: [] }, async (calls) => {
+      expect(calls[0].set).toMatchObject({ phase: "awaiting-review", lastCodeReviewSeq: 500 });
+      expect(calls[0].set?.reviewSkillRequired).toBeUndefined();
+      expect(calls[0].remove).toContain("reviewSkillRequired");
+    });
+  });
+
+  it("clears reviewSkillRequired when auto mode cannot tell whether devkit is running", async () => {
+    await withDispatch({ reviewMode: "auto", plugins: "throws" }, async (calls) => {
+      expect(calls[0].set).toMatchObject({ phase: "awaiting-review", lastCodeReviewSeq: 500 });
+      expect(calls[0].set?.reviewSkillRequired).toBeUndefined();
+      expect(calls[0].remove).toContain("reviewSkillRequired");
+    });
+  });
+
+  it("clears reviewSkillRequired in self mode, without asking whether devkit runs", async () => {
+    await withDispatch({ reviewMode: "self", plugins: [devkit] }, async (calls) => {
+      expect(calls[0].set).toMatchObject({ phase: "awaiting-review", lastCodeReviewSeq: 500 });
+      expect(calls[0].set?.reviewSkillRequired).toBeUndefined();
+      expect(calls[0].remove).toContain("reviewSkillRequired");
+    });
   });
 });

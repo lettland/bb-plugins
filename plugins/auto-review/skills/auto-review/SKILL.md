@@ -195,6 +195,21 @@ not proof that a review ran: it does not look at how many reviewers were used. `
   `plan-review-unverified`, outcome `stood-down`, plus a warn line). The review may well have
   run.
 
+The same requirement covers code reviews. It is decided once, at dispatch (`devkit` mode, or
+`auto` mode with devkit running), and latched with the review; nothing is recomputed at report
+time. When the agent calls `ReportReview`, the plugin checks the same evidence as the plan
+gate: an agent's own `review-code` load, never a subagent's, read from the cursor captured
+before the send (`lastCodeReviewSeq`), never the delivery cursor, so a load the review prompt
+triggered counts. A latched requirement with no such load records the review as `incomplete`:
+the findings are recorded as reported and the summary kept unchanged, but the outcome becomes
+`incomplete`, an incident is written for the review, the baseline is recorded as not clean, and
+a warn line names the thread and the steps. Outcome `blocked` and the exact stand-down shape
+(`no-changes`, no findings, a summary starting `Stood down: no own edits.`) are exempt; the
+stand-down prefix on any other report is still checked. `"unknown"` (no cursor, a read error,
+missing arguments, or the page cap) is never `incomplete`: the agent's outcome stands, the
+baseline is recorded as not clean, and a warn line is logged. A passing re-report for the same
+review replaces the record and clears the incident.
+
 An expired arm is never checked. A redo whose send or deny fails, or whose queued review is
 cancelled, leaves the plan with the user as any failed hold does (reason `send-failed`, or
 nothing for a cancel), without the disclosure line. A delivered review is not bounded by
@@ -276,7 +291,11 @@ and type, never by value.
   `[a-z0-9._:/-]` (for example `src-foo-ts:null-check`); `file` is a repo-relative path without
   spaces (the nearest file for a finding that is not about one), and `security?` (set it for a
   secret, credential or other security issue: it ends the file's review baseline, and an open one
-  keeps the review's reads from becoming the next baseline).
+  keeps the review's reads from becoming the next baseline). `skipped?` lists the parts of step 1
+  the review did not run as written — the `review-code` workflow or any of its lenses, the
+  self-review, the aislop scan — whether skipped by choice, because another instruction said so,
+  or because it failed; give the reason in the `summary` and the final reply, and a review that
+  declares skipped parts is recorded as `incomplete`.
 - Findings persist per thread as **chains** under their `key` (up to 100 per thread; settled
   chains are evicted first). The next review is told the open chains and recently dismissed
   false positives (up to 15) and should reuse their keys; an open chain outside the files of
@@ -291,11 +310,16 @@ and type, never by value.
   outcomes too: `not-reported` (the review ran but never called the tool; the commit may still
   have happened), `stopped` (the user stopped it, or its queued review was cancelled or reset),
   and `unavailable` (it could not be sent). `not-reported` and `unavailable` also leave an
-  incident (the last 20 are kept). A session that started before the plugin update does not have
-  the tool until it is restarted, so it shows `not-reported` (its incident says to restart); a
-  thread that failed or was archived mid-review shows `not-reported` with an incident saying so.
-  Recording an outcome is best-effort: a storage failure is logged and never keeps a thread
-  latched.
+  incident (the last 20 are kept). A review that did not run as asked is recorded as
+  `incomplete`, never as a pass: the agent listed parts of step 1 it skipped in `skipped`
+  (above), or the `review-code` check (above) found no load when the dispatch latched the
+  requirement. The record becomes `incomplete` with the agent's summary kept, an incident is
+  written for the review, and the baseline is recorded as not clean; a passing re-report for
+  the same review replaces the record and clears the incident. A session that started before
+  the plugin update does not have the tool until it is restarted, so it shows `not-reported`
+  (its incident says to restart); a thread that failed or was archived mid-review shows
+  `not-reported` with an incident saying so. Recording an outcome is best-effort: a storage
+  failure is logged and never keeps a thread latched.
 - Findings are deleted when the thread is deleted (archive and failure keep them); an orphan
   sweep (every 5 minutes, after the deferral sweep, and not skipped when that one fails) removes
   the findings of a thread that no longer exists — only when the host reports it deleted or

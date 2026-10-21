@@ -46,7 +46,10 @@ line. A review that has been delivered runs as long as it needs: its arm expires
 the 2-hour continuation cap (the same bound a code review gets), so the re-presented plan
 is still released as reviewed. An arm past its window — a review still queued 30 minutes
 after it was armed, a delivery this plugin never saw, or an arm past the cap — re-presents
-into a new cycle rather than releasing a plan auto-review never touched.
+into a new cycle rather than releasing a plan auto-review never touched. The same
+requirement also applies to code reviews: when the dispatch latched it as required,
+`ReportReview` verifies the agent itself loaded `review-code` since the cursor captured
+before the send, and records the review `incomplete` when it was not.
 Upgrading: in `devkit` and `auto` (with devkit) modes every plan whose review never loaded
 `review-code` now gets one redo, auto-approve or not, and with auto-approve on such a plan
 is no longer approved automatically. Set the review mode to `self` to opt out.
@@ -462,14 +465,18 @@ It ships enabled (opt-out).
 - After committing, the review turn checks the thread's plan and continues genuinely
   unfinished planned work. It never invents work.
 - Records what each review reported. The review turn ends by calling the `ReportReview` tool
-  with an outcome (`committed`, `merged`, `uncommitted`, `blocked`, `no-changes`), a summary
-  and its findings. Findings persist per thread as chains with stable keys: the next review is
-  told what is still open, a repeat is marked re-raised, and dismissing a false positive a
-  second time needs a new reason. A review that never reported shows as `not-reported`, a
-  stopped or cancelled one as `stopped`, one that could not be sent as `unavailable`; none
-  reads as a pass. Outcomes are agent-reported, not verified against git. A session started
-  before this plugin version does not have the tool until restarted and shows "Review not
-  reported". See `bb auto-review status` and `bb auto-review findings`.
+  with an outcome (`committed`, `merged`, `uncommitted`, `blocked`, `no-changes`), a summary,
+  its findings and the parts of the review it skipped (`skipped`). Findings persist per thread
+  as chains with stable keys: the next review is told what is still open, a repeat is marked
+  re-raised, and dismissing a false positive a second time needs a new reason. A review that
+  never reported shows as `not-reported`, a stopped or cancelled one as `stopped`, one that
+  could not be sent as `unavailable`; none reads as a pass. A review that did not run as asked
+  — the agent declares the parts it skipped in `skipped`, or the `review-code` check finds no
+  load since the pre-send cursor — is recorded as `incomplete`: never as a pass, with no
+  baseline promotion, and a passing re-report for the same review replaces it. Outcomes are
+  agent-reported, not verified against git. A session started before this plugin version does
+  not have the tool until restarted and shows "Review not reported". See `bb auto-review status`
+  and `bb auto-review findings`.
 
 The full behavior, including the branch policy table and every `status` reason, is in
 [`skills/auto-review/SKILL.md`](skills/auto-review/SKILL.md). The skill ships with the

@@ -176,12 +176,14 @@ const STATUS_LABELS: Record<ReviewStatus, string> = {
   "not-reported": "Review not reported",
   stopped: "Review stopped",
   unavailable: "Review unavailable",
+  incomplete: "Review incomplete",
 };
 
 const DESTRUCTIVE_STATUSES: ReadonlySet<ReviewStatus> = new Set([
   "blocked",
   "not-reported",
   "unavailable",
+  "incomplete",
 ]);
 
 // The plugin itself records these; every other outcome is the review agent's claim.
@@ -193,7 +195,11 @@ const PLUGIN_RECORDED_STATUSES: ReadonlySet<ReviewStatus> = new Set([
 ]);
 
 // Any other status can sit beside an incident from a previous review.
-const INCIDENT_IS_CURRENT: ReadonlySet<ReviewStatus> = new Set(["not-reported", "unavailable"]);
+const INCIDENT_IS_CURRENT: ReadonlySet<ReviewStatus> = new Set([
+  "not-reported",
+  "unavailable",
+  "incomplete",
+]);
 
 function statusColor(status: ReviewStatus): string {
   if (DESTRUCTIVE_STATUSES.has(status)) return "var(--destructive-text)";

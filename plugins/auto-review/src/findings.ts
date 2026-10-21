@@ -2,6 +2,7 @@ import { stripControl } from "./text.js";
 import {
   FALSE_POSITIVE_PROMPT_WINDOW_MS,
   FINDING_SEVERITIES,
+  INCOMPLETE_OUTCOME,
   MAX_CHAINS,
   MAX_INCIDENTS,
   MAX_PROMPT_FINDINGS,
@@ -209,6 +210,37 @@ function countFindings(findings: readonly ReportedFinding[]): FindingCounts {
   };
 }
 
+/** Incident detail as it is stored: control characters stripped, capped. */
+function cleanIncidentDetail(detail: string): string {
+  return stripControl(detail).slice(0, 300);
+}
+
+/**
+ * Replaces this review's `incomplete` incident, never appending a duplicate;
+ * without a detail, a passing report for the same review drops it. Other
+ * incidents are untouched.
+ */
+function replaceIncompleteIncident(
+  incidents: Incident[],
+  reviewId: number,
+  now: number,
+  detail: string | undefined,
+): Incident[] {
+  const kept = incidents.filter(
+    (incident) => incident.kind !== "incomplete" || incident.reviewId !== reviewId,
+  );
+  if (detail === undefined) {
+    return kept;
+  }
+  const incident: Incident = {
+    at: now,
+    kind: "incomplete",
+    detail: cleanIncidentDetail(detail),
+    reviewId,
+  };
+  return [...kept, incident].slice(-MAX_INCIDENTS);
+}
+
 /**
  * Folds one review's report into the store. Pure.
  *
@@ -217,12 +249,17 @@ function countFindings(findings: readonly ReportedFinding[]): FindingCounts {
  * goes away or reverts, and fixed-then-open within one review is not a
  * re-raise. A report is never refused as a whole — a repeated dismissal
  * without a new reason is skipped finding by finding, so the outcome is kept.
+ *
+ * With `incomplete`, the record's outcome becomes `incomplete` (the summary is
+ * kept unchanged) and the review's incident is written; without it, a passing
+ * report of the same review drops that incident again.
  */
 export function mergeReport(
   store: FindingsStore,
   report: ReviewReport,
   reviewId: number,
   now: number,
+  incomplete?: { detail: string },
 ): MergeResult {
   // The same key twice in one report is one finding; the later entry wins.
   const byKey = new Map(report.findings.map((finding) => [finding.key, finding]));
@@ -244,8 +281,14 @@ export function mergeReport(
   return {
     store: {
       chains: evict(chains, new Set(byKey.keys())),
-      lastReport: { reviewId, at: now, outcome: report.outcome, summary: report.summary, counts },
-      incidents: store.incidents,
+      lastReport: {
+        reviewId,
+        at: now,
+        outcome: incomplete === undefined ? report.outcome : INCOMPLETE_OUTCOME,
+        summary: report.summary,
+        counts,
+      },
+      incidents: replaceIncompleteIncident(store.incidents, reviewId, now, incomplete?.detail),
     },
     ignored,
     counts,
@@ -271,7 +314,7 @@ export function withUnreportedOutcome(
       ? store.incidents
       : [
           ...store.incidents,
-          { at: now, kind: entry.incident.kind, detail: stripControl(entry.incident.detail).slice(0, 300) },
+          { at: now, kind: entry.incident.kind, detail: cleanIncidentDetail(entry.incident.detail) },
         ].slice(-MAX_INCIDENTS);
   return {
     chains: store.chains,

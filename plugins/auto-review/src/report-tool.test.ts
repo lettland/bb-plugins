@@ -15,7 +15,21 @@ const CTX = { threadId: THREAD_ID, projectId: "project-1" };
 interface Options {
   queuedRows?: Array<{ id: string }>;
   timelineThrows?: boolean;
+  /** Completed timeline items, as `reviewSkillLoaded` reads them. */
+  events?: Array<{ seq: number; type: "item/completed"; item?: Record<string, unknown> }>;
 }
+
+/** The agent's own `review-code` load, as real rows carry it (mirrors plan.test.ts). */
+const agentLoadRow = (seq: number): NonNullable<Options["events"]>[number] => ({
+  seq,
+  type: "item/completed",
+  item: {
+    type: "toolCall",
+    tool: "devkit_load_skill",
+    status: "completed",
+    arguments: { slug: "review-code" },
+  },
+});
 
 async function withHost(
   options: Options,
@@ -37,6 +51,14 @@ async function withHost(
           throw new Error("timeline down");
         }
         return { rows: [], maxSeq: 77 };
+      },
+      events: {
+        list: async (args: { afterSeq: string; types: readonly string[]; limit: string }) =>
+          (options.events ?? [])
+            .filter((row) => args.types.includes(row.type) && row.seq > Number(args.afterSeq))
+            .sort((first, second) => first.seq - second.seq)
+            .slice(0, Number(args.limit))
+            .map((row) => ({ seq: row.seq, type: row.type, data: { item: row.item } })),
       },
       queuedMessages: { list: async () => options.queuedRows ?? [] },
     },
@@ -64,6 +86,32 @@ const call = (host: ReturnType<typeof createFakePluginHost>, input: unknown) =>
   host.harness.callAgentTool(REPORT_REVIEW_TOOL_NAME, input, CTX);
 
 const REPORT = { outcome: "committed", summary: "done", findings: [finding()] };
+
+/** State with the `review-code` requirement latched and the pre-send cursor set. */
+const REQUIRED_STATE = {
+  phase: "awaiting-review",
+  dispatchedAt: 1,
+  reviewDeliveredAt: 500,
+  reviewSkillRequired: true,
+  lastCodeReviewSeq: 100,
+};
+
+const BASELINE_KEY = `baseline:code:${THREAD_ID}`;
+
+const seedBaseline = (host: ReturnType<typeof createFakePluginHost>): Promise<unknown> =>
+  host.bb.storage.kv.set(BASELINE_KEY, {
+    copies: {},
+    pending: { headSha: "head-1", at: 1, files: { "src/a.ts": "a1\n" } },
+  });
+
+const baselineClean = async (host: ReturnType<typeof createFakePluginHost>): Promise<boolean | undefined> =>
+  ((await host.bb.storage.kv.get(BASELINE_KEY)) as { clean?: boolean } | null)?.clean;
+
+/** The plugin's own warnings; the fake host keeps every log entry. */
+const autoReviewWarns = (host: ReturnType<typeof createFakePluginHost>): string[] =>
+  host.harness.logEntries
+    .filter((entry) => entry.level === "warn" && entry.message.startsWith("auto-review:"))
+    .map((entry) => entry.message);
 
 function isRejected(result: Awaited<ReturnType<typeof call>>): boolean {
   return typeof result !== "string" && result.isError === true;
@@ -188,6 +236,204 @@ describe("ReportReview", () => {
     });
   });
 
+  it("records a report as incomplete when the required review-code was not loaded after the pre-send cursor", async () => {
+    await withHost({ events: [] }, async (host, metadata) => {
+      Object.assign(metadata, REQUIRED_STATE);
+      await seedBaseline(host);
+      const result = await call(host, REPORT);
+      expect(typeof result).toBe("string");
+      expect(result).toContain("incomplete, not committed");
+      expect(result).toContain("review-code was not loaded");
+      expect(result).toContain("did not run in full");
+      expect(result).toContain("already committed without the full review");
+      const store = await readFindings(host.bb, THREAD_ID);
+      expect(store.lastReport).toMatchObject({ reviewId: 500, outcome: "incomplete", summary: "done" });
+      expect(store.incidents).toEqual([
+        expect.objectContaining({
+          kind: "incomplete",
+          reviewId: 500,
+          detail: "Reported as committed; not run: review-code was not loaded",
+        }),
+      ]);
+      expect(await baselineClean(host)).toBe(false);
+      expect(autoReviewWarns(host)).toEqual([
+        expect.stringContaining(`${THREAD_ID} was incomplete, not run: review-code was not loaded`),
+      ]);
+    });
+  });
+
+  it("names work that already landed only when the outcome says it did", async () => {
+    await withHost({ events: [] }, async (host, metadata) => {
+      Object.assign(metadata, REQUIRED_STATE);
+      const merged = await call(host, { outcome: "merged", summary: "again", findings: [] });
+      expect(merged).toContain("already merged without the full review");
+      const uncommitted = await call(host, { ...REPORT, outcome: "uncommitted" });
+      expect(uncommitted).toContain("incomplete, not uncommitted");
+      expect(uncommitted).not.toContain("without the full review");
+    });
+  });
+
+  it("ignores a review-code load from before the pre-send cursor", async () => {
+    await withHost({ events: [agentLoadRow(90)] }, async (host, metadata) => {
+      Object.assign(metadata, REQUIRED_STATE);
+      const result = await call(host, REPORT);
+      expect(result).toContain("incomplete, not committed");
+      expect((await readFindings(host.bb, THREAD_ID)).lastReport).toMatchObject({ outcome: "incomplete" });
+    });
+  });
+
+  it("reads the evidence from the pre-send cursor: a load after it but before the delivery counts", async () => {
+    await withHost({ events: [agentLoadRow(150)] }, async (host, metadata) => {
+      Object.assign(metadata, { ...REQUIRED_STATE, reviewDeliveredSeq: 200 });
+      const result = await call(host, REPORT);
+      expect(result).toContain("committed (1 open, 0 fixed, 0 false positive)");
+      const store = await readFindings(host.bb, THREAD_ID);
+      expect(store.lastReport).toMatchObject({ outcome: "committed" });
+      expect(store.incidents).toEqual([]);
+    });
+  });
+
+  it("reads the pre-send cursor on the missed-dispatch path, where delivery lands after the load", async () => {
+    await withHost({ queuedRows: [], events: [agentLoadRow(60)] }, async (host, metadata) => {
+      Object.assign(metadata, {
+        phase: "pending-dispatch",
+        pendingEntryId: "qm-1",
+        dispatchedAt: 1,
+        reviewSkillRequired: true,
+        lastCodeReviewSeq: 50,
+      });
+      const result = await call(host, REPORT);
+      expect(typeof result).toBe("string");
+      expect(metadata.phase).toBe("awaiting-review");
+      expect(metadata.reviewDeliveredSeq).toBe(77);
+      expect((await readFindings(host.bb, THREAD_ID)).lastReport).toMatchObject({ outcome: "committed" });
+    });
+  });
+
+  it("does not consult the log when the requirement was not latched", async () => {
+    await withHost({ events: [] }, async (host, metadata) => {
+      Object.assign(metadata, { phase: "awaiting-review", dispatchedAt: 1, reviewDeliveredAt: 500 });
+      await seedBaseline(host);
+      const result = await call(host, REPORT);
+      expect(result).toContain("committed (1 open, 0 fixed, 0 false positive)");
+      expect((await readFindings(host.bb, THREAD_ID)).lastReport).toMatchObject({ outcome: "committed" });
+      expect(await baselineClean(host)).toBe(true);
+    });
+  });
+
+  it("keeps the reported outcome but records the baseline as not clean when no cursor can bound the check", async () => {
+    await withHost({}, async (host, metadata) => {
+      Object.assign(metadata, {
+        phase: "awaiting-review",
+        dispatchedAt: 1,
+        reviewDeliveredAt: 500,
+        reviewSkillRequired: true,
+      });
+      await seedBaseline(host);
+      const result = await call(host, REPORT);
+      expect(result).toContain("committed (1 open, 0 fixed, 0 false positive)");
+      const store = await readFindings(host.bb, THREAD_ID);
+      expect(store.lastReport).toMatchObject({ outcome: "committed" });
+      expect(store.incidents).toEqual([]);
+      expect(await baselineClean(host)).toBe(false);
+      expect(autoReviewWarns(host)).toHaveLength(1);
+    });
+  });
+
+  it("exempts a blocked report from the check, recorded as before", async () => {
+    await withHost({ events: [] }, async (host, metadata) => {
+      Object.assign(metadata, REQUIRED_STATE);
+      await seedBaseline(host);
+      const result = await call(host, { outcome: "blocked", summary: "stopping", findings: [] });
+      expect(typeof result).toBe("string");
+      const store = await readFindings(host.bb, THREAD_ID);
+      expect(store.lastReport).toMatchObject({ outcome: "blocked" });
+      expect(store.incidents).toEqual([]);
+      expect(await baselineClean(host)).toBe(false);
+    });
+  });
+
+  it("exempts a stand-down in its exact shape, with a baseline that is never clean", async () => {
+    await withHost({ events: [] }, async (host, metadata) => {
+      Object.assign(metadata, REQUIRED_STATE);
+      await seedBaseline(host);
+      const result = await call(host, {
+        outcome: "no-changes",
+        summary: "Stood down: no own edits.",
+        findings: [],
+      });
+      expect(typeof result).toBe("string");
+      const store = await readFindings(host.bb, THREAD_ID);
+      expect(store.lastReport).toMatchObject({ outcome: "no-changes" });
+      expect(store.incidents).toEqual([]);
+      expect(await baselineClean(host)).toBe(false);
+    });
+  });
+
+  it("still checks the stand-down prefix on a report that is not a stand-down", async () => {
+    await withHost({ events: [] }, async (host, metadata) => {
+      Object.assign(metadata, REQUIRED_STATE);
+      const result = await call(host, {
+        outcome: "merged",
+        summary: "Stood down: no own edits.",
+        findings: [],
+      });
+      expect(result).toContain("incomplete, not merged");
+      expect((await readFindings(host.bb, THREAD_ID)).lastReport).toMatchObject({ outcome: "incomplete" });
+    });
+  });
+
+  it("records a report as incomplete when the agent itself declared skipped steps, with the skill loaded", async () => {
+    await withHost({ events: [agentLoadRow(150)] }, async (host, metadata) => {
+      Object.assign(metadata, REQUIRED_STATE);
+      const result = await call(host, { ...REPORT, skipped: ["the aislop scan"] });
+      expect(result).toContain("incomplete, not committed");
+      expect(result).toContain("the aislop scan");
+      const store = await readFindings(host.bb, THREAD_ID);
+      expect(store.lastReport).toMatchObject({ outcome: "incomplete" });
+      expect(store.incidents).toEqual([
+        expect.objectContaining({
+          kind: "incomplete",
+          reviewId: 500,
+          detail: "Reported as committed; not run: the aislop scan",
+        }),
+      ]);
+    });
+  });
+
+  it("lets a passing report of the same review replace an incomplete one, incident and baseline included", async () => {
+    const events: NonNullable<Options["events"]> = [];
+    await withHost({ events }, async (host, metadata) => {
+      Object.assign(metadata, REQUIRED_STATE);
+      await seedBaseline(host);
+      await call(host, REPORT);
+      expect((await readFindings(host.bb, THREAD_ID)).lastReport).toMatchObject({ outcome: "incomplete" });
+      events.push(agentLoadRow(150));
+      const result = await call(host, REPORT);
+      expect(result).toContain("committed (1 open, 0 fixed, 0 false positive)");
+      const store = await readFindings(host.bb, THREAD_ID);
+      expect(store.lastReport).toMatchObject({ outcome: "committed" });
+      expect(store.incidents).toEqual([]);
+      expect(await baselineClean(host)).toBe(true);
+    });
+  });
+
+  it("replaces, never stacks, the incomplete incident of one review", async () => {
+    await withHost({ events: [] }, async (host, metadata) => {
+      Object.assign(metadata, REQUIRED_STATE);
+      await call(host, REPORT);
+      await call(host, { ...REPORT, skipped: ["the aislop scan"] });
+      const store = await readFindings(host.bb, THREAD_ID);
+      expect(store.incidents).toEqual([
+        expect.objectContaining({
+          kind: "incomplete",
+          reviewId: 500,
+          detail: "Reported as committed; not run: review-code was not loaded, the aislop scan",
+        }),
+      ]);
+    });
+  });
+
   it("is registered with a description that limits when to call it", async () => {
     await withHost({}, async (host) => {
       const configured = await host.harness.resolveAgentConfiguration(
@@ -200,6 +446,7 @@ describe("ReportReview", () => {
       const tool = configured.tools.find((entry) => entry.name === REPORT_REVIEW_TOOL_NAME);
       expect(tool?.description).toContain("Only call this when an [bb auto-review] prompt asks you to");
       expect(tool?.description).toContain("never by value");
+      expect(tool?.description).toContain("List in `skipped` each step of the review that did not run as written.");
     });
   });
 });

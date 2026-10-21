@@ -26,12 +26,17 @@ export type AgentOutcome = (typeof AGENT_OUTCOMES)[number];
 /**
  * The plugin's own outcomes, for reviews that ended without a report: it ran
  * but never reported, the user stopped it, or it could not be sent at all. They
- * exist so such a review never looks like a pass.
+ * exist so such a review never looks like a pass. An incomplete review is not
+ * one of them even though the plugin records it too: it rides in through
+ * `mergeReport` on the agent's own report, never as an unreported outcome.
  */
 export const PLUGIN_OUTCOMES = ["not-reported", "stopped", "unavailable"] as const;
 export type PluginOutcome = (typeof PLUGIN_OUTCOMES)[number];
 
-export const REVIEW_OUTCOMES = [...AGENT_OUTCOMES, ...PLUGIN_OUTCOMES] as const;
+/** The outcome for a review that did not run as asked: never an agent outcome, so no report can pass it. */
+export const INCOMPLETE_OUTCOME = "incomplete";
+
+export const REVIEW_OUTCOMES = [...AGENT_OUTCOMES, ...PLUGIN_OUTCOMES, INCOMPLETE_OUTCOME] as const;
 export type ReviewOutcome = (typeof REVIEW_OUTCOMES)[number];
 
 /** How many chains one thread keeps, and how many incidents. */
@@ -74,6 +79,8 @@ export const reviewReportSchema = z.object({
   outcome: z.enum(AGENT_OUTCOMES),
   summary: cleanText(500),
   findings: z.array(reportedFindingSchema).max(50).default([]),
+  /** The parts of review step 1 the agent did not run as written. */
+  skipped: z.array(cleanText(120).pipe(z.string().min(1))).max(10).optional(),
 });
 export type ReviewReport = z.output<typeof reviewReportSchema>;
 
@@ -121,8 +128,10 @@ export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
 
 export const incidentSchema = z.object({
   at: z.number(),
-  kind: z.enum(["send-failed", "not-reported"]),
+  kind: z.enum(["send-failed", "not-reported", "incomplete"]),
   detail: z.string(),
+  /** For an `incomplete` incident: the review it belongs to, so a later report of it can replace or clear it. */
+  reviewId: z.number().optional(),
 });
 export type Incident = z.infer<typeof incidentSchema>;
 

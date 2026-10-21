@@ -67,7 +67,7 @@ export async function devkitRunning(bb: BbPluginApi): Promise<"running" | "absen
   const serves = await pluginServesCommand(
     bb,
     "devkit",
-    "auto-review: could not list plugins to tell whether devkit is running; the plan review cannot be verified",
+    "auto-review: could not list plugins to tell whether devkit is running; the review-code check cannot run",
   );
   return serves === null ? "unknown" : serves ? "running" : "absent";
 }
@@ -154,15 +154,19 @@ async function sendReview(
   thread: GateThreadLike,
   prompt: string,
   extra: FireExtra,
+  reviewSkillRequired: boolean,
 ): Promise<void> {
   const { bb } = ctx;
   const dispatchedAt = Date.now();
   const cursor = await codeReviewCursor(bb, thread.id);
+  const skillLatch: { set: Partial<ThreadState>; remove: string[] } = reviewSkillRequired
+    ? { set: { reviewSkillRequired: true }, remove: [] }
+    : { set: {}, remove: ["reviewSkillRequired"] };
   await writeState(
     bb,
     thread.id,
-    { phase: "awaiting-review", dispatchedAt, ...cursor },
-    ["pendingEntryId", "deferredSince", "heldBy"],
+    { phase: "awaiting-review", dispatchedAt, ...cursor, ...skillLatch.set },
+    ["pendingEntryId", "deferredSince", "heldBy", ...skillLatch.remove],
   );
   await addReview(bb, { threadId: thread.id, providerId: thread.providerId });
   await removeDeferral(bb, thread.id);
@@ -230,6 +234,12 @@ export async function dispatchReview(
 
     const prior = openFindingsForPrompt(await readFindings(ctx.bb, thread.id), Date.now());
     const rendered = renderScope(scope);
+    // Whether this review's prompt requires devkit's `review-code` — the rule
+    // `planSkillCheck` applies to plans, decided from the dispatch-time config
+    // alone; absent and unknown devkit are lenient. Latched for `ReportReview`.
+    const reviewSkillRequired =
+      config.reviewMode === "devkit" ||
+      (config.reviewMode === "auto" && (await devkitRunning(ctx.bb)) === "running");
     const prompt = buildReviewPrompt({
       decision,
       reviewMode: config.reviewMode,
@@ -246,7 +256,7 @@ export async function dispatchReview(
       priorFindingsOmitted: prior.omitted,
     });
     // A re-park records no parked fields: it reviewed nothing, and the next evaluation decides again.
-    await sendReview(ctx, thread, prompt, { ...extra, ...parkedFire(turn) });
+    await sendReview(ctx, thread, prompt, { ...extra, ...parkedFire(turn) }, reviewSkillRequired);
     return false;
   });
   // Hashing the tree stays out of the provider lock so it does not serialise other dispatches. It is read afresh, after the snapshot's start time, for `withoutParked`.

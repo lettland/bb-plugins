@@ -650,6 +650,9 @@ describe("buildReviewPrompt", () => {
       expect(last).toContain("repo-relative path without spaces");
       expect(last).toContain("ToolSearch");
       expect(last).toContain("never by value");
+      expect(last).toContain("did not run any part of step 1 as written (the `review-code` workflow or any of its lenses, the self-review, or any other step it lists)");
+      expect(last).toContain("list each such part in `skipped` and give the reason in `summary` and in your final reply");
+      expect(last).toContain("recorded as `incomplete`, and you must never report or describe it as clean");
       expect(last).toContain("the last report wins");
       expect(last).toContain("truly cannot be found");
       // Numbered consecutively, the report step following the branch's last step.

@@ -157,20 +157,29 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   not proof a review ran; a turn ending does not void it, unlike the auto-approve proof). A plan
   whose review never loaded it is sent back once for a full re-review (reason `plan-review-redo`);
   a second miss is released without an auto-approve (`plan-review-incomplete`), and a check that
-  cannot be made releases it without a redo or an auto-approve (`plan-review-unverified`).
+  cannot be made releases it without a redo or an auto-approve (`plan-review-unverified`). The
+  same requirement (decided at dispatch and latched) covers code reviews: `ReportReview` reads
+  the agent's own load from the cursor captured before the send (`lastCodeReviewSeq`), never the
+  delivery cursor, and records the review `incomplete` — an incident, and no clean baseline —
+  when it was not; `blocked` and the exact stand-down are exempt, and `"unknown"` never records
+  `incomplete`.
 - The review turn ends by calling the `ReportReview` agent tool (offered to every top-level,
   non-plugin thread on every provider, whatever the global switch says; inert outside a review)
-  with an outcome (`committed`, `merged`, `uncommitted`, `blocked`, `no-changes`), a summary and
-  structured findings. Findings persist per thread as chains with stable keys (plugin KV,
-  `findings:<thread id>`): the next review is told what is still open, a repeat is marked
-  re-raised (severity keeps its maximum), and dismissing a finding as a false positive a second
-  time needs a new reason. The last report of a review replaces earlier ones. Outcomes are
-  agent-reported, not verified against git; a review that ran but never reported is recorded as
-  `not-reported`, one the user stopped or cancelled as `stopped`, one that could not be sent as
-  `unavailable` — none of these ever reads as a pass. A session started before the plugin
-  update does not have the tool until restarted, so its reviews show "Review not reported".
-  Recording an outcome is best-effort and never blocks the latch reset; the orphan sweep deletes
-  a thread's findings only on a deleted thread or a structured `thread_not_found` / 404.
+  with an outcome (`committed`, `merged`, `uncommitted`, `blocked`, `no-changes`), a summary,
+  structured findings and the parts of the review the agent skipped (`skipped`). Findings
+  persist per thread as chains with stable keys (plugin KV, `findings:<thread id>`): the
+  next review is told what is still open, a repeat is marked re-raised (severity keeps its
+  maximum), and dismissing a finding as a false positive a second time needs a new reason. The
+  last report of a review replaces earlier ones. Outcomes are agent-reported, not verified
+  against git; a review that ran but never reported is recorded as `not-reported`, one the user
+  stopped or cancelled as `stopped`, one that could not be sent as `unavailable`, and one that
+  did not run as asked (its `skipped` steps, or the `review-code` check finding no load) as
+  `incomplete` — none of these ever reads as a pass, and a passing re-report for the same
+  review replaces an `incomplete` record and clears its incident. A session started before
+  the plugin update does not have the tool until restarted, so its reviews show "Review not
+  reported". Recording an outcome is best-effort and never blocks the latch reset; the orphan
+  sweep deletes a thread's findings only on a deleted thread or a structured
+  `thread_not_found` / 404.
 - Ships enabled (opt-out). Turn it off globally or per project with `bb auto-review`;
   there is no per-thread skip.
 

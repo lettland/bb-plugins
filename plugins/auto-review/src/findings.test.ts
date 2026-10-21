@@ -363,6 +363,59 @@ describe("mergeReport: one review, many reports", () => {
   });
 });
 
+describe("mergeReport: incomplete reviews", () => {
+  it("records the outcome as incomplete, keeps the summary and writes the review's incident", () => {
+    const { store } = mergeReport(
+      emptyStore(),
+      report([], { summary: "Ran the scan; not the lenses" }),
+      7,
+      T0,
+      { detail: "Reported as no-changes; not run: the five lenses" },
+    );
+    expect(store.lastReport).toEqual({
+      reviewId: 7,
+      at: T0,
+      outcome: "incomplete",
+      summary: "Ran the scan; not the lenses",
+      counts: { open: 0, fixed: 0, falsePositive: 0 },
+    });
+    expect(store.incidents).toEqual([
+      {
+        at: T0,
+        kind: "incomplete",
+        detail: "Reported as no-changes; not run: the five lenses",
+        reviewId: 7,
+      },
+    ]);
+  });
+
+  it("cleans the incident detail and caps it", () => {
+    const { store } = mergeReport(emptyStore(), report([]), 1, T0, {
+      detail: `bad\u0000${"x".repeat(400)}`,
+    });
+    expect(store.incidents[0]?.detail).toHaveLength(300);
+    expect(store.incidents[0]?.detail.startsWith("bad")).toBe(true);
+  });
+
+  it("replaces the review's incident instead of stacking, and a passing report clears it", () => {
+    // An earlier review's unrelated incident, which none of this touches.
+    const base = withUnreportedOutcome(
+      emptyStore(),
+      { reviewId: 1, outcome: "not-reported", summary: "s", incident: { kind: "not-reported", detail: "d" } },
+      T0,
+    );
+    let store = mergeReport(base, report([]), 3, T0 + 1, { detail: "first" }).store;
+    store = mergeReport(store, report([]), 3, T0 + 2, { detail: "second" }).store;
+    expect(store.incidents).toEqual([
+      { at: T0, kind: "not-reported", detail: "d" },
+      { at: T0 + 2, kind: "incomplete", detail: "second", reviewId: 3 },
+    ]);
+    store = mergeReport(store, report([finding()]), 3, T0 + 3).store;
+    expect(store.lastReport).toMatchObject({ reviewId: 3, outcome: "committed" });
+    expect(store.incidents).toEqual([{ at: T0, kind: "not-reported", detail: "d" }]);
+  });
+});
+
 describe("mergeReport: eviction", () => {
   function crowded(settled: "fixed" | "false-positive" = "fixed"): FindingsStore {
     const chains: FindingsStore["chains"] = {};
@@ -441,13 +494,14 @@ describe("report schema", () => {
     expect(parsed.findings[0]).toMatchObject({ title: "xyzwvu", reason: "xyzwvu" });
   });
 
-  it("rejects a bad key, an unsafe path, an unknown severity and an agent-set plugin outcome", () => {
+  it("rejects a bad key, an unsafe path, an unknown severity and an outcome the agent cannot set", () => {
     expect(reportedFindingSchema.safeParse({ ...valid, key: "Bad Key" }).success).toBe(false);
     expect(reportedFindingSchema.safeParse({ ...valid, key: "-lead" }).success).toBe(false);
     expect(reportedFindingSchema.safeParse({ ...valid, file: "src/a b.ts" }).success).toBe(false);
     expect(reportedFindingSchema.safeParse({ ...valid, file: "../`rm`" }).success).toBe(false);
     expect(reportedFindingSchema.safeParse({ ...valid, severity: "critical" }).success).toBe(false);
     expect(reviewReportSchema.safeParse({ outcome: "not-reported", summary: "x" }).success).toBe(false);
+    expect(reviewReportSchema.safeParse({ outcome: "incomplete", summary: "x" }).success).toBe(false);
   });
 
   it("requires a reason for a false positive", () => {

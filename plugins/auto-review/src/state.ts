@@ -116,6 +116,14 @@ export const threadStateSchema = z.object({
    */
   lastCodeReviewSeq: z.number().int().nonnegative().optional(),
   /**
+   * Latched at dispatch time with whether the code-review prompt required
+   * devkit's `review-code` (devkit mode, or auto mode with devkit running).
+   * `ReportReview` reads it at report time and never recomputes it there: the
+   * devkit plugin may come and go between the send and the report. A latch
+   * key, so every reset clears it together with the phase it belongs to.
+   */
+  reviewSkillRequired: z.literal(true).optional(),
+  /**
    * Set when a plan's first presentation was held back for review; the next
    * presentation (the reviewed plan) is released to the user and clears it.
    * Deliberately not a latch key: an idle reset must not re-arm plan review
@@ -244,6 +252,7 @@ export const LATCH_KEYS: readonly string[] = [
   "userTurnAuthored",
   "userStopFloorSeq",
   "handledTurnEndSeq",
+  "reviewSkillRequired",
 ];
 
 /** Native plan-gate keys, cleared together whenever that gate disarms. */
