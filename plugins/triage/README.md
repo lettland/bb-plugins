@@ -5,6 +5,10 @@ Run tasks now or schedule them for later, organize them into configurable stages
 and turn existing BB sessions into cards. Open each card's linked conversation
 to follow the work.
 
+Based on [MayankBansal12/bb-plugin-triage](https://github.com/MayankBansal12/bb-plugin-triage);
+this copy is maintained in the [lettland/bb-plugins](https://github.com/lettland/bb-plugins)
+collection.
+
 ## Screenshots
 
 Track tasks across stages, projects, and machines.
@@ -30,22 +34,40 @@ Triage stores cards and update history in BB's plugin-owned SQLite database.
 It does not require a separate Triage account or external task service.
 Browser notifications require your permission.
 
-## Install from Git
+## Install
 
-Install the current main branch with:
+Install from npm (tracks compatible releases):
 
 ```sh
-bb plugin install git:https://github.com/MayankBansal12/bb-plugin-triage.git@main
+bb plugin install npm:@lettland/bb-plugin-triage
 ```
 
-This tracks development on `main`.
+Or from this collection over git:
+
+```sh
+bb plugin install git:https://github.com/lettland/bb-plugins.git --plugin triage
+```
+
+### Switching from upstream
+
+If you previously installed the upstream build:
+
+1. Back up `~/.bb/plugins/triage/` — the board lives in its `data.db`.
+2. Run `bb plugin remove triage`. This deletes the plugin's settings and schedules.
+3. Install this build (see above).
+4. If the board comes back empty, stop bb, copy your backed-up `data.db` back into `~/.bb/plugins/triage/`, and start bb again.
 
 ## Development
 
+This plugin lives in the
+[lettland/bb-plugins](https://github.com/lettland/bb-plugins) monorepo (see the
+root README's "Local development"). From `plugins/triage`, under the Node
+version pinned in the repo's `.nvmrc`:
+
 ```sh
-npm ci
-bb plugin install .
-bb plugin dev
+npm install --include=dev --legacy-peer-deps
+npm test
+bb plugin build
 ```
 
 The plugin stores its board in BB's plugin-owned SQLite database. Worker
@@ -95,9 +117,9 @@ subsequent agent configuration. Importing does not interrupt a running turn.
 
 ## Compatibility and verification
 
-Requires BB 0.42+ and a compatible Plugin SDK 0.4.47 runtime. For a reproducible
-checkout, run `npm ci`, `npm run typecheck`, `npm test`, and `bb plugin build`.
-The GitHub Actions workflow checks types, tests, and production dependencies.
+Requires BB 0.42+ and Plugin SDK 0.4.47 or newer. This repository's GitHub
+Actions workflow runs `npm test` (`tsc --noEmit` plus the test suite) on every
+push and pull request.
 
 New cards start in To Do. Agent execution moves them to In Progress; agents are
 instructed to explicitly report completion or a need for attention. Ending a turn
