@@ -6,6 +6,7 @@ import {
   planApprovalOf,
   planGateAction,
   planSkillCheck,
+  reviewRanSince,
   reviewReachedAgent,
   reviewSkillLoaded,
   userQuestionOf,
@@ -194,6 +195,17 @@ describe("reviewReachedAgent", () => {
     expect(reviewReachedAgent([subagent], GATE_TOOLS, true, false)).toBe(true);
     expect(reviewReachedAgent([subagent], GATE_TOOLS, false, false)).toBe(false);
     expect(reviewReachedAgent([subagent, read()], GATE_TOOLS, false, false)).toBe(true);
+  });
+});
+
+describe("reviewRanSince", () => {
+  const GATE_TOOLS = ["ExitPlanMode", "EnterPlanMode", "AskUserQuestion"];
+
+  it("is true across a turn end when acrossTurns, and reads no turn ends", async () => {
+    // The review's children ended the turn; bb wakes the agent in a later one.
+    const across = eventsBb([readRow(101), { seq: 102, type: "turn/completed" }]);
+    expect(await reviewRanSince(across.bb, "t", 100, GATE_TOOLS, false, true)).toBe(true);
+    expect(across.calls.every((call) => call.types.includes("item/completed"))).toBe(true);
   });
 });
 

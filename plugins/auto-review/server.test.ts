@@ -6152,6 +6152,39 @@ describe("auto-review plugin: review baselines", () => {
       await host.harness.dispose();
     });
 
+    it("promotes the pending text when the review spans turns, then embeds only the delta next cycle", async () => {
+      const host = await nativeHost();
+      await emitPlan(host, planInteraction(V1, "pint-1"));
+      await host.harness.behavior.emitThreadEvent("message.dispatched", { entry: queueEntry() });
+      host.completeItem({ seq: 101, item: READ });
+      // The review's child threads ended the turn; bb wakes the agent in a later one.
+      host.completeTurn(102);
+      await emitPlan(host, planInteraction(`${V1}\nreviewed\n`, "pint-2"));
+      expect(await planRecord(host)).toEqual({ copy: { content: V1, at: expect.any(Number) } });
+
+      await emitPlan(host, planInteraction(V2, "pint-3"));
+      const second = promptText(host, 1);
+      expect(second).toContain("```diff");
+      expect(second).toContain("-step 2\n+step 2b");
+      expect(second).toContain("`delta vs baseline`");
+      await host.harness.dispose();
+    });
+
+    it("leaves a turn-spanning review's plan with the user under auto-approve, but still promotes the baseline", async () => {
+      const host = await nativeHost({}, true);
+      await emitPlan(host, planInteraction(V1, "pint-1"));
+      await host.harness.behavior.emitThreadEvent("message.dispatched", { entry: queueEntry() });
+      host.completeItem({ seq: 101, item: READ });
+      host.completeTurn(102);
+      await emitPlan(host, planInteraction(`${V1}\nreviewed\n`, "pint-2"));
+      expect(host.resolutions.at(-1)).toMatchObject({
+        interactionId: "pint-1",
+        resolution: { decision: "deny" },
+      });
+      expect(await planRecord(host)).toEqual({ copy: { content: V1, at: expect.any(Number) } });
+      await host.harness.dispose();
+    });
+
     it("skips the review when the plan is unchanged since its last reviewed cycle", async () => {
       const host = await nativeHost();
       await reviewedCycle(host, V1, ["pint-1", "pint-2"]);
@@ -6289,6 +6322,31 @@ describe("auto-review plugin: review baselines", () => {
       host.completeItem({ seq: 101, item: READ });
       expect(await present(host)).toBe(PRESENT_PLAN_APPROVED_MESSAGE);
       expect(await planRecord(host)).toBeNull();
+      rmSync(dir, { recursive: true, force: true });
+      await host.harness.dispose();
+    });
+
+    it("promotes the baseline when the review spans turns between the two calls", async () => {
+      const host = await presentHost();
+      await present(host);
+      host.completeItem({ seq: 101, item: READ });
+      // The review's child threads ended the turn; bb wakes the agent in a later one.
+      host.completeTurn(102);
+      writeFileSync(file, `${V1}fixed by the review\n`);
+      expect(await present(host)).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+      expect(await planRecord(host)).toEqual({ copy: { content: V1, at: expect.any(Number) } });
+      rmSync(dir, { recursive: true, force: true });
+      await host.harness.dispose();
+    });
+
+    it("does not auto-approve a release whose review spanned turns, but still promotes the baseline", async () => {
+      const host = await presentHost(true);
+      await present(host);
+      host.completeItem({ seq: 101, item: READ });
+      host.completeTurn(102);
+      writeFileSync(file, `${V1}fixed by the review\n`);
+      expect(await present(host)).not.toBe(PRESENT_PLAN_APPROVED_MESSAGE);
+      expect(await planRecord(host)).toEqual({ copy: { content: V1, at: expect.any(Number) } });
       rmSync(dir, { recursive: true, force: true });
       await host.harness.dispose();
     });

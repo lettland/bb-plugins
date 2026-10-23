@@ -107,11 +107,17 @@ async function releasePlan(
     return presentPlanRedoMessage(config.reviewMode);
   }
   await writeState(bb, ctx.threadId, {}, [...PRESENT_PLAN_KEYS]);
-  const reviewRan =
+  // The baseline accepts a review that spans turns: child-thread reviewers end
+  // the turn and bb wakes the agent later. Auto-approve still needs the
+  // same-turn proof.
+  const reviewWorked =
     check === "loaded" &&
     state.presentPlanArmedSeq !== undefined &&
-    (await reviewRanSince(bb, ctx.threadId, state.presentPlanArmedSeq, PRESENT_PLAN_GATE_TOOLS, true));
-  await settlePlanBaseline(bb, ctx.threadId, planFilePath, reviewRan);
+    (await reviewRanSince(bb, ctx.threadId, state.presentPlanArmedSeq, PRESENT_PLAN_GATE_TOOLS, true, true));
+  const reviewRan =
+    reviewWorked &&
+    state.presentPlanArmedSeq !== undefined &&
+    (await reviewRanSince(bb, ctx.threadId, state.presentPlanArmedSeq, PRESENT_PLAN_GATE_TOOLS, true, false));  await settlePlanBaseline(bb, ctx.threadId, planFilePath, reviewWorked);
   if (reviewRan && config.autoApprovePlans) {
     await clearPlanBaseline(bb, ctx.threadId, planFilePath);
     await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-approved");

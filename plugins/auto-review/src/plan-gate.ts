@@ -206,12 +206,19 @@ async function releaseReviewedPlan(
   }
   await writeState(bb, thread.id, {}, [...PLAN_GATE_KEYS]);
   const { planReviewDeliveredSeq } = state;
-  const reviewRan =
+  // The baseline accepts a review that spans turns: child-thread reviewers end
+  // the turn and bb wakes the agent later. Auto-approve still needs the
+  // same-turn proof.
+  const reviewWorked =
     check === "loaded" &&
     planReviewDeliveredSeq !== undefined &&
     !expired &&
-    (await reviewRanSince(bb, thread.id, planReviewDeliveredSeq, NATIVE_GATE_TOOLS, false));
-  await settlePlanBaseline(bb, thread.id, approval.planFilePath, reviewRan);
+    (await reviewRanSince(bb, thread.id, planReviewDeliveredSeq, NATIVE_GATE_TOOLS, false, true));
+  const reviewRan =
+    reviewWorked &&
+    planReviewDeliveredSeq !== undefined &&
+    (await reviewRanSince(bb, thread.id, planReviewDeliveredSeq, NATIVE_GATE_TOOLS, false, false));
+  await settlePlanBaseline(bb, thread.id, approval.planFilePath, reviewWorked);
   if (reviewRan && config.autoApprovePlans && approval.canApprove && (await approvePlan(ctx, thread, approval))) {
     await clearPlanBaseline(bb, thread.id, approval.planFilePath);
     return;

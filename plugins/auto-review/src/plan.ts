@@ -156,6 +156,12 @@ export { EVENT_PAGE_MAX };
  * could end between the reads and a tool call from after it would count as
  * proof. A failed read of either counts as no proof: the plan then stays with
  * the user.
+ *
+ * `acrossTurns` accepts a review that a later turn completes: child-thread
+ * reviewers end the agent's turn and bb wakes it afterwards, so a turn end is
+ * then no evidence against the review. When it is true the `turn/completed`
+ * read is skipped and no turn counts as ended; the same-turn rule is for the
+ * callers that must not let a stale arm approve a later plan.
  */
 export async function reviewRanSince(
   bb: BbPluginApi,
@@ -163,6 +169,7 @@ export async function reviewRanSince(
   sinceSeq: number,
   gateTools: readonly string[],
   countSubagentCalls: boolean,
+  acrossTurns: boolean,
 ): Promise<boolean> {
   try {
     const afterSeq = String(sinceSeq);
@@ -173,14 +180,18 @@ export async function reviewRanSince(
       order: "asc",
       limit: String(EVENT_PAGE_MAX),
     });
-    const turnEnds = await bb.sdk.threads.events.list({
-      threadId,
-      afterSeq,
-      types: ["turn/completed"],
-      order: "asc",
-      limit: "1",
-    });
-    return reviewReachedAgent(events, gateTools, countSubagentCalls, turnEnds.length > 0);
+    let turnEnded = false;
+    if (!acrossTurns) {
+      const turnEnds = await bb.sdk.threads.events.list({
+        threadId,
+        afterSeq,
+        types: ["turn/completed"],
+        order: "asc",
+        limit: "1",
+      });
+      turnEnded = turnEnds.length > 0;
+    }
+    return reviewReachedAgent(events, gateTools, countSubagentCalls, turnEnded);
   } catch (error) {
     bb.log.warn(
       `auto-review: could not read events to check the plan review ran in ${threadId}; leaving the plan for the user: ${
