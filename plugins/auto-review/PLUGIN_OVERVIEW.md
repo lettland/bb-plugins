@@ -152,9 +152,9 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   thread context, not a security boundary); the agent mentions that the approval may have
   come from auto-review rather than from the user. A turn that ended since the review was
   delivered (a `turn/completed` event) voids the evidence. Within the same turn (no turn end
-  and no delivered message since), a plan re-presented byte-identically after the gate left it
-  with the user and it was approved is approved once more instead of being held for another
-  review round (reason `plan-already-approved`).
+  and no delivered message since), a plan that the gate left with the user, that was approved,
+  and that is re-presented byte-identically is approved once more instead of being held for
+  another review round (reason `plan-already-approved`).
 - In `devkit` mode, and in `auto` mode while the devkit plugin runs, both plan paths also check
   that the agent itself loaded `review-code` after the review was sent (an anti-shortcut check,
   not proof a review ran; a turn ending does not void it, unlike the auto-approve proof). A plan

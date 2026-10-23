@@ -311,7 +311,7 @@ async function approvePlan(
  * still pending" guarantee is gone, and only this record (`planReleased`,
  * written at the release) vouches for the repetition. The guarantees are
  * checkable: the identical plan text (same hash), the earlier interaction
- * resolved in the user's favour (`allow_once` or `allow_for_session`), and no
+ * resolved as an approval (`allow_once` or `allow_for_session`), and no
  * `turn/completed` or `turn/input/accepted` since the release — no turn ended
  * and no message was delivered, so the re-presentation cannot carry anything
  * new. The record is one-shot: removed before any check, so a different plan,
