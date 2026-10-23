@@ -11,5 +11,5 @@
     "resolveJsonModule": true,
     "types": ["node"]
   },
-  "include": ["server.ts", "app.tsx", "app.test.tsx", "server.test.ts", "vitest.config.ts"]
+  "include": ["server.ts", "app.tsx", "app.test.tsx", "server.test.ts", "src/**/*.ts", "vitest.config.ts"]
 }

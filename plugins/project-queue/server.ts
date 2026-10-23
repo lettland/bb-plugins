@@ -1,120 +1,28 @@
 import {
-  PluginCliError,
-  cliCommand,
-  defineCli,
   type BbPluginApi,
   type MessageDispatchHookContext,
   type MessageDispatchHookDecision,
-  type PluginCliResult,
 } from "@get-bb/plugin-sdk";
-import { z } from "zod";
+import { registerCli } from "./src/cli.js";
+import {
+  KEEPER_INTERVAL_MS,
+  MAX_ANCESTOR_DEPTH,
+  MAX_PROJECT_CACHE,
+  PROCEED,
+  QUEUED_KEY,
+  errorMessage,
+  httpStatus,
+  queuedIdsSchema,
+  queueIntentSchema,
+  sleep,
+  staleReason,
+  waitDecision,
+  type QueuedThreadRef,
+  type QueuedView,
+  type ReleaseEntry,
+} from "./src/shared.js";
 
-const QUEUED_KEY = "queued-thread-ids";
-const KEEPER_INTERVAL_MS = 30_000;
-const MAX_ANCESTOR_DEPTH = 64;
-const MAX_PROJECT_CACHE = 5_000;
-export const MAX_REASON_LENGTH = 200;
-
-const REASONING_LEVELS = [
-  "none",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "ultracode",
-  "max",
-  "ultra",
-] as const;
-const PERMISSION_MODES = ["accept-edits", "auto", "full"] as const;
-
-const JSON_OPTION = {
-  type: "boolean",
-  description: "Emit machine-readable JSON",
-} as const;
-
-const queuedIdsSchema = z.array(z.string().min(1));
-const queueIntentSchema = z.object({ queue: z.literal(true) });
-
-const PROCEED: MessageDispatchHookDecision = { action: "proceed" };
-
-interface ReleaseEntry {
-  id: string;
-  cause: string;
-}
-
-interface QueuedThreadRef {
-  id: string;
-  projectId: string;
-  parentThreadId: string | null;
-}
-
-interface ThreadState {
-  status: string;
-  archivedAt: number | null;
-  deletedAt: number | null;
-}
-
-type QueuedView =
-  | {
-      id: string;
-      state: "queued";
-      title: string | null;
-      projectId: string;
-      project: string;
-      blockers: string[];
-    }
-  | { id: string; state: "stale"; reason: string }
-  | { id: string; state: "unknown"; error: string };
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function httpStatus(error: unknown): number | null {
-  if (typeof error !== "object" || error === null || !("status" in error)) {
-    return null;
-  }
-  return typeof error.status === "number" ? error.status : null;
-}
-
-function staleReason(thread: ThreadState): string | null {
-  if (thread.status !== "pending") return `thread is ${thread.status}`;
-  if (thread.deletedAt !== null) return "thread was deleted";
-  if (thread.archivedAt !== null) return "thread was archived";
-  return null;
-}
-
-function waitDecision(
-  blockerCount: number,
-  projectName: string,
-): MessageDispatchHookDecision {
-  const reason = `${blockerCount} other thread${blockerCount === 1 ? "" : "s"} running in ${projectName}`;
-  if (reason.length <= MAX_REASON_LENGTH) {
-    return { action: "wait", reason };
-  }
-  let truncated = reason.slice(0, MAX_REASON_LENGTH - 1);
-  const last = truncated.charCodeAt(truncated.length - 1);
-  if (last >= 0xd800 && last <= 0xdbff) {
-    truncated = truncated.slice(0, -1);
-  }
-  return { action: "wait", reason: `${truncated}…` };
-}
-
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolveSleep) => {
-    if (signal.aborted) {
-      resolveSleep();
-      return;
-    }
-    const timer = setTimeout(done, ms);
-    function done(): void {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", done);
-      resolveSleep();
-    }
-    signal.addEventListener("abort", done, { once: true });
-  });
-}
+export { MAX_REASON_LENGTH } from "./src/shared.js";
 
 export default async function projectQueuePlugin(
   bb: BbPluginApi,
@@ -334,224 +242,7 @@ export default async function projectQueuePlugin(
     return present;
   }
 
-  function formatView(view: QueuedView): string {
-    if (view.state === "stale") {
-      return `${view.id}  stale (${view.reason}), removed from the queue`;
-    }
-    if (view.state === "unknown") {
-      return `${view.id}  could not be read: ${view.error}`;
-    }
-    const status =
-      view.blockers.length === 0
-        ? "no blockers, starts on the next recheck"
-        : `blocked by ${view.blockers.join(", ")}`;
-    return `${view.id}  ${view.title ?? "(untitled)"}  ${view.project}  ${status}`;
-  }
-
-  function printableLine(line: string): string {
-    return line.replace(
-      /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu,
-      " ",
-    );
-  }
-
-  bb.cli.register(
-    defineCli({
-      name: "project-queue",
-      summary: "Start new threads only when their project is idle",
-      description:
-        "A queued thread waits until no other thread in its project is running, then starts. Only a thread's first message is queued; follow-ups are never held. The thread's own ancestors never block it.",
-      commands: {
-        spawn: cliCommand({
-          summary: "Spawn a thread that waits until its project is idle",
-          description:
-            "Supports a small subset of `bb thread spawn` flags. The parent link is opt-in: a parent and its ancestors never block the child. Without a parent link the calling thread does block it, so do not `bb thread wait` on the child from a thread that is not its ancestor.",
-          options: {
-            prompt: {
-              type: "string",
-              placeholder: "text",
-              required: true,
-              description:
-                'Initial prompt; for a file on this machine pass "$(cat <path>)"',
-            },
-            project: {
-              type: "string",
-              placeholder: "id",
-              description:
-                "Project id; defaults to the calling thread's project",
-            },
-            provider: {
-              type: "string",
-              placeholder: "id",
-              description: "Provider id",
-            },
-            model: {
-              type: "string",
-              placeholder: "model",
-              description: "Model id the provider accepts",
-            },
-            "reasoning-level": {
-              type: "enum",
-              values: REASONING_LEVELS,
-              description: "Reasoning level (provider-dependent)",
-            },
-            "permission-mode": {
-              type: "enum",
-              values: PERMISSION_MODES,
-              description: "Permission mode",
-            },
-            environment: {
-              type: "string",
-              placeholder: "id",
-              description:
-                "Existing environment id; omit to use the project default",
-            },
-            title: {
-              type: "string",
-              placeholder: "title",
-              description: "Thread title",
-            },
-            "parent-thread": {
-              type: "string",
-              placeholder: "id",
-              description:
-                "Parent thread id; the parent and its ancestors never block this thread",
-            },
-            "parent-self": {
-              type: "boolean",
-              description:
-                "Parent the new thread to the calling thread, which then never blocks it",
-            },
-            json: JSON_OPTION,
-          },
-          constraints: [
-            { kind: "at-most-one", options: ["parent-thread", "parent-self"] },
-          ],
-          async run(input, ctx): Promise<PluginCliResult> {
-            const { options } = input;
-            const prompt = options.prompt;
-            if (prompt.trim() === "") {
-              throw new PluginCliError("The prompt is empty", {
-                code: "invalid_value",
-              });
-            }
-            const projectId = options.project ?? ctx.projectId;
-            if (projectId === undefined) {
-              throw new PluginCliError("No project to start the thread in", {
-                code: "missing_project",
-                hint: "pass --project <id>",
-              });
-            }
-            let parentThreadId = options["parent-thread"];
-            if (options["parent-self"]) {
-              if (ctx.threadId === undefined) {
-                throw new PluginCliError(
-                  "--parent-self needs a calling thread",
-                  {
-                    code: "missing_thread",
-                    hint: "pass --parent-thread <id>",
-                  },
-                );
-              }
-              parentThreadId = ctx.threadId;
-            }
-            const environmentId = options.environment;
-            const thread = await bb.sdk.threads.spawn({
-              projectId,
-              prompt,
-              environment:
-                environmentId === undefined
-                  ? { type: "project-default" }
-                  : { type: "reuse", environmentId },
-              ...(options.provider === undefined
-                ? {}
-                : { providerId: options.provider }),
-              ...(options.model === undefined ? {} : { model: options.model }),
-              ...(options["reasoning-level"] === undefined
-                ? {}
-                : { reasoningLevel: options["reasoning-level"] }),
-              ...(options["permission-mode"] === undefined
-                ? {}
-                : { permissionMode: options["permission-mode"] }),
-              ...(options.title === undefined ? {} : { title: options.title }),
-              ...(parentThreadId === undefined ? {} : { parentThreadId }),
-              pluginSubmission: {
-                pluginId: bb.pluginId,
-                data: { queue: true },
-              },
-            });
-            const held = thread.status === "pending" && queued.has(thread.id);
-            return {
-              exitCode: 0,
-              stdout: options.json
-                ? JSON.stringify({ thread, queued: held })
-                : held
-                  ? `Thread ${thread.id} queued; it starts when no other thread in the project is running.`
-                  : `Thread ${thread.id} spawned (${thread.status}).`,
-            };
-          },
-        }),
-        list: cliCommand({
-          summary: "List queued threads and what blocks each",
-          description:
-            "Ids whose thread is missing or no longer pending are shown as stale and removed.",
-          options: {
-            project: {
-              type: "string",
-              placeholder: "id",
-              description: "Only list threads in this project",
-            },
-            json: JSON_OPTION,
-          },
-          async run(input): Promise<PluginCliResult> {
-            const views = await listViews(input.options.project);
-            return {
-              exitCode: 0,
-              stdout: input.options.json
-                ? JSON.stringify({ queued: views })
-                : views.length === 0
-                  ? "No queued threads."
-                  : views
-                      .map((view) => printableLine(formatView(view)))
-                      .join("\n"),
-            };
-          },
-        }),
-        release: cliCommand({
-          summary: "Stop holding a queued thread",
-          description:
-            "Removes the thread from the queue and rechecks. Unlike Send now, it still respects other plugins such as concurrency-limit.",
-          positionals: [
-            {
-              name: "thread-id",
-              description: "Queued thread id, as `list` prints it",
-              required: true,
-            },
-          ],
-          options: { json: JSON_OPTION },
-          async run(input): Promise<PluginCliResult> {
-            const threadId = input.positionals["thread-id"];
-            if (!queued.has(threadId)) {
-              throw new PluginCliError(`${threadId} is not queued`, {
-                code: "not_queued",
-                hint: "Run `bb project-queue list` for the queued thread ids.",
-              });
-            }
-            await releaseThreads([
-              { id: threadId, cause: "released by command" },
-            ]);
-            await recheckDispatch();
-            return {
-              exitCode: 0,
-              stdout: input.options.json
-                ? JSON.stringify({ threadId, released: true })
-                : `Released ${threadId}; it starts once other plugins and core allow it.`,
-            };
-          },
-        }),
-      },
-    }),
-  );
+  registerCli(bb, { queued, listViews, releaseThreads, recheckDispatch });
 
   bb.background.service("queue-keeper", {
     async start(signal) {

@@ -7,7 +7,7 @@ export default defineConfig({
     exclude: ["node_modules/**"],
     coverage: {
       provider: "v8",
-      include: ["server.ts", "app.tsx"],
+      include: ["server.ts", "app.tsx", "src/**"],
       reporter: ["text-summary", "lcov"],
       exclude: ["node_modules/**", "dist/**", "**/*.test.{ts,tsx}", "vitest.config.ts"],
     },
