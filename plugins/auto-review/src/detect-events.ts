@@ -1,6 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
-import { AUTO_REVIEW_MARKER } from "./prompt.js";
+import { AUTO_REVIEW_MARKER, CODE_REVIEW_OPENING } from "./prompt.js";
 
 export async function captureSinceSeq(
   bb: BbPluginApi,
@@ -136,11 +136,58 @@ function isUserRequest(data: TurnRequestData): boolean {
   );
 }
 
+/**
+ * Whether the request carries the code-review prompt's opening text, so the
+ * turn it was accepted into is the review's own: auto-review delivered the
+ * prompt as a turn request (steered into a running turn or starting one), and
+ * plan-review prompts open differently, so this matches only code reviews.
+ */
+function isCodeReviewRequest(data: TurnRequestData): boolean {
+  return data.input.some((part) => part.type === "text" && part.text.startsWith(CODE_REVIEW_OPENING));
+}
+
+/**
+ * The plan approval the interaction lifecycle event resolved, or null when it
+ * resolves none: a `resolved` approval whose decision is `allow_once` or
+ * `allow_for_session` of a plan; a deny, an interaction still `resolving`, or
+ * an approval of anything else is not one. The event carries no resolver, so
+ * the caller tells an approval the user gave from one auto-review gave itself.
+ */
+function approvedPlanOf(event: EventOf<"system/interaction/lifecycle">): ApprovedPlan | null {
+  const { interaction } = event.data;
+  if (
+    interaction.payload.kind !== "approval" ||
+    interaction.payload.subject.kind !== "plan" ||
+    interaction.status !== "resolved"
+  ) {
+    return null;
+  }
+  const { resolution } = interaction;
+  if (
+    resolution === null ||
+    !("decision" in resolution) ||
+    (resolution.decision !== "allow_once" && resolution.decision !== "allow_for_session")
+  ) {
+    return null;
+  }
+  return { id: interaction.id, seq: event.seq };
+}
+
+/** A plan approval a turn resolved, with the seq of the lifecycle event that resolved it. */
+export interface ApprovedPlan {
+  id: string;
+  seq: number;
+}
+
 export interface EndedTurn {
   /** Whether the user started the turn. */
   users: boolean;
   /** The seq of the turn's `turn/completed`: a stop after it was not pressed inside the turn. */
   completedSeq: number;
+  /** The plan approvals the turn resolved, oldest first; a deny, an unresolved interaction or a non-plan approval is never among them. */
+  approvedPlans: ApprovedPlan[];
+  /** Whether any input accepted into the turn came from a request carrying the code-review prompt's opening: the review's own turn, steered into it or not. */
+  reviewTurn: boolean;
 }
 
 /** No turn has completed since the last one handled: every idle's read ends here once it has caught up. */
@@ -172,7 +219,12 @@ export class UnreadTurnError extends Error {
  * turn of its own, so it began that turn. If inputs were batched into one turn,
  * any of them being the user's makes it the user's. A turn with no input
  * accepted into it since the cursor, or only steers, began before the cursor,
- * such as one the review prompt was steered into, and is not the user's.
+ * such as one the review prompt was steered into, and is not the user's. The
+ * plan approvals the turn resolved are read from its interaction lifecycle
+ * events whatever requests it took, so a turn with none of the user's own
+ * input still names them. Whether the turn is the review's own comes from the
+ * same requests: any input accepted into it that carries the code-review
+ * prompt's opening marks it (`reviewTurn`), steered into the turn or not.
  *
  * Throws a `NoTurnCompletedError` when no turn completed after `handledSeq`. Once a turn did, a failure
  * to read it (a lookup error, an accepted input with no request row) throws an
@@ -197,8 +249,14 @@ export async function endedTurn(
     const accepted = (await collect(eventsSince(bb, threadId, sinceSeq, "turn/input/accepted"))).filter(
       ({ scope }) => scope.kind === "turn" && scope.turnId === turnId,
     );
+    const approvedPlans = (await collect(eventsSince(bb, threadId, sinceSeq, "system/interaction/lifecycle")))
+      .filter(({ scope }) => scope.kind === "turn" && scope.turnId === turnId)
+      .flatMap((event) => {
+        const approval = approvedPlanOf(event);
+        return approval === null ? [] : [approval];
+      });
     if (accepted.length === 0) {
-      return { users: false, completedSeq: completed.seq };
+      return { users: false, completedSeq: completed.seq, approvedPlans, reviewTurn: false };
     }
     const requests = new Map(
       (await collect(eventsSince(bb, threadId, sinceSeq, "client/turn/requested"))).map((event) => [
@@ -207,6 +265,7 @@ export async function endedTurn(
       ]),
     );
     let users = false;
+    let reviewTurn = false;
     for (const { data } of accepted) {
       const request = requests.get(data.clientRequestId);
       if (request === undefined) {
@@ -215,8 +274,10 @@ export async function endedTurn(
       const { target } = request;
       const steers = "expectedTurnId" in target && target.expectedTurnId === turnId;
       users ||= !steers && isUserRequest(request);
+      // Steered or not: a review prompt steered into a running turn makes that turn the review's own.
+      reviewTurn ||= isCodeReviewRequest(request);
     }
-    return { users, completedSeq: completed.seq };
+    return { users, completedSeq: completed.seq, approvedPlans, reviewTurn };
   } catch (error) {
     throw new UnreadTurnError(error instanceof Error ? error.message : String(error), completed.seq);
   }

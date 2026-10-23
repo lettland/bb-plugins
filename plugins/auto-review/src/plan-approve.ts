@@ -2,17 +2,31 @@ import { createHash } from "node:crypto";
 import type { FireReason } from "./config.js";
 import { recordFire, type GateThreadLike, type ReviewContext } from "./context.js";
 import type { PlanApproval } from "./plan.js";
-import { writeState, type ThreadState } from "./state.js";
+import { readState, writeState, type ThreadState } from "./state.js";
 
 /** Sha256 hex of the plan text, for the one-shot `planReleased` record. */
 export function planHash(plan: string): string {
   return createHash("sha256").update(plan).digest("hex");
 }
 
+/** How many interaction ids `autoResolvedPlanIds` keeps: enough to cover every approval a hold can judge, small enough to stay a record, not a log. */
+const AUTO_RESOLVED_PLAN_IDS_MAX = 10;
+
 /**
  * Resolve a plan approval `allow_once` and record the fire under `reason`;
  * `failureLead` and `successLine` are the caller's warn lead and success line.
  * False (warned) leaves the plan where its caller says.
+ *
+ * The interaction id is recorded under `autoResolvedPlanIds` **before** the
+ * resolve, read fresh from the state (`approvePlan` has no `state` argument,
+ * and `reapproveSamePlan`'s is stale after its own write): the lifecycle event
+ * that records the resolution carries no resolver, so this record is the only
+ * way a hold idle tells an approval auto-review gave itself from one the user
+ * gave — and writing first means the event can never be read before the id is
+ * recorded. A resolve that then fails removes the id again; a removal that
+ * fails is logged with the interaction id, since a stale id only makes a later
+ * manual approval of the same interaction count as automatic, and its work
+ * would then get no follow-up review.
  */
 async function resolvePlanApproval(
   ctx: ReviewContext,
@@ -24,11 +38,36 @@ async function resolvePlanApproval(
 ): Promise<boolean> {
   const { bb } = ctx;
   try {
-    await bb.sdk.threads.interactions.resolve({
-      threadId: thread.id,
-      interactionId: approval.interactionId,
-      resolution: { decision: "allow_once", grantedPermissions: null },
+    // Read fresh, so two approvals resolving in one turn keep each other's ids.
+    const { autoResolvedPlanIds } = await readState(bb, thread.id);
+    await writeState(bb, thread.id, {
+      autoResolvedPlanIds: [...(autoResolvedPlanIds ?? []), approval.interactionId].slice(
+        -AUTO_RESOLVED_PLAN_IDS_MAX,
+      ),
     });
+    try {
+      await bb.sdk.threads.interactions.resolve({
+        threadId: thread.id,
+        interactionId: approval.interactionId,
+        resolution: { decision: "allow_once", grantedPermissions: null },
+      });
+    } catch (error) {
+      try {
+        const after = await readState(bb, thread.id);
+        await writeState(bb, thread.id, {
+          autoResolvedPlanIds: (after.autoResolvedPlanIds ?? []).filter(
+            (id) => id !== approval.interactionId,
+          ),
+        });
+      } catch (removalError) {
+        bb.log.warn(
+          `auto-review: could not unrecord the auto-approval of interaction ${approval.interactionId} in ${thread.id}; a later manual approval of it may be mistaken for an automatic one: ${
+            removalError instanceof Error ? removalError.message : String(removalError)
+          }`,
+        );
+      }
+      throw error;
+    }
   } catch (error) {
     bb.log.warn(
       `${failureLead}: ${

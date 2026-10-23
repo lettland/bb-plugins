@@ -16,7 +16,7 @@ export {
   tryCaptureSinceSeq,
   userTurnRunningSince,
 } from "./detect-events.js";
-export type { EndedTurn } from "./detect-events.js";
+export type { ApprovedPlan, EndedTurn } from "./detect-events.js";
 export { runningChildIds, spawnedDescendantIds } from "./detect-children.js";
 export {
   captureTree,

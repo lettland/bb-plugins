@@ -423,6 +423,15 @@ It ships enabled (opt-out).
   and unreviewed; pressed during your own turn it stops that turn only. Your own turns that
   changed files are reviewed together once the children finish, and not if you stopped one of
   them; a message steered into the review or a wake-up turn counts as part of the review.
+  A plan you approve after the review's own turn ended counts as your own turn: everything from
+  that turn on, including reviewer fixes that land after it, is reviewed once the children
+  finish, and nothing the review does later cancels that. Plans auto-review approves itself,
+  and approvals inside the review's own turn, do not count: work under such a plan is covered
+  by the review itself and gets no follow-up review, and each set-aside approval is logged (an
+  `auto-review:` info line with the interaction id). If you approve a fix plan from a later
+  wake-up turn of the review, those fixes get a follow-up review too; each such round needs
+  your approval. A stop pressed in a review or wake-up turn ends the review and also drops the
+  follow-up review of work under a plan you approved.
   Other reviews on the provider wait behind the hold, up to that cap. Residual race: if a
   child goes idle before bb queues its wake-up, the hold ends one idle early and that wake-up
   turn's fixes get one more review.

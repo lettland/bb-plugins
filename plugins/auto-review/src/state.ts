@@ -110,6 +110,17 @@ export const threadStateSchema = z.object({
    */
   handledTurnEndSeq: z.number().int().nonnegative().optional(),
   /**
+   * The `turn/completed` seq of the review's own turn, recognized by the
+   * code-review opening its request carried. Set once by `noteUserTurn`, from
+   * the first turn it read that mark on, and never moved, it is the cut-off
+   * plan approvals are judged against — an approval resolved after it, in a
+   * later turn, counts as the user's, and one inside the review's own turn
+   * never does, whatever the review reports later. A latch key, so every
+   * reset clears it together with the phase it belongs to and it never leaks
+   * into the next review's hold.
+   */
+  reviewTurnEndSeq: z.number().int().nonnegative().optional(),
+  /**
    * The timeline cursor when the last code review was sent. No further code
    * review fires until the user sends a turn of their own after it. Durable:
    * not a latch key, so an idle reset keeps it; only `bb auto-review reset` clears it.
@@ -177,6 +188,18 @@ export const threadStateSchema = z.object({
   presentPlanArmedSeq: z.number().int().nonnegative().optional(),
   /** `planReviewRedone` for `PresentPlan`: the one redo this arm has used. */
   presentPlanRedone: z.literal(true).optional(),
+  /**
+   * The interaction ids of the plan approvals auto-review resolved itself
+   * (auto-approved, or re-approved on an earlier approval), most recent last,
+   * capped at the last 10. A hold idle reads it to set those approvals aside
+   * when a turn's plan approvals are judged, so an approval the plugin gave
+   * never counts as a turn of the user's — the lifecycle event that records
+   * the resolution carries no resolver. Written just before the resolve, so
+   * the event can never be read before the id is recorded; deliberately not a
+   * latch key, since the write and the resolve it vouches for need not land
+   * inside one hold.
+   */
+  autoResolvedPlanIds: z.array(z.string()).optional(),
 });
 export type ThreadState = z.infer<typeof threadStateSchema>;
 
@@ -256,6 +279,7 @@ export const LATCH_KEYS: readonly string[] = [
   "userTurnAuthored",
   "userStopFloorSeq",
   "handledTurnEndSeq",
+  "reviewTurnEndSeq",
   "reviewSkillRequired",
 ];
 

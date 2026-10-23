@@ -128,6 +128,7 @@ describe("resetToIdlePatch", () => {
       "userTurnAuthored",
       "userStopFloorSeq",
       "handledTurnEndSeq",
+      "reviewTurnEndSeq",
       "reviewSkillRequired",
     ]);
   });

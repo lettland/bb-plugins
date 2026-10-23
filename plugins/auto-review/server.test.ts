@@ -12,6 +12,7 @@ import {
 import plugin from "./server.js";
 import {
   AUTO_REVIEW_MARKER,
+  CODE_REVIEW_OPENING,
   PLAN_FIRST_INSTRUCTIONS,
   PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
   PLAN_HOLD_ANSWER,
@@ -313,6 +314,8 @@ function createHost(options: HostOptions = {}) {
   let completedEvents: Record<string, ItemStartedEvent[]> = {};
   let turnEnds: Record<string, Array<{ seq: number; turnId?: string }>> = {};
   let turnRequests: Record<string, TurnRequest[]> = {};
+  let lifecycleEvents: Record<string, Array<{ seq: number; turnId: string; interaction: Record<string, unknown> }>> = {};
+  let lifecycleReadsLeft: number | undefined;
 
   const sdk = {
     projects: {
@@ -539,6 +542,25 @@ function createHost(options: HostOptions = {}) {
                   createdAt: 1_000,
                   type: "turn/completed",
                   data: {},
+                })),
+            );
+          }
+          if (args.types?.includes("system/interaction/lifecycle") === true) {
+            if (lifecycleReadsLeft !== undefined && (lifecycleReadsLeft -= 1) === 0) {
+              lifecycleReadsLeft = undefined;
+              throw new Error("events unavailable");
+            }
+            rows.push(
+              ...(lifecycleEvents[args.threadId] ?? [])
+                .filter((event) => event.seq > after)
+                .map((event) => ({
+                  id: `ev-${args.threadId}-lifecycle-${event.seq}`,
+                  scope: { kind: "turn", turnId: event.turnId },
+                  threadId: args.threadId,
+                  seq: event.seq,
+                  createdAt: 1_000,
+                  type: "system/interaction/lifecycle",
+                  data: { interaction: event.interaction, threadId: args.threadId },
                 })),
             );
           }
@@ -802,6 +824,46 @@ function createHost(options: HostOptions = {}) {
     /** Record a `client/turn/requested` event: a turn someone asked the thread to start. */
     requestTurn: (request: TurnRequest, threadId: string = THREAD_ID) => {
       turnRequests = { ...turnRequests, [threadId]: [...(turnRequests[threadId] ?? []), request] };
+    },
+    /**
+     * Record a `system/interaction/lifecycle` event for the plan approval
+     * (`interactionId`, default the fixture's) resolved inside turn `turnId`
+     * at `seq`. `status` (default "resolved") also carries the pre-resolve
+     * `resolving` step, whose resolution is still null; `decision` overrides
+     * the resolved one.
+     */
+    lifecycle: (
+      seq: number,
+      turnId: string,
+      extra: { interactionId?: string; status?: string; decision?: string } = {},
+      threadId: string = THREAD_ID,
+    ) => {
+      const interaction = planInteraction("# Plan\n\nDo the thing.", extra.interactionId ?? "pint-1");
+      const status = extra.status ?? "resolved";
+      lifecycleEvents = {
+        ...lifecycleEvents,
+        [threadId]: [
+          ...(lifecycleEvents[threadId] ?? []),
+          {
+            seq,
+            turnId,
+            interaction: {
+              ...interaction,
+              status,
+              resolution:
+                extra.decision !== undefined
+                  ? { decision: extra.decision }
+                  : status === "resolved"
+                    ? { decision: "allow_once", grantedPermissions: null }
+                    : null,
+            },
+          },
+        ],
+      };
+    },
+    /** The `read`th listing of `system/interaction/lifecycle` events from now on fails, once; the others succeed. */
+    failLifecycleRead: (read: number) => {
+      lifecycleReadsLeft = read;
     },
     /** From now on, listing `client/turn/requested` events fails (or works again). */
     setTurnRequestsThrow: (next: boolean) => {
@@ -2653,6 +2715,309 @@ describe("auto-review plugin", () => {
       expect(host.sends).toHaveLength(0);
       await host.harness.dispose();
     });
+
+    describe("plan approvals during the hold", () => {
+      const reportInput = { outcome: "committed", summary: "done", findings: [] };
+
+      /** A ReportReview call through the harness, the way the review itself reports. */
+      function callReportReview(host: Host) {
+        return host.harness.callAgentTool("ReportReview", reportInput, { threadId: THREAD_ID, projectId: "project-1" });
+      }
+
+      /** The review's own turn: the code-review prompt sent as a turn request, ended at `endSeq`. */
+      function reviewTurn(host: Host, seq: number, endSeq: number) {
+        host.requestTurn({ seq, initiator: "user", text: `${CODE_REVIEW_OPENING} Review them, apply fixes, and record the result.` });
+        host.setMaxSeq(endSeq);
+        host.completeTurnOf(seq, endSeq);
+      }
+
+      /**
+       * A review delivered from a queued row: `dispatchedAt` behind
+       * `reviewDeliveredAt`, as that path leaves them, delivery cursor 100.
+       * The approval cases' fixture — the rule under test must not ride on
+       * report state, which these values differ from.
+       */
+      async function deliveredQueued(host: Host) {
+        await startReview(host, THREAD_ID, Date.now() - 10_000);
+        Object.assign(host.metadata, { reviewDeliveredAt: Date.now() - 5_000, reviewDeliveredSeq: 100 });
+      }
+
+      /** A delivered review that also reported through the tool in its own turn. */
+      async function reportedReview(host: Host) {
+        await deliveredQueued(host);
+        const result = await callReportReview(host);
+        expect(typeof result !== "string" && result.isError === true).toBe(false);
+      }
+
+      const infoLines = (host: Host) =>
+        host.harness.logEntries.filter((entry) => entry.level === "info").map((entry) => entry.message);
+      const setAsides = (host: Host) => infoLines(host).filter((message) => message.includes("is set aside"));
+
+      it("follow-up reviews the work a wake-up turn changed after the user approved its plan", async () => {
+        const host = editingHost();
+        await plugin(host.bb);
+        await reportedReview(host);
+        // The review reports in its own turn, which then ends.
+        reviewTurn(host, 105, 108);
+        // A wake-up turn carries a plan approval of the user's and changes nothing.
+        await holdTurn(host, wakeUp(120), undefined, () => {
+          host.lifecycle(125, "turn-120");
+        });
+        expect(host.metadata.phase).toBe("awaiting-review");
+        expect(host.metadata.reviewTurnEndSeq).toBe(108);
+        expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 130 });
+        expect(host.metadata.userTurnAuthored).toBe(true);
+        const approvalCursor = { ...(host.metadata.turnStart as object) };
+
+        // Later wake-up turns change files; the hold ends with a follow-up review
+        // from the turnStart held when the approval turn's idle was handled.
+        host.setEnvThreads(idleChild);
+        await holdTurn(host, wakeUp(150), ["src/fix.ts"]);
+        expect(host.sends).toHaveLength(1);
+        expect(host.metadata.turnStart).toEqual(approvalCursor);
+        expect((await lastFire(host)).scopePaths).toContain("src/fix.ts");
+        // The follow-up review's own hold starts with the cut-off unset.
+        expect(host.metadata.reviewTurnEndSeq).toBeUndefined();
+        await host.harness.dispose();
+      });
+
+      it("reviews nothing for a plan auto-review approved itself, and logs the set-aside once", async () => {
+        const host = editingHost();
+        await plugin(host.bb);
+        await reportedReview(host);
+        reviewTurn(host, 105, 108);
+        host.metadata.autoResolvedPlanIds = ["pint-1"];
+        // The same wake-up approval, but auto-review resolved it itself.
+        await holdTurn(host, wakeUp(120), undefined, () => {
+          host.lifecycle(125, "turn-120");
+        });
+        expect(host.metadata.userTurnStart).toBeUndefined();
+        expect(setAsides(host)).toHaveLength(1);
+        expect(setAsides(host)[0]).toContain("pint-1");
+
+        host.setEnvThreads(idleChild);
+        await holdTurn(host, wakeUp(150), ["src/fix.ts"]);
+        expect(host.metadata.phase).toBe("idle");
+        expect(host.sends).toHaveLength(0);
+        await host.harness.dispose();
+      });
+
+      it("does not count an approval resolved inside the review's own turn", async () => {
+        const host = editingHost({ envThreads: idleChild });
+        await plugin(host.bb);
+        await reportedReview(host);
+        // The approval settles inside the review's own turn, before the turn ends.
+        reviewTurn(host, 105, 108);
+        host.lifecycle(106, "turn-105", { status: "resolving" });
+        host.lifecycle(107, "turn-105");
+        // Then a wake-up turn that changes nothing, and the idle ends the hold.
+        // (The set-aside is the cut-off's proof: unrecognized, the approval at
+        // 107 would sit above the delivery cursor 100 and count.)
+        await holdTurn(host, wakeUp(120));
+        expect(setAsides(host)).toHaveLength(1);
+        expect(host.metadata.phase).toBe("idle");
+        expect(host.sends).toHaveLength(0);
+        await host.harness.dispose();
+      });
+
+      it("does not count an approval in the turn the review queued behind, but one after the review turn counts", async () => {
+        const host = editingHost();
+        await plugin(host.bb);
+        await startReview(host, THREAD_ID, Date.now() - 10_000);
+        // The pre-send cursor is 100; the review was delivered later, at cursor 140.
+        Object.assign(host.metadata, { reviewDeliveredAt: Date.now() - 5_000, reviewDeliveredSeq: 140, lastCodeReviewSeq: 100 });
+        // The user's turn the review queued behind ends after the cursor; its plan
+        // approval sits below the delivery cursor, so it is not the user's to count.
+        await holdTurn(host, userRequest(110), undefined, () => {
+          host.lifecycle(125, "turn-110");
+          reviewTurn(host, 140, 160);
+        });
+        expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 120 });
+        expect(setAsides(host)).toHaveLength(1);
+        // The cut-off becomes the review turn's end, not the earlier turn's.
+        expect(host.metadata.reviewTurnEndSeq).toBe(160);
+
+        // A wake-up approval after the review turn counts — it is not set
+        // aside, and the turn it lands in sets no stop floor.
+        await holdTurn(host, wakeUp(180), undefined, () => {
+          host.lifecycle(185, "turn-180");
+        });
+        expect(setAsides(host)).toHaveLength(1);
+        expect(host.metadata.userTurnAuthored).toBe(true);
+        expect(host.metadata.userStopFloorSeq).toBe(130);
+
+        host.setEnvThreads(idleChild);
+        await holdTurn(host, wakeUp(210), ["src/fix.ts"]);
+        expect(host.sends).toHaveLength(1);
+        expect((await lastFire(host)).scopePaths).toContain("src/fix.ts");
+        await host.harness.dispose();
+      });
+
+      it("counts a user approval above the delivery cursor when no turn is recognized as the review's own", async () => {
+        const host = editingHost();
+        await plugin(host.bb);
+        // No turn carries the code-review opening, so the cut-off stays the delivery cursor.
+        await deliveredQueued(host);
+        await holdTurn(host, wakeUp(120), ["src/fix.ts"], () => {
+          host.lifecycle(125, "turn-120");
+        });
+        expect(host.metadata.reviewTurnEndSeq).toBeUndefined();
+        expect(host.metadata.userTurnAuthored).toBe(true);
+
+        host.setEnvThreads(idleChild);
+        await holdTurn(host, wakeUp(150));
+        expect(host.sends).toHaveLength(1);
+        expect((await lastFire(host)).scopePaths).toContain("src/fix.ts");
+        await host.harness.dispose();
+      });
+
+      it("still counts a user approval when the review reports again later in the approval's turn", async () => {
+        const host = editingHost();
+        await plugin(host.bb);
+        await reportedReview(host);
+        reviewTurn(host, 105, 108);
+        // Wake-up turn A carries the user's plan approval and changes files.
+        await holdTurn(host, wakeUp(120), ["src/fix.ts"], () => {
+          host.lifecycle(125, "turn-120");
+        });
+        expect(host.metadata.userTurnAuthored).toBe(true);
+        // Another report lands later in turn A; it cannot cancel the approval.
+        const result = await callReportReview(host);
+        expect(typeof result !== "string" && result.isError === true).toBe(false);
+
+        host.setEnvThreads(idleChild);
+        await holdTurn(host, wakeUp(150));
+        expect(host.sends).toHaveLength(1);
+        expect((await lastFire(host)).scopePaths).toContain("src/fix.ts");
+        await host.harness.dispose();
+      });
+
+      it("still counts a user approval when the report lands in the turn behind, drained by one idle", async () => {
+        const host = editingHost();
+        await plugin(host.bb);
+        await reportedReview(host);
+        reviewTurn(host, 105, 108);
+        // A carries the approval and changes files; B completes behind it; one idle reads both.
+        await holdTurn(host, wakeUp(120), ["src/fix.ts"], () => {
+          host.lifecycle(125, "turn-120");
+          host.requestTurn(wakeUp(150));
+          host.completeTurnOf(150, 170);
+        });
+        expect(host.metadata.userTurnAuthored).toBe(true);
+        // The report lands in turn B.
+        const result = await callReportReview(host);
+        expect(typeof result !== "string" && result.isError === true).toBe(false);
+
+        host.setEnvThreads(idleChild);
+        await emitIdle(host);
+        expect(host.sends).toHaveLength(1);
+        expect((await lastFire(host)).scopePaths).toContain("src/fix.ts");
+        await host.harness.dispose();
+      });
+
+      it("still counts a user approval when the report lands in a later turn read at its own idle", async () => {
+        const host = editingHost();
+        await plugin(host.bb);
+        await reportedReview(host);
+        reviewTurn(host, 105, 108);
+        await holdTurn(host, wakeUp(120), ["src/fix.ts"], () => {
+          host.lifecycle(125, "turn-120");
+        });
+        expect(host.metadata.userTurnAuthored).toBe(true);
+
+        // Turn B: requested, reported in, and read at its own idle.
+        host.requestTurn(wakeUp(150));
+        host.setMaxSeq(160);
+        await emitActive(host);
+        host.completeTurnOf(150, 170);
+        const result = await callReportReview(host);
+        expect(typeof result !== "string" && result.isError === true).toBe(false);
+        await emitIdle(host);
+        expect(host.metadata.phase).toBe("awaiting-review");
+
+        host.setEnvThreads(idleChild);
+        await holdTurn(host, wakeUp(180));
+        expect(host.sends).toHaveLength(1);
+        expect((await lastFire(host)).scopePaths).toContain("src/fix.ts");
+        await host.harness.dispose();
+      });
+
+      it("counts a user approval when the review never reports", async () => {
+        const host = editingHost();
+        await plugin(host.bb);
+        // Delivered from a queued row (dispatchedAt behind reviewDeliveredAt), and never reported.
+        await deliveredQueued(host);
+        reviewTurn(host, 105, 108);
+        await holdTurn(host, wakeUp(120), ["src/fix.ts"], () => {
+          host.lifecycle(125, "turn-120");
+        });
+        expect(host.metadata.userTurnAuthored).toBe(true);
+
+        host.setEnvThreads(idleChild);
+        await holdTurn(host, wakeUp(150));
+        expect(host.sends).toHaveLength(1);
+        expect((await lastFire(host)).scopePaths).toContain("src/fix.ts");
+        expect(await lastReportOutcome(host)).toBe("not-reported");
+        await host.harness.dispose();
+      });
+
+      it("falls back to the hold's turn-start cursor for approvals when no delivery cursor was recorded", async () => {
+        const host = editingHost();
+        await plugin(host.bb);
+        await startReview(host, THREAD_ID, Date.now() - 10_000);
+        Object.assign(host.metadata, { reviewDeliveredAt: Date.now() - 5_000 });
+        // The turn started at cursor 130; an approval logged before it does not
+        // count, one after it does.
+        await holdTurn(host, wakeUp(120), ["src/fix.ts"], () => {
+          host.lifecycle(125, "turn-120");
+          host.lifecycle(135, "turn-120");
+        });
+        expect(host.metadata.reviewTurnEndSeq).toBeUndefined();
+        expect(host.metadata.userTurnAuthored).toBe(true);
+
+        host.setEnvThreads(idleChild);
+        await holdTurn(host, wakeUp(150));
+        expect(host.sends).toHaveLength(1);
+        await host.harness.dispose();
+      });
+
+      it("counts the hold as the user's when the review's own turn cannot be read, and leaves the cut-off unset", async () => {
+        const host = editingHost();
+        await plugin(host.bb);
+        await reportedReview(host);
+        reviewTurn(host, 105, 108);
+        host.failLifecycleRead(1);
+        await holdTurn(host, wakeUp(120), ["src/fix.ts"]);
+        expect(warned(host, "could not read whether the turn that ended")).toBe(true);
+        expect(host.metadata.reviewTurnEndSeq).toBeUndefined();
+        expect(host.metadata.userTurnAuthored).toBe(true);
+
+        host.setEnvThreads(idleChild);
+        await holdTurn(host, wakeUp(150));
+        expect(host.sends).toHaveLength(1);
+        expect(host.metadata.reviewTurnEndSeq).toBeUndefined();
+        await host.harness.dispose();
+      });
+
+      it("still ends the review as stopped when a stop in a wake-up turn precedes a user approval", async () => {
+        const host = editingHost({ envThreads: idleChild });
+        await plugin(host.bb);
+        await reportedReview(host);
+        reviewTurn(host, 105, 108);
+        // The stop lands in wake-up turn A; turn B, with the user's approval, ends
+        // behind it, and one idle reads both.
+        host.interrupt({ seq: 135, reason: "manual-stop" });
+        await holdTurn(host, wakeUp(120), ["src/fix.ts"], () => {
+          host.requestTurn(wakeUp(150));
+          host.completeTurnOf(150, 170);
+          host.lifecycle(155, "turn-150");
+        });
+        expect(host.metadata.phase).toBe("idle");
+        expect(host.sends).toHaveLength(0);
+        expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "user-stopped" });
+        await host.harness.dispose();
+      });
+    });
   });
 
   it("does not hold the turn for a lifecycle-owned-only helper or a plugin-originated child", async () => {
@@ -3873,6 +4238,16 @@ describe("auto-review plugin", () => {
     host.metadata.phase = "awaiting-review";
     const latchedReset = await host.harness.runCli(["reset", THREAD_ID]);
     expect(latchedReset.stdout).toContain("cleared awaiting-review");
+    await host.harness.dispose();
+  });
+
+  it("reset clears the review turn's cut-off with the rest of the latch", async () => {
+    const host = createHost();
+    await plugin(host.bb);
+    Object.assign(host.metadata, { phase: "awaiting-review", reviewTurnEndSeq: 108 });
+    const result = await host.harness.runCli(["reset", THREAD_ID]);
+    expect(result.exitCode).toBe(0);
+    expect(host.metadata.reviewTurnEndSeq).toBeUndefined();
     await host.harness.dispose();
   });
 

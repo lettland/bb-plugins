@@ -25,6 +25,15 @@ export {
  */
 export const MAX_SCOPE_ENTRIES = 400;
 
+/**
+ * The opening of every code-review prompt's first line, past the marker: the
+ * sentence that says the turn's changes are attributed to the agent. The turn
+ * a hold reads the review's own end from is recognized by its request carrying
+ * input that starts with this text — plan-review prompts also start with the
+ * marker, so the marker alone never identifies it.
+ */
+export const CODE_REVIEW_OPENING = `${AUTO_REVIEW_MARKER} auto-review attributed file changes to your recent work.`;
+
 export interface ScopeRendering {
   listed: readonly string[];
   oddCount: number;
@@ -238,7 +247,7 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
   });
   const lines: string[] = [];
   lines.push(
-    `${AUTO_REVIEW_MARKER} auto-review attributed file changes to your recent work. Review them, apply fixes, and record the result. Follow these steps in order. ${STEER_INTERRUPTION_NOTE}`,
+    `${CODE_REVIEW_OPENING} Review them, apply fixes, and record the result. Follow these steps in order. ${STEER_INTERRUPTION_NOTE}`,
   );
   lines.push("");
   lines.push(NO_OWN_EDITS_GUARD);
