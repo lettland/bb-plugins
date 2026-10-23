@@ -241,9 +241,11 @@ export async function deleteBaselines(bb: BbPluginApi, threadId: string): Promis
 
 /**
  * Whether `error` is the CLI's report of a missing path: the structured
- * `code: "ENOENT"` the 404 body leaves on the error thrown in-process. Nothing
- * else counts: the bare 404 of an unknown environment or route carries no
- * code, and the message is never matched, since it embeds an absolute path.
+ * `code: "ENOENT"` the 404 body leaves on the error thrown in-process. That
+ * in-process shape is assumed and unconfirmed; any other shape falls back to a
+ * failed read. Nothing else counts: the bare 404 of an unknown environment or
+ * route carries no code, and the message is never matched, since it embeds an
+ * absolute path.
  */
 function isMissingPath(error: unknown): boolean {
   return (error as { code?: unknown } | undefined)?.code === "ENOENT";
@@ -260,8 +262,10 @@ type FileRead = { content: string | null } | { failed: true } | { unusable: true
 /**
  * The file's content in the working tree, read whatever its working-tree
  * status (a committed, clean file reads like an edited one): the content, null
- * once deleted — status `"D"`, or a read failing with the ENOENT code, a
- * deletion that was already committed.
+ * once deleted — status `"D"`, or a read failing with the ENOENT code while the
+ * working tree no longer lists the file, a deletion that was already committed.
+ * A file the tree still lists that reads ENOENT contradicts the listing, so the
+ * read fails instead of staging a removal that could hide content.
  */
 async function currentContent(
   bb: BbPluginApi,
@@ -283,7 +287,7 @@ async function currentContent(
       ? { content: result.content }
       : { unusable: true };
   } catch (error) {
-    return isMissingPath(error) ? { content: null } : { failed: true };
+    return isMissingPath(error) && status === undefined ? { content: null } : { failed: true };
   }
 }
 
@@ -341,7 +345,9 @@ export async function prepareCodeBaseline(
       return;
     }
     if ("failed" in read) {
-      // A failed read keeps the file's copy; nothing is staged for it.
+      // A failed read keeps the file's copy; nothing is staged for it. That copy can be older
+      // than this review's read, so the next delta may include changes this review saw in full;
+      // that errs toward more review, which is accepted.
       return;
     }
     files[path] = read.content;

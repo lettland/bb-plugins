@@ -359,6 +359,18 @@ describe("code baselines", () => {
     expect(stored(f).copies).toEqual({});
   });
 
+  it("keeps the copy and stages nothing when a file the tree still lists reads ENOENT", async () => {
+    const f = fake();
+    await review(f, { "src/a.ts": "a1\n" });
+    // The tree lists the file as edited while the read reports it missing: a contradiction, so
+    // the read fails instead of staging a deletion that could hide the file's content.
+    delete f.files["src/a.ts"];
+    const scope = await prepare(f, workspace({ "src/a.ts": "M" }), ["src/a.ts"]);
+    expect(scope).toEqual([]);
+    expect(stored(f).pending?.files).toEqual({});
+    expect(stored(f).copies).toMatchObject({ "src/a.ts": { content: "a1\n" } });
+  });
+
   it("keeps the copy and stages nothing for a read that fails without the ENOENT code, 404 or not", async () => {
     const f = fake();
     await review(f, { "src/a.ts": "a1\n", "src/b.ts": "b1\n" });
