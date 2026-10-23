@@ -248,6 +248,11 @@ describe("tolerating shapes we did not write", () => {
     expect(countOurs(null)).toBe(0);
   });
 
+  it("installs more than one entry", () => {
+    // If this ever fails, the ignored singular branch in cli.mjs diffSummary can be reached and needs a real test.
+    expect(expectedCount()).toBeGreaterThan(1);
+  });
+
   it("dispatches on kind and the uninstall flag", () => {
     const codex = plan("codex", { hooks: {} });
     expect(JSON.stringify(codex)).toContain("codex-shim.sh");

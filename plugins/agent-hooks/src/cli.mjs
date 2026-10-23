@@ -56,6 +56,7 @@ async function codexTrust(provider, out, { readOnly = false } = {}) {
 }
 
 function diffSummary(before, after) {
+  /* v8 ignore next -- @preserve singular "entry" is unreachable while WIRING installs more than one entry: install always writes every WIRING entry and uninstall removes all of them. The wire.test.ts count test pins this. */
   return `${countOurs(before)} -> ${countOurs(after)} agent-hooks entr${countOurs(after) === 1 ? "y" : "ies"}`;
 }
 
