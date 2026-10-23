@@ -2860,6 +2860,37 @@ describe("auto-review plugin", () => {
         await host.harness.dispose();
       });
 
+      it("counts an approval in the user turn the review queued behind, and keeps that turn's stop floor", async () => {
+        const host = editingHost();
+        await plugin(host.bb);
+        await startReview(host, THREAD_ID, Date.now() - 10_000);
+        // The pre-send cursor is 100; the review was delivered later, at cursor
+        // 140, after the user turn it queued behind had ended.
+        Object.assign(host.metadata, { reviewDeliveredAt: Date.now() - 5_000, reviewDeliveredSeq: 140, lastCodeReviewSeq: 100 });
+        // The approval sits below the delivery cursor, and the turn it resolved
+        // in is the user's own request, not a wake-up: it counts as theirs.
+        await holdTurn(host, userRequest(110), undefined, () => {
+          host.lifecycle(125, "turn-110");
+          reviewTurn(host, 140, 160);
+        });
+        expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 120 });
+        expect(host.metadata.userTurnAuthored).toBe(true);
+        // The turn was started by the user themselves, so it keeps the stop
+        // floor its end set, next to the window the approval rule opened.
+        expect(host.metadata.userStopFloorSeq).toBe(130);
+        expect(setAsides(host)).toHaveLength(0);
+        // The review turn is still recognized, and the latch takes its end.
+        expect(host.metadata.reviewTurnEndSeq).toBe(160);
+
+        // Once the children finish, the hold ends with the follow-up review
+        // from the window the turn opened.
+        host.setEnvThreads(idleChild);
+        await holdTurn(host, wakeUp(210), ["src/fix.ts"]);
+        expect(host.sends).toHaveLength(1);
+        expect((await lastFire(host)).scopePaths).toContain("src/fix.ts");
+        await host.harness.dispose();
+      });
+
       it("sets aside only an approval the steered review turn requested after the review was delivered", async () => {
         const host = editingHost();
         await plugin(host.bb);

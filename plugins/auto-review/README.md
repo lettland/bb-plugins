@@ -423,8 +423,6 @@ It ships enabled (opt-out).
   and unreviewed; pressed during your own turn it stops that turn only. Your own turns that
   changed files are reviewed together once the children finish, and not if you stopped one of
   them; a message steered into the review or a wake-up turn counts as part of the review.
-  Code reviews keep a private per-thread copy of the files each review read, for up to 7 days,
-  dropped when the thread is deleted.
   A plan you approve during the hold counts as your own turn wherever it lands: in a turn the
   review waited behind, in the review's own turn before the review prompt was delivered there, or
   in any turn after the review's own. Only a plan requested inside the review's own turn after the
@@ -488,10 +486,11 @@ It ships enabled (opt-out).
   could not be sent as `unavailable`; none reads as a pass. A review that did not run as asked
   — the agent declares the parts it skipped in `skipped`, or the `review-code` check finds no
   load since the pre-send cursor — is recorded as `incomplete`: never as a pass, with no
-  baseline promotion, and a passing re-report for the same review replaces it. Outcomes are
-  agent-reported, not verified against git. A session started before this plugin version does
-  not have the tool until restarted and shows "Review not reported". See `bb auto-review status`
-  and `bb auto-review findings`.
+  baseline promotion, and a passing re-report for the same review replaces it. Code reviews
+  keep a private per-thread copy of the files each review read, for up to 7 days, dropped when
+  the thread is deleted. Outcomes are agent-reported, not verified against git. A session
+  started before this plugin version does not have the tool until restarted and shows
+  "Review not reported". See `bb auto-review status` and `bb auto-review findings`.
 
 The full behavior, including the branch policy table and every `status` reason, is in
 [`skills/auto-review/SKILL.md`](skills/auto-review/SKILL.md). The skill ships with the
