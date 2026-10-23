@@ -120,6 +120,25 @@
       }
     },
     {
+      "id": "project-queue",
+      "displayName": "Project queue",
+      "description": "Start a new thread only when no other thread in its project is running.",
+      "icon": "Clock",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/project-queue",
+          "range": "0.x",
+          "tagPrefix": "project-queue/"
+        }
+      }
+    },
+    {
       "id": "shared-runtime",
       "displayName": "Shared Runtime",
       "description": "Typed, project-confined shared container runtime for BB worktrees, driven by each repository's .bb-runtime.json",
