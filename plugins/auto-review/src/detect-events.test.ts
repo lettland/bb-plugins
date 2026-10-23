@@ -201,8 +201,9 @@ describe("endedTurn", () => {
       request(3, "creq-1", "user"),
       accepted(4, "turn-1", "creq-1"),
       completed(5, "turn-1"),
-      lifecycle(1295, "turn-1", "pending", null),
+      // Out of seq order, so keeping the first one seen instead of the minimum would fail here.
       lifecycle(1300, "turn-1", "pending", null),
+      lifecycle(1295, "turn-1", "pending", null),
       lifecycle(1301, "turn-1", "resolved"),
     ]);
     expect(await endedTurn(bb, "thr", 0)).toEqual({

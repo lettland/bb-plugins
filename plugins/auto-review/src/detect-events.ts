@@ -179,11 +179,13 @@ function approvedPlanOf(
 
 /**
  * A plan approval a turn resolved, with the seq of the lifecycle event that
- * resolved it and the seq of the interaction's `pending` event — when the
- * approval was requested, which is not when it resolved: the turn blocks in
- * between. `requestedSeq` is undefined when no `pending` event for the
- * interaction is among the lifecycle events the turn was read from; the
- * request can predate that window.
+ * resolved it and the seq of the interaction's earliest `pending` event in
+ * the window — when the approval was requested, which is not when it
+ * resolved: the turn blocks in between. `requestedSeq` is undefined when no
+ * `pending` event for the interaction is among the lifecycle events the turn
+ * was read from; the request can predate that window. A re-emitted `pending`
+ * whose original fell before the window would still be the only one seen;
+ * re-emitting is not a known host behaviour.
  */
 export interface ApprovedPlan {
   id: string;

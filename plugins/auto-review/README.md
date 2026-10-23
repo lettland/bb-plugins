@@ -425,12 +425,12 @@ It ships enabled (opt-out).
   them; a message steered into the review or a wake-up turn counts as part of the review.
   A plan you approve during the hold counts as your own turn wherever it lands: in a turn the
   review waited behind, in the review's own turn before the review prompt was delivered there, or
-  in any turn after the review's own. Only a plan requested inside the review's own turn after the
-  review was delivered, and one auto-review approves itself, does not count: work under such a
+  in any turn after the review's own. Only a plan requested after the review was delivered and
+  resolved inside the review's own turn, and one auto-review approves itself, does not count: work under such a
   plan is covered by the review itself and gets no follow-up review, and each set-aside approval
   is logged as an `auto-review:` info line with the interaction id, visible with `bb plugin logs
   auto-review` (`bb plugin list` shows the plugin's id). An approval whose request came before the
-  delivery, whose request was not found, or with no delivery cursor to judge it against counts
+  delivery, or when bb cannot tell when it was requested or when the review was delivered, counts
   too — the rule errs toward more review. Everything from your approval on, including reviewer
   fixes that land after it, is reviewed once the children finish, and nothing the review does
   later cancels that. If you approve a fix plan from a later wake-up turn of the
