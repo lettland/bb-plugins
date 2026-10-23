@@ -6577,6 +6577,42 @@ describe("auto-review plugin: no new work", () => {
     await host.harness.dispose();
   });
 
+  it("carries the review when the user's turn starts while the idle is still detecting", async () => {
+    const host = await carriedBehindQueue();
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 220)]);
+    host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
+    host.setMaxSeq(230);
+    await emitActive(host);
+    // The user's message starts a turn while detection runs on: no queued row
+    // is left, the thread is busy with their turn, and the review is carried
+    // into it, anchored on its request.
+    host.onNextStatusRead(() => {
+      host.setEnvThreads(busyThread);
+      host.requestTurn({ seq: 240, initiator: "user", text: "and a question" });
+      host.setMaxSeq(250);
+    });
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+    expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 239 });
+
+    host.setEnvThreads(idleThread);
+    host.setSiblingRows(THREAD_ID, [
+      fileChangeRow("src/a.ts"),
+      fileChangeRow("src/c.ts", 220),
+      fileChangeRow("src/d.ts", 250),
+    ]);
+    host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }, { path: "src/d.ts" }]);
+    host.setMaxSeq(270);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({
+      outcome: "fired",
+      scopePaths: ["src/a.ts", "src/c.ts", "src/d.ts"],
+    });
+    await host.harness.dispose();
+  });
+
   it("dispatches as before when a wake-up starts mid-detection and its request cannot be read", async () => {
     const host = await carriedBehindQueue();
     host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 220)]);
@@ -6591,6 +6627,7 @@ describe("auto-review plugin: no new work", () => {
       host.setMaxSeq(240);
     });
     await emitIdle(host);
+    expect(warned(host, "running turn of")).toBe(true);
     expect(host.sends).toHaveLength(1);
     expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
     await host.harness.dispose();

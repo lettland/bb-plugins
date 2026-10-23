@@ -93,7 +93,12 @@ async function userTurnRunning(
 ): Promise<boolean> {
   try {
     return (await userTurnRunningSince(ctx.bb, threadId, sinceSeq)) !== null;
-  } catch {
+  } catch (error) {
+    ctx.bb.log.warn(
+      `auto-review: could not read whether the running turn of ${threadId} is the user's; reviewing anyway: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
     return false;
   }
 }
