@@ -841,6 +841,31 @@ describe("buildReviewPrompt", () => {
       }
     });
 
+    it("leaves the range sentence out when a baseline has no commit range to stand in for", () => {
+      const text = buildReviewPrompt({
+        decision: { commit: true, merge: false },
+        reviewMode: "auto",
+        scope: baseScope,
+        codeBaseline: [changed],
+      });
+      expect(text).toContain("Review baseline: auto-review keeps a private copy");
+      expect(text).not.toContain("range diff");
+    });
+
+    it("carries the range sentence on the no-commit paths when the turn has committed work", () => {
+      for (const input of Object.values(noCommitInputs)) {
+        const text = buildReviewPrompt({
+          ...input,
+          reviewMode: "auto",
+          committedSince: "0123abcd",
+          codeBaseline: [changed],
+        });
+        expect(text).toContain("Review baseline: auto-review keeps a private copy");
+        expect(text).toContain("the delta replaces that file's range diff");
+        expect(text).toContain("the secret scan still covers the whole range");
+      }
+    });
+
     it("still leaves a commit path without a baseline when no file has one", () => {
       for (const decision of [{ commit: true, merge: false }, { commit: true, merge: true }]) {
         for (const codeBaseline of [undefined, []] as const) {

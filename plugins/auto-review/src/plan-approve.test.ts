@@ -181,4 +181,12 @@ describe("reapproveSamePlan", () => {
     expect(fake.calls).toEqual(["metadata", "interaction", "events", "metadata", "resolve"]);
     expect(fake.writes.at(-1)).toMatchObject({ set: { autoResolvedPlanIds: ["pint-2"] } });
   });
+
+  it("removes the recorded id again when the resolve fails", async () => {
+    const fake = fakeBb({ failResolve: true });
+    expect(await reapproveSamePlan({ bb: fake.bb } as ReviewContext, threadOf(), state, approvalOf())).toBe(false);
+    expect(fake.calls).toEqual(["metadata", "interaction", "events", "metadata", "resolve", "metadata"]);
+    expect(fake.writes.at(-1)?.set?.autoResolvedPlanIds).toEqual([]);
+    expect(fake.warnings.some((message) => message.includes("could not re-approve"))).toBe(true);
+  });
 });

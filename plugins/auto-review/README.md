@@ -423,6 +423,8 @@ It ships enabled (opt-out).
   and unreviewed; pressed during your own turn it stops that turn only. Your own turns that
   changed files are reviewed together once the children finish, and not if you stopped one of
   them; a message steered into the review or a wake-up turn counts as part of the review.
+  Code reviews keep a private per-thread copy of the files each review read, for up to 7 days,
+  dropped when the thread is deleted.
   A plan you approve during the hold counts as your own turn wherever it lands: in a turn the
   review waited behind, in the review's own turn before the review prompt was delivered there, or
   in any turn after the review's own. Only a plan approved inside the review's own turn after the
