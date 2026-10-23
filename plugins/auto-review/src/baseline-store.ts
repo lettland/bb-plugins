@@ -132,7 +132,7 @@ async function blockerOpen(bb: BbPluginApi, threadId: string): Promise<boolean> 
   }
 }
 
-// ---- plans -----------------------------------------------------------------
+// plans.
 
 /**
  * What a plan review covers: the delta against the plan's promoted copy when
