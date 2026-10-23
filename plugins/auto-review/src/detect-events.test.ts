@@ -194,6 +194,25 @@ describe("endedTurn", () => {
     });
   });
 
+  it("keeps the earliest pending seq when an interaction id is pending twice", async () => {
+    // The caller judges the request against the review's delivery cursor and
+    // fails open: a re-emitted `pending` after it must not read as the request.
+    const { bb } = logOf([
+      request(3, "creq-1", "user"),
+      accepted(4, "turn-1", "creq-1"),
+      completed(5, "turn-1"),
+      lifecycle(1295, "turn-1", "pending", null),
+      lifecycle(1300, "turn-1", "pending", null),
+      lifecycle(1301, "turn-1", "resolved"),
+    ]);
+    expect(await endedTurn(bb, "thr", 0)).toEqual({
+      users: true,
+      completedSeq: 5,
+      approvedPlans: [{ id: "pint-1", seq: 1301, requestedSeq: 1295 }],
+      reviewTurn: false,
+    });
+  });
+
   it("lists neither a denied, a non-plan, nor another turn's approval", async () => {
     const { bb } = logOf([
       request(3, "creq-1", "user"),

@@ -182,7 +182,7 @@ function countUserApprovals(
         `auto-review: the plan approval ${approval.id} at seq ${approval.seq} in thread ${threadId} is set aside (${
           auto.includes(approval.id)
             ? "auto-review resolved it itself"
-            : "it was requested and resolved inside the review's own turn, after the review was delivered"
+            : "it was requested after the review was delivered and resolved inside the review's own turn"
         }), so the work under it is covered by the review itself`,
       );
       continue;

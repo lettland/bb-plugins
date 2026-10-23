@@ -2820,7 +2820,7 @@ describe("auto-review plugin", () => {
         // the review's own turn, after the review was delivered at cursor 100.)
         await holdTurn(host, wakeUp(120));
         expect(setAsides(host)).toEqual([
-          `auto-review: the plan approval pint-1 at seq 108 in thread ${THREAD_ID} is set aside (it was requested and resolved inside the review's own turn, after the review was delivered), so the work under it is covered by the review itself`,
+          `auto-review: the plan approval pint-1 at seq 108 in thread ${THREAD_ID} is set aside (it was requested after the review was delivered and resolved inside the review's own turn), so the work under it is covered by the review itself`,
         ]);
         expect(host.metadata.phase).toBe("idle");
         expect(host.sends).toHaveLength(0);
@@ -2927,7 +2927,7 @@ describe("auto-review plugin", () => {
         // The steered turn is the review turn, and the latch takes its end.
         expect(host.metadata.reviewTurnEndSeq).toBe(200);
         expect(setAsides(host)).toEqual([
-          `auto-review: the plan approval pint-2 at seq 190 in thread ${THREAD_ID} is set aside (it was requested and resolved inside the review's own turn, after the review was delivered), so the work under it is covered by the review itself`,
+          `auto-review: the plan approval pint-2 at seq 190 in thread ${THREAD_ID} is set aside (it was requested after the review was delivered and resolved inside the review's own turn), so the work under it is covered by the review itself`,
         ]);
         // The earlier approval counts as the user's, though it resolved after the delivery.
         expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 120 });
@@ -3133,7 +3133,7 @@ describe("auto-review plugin", () => {
         Object.assign(host.metadata, { reviewDeliveredAt: Date.now() - 5_000, lastCodeReviewSeq: 100 });
         await holdTurn(host, wakeUp(120));
         expect(setAsides(host)).toEqual([
-          `auto-review: the plan approval pint-1 at seq 107 in thread ${THREAD_ID} is set aside (it was requested and resolved inside the review's own turn, after the review was delivered), so the work under it is covered by the review itself`,
+          `auto-review: the plan approval pint-1 at seq 107 in thread ${THREAD_ID} is set aside (it was requested after the review was delivered and resolved inside the review's own turn), so the work under it is covered by the review itself`,
         ]);
         expect(host.metadata.phase).toBe("idle");
         expect(host.sends).toHaveLength(0);

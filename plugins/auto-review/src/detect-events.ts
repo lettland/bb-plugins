@@ -268,11 +268,19 @@ export async function endedTurn(
     // predate the window: the pending step is matched by interaction id across every lifecycle
     // event read, not by the ended turn's scope.
     const lifecycle = await collect(eventsSince(bb, threadId, sinceSeq, "system/interaction/lifecycle"));
-    const requestedSeqOf = new Map(
-      lifecycle
-        .filter((event) => event.data.interaction.status === "pending")
-        .map((event) => [event.data.interaction.id, event.seq]),
-    );
+    // The earliest `pending` seq wins: the set-aside rule fails open, so a re-emitted or
+    // reused `pending` after the review's delivery must not set aside an approval first
+    // requested before that delivery.
+    const requestedSeqOf = new Map<string, number>();
+    for (const event of lifecycle) {
+      if (event.data.interaction.status !== "pending") {
+        continue;
+      }
+      const earliest = requestedSeqOf.get(event.data.interaction.id);
+      if (earliest === undefined || event.seq < earliest) {
+        requestedSeqOf.set(event.data.interaction.id, event.seq);
+      }
+    }
     const approvedPlans = lifecycle
       .filter(({ scope }) => scope.kind === "turn" && scope.turnId === turnId)
       .flatMap((event) => {
