@@ -306,7 +306,7 @@ async function approvePlan(
 /**
  * Whether a plan presented again right after the gate left an identical one
  * with the user is that plan re-presented in the same turn, and can be
- * approved again on the user's earlier word instead of being held for another
+ * approved again on that earlier approval instead of being held for another
  * review round — the gate has disarmed, so the hold's usual "a review is
  * still pending" guarantee is gone, and only this record (`planReleased`,
  * written at the release) vouches for the repetition. The guarantees are
