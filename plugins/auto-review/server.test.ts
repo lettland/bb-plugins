@@ -6545,6 +6545,57 @@ describe("auto-review plugin: no new work", () => {
     await host.harness.dispose();
   });
 
+  it("carries the review when a message is queued while the idle is still detecting", async () => {
+    const host = await carriedBehindQueue();
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 220)]);
+    host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
+    host.setMaxSeq(230);
+    await emitActive(host);
+    // The message lands while detection runs on, after the check at the start
+    // of the idle: carried into that turn, not sent alongside it.
+    host.onNextStatusRead(() => host.setQueuedRows([userMessage("u2")]));
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+    expect(host.metadata.lastIdle).toMatchObject({ sinceSeq: 230 });
+
+    host.setQueuedRows([]);
+    host.setSiblingRows(THREAD_ID, [
+      fileChangeRow("src/a.ts"),
+      fileChangeRow("src/c.ts", 220),
+      fileChangeRow("src/d.ts", 240),
+    ]);
+    host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }, { path: "src/d.ts" }]);
+    host.setMaxSeq(250);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({
+      outcome: "fired",
+      scopePaths: ["src/a.ts", "src/c.ts", "src/d.ts"],
+    });
+    await host.harness.dispose();
+  });
+
+  it("dispatches as before when a wake-up starts mid-detection and its request cannot be read", async () => {
+    const host = await carriedBehindQueue();
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 220)]);
+    host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
+    host.setMaxSeq(230);
+    await emitActive(host);
+    // A wake-up whose request cannot be read is not known to be the user's:
+    // the idle keeps today's dispatch path instead of carrying.
+    host.onNextStatusRead(() => {
+      host.setEnvThreads(busyThread);
+      host.setTurnRequestsThrow(true);
+      host.setMaxSeq(240);
+    });
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
+    await host.harness.dispose();
+  });
+
   describe("when the user's next turn is already running", () => {
     /** Turn A edited `src/a.ts` at seq 150; the user's question (request at seq 160) is already running when A's idle arrives. */
     async function runningBehind(options: HostOptions = {}) {

@@ -18,6 +18,7 @@ import {
   runningChildIds,
   stoppedByUser,
   turnChangedPaths,
+  userTurnRunningSince,
   type AvailableWorkspace,
   type TurnChanges,
 } from "./detect.js";
@@ -79,6 +80,22 @@ async function userTurnQueued(
           (row.sendAt === null || row.sendAt <= now),
       ),
   };
+}
+
+/**
+ * Whether the turn running now is the user's, read from the requests after
+ * `sinceSeq`. False when the read fails, so the caller dispatches as before.
+ */
+async function userTurnRunning(
+  ctx: ReviewContext,
+  threadId: string,
+  sinceSeq: number,
+): Promise<boolean> {
+  try {
+    return (await userTurnRunningSince(ctx.bb, threadId, sinceSeq)) !== null;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -348,6 +365,15 @@ export async function evaluate(
       park,
     })
   ) {
+    return;
+  }
+  // Detection can take minutes; a user turn that started or was queued
+  // meanwhile still carries the review, as at the start of the idle. A
+  // wake-up that started meanwhile is not the user's turn and dispatches
+  // as before.
+  const { busy, queued } = await userTurnQueued(ctx, thread.id);
+  if (queued && (!busy || (await userTurnRunning(ctx, thread.id, lastIdleFloor(state))))) {
+    await carryOver(ctx, thread, state, busy);
     return;
   }
   await dispatchReview(ctx, {
