@@ -26,14 +26,24 @@ interface Fake {
   bb: BbPluginApi;
   kv: Map<string, unknown>;
   warnings: string[];
-  /** What `diffFile` serves per path; a missing path throws. */
-  files: Record<string, string>;
+  /** How many paths `diffFile` was asked to read. */
+  readonly reads: number;
+  /**
+   * What `diffFile` serves per path: utf8 text, binary content, or a thrown
+   * error. Any path with nothing served fails like the CLI's ENOENT 404.
+   */
+  files: Record<string, string | { base64: string } | Error>;
 }
 
-function fake(files: Record<string, string> = {}): Fake {
+/** The error thrown in-process for a missing path: the CLI's 404, its code structured, the path absolute in the message. */
+const enoent404 = (path: string): Error =>
+  Object.assign(new Error(`HTTP 404: Path does not exist: /work/${path}`), { code: "ENOENT" });
+
+function fake(files: Fake["files"] = {}): Fake {
   const kv = new Map<string, unknown>();
   const warnings: string[] = [];
   const served = files;
+  let reads = 0;
   const bb = {
     storage: {
       kv: {
@@ -51,16 +61,23 @@ function fake(files: Record<string, string> = {}): Fake {
     sdk: {
       environments: {
         diffFile: async ({ path }: { path: string }) => {
+          reads += 1;
           const content = served[path];
           if (content === undefined) {
-            throw new Error(`no content for ${path}`);
+            throw enoent404(path);
           }
-          return { path, content, contentEncoding: "utf8", sizeBytes: content.length };
+          if (content instanceof Error) {
+            throw content;
+          }
+          if (typeof content === "string") {
+            return { path, content, contentEncoding: "utf8", sizeBytes: content.length };
+          }
+          return { path, content: content.base64, contentEncoding: "base64", sizeBytes: content.base64.length };
         },
       },
     },
   } as unknown as BbPluginApi;
-  return { bb, kv, warnings, files: served };
+  return { bb, kv, warnings, get reads() { return reads; }, files: served };
 }
 
 function workspace(paths: Record<string, string>, headSha = "head-1"): AvailableWorkspace {
@@ -271,16 +288,25 @@ describe("code baselines", () => {
     expect(scope.map(({ path }) => path)).toEqual(["src/b.ts"]);
   });
 
-  it("ignores a copy once HEAD moved", async () => {
+  it("keeps a copy valid across a commit, and reviews only the next turn's edit", async () => {
     const f = fake();
-    await review(f, { "src/a.ts": "a1\n" }, "head-1");
-    f.files["src/a.ts"] = "a2\n";
-    const scope = await prepare(f, workspace({ "src/a.ts": "M" }, "head-2"), ["src/a.ts"]);
-    expect(scope).toEqual([]);
-    expect(stored(f).pending?.headSha).toBe("head-2");
+    await review(f, { "src/a.ts": "a1\na2\n" }, "head-1");
+    // The review committed its work: HEAD is head-2, the file sits clean in the tree, and the next turn edits it again.
+    f.files["src/a.ts"] = "a1\nA2\n";
+    const scope = await prepare(f, workspace({}, "head-2"), ["src/a.ts"]);
+    expect(scope.map(({ path, kind }) => [path, kind])).toEqual([["src/a.ts", "delta"]]);
+    expect(scope[0]?.diff).toContain("-a2\n+A2");
   });
 
-  it("has no baseline without a HEAD to compare, and stages nothing", async () => {
+  it("reads a committed, clean file and calls it unchanged while its content still matches", async () => {
+    const f = fake();
+    await review(f, { "src/a.ts": "a1\n" }, "head-1");
+    const scope = await prepare(f, workspace({}, "head-2"), ["src/a.ts"]);
+    expect(scope.map(({ path, kind }) => [path, kind])).toEqual([["src/a.ts", "unchanged"]]);
+    expect(stored(f).pending?.files).toEqual({ "src/a.ts": "a1\n" });
+  });
+
+  it("stages nothing without a HEAD to record the read under", async () => {
     const f = fake({ "src/a.ts": "a1\n" });
     expect(await prepare(f, null, ["src/a.ts"])).toEqual([]);
     expect(stored(f).pending).toBeUndefined();
@@ -319,27 +345,59 @@ describe("code baselines", () => {
     expect(scope.map(({ path }) => path)).toEqual(["src/a.ts", "src/c.ts"]);
   });
 
-  it("gives no baseline to a file it cannot read, is too large, or is not in the working tree", async () => {
+  it("stages null for an ENOENT read, a deletion that was already committed", async () => {
     const f = fake();
-    await review(f, { "src/a.ts": "a1\n", "src/b.ts": "b1\n", "src/c.ts": "c1\n" });
-    f.files["src/b.ts"] = "x".repeat(MAX_BASELINE_FILE_BYTES + 1);
+    await review(f, { "src/a.ts": "a1\na2\n" });
+    // Committed and gone: no working-tree status, and the read fails like the CLI's 404.
     delete f.files["src/a.ts"];
-    f.files["src/c.ts"] = "c2\n";
-    const scope = await prepare(
-      f,
-      workspace({ "src/a.ts": "M", "src/b.ts": "M" }),
-      ["src/a.ts", "src/b.ts", "src/c.ts"],
-    );
+    const scope = await prepare(f, workspace({}, "head-2"), ["src/a.ts"]);
+    expect(scope[0]).toMatchObject({ path: "src/a.ts", kind: "removed" });
+    expect(scope[0]?.diff).toContain("-a1\n-a2");
+    expect(stored(f).pending?.files["src/a.ts"]).toBeNull();
+    await recordCodeReport(f.bb, THREAD, clean, false);
+    await settleCodeBaseline(f.bb, THREAD, NOW);
+    expect(stored(f).copies).toEqual({});
+  });
+
+  it("keeps the copy and stages nothing for a read that fails without the ENOENT code, 404 or not", async () => {
+    const f = fake();
+    await review(f, { "src/a.ts": "a1\n", "src/b.ts": "b1\n" });
+    // The 404 of an unknown environment carries no code; its message looks just like the missing
+    // path's, so only the code may decide. The other read fails without being a 404 at all.
+    f.files["src/a.ts"] = new Error("HTTP 404: Path does not exist: /work/src/a.ts");
+    f.files["src/b.ts"] = new Error("diff-file is down");
+    const scope = await prepare(f, workspace({ "src/a.ts": "M", "src/b.ts": "M" }), ["src/a.ts", "src/b.ts"]);
+    expect(scope).toEqual([]);
+    expect(stored(f).pending?.files).toEqual({});
+    expect(stored(f).copies).toMatchObject({
+      "src/a.ts": { content: "a1\n" },
+      "src/b.ts": { content: "b1\n" },
+    });
+  });
+
+  it("still drops the copy of a file that is not utf8 text or is over the size guard", async () => {
+    const f = fake();
+    await review(f, { "src/a.ts": "a1\n", "src/b.ts": "b1\n" });
+    f.files["src/a.ts"] = "x".repeat(MAX_BASELINE_FILE_BYTES + 1);
+    f.files["src/b.ts"] = { base64: Buffer.from("bin\0ary").toString("base64") };
+    const scope = await prepare(f, workspace({ "src/a.ts": "M", "src/b.ts": "M" }), ["src/a.ts", "src/b.ts"]);
     expect(scope).toEqual([]);
     expect(stored(f).pending?.files).toEqual({});
     expect(stored(f).copies).toEqual({});
   });
 
-  it("keeps at most the file limit in a review's pending set", async () => {
+  it("reads at most the file cap and drops the copies past it", async () => {
     const paths = Array.from({ length: MAX_CODE_BASELINE_FILES + 10 }, (_, i) => `f${i}.ts`);
     const f = fake(Object.fromEntries(paths.map((path) => [path, "x\n"])));
-    await prepare(f, workspace(Object.fromEntries(paths.map((path) => [path, "M"]))), paths);
+    await review(f, { "z-tail.ts": "tail\n" });
+    const all = [...paths, "z-tail.ts"];
+    const before = f.reads;
+    const scope = await prepare(f, workspace(Object.fromEntries(all.map((p) => [p, "M"]))), all);
+    expect(f.reads - before).toBe(MAX_CODE_BASELINE_FILES);
+    expect(scope).toEqual([]);
     expect(Object.keys(stored(f).pending?.files ?? {})).toHaveLength(MAX_CODE_BASELINE_FILES);
+    // The copy past the cap went without its path being read.
+    expect(stored(f).copies).toEqual({});
   });
 
   it("drops copies older than the TTL when touched", async () => {

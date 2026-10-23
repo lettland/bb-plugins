@@ -196,8 +196,13 @@ describe("the review-code latch in sendReview", () => {
   const devkit = { enabled: true, status: "running", cliCommand: { name: "devkit" } };
 
   async function withDispatch(
-    options: { reviewMode: ReviewMode; plugins: unknown[] | "throws" },
-    body: (calls: MetadataCall[]) => Promise<void>,
+    options: {
+      reviewMode: ReviewMode;
+      plugins: unknown[] | "throws";
+      /** Extra sdk stubs, such as `environments`, for a test that drives the workspace reads. */
+      environments?: Record<string, unknown>;
+    },
+    body: (calls: MetadataCall[], bb: Awaited<ReturnType<typeof createFakePluginHost>>["bb"]) => Promise<void>,
   ) {
     const calls: MetadataCall[] = [];
     const sdk = {
@@ -217,6 +222,8 @@ describe("the review-code latch in sendReview", () => {
         },
         send: async () => ({ delivery: "queued", queuedMessage: { id: "qm-1" } }),
       },
+      // An undefined value is fine: the fake sdk ignores an override that is no object.
+      environments: options.environments,
     } as unknown as CreateFakePluginHostOptions["sdk"];
     const host = createFakePluginHost({ pluginId: "auto-review", sdk, agentSkillIds: ["auto-review"] });
     try {
@@ -240,7 +247,7 @@ describe("the review-code latch in sendReview", () => {
         scope: ["a.ts"],
         turn: { paths: ["a.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [], parkedCommits: [], parkedPaths: [] },
       });
-      await body(calls);
+      await body(calls, host.bb);
     } finally {
       await host.harness.dispose();
     }
@@ -287,5 +294,34 @@ describe("the review-code latch in sendReview", () => {
       expect(calls[0].set?.reviewSkillRequired).toBeUndefined();
       expect(calls[0].remove).toContain("reviewSkillRequired");
     });
+  });
+
+  it("stages a pending baseline on a commit-policy dispatch too", async () => {
+    await withDispatch(
+      {
+        reviewMode: "auto",
+        plugins: [],
+        environments: {
+          status: async () => ({
+            outcome: "available",
+            workspace: {
+              checkout: { kind: "branch", headSha: "0123abcd" },
+              workingTree: { files: [{ path: "a.ts", status: "M" }] },
+            },
+          }),
+          diffFile: async ({ path }: { path: string }) => ({
+            path,
+            content: "a1\n",
+            contentEncoding: "utf8",
+            sizeBytes: 3,
+          }),
+        },
+      },
+      async (_calls, bb) => {
+        expect(await bb.storage.kv.get("baseline:code:thr_1")).toMatchObject({
+          pending: { headSha: "0123abcd", files: { "a.ts": "a1\n" } },
+        });
+      },
+    );
   });
 });

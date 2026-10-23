@@ -84,7 +84,11 @@ export interface BuildPromptInput {
   priorFindings?: readonly PromptFinding[];
   /** How many more such findings did not fit the list. */
   priorFindingsOmitted?: number;
-  /** The files of a no-commit review that have a baseline, each with its delta; any other file gets the full review. */
+  /**
+   * The files earlier reviews of this thread read, each with its delta; any
+   * other file gets the full review. Every review carries them now, but a
+   * commit-path prompt with none stays without the baseline paragraph.
+   */
   codeBaseline?: readonly CodeFileScope[];
 }
 
@@ -266,8 +270,8 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
   lines.push(...priorFindingsSection(input.priorFindings ?? [], input.priorFindingsOmitted ?? 0));
   const overflow = decision.commit && scope.overflowCount > 0;
   const noCommit = isNoCommit(decision, scope);
-  if (noCommit) {
-    lines.push(codeBaselineParagraph(reviewMode, input.codeBaseline ?? []), "");
+  if (noCommit || (input.codeBaseline ?? []).length > 0) {
+    lines.push(codeBaselineParagraph(reviewMode, input.codeBaseline ?? [], committedSince), "");
   }
   lines.push(reviewerMessageRules(decision, scope), "");
   lines.push(`1. ${reviewStep(reviewMode, committedSince, input.aislopScan ?? false)}`);

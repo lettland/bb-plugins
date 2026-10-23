@@ -6853,7 +6853,7 @@ describe("auto-review plugin: review baselines", () => {
       await host.harness.dispose();
     });
 
-    it("leaves a review that commits without a baseline and clears what an earlier review staged", async () => {
+    it("stages a baseline for a review that commits too, replacing what an earlier review staged", async () => {
       const host = createHost({ headSha: "head-0", workingTreeFiles: [{ path: "src/a.ts", content: "one\n" }] });
       await plugin(host.bb);
       await host.bb.storage.kv.set(`baseline:code:${THREAD_ID}`, {
@@ -6862,7 +6862,7 @@ describe("auto-review plugin: review baselines", () => {
       });
       await reviewTurn(host, 2);
       expect(promptText(host)).not.toContain("Review baseline");
-      expect((await codeRecord(host))?.pending).toBeUndefined();
+      expect((await codeRecord(host))?.pending).toMatchObject({ headSha: "head-0", files: { "src/a.ts": "one\n" } });
       await host.harness.dispose();
     });
   });

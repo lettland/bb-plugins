@@ -42,7 +42,11 @@ const planRecordSchema = z.object({
 type PlanRecord = z.infer<typeof planRecordSchema>;
 
 const codeRecordSchema = z.object({
-  /** Repo-relative path -> what the last clean review read, valid while HEAD is still `headSha`. */
+  /**
+   * Repo-relative path -> what the last clean review read. A copy is compared
+   * by content, so it stays valid whatever HEAD does; `headSha` is kept only
+   * so stored records still parse.
+   */
   copies: z
     .record(z.string(), z.object({ content: z.string(), headSha: z.string(), at: z.number() }))
     .default({}),
@@ -233,23 +237,40 @@ export async function deleteBaselines(bb: BbPluginApi, threadId: string): Promis
   await deleteRecord(bb, codeKey(threadId));
 }
 
-// ---- no-commit code reviews --------------------------------------------------
+// code baselines.
 
 /**
- * The file's content in the working tree: null once deleted, undefined when it
- * cannot be read as text within the size guard (it then has no baseline).
+ * Whether `error` is the CLI's report of a missing path: the structured
+ * `code: "ENOENT"` the 404 body leaves on the error thrown in-process. Nothing
+ * else counts: the bare 404 of an unknown environment or route carries no
+ * code, and the message is never matched, since it embeds an absolute path.
+ */
+function isMissingPath(error: unknown): boolean {
+  return (error as { code?: unknown } | undefined)?.code === "ENOENT";
+}
+
+/**
+ * One file's read for a baseline: its working-tree `content` (null once
+ * deleted), a read that `failed` (nothing is staged; the copy is kept for the
+ * next review), or content `unusable` as a baseline (not utf8 text, or over
+ * the size guard; the copy is dropped, as it always has been).
+ */
+type FileRead = { content: string | null } | { failed: true } | { unusable: true };
+
+/**
+ * The file's content in the working tree, read whatever its working-tree
+ * status (a committed, clean file reads like an edited one): the content, null
+ * once deleted — status `"D"`, or a read failing with the ENOENT code, a
+ * deletion that was already committed.
  */
 async function currentContent(
   bb: BbPluginApi,
   environmentId: string,
   path: string,
   status: string | undefined,
-): Promise<string | null | undefined> {
-  if (status === undefined) {
-    return undefined;
-  }
+): Promise<FileRead> {
   if (status === "D") {
-    return null;
+    return { content: null };
   }
   try {
     const result = await bb.sdk.environments.diffFile({
@@ -258,9 +279,11 @@ async function currentContent(
       path,
       side: "new",
     });
-    return result.contentEncoding === "utf8" && !tooBig(result.content) ? result.content : undefined;
-  } catch {
-    return undefined;
+    return result.contentEncoding === "utf8" && !tooBig(result.content)
+      ? { content: result.content }
+      : { unusable: true };
+  } catch (error) {
+    return isMissingPath(error) ? { content: null } : { failed: true };
   }
 }
 
@@ -274,10 +297,16 @@ export interface CodeBaselineInput {
 }
 
 /**
- * The deltas of a no-commit review, for the files whose copy is still valid
- * (the repository is still at the copy's HEAD) and whose delta fits the budget;
- * every other file gets the full review. Stages what the files read now as
- * pending, for the review's clean end to promote.
+ * The deltas of a review, for the files whose earlier copy still matches the
+ * file's content and whose delta fits the budget; every other file gets the
+ * full review. A copy is matched by content, so a branch switch or a pull
+ * between reviews only makes the delta larger — upstream changes are then
+ * reviewed, never skipped, and past `CODE_DELTA_BUDGET` the whole file falls
+ * back to a full review. At most `MAX_CODE_BASELINE_FILES` paths are read; a
+ * listed path past the cap loses its copy, as a file past the limit always
+ * did. Stages what the files read now as pending, for the review's clean end
+ * to promote. Retention is unchanged: the 7-day TTL and the size caps still
+ * prune copies, and `deleteBaselines` still drops the record with the thread.
  */
 export async function prepareCodeBaseline(
   bb: BbPluginApi,
@@ -295,25 +324,33 @@ export async function prepareCodeBaseline(
     return [];
   }
   const statuses = new Map(workspace.workingTree.files.map((file) => [file.path, file.status]));
-  const contents = await mapLimit(paths, HASH_CONCURRENCY, (path) =>
-    currentContent(bb, environmentId, path, statuses.get(path)),
+  // The read is the costly step: past the cap a path's copy is dropped without reading it,
+  // so entries past the cap in `contents` are undefined.
+  const contents: (FileRead | undefined)[] = await mapLimit(
+    paths.slice(0, MAX_CODE_BASELINE_FILES),
+    HASH_CONCURRENCY,
+    (path) => currentContent(bb, environmentId, path, statuses.get(path)),
   );
   const scope: CodeFileScope[] = [];
   const files: Record<string, string | null> = {};
   let budget = CODE_DELTA_BUDGET;
   paths.forEach((path, index) => {
-    const current = contents[index];
-    if (current === undefined || Object.keys(files).length >= MAX_CODE_BASELINE_FILES) {
+    const read = contents[index];
+    if (read === undefined || "unusable" in read) {
       delete copies[path];
       return;
     }
-    files[path] = current;
-    const copy = copies[path];
-    if (copy === undefined || copy.headSha !== head) {
+    if ("failed" in read) {
+      // A failed read keeps the file's copy; nothing is staged for it.
       return;
     }
-    const diff = unifiedDelta(copy.content, current ?? "", path);
-    const kind = current === null ? "removed" : diff === "" ? "unchanged" : "delta";
+    files[path] = read.content;
+    const copy = copies[path];
+    if (copy === undefined) {
+      return;
+    }
+    const diff = unifiedDelta(copy.content, read.content ?? "", path);
+    const kind = read.content === null ? "removed" : diff === "" ? "unchanged" : "delta";
     if (diff !== undefined && diff.length <= budget) {
       budget -= diff.length;
       scope.push({ path, kind, diff });

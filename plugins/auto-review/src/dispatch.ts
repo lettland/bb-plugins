@@ -15,7 +15,7 @@ import { parkedFire } from "./detect-park.js";
 import { readFindings, recordUnreported } from "./findings-store.js";
 import { openFindingsForPrompt } from "./findings.js";
 import { refreshIdleSnapshot } from "./last-idle.js";
-import { buildReviewPrompt, isNoCommit, renderScope } from "./prompt.js";
+import { buildReviewPrompt, renderScope } from "./prompt.js";
 import { withProviderLock } from "./provider-lock.js";
 import { deliveredPatch } from "./review-outcome.js";
 import { addReview, removeReview } from "./reviews.js";
@@ -128,22 +128,23 @@ async function codeReviewCursor(bb: BbPluginApi, threadId: string): Promise<{ la
 }
 
 /**
- * The deltas of a no-commit review (see `prepareCodeBaseline`). A review that
- * commits needs none, but still ends the pending content an earlier review left.
+ * The deltas of the review (see `prepareCodeBaseline`): every review stages
+ * what the files in scope read, whatever its commit policy, so a later review
+ * covers only what changed since. A review whose files have no baseline yet
+ * gets the full one; every failure here means a full review, never a failed
+ * dispatch.
  */
 async function codeBaselineFor(
   bb: BbPluginApi,
   threadId: string,
   environmentId: string,
-  decision: ReturnType<typeof decide>,
   rendered: ReturnType<typeof renderScope>,
 ) {
-  const noCommit = isNoCommit(decision, rendered);
-  const workspace = noCommit ? await fetchWorkspace(bb, environmentId).catch(() => null) : null;
+  const workspace = await fetchWorkspace(bb, environmentId).catch(() => null);
   return prepareCodeBaseline(bb, {
     threadId,
     environmentId,
-    paths: noCommit ? rendered.listed : [],
+    paths: rendered.listed,
     workspace,
     now: Date.now(),
   });
@@ -244,7 +245,7 @@ export async function dispatchReview(
       decision,
       reviewMode: config.reviewMode,
       scope: rendered,
-      codeBaseline: await codeBaselineFor(ctx.bb, thread.id, environmentId, decision, rendered),
+      codeBaseline: await codeBaselineFor(ctx.bb, thread.id, environmentId, rendered),
       committedSince: committedSinceHead(turn, state),
       commitScanFrom: commitScanHead(turn, state),
       foreignCommits: turn.foreignCommits.map(({ sha }) => sha),

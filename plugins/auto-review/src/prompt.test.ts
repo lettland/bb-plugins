@@ -819,15 +819,45 @@ describe("buildReviewPrompt", () => {
       expect(text).toContain("`docs/a.md`\n`````diff\n@@ -1 +1 @@\n-```\n+````js\n`````");
     });
 
-    it("leaves the commit path without a baseline, but with the closure re-run wording", () => {
+    it("carries the paragraph and the range sentence on a commit path with a baseline, with the closure re-run wording", () => {
       for (const decision of [{ commit: true, merge: false }, { commit: true, merge: true }]) {
-        const text = buildReviewPrompt({ decision, reviewMode: "auto", scope: baseScope, codeBaseline: [changed] });
-        expect(text).not.toContain("Review baseline");
-        expect(text).not.toContain("```diff");
+        const text = buildReviewPrompt({
+          decision,
+          reviewMode: "auto",
+          scope: baseScope,
+          committedSince: "0123abcd",
+          codeBaseline: [changed],
+        });
+        expect(text).toContain("Review baseline: auto-review keeps a private copy");
+        expect(text).toContain("`src/a.ts`\n```diff\n@@ -1 +1 @@\n-old\n+new\n```");
+        expect(text).toContain("the delta replaces that file's range diff");
+        expect(text).toContain('an "unchanged" file is not reviewed again');
+        expect(text).toContain("the secret scan still covers the whole range");
+        expect(text.indexOf("Review baseline:")).toBeLessThan(text.indexOf("\n1. "));
         expect(step5(text)).not.toContain("copies");
         expect(step2(text)).toBe(
           "2. Apply the fixes the review reports. If it asks for a re-run, re-run only over the changes since its previous pass (devkit's closure rule); a self-review is one pass.",
         );
+      }
+    });
+
+    it("still leaves a commit path without a baseline when no file has one", () => {
+      for (const decision of [{ commit: true, merge: false }, { commit: true, merge: true }]) {
+        for (const codeBaseline of [undefined, []] as const) {
+          const text = buildReviewPrompt({
+            decision,
+            reviewMode: "auto",
+            scope: baseScope,
+            committedSince: "0123abcd",
+            ...(codeBaseline === undefined ? {} : { codeBaseline }),
+          });
+          expect(text).not.toContain("Review baseline");
+          expect(text).not.toContain("```diff");
+          expect(text).not.toContain("range diff");
+          expect(step2(text)).toBe(
+            "2. Apply the fixes the review reports. If it asks for a re-run, re-run only over the changes since its previous pass (devkit's closure rule); a self-review is one pass.",
+          );
+        }
       }
     });
 

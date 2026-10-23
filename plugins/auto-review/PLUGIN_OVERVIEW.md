@@ -116,16 +116,18 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   latch (persisted in plugin metadata) so it never reviews its own review turn. When that
   turn commits, it judges from the thread's plan whether work remains and continues any
   genuinely-unfinished planned work instead of halting mid-plan (never inventing work).
-- Later reviews are delta-scoped: plan reviews, and no-commit code reviews (protected
-  mainline, over-400-files), review only what changed since the last clean review. The plugin
-  keeps those baselines itself (plugin KV, per thread: `baseline:plan:<thread>:<sha256(path)>`,
-  `baseline:code:<thread>`), computes each delta with `diff` (jsdiff) and embeds it in the prompt
-  as a ```diff block, so the agent runs no shell command for it. Arming a review stages what it
-  reads as `pending`; a review that ran and left no open Blocker (plan) or Blocker/security
+- Later reviews are delta-scoped: plan reviews, and code reviews of every commit policy
+  (protected mainline, over-400-files, and the ordinary commit path), review only what changed
+  since the last clean review. The plugin keeps those baselines itself (plugin KV, per thread:
+  `baseline:plan:<thread>:<sha256(path)>`, `baseline:code:<thread>`), computes each delta with
+  `diff` (jsdiff) and embeds it in the prompt as a ```diff block, so the agent runs no shell
+  command for it. Arming a review stages what it reads as `pending`; a review that ran and left
+  no open Blocker (plan) or Blocker/security
   Concern (code) promotes it, else it is dropped; a plan review that spans several turns promotes
   it too, since child-thread reviewers end the turn and bb wakes the agent later. A code copy is
-  valid only while HEAD is still the sha it was taken at; a finding flagged `security` on a file
-  ends that file's baseline; files over 256 KB, more than 200 files, and deltas over 40 KB
+  compared by content, so it stays valid whatever HEAD did (a branch switch or pull only makes
+  the next delta larger); a failed read keeps a file's copy; a finding flagged `security` on a
+  file ends that file's baseline; files over 256 KB, more than 200 files, and deltas over 40 KB
   (plan) / 80 KB (code, total) fall back to a full review; records untouched for 7 days are
   dropped. The reply states `delta vs baseline` or `full (no baseline)`; an auto-approval, a redo
   and a thread deletion clear a plan's baseline.
