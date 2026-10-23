@@ -418,6 +418,17 @@ describe("auto-review cli: auto-approve", () => {
       expect(result.stdout).toContain("lastFire: fired (plan-approved) at ");
     });
   });
+
+  it("shows the plan-already-approved fire reason in status", async () => {
+    await withHost({}, async (host) => {
+      await host.kv.set(
+        `lastfire:${PROJECT_ID}:${THREAD_ID}`,
+        lastFire({ outcome: "fired", reason: "plan-already-approved" }),
+      );
+      const result = await host.run(["status", THREAD_ID]);
+      expect(result.stdout).toContain("lastFire: fired (plan-already-approved) at ");
+    });
+  });
 });
 
 describe("auto-review cli: skip / unskip (removed)", () => {
@@ -472,6 +483,19 @@ describe("auto-review cli: reset", () => {
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe(`reset ${THREAD_ID} (cleared awaiting-review latch).\n`);
       expect(host.metadataFor(THREAD_ID)).toEqual({ phase: "idle", unrelated: "kept" });
+    });
+  });
+
+  it("clears the one-shot planReleased record as well", async () => {
+    await withHost({}, async (host) => {
+      Object.assign(host.metadataFor(THREAD_ID), {
+        phase: "idle",
+        planReleased: { interactionId: "pint-1", planHash: "abc123", releasedSeq: 9 },
+      });
+      const result = await host.run(["reset", THREAD_ID]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toBe(`reset ${THREAD_ID} (was already idle; nothing latched).\n`);
+      expect(host.metadataFor(THREAD_ID)).toEqual({ phase: "idle" });
     });
   });
 

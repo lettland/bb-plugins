@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import type { PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
 import { clearPlanBaseline, planScope, settlePlanBaseline, stagePlanPending } from "./baseline-store.js";
-import { effectiveConfig, readProjectConfig } from "./config.js";
+import { effectiveConfig, readProjectConfig, type FireReason } from "./config.js";
 import {
   queuedRowExists,
   recordFire,
@@ -35,6 +36,11 @@ import {
   writeState,
   type ThreadState,
 } from "./state.js";
+
+/** Sha256 hex of the plan text, for the one-shot `planReleased` record. */
+function planHash(plan: string): string {
+  return createHash("sha256").update(plan).digest("hex");
+}
 
 /**
  * The plan gate's own tools: completing one of these is not the agent working on the review.
@@ -74,6 +80,9 @@ export async function gatePlan(
   }
   if (action === "hold") {
     await holdOrReleasePlan(ctx, thread, state, approval, config);
+    return;
+  }
+  if (await reapproveSamePlan(ctx, thread, state, approval)) {
     return;
   }
 
@@ -223,14 +232,40 @@ async function releaseReviewedPlan(
       check,
     );
   }
+  // The plan stays with the user, so remember it once: a re-presentation of
+  // this exact plan in the same turn is the user's approval arriving again
+  // (see `reapproveSamePlan`), not a new plan to hold. Auto-approved plans
+  // never reach this path, so auto-review's own approval can never stand in
+  // for the user's.
+  const releasedSeq = await tryCaptureSinceSeq(
+    bb,
+    thread.id,
+    `the plan left with the user in ${thread.id}; without it a same-turn re-presentation of the approved plan is held for review again`,
+  );
+  if (releasedSeq !== undefined) {
+    await writeState(bb, thread.id, {
+      planReleased: {
+        interactionId: approval.interactionId,
+        planHash: planHash(approval.plan),
+        releasedSeq,
+      },
+    });
+  }
   await recordFire(ctx, thread.projectId, thread.id, "stood-down", planReleaseReason(check));
 }
 
-/** Resolve the reviewed plan `allow_once`; false (logged) leaves it with the user. */
-async function approvePlan(
+/**
+ * Resolve a plan approval `allow_once` and record the fire under `reason`;
+ * `resolved` and `approved` are the caller's warn lead and success line.
+ * False (warned) leaves the plan where its caller says.
+ */
+async function resolvePlanApproval(
   ctx: ReviewContext,
   thread: GateThreadLike,
   approval: PlanApproval,
+  reason: FireReason,
+  resolved: string,
+  approved: string,
 ): Promise<boolean> {
   const { bb } = ctx;
   try {
@@ -241,17 +276,98 @@ async function approvePlan(
     });
   } catch (error) {
     bb.log.warn(
-      `auto-review: could not auto-approve the reviewed plan in ${thread.id}; leaving it for the user: ${
+      `${resolved}: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
     return false;
   }
-  await recordFire(ctx, thread.projectId, thread.id, "fired", "plan-approved");
-  bb.log.info(
+  await recordFire(ctx, thread.projectId, thread.id, "fired", reason);
+  bb.log.info(approved);
+  return true;
+}
+
+/** Resolve the reviewed plan `allow_once`; false (logged) leaves it with the user. */
+async function approvePlan(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  approval: PlanApproval,
+): Promise<boolean> {
+  return resolvePlanApproval(
+    ctx,
+    thread,
+    approval,
+    "plan-approved",
+    `auto-review: could not auto-approve the reviewed plan in ${thread.id}; leaving it for the user`,
     `auto-review: auto-approved the reviewed plan ${approval.interactionId} in thread ${thread.id}`,
   );
-  return true;
+}
+
+/**
+ * Whether a plan presented again right after the gate left an identical one
+ * with the user is that plan re-presented in the same turn, and can be
+ * approved again on the user's earlier word instead of being held for another
+ * review round — the gate has disarmed, so the hold's usual "a review is
+ * still pending" guarantee is gone, and only this record (`planReleased`,
+ * written at the release) vouches for the repetition. The guarantees are
+ * checkable: the identical plan text (same hash), the earlier interaction
+ * resolved in the user's favour (`allow_once` or `allow_for_session`), and no
+ * `turn/completed` or `turn/input/accepted` since the release — no turn ended
+ * and no message was delivered, so the re-presentation cannot carry anything
+ * new. The record is one-shot: removed before any check, so a different plan,
+ * a held plan or a later turn can never reuse it.
+ */
+async function reapproveSamePlan(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  state: ThreadState,
+  approval: PlanApproval,
+): Promise<boolean> {
+  const { bb } = ctx;
+  const released = state.planReleased;
+  await writeState(bb, thread.id, {}, ["planReleased"]);
+  if (released === undefined || !approval.canApprove || released.planHash !== planHash(approval.plan)) {
+    return false;
+  }
+  try {
+    const earlier = await bb.sdk.threads.interactions.get({
+      threadId: thread.id,
+      interactionId: released.interactionId,
+    });
+    const resolution = earlier.resolution;
+    if (
+      earlier.status !== "resolved" ||
+      resolution === null ||
+      !("decision" in resolution) ||
+      (resolution.decision !== "allow_once" && resolution.decision !== "allow_for_session")
+    ) {
+      return false;
+    }
+    const events = await bb.sdk.threads.events.list({
+      threadId: thread.id,
+      afterSeq: String(released.releasedSeq),
+      types: ["turn/completed", "turn/input/accepted"],
+      limit: "1",
+    });
+    if (events.length > 0) {
+      return false;
+    }
+  } catch (error) {
+    bb.log.warn(
+      `auto-review: could not check the earlier approval of this plan in ${thread.id}; leaving it for a normal review: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return false;
+  }
+  return resolvePlanApproval(
+    ctx,
+    thread,
+    approval,
+    "plan-already-approved",
+    `auto-review: could not re-approve the re-presented plan in ${thread.id}; leaving it for a normal review`,
+    `auto-review: approved plan ${approval.interactionId} in thread ${thread.id} again: the user approved the identical plan ${released.interactionId} earlier in this turn`,
+  );
 }
 
 /**

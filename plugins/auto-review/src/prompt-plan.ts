@@ -116,17 +116,17 @@ function nativePlanPrompt(input: BuildPlanPromptInput, redo: boolean): string {
 function planFollowUpSteps(autoApprove: boolean): string[] {
   const lines = [
     `2. ${APPLY_PLAN_FINDINGS}`,
-    "3. If you are no longer in plan mode and your provider can re-enter it (Claude Code: EnterPlanMode), re-enter it first: outside plan mode, Claude Code's ExitPlanMode approves itself without asking the user.",
+    "3. If you are no longer in plan mode and your provider can re-enter it (Claude Code: EnterPlanMode), re-enter it first: outside plan mode, Claude Code's ExitPlanMode approves itself without asking the user. Skip steps 3 and 4 once the ExitPlanMode call you made from plan mode for this plan has returned that the user approved it, and go to step 5.",
   ];
   if (autoApprove) {
     lines.push(
       `4. ${PLAN_OPEN_GATE} Otherwise present the revised plan again (ExitPlanMode). This project auto-approves reviewed plans, so it won't wait for the user; include a short summary of what the review changed and any findings still open.`,
-      `5. Once ExitPlanMode returns approved, mention in your reply that this project auto-approves reviewed plans, so the approval may have come from auto-review rather than from the user, then implement the plan. If it is not approved, stop and wait for the user.`,
+      `5. Once ExitPlanMode returns approved, mention in your reply that this project auto-approves reviewed plans, so the approval may have come from auto-review rather than from the user, then implement the plan. If it is not approved, stop and wait for the user. Once it is approved, do not run another review round, call EnterPlanMode, or present the plan again.`,
     );
   } else {
     lines.push(
       `4. ${PLAN_OPEN_GATE} Otherwise present the revised plan for approval again, the same way you did before (for example ExitPlanMode). That presentation goes straight to the user, so include a short summary of what the review changed and any findings still open. Without a plan-approval tool, end your turn with the revised plan.`,
-      `5. Stop. Implement only after the user explicitly approves the plan.`,
+      `5. Stop. Implement only after the user explicitly approves the plan. When the ExitPlanMode call you made from plan mode returns that the user approved your plan, that is the approval: implement the plan then, without another review round, EnterPlanMode, or presenting it again.`,
     );
   }
   return lines;
@@ -212,7 +212,7 @@ export function buildPresentPlanReviewPrompt(input: BuildPresentPlanPromptInput)
  */
 export const PLAN_FIRST_INSTRUCTIONS = [
   "auto-review reviews plans, but only a plan you present for approval. Before substantial implementation — a new module, a change across several files, or a design choice the user has not seen — present a plan first, even when the thread is not in plan mode. Settling the design yourself is not approval: never announce a design and start editing.",
-  "To present it: enter plan mode (Claude Code: EnterPlanMode), write the plan, then present it (ExitPlanMode). Do not call ExitPlanMode outside plan mode — there it approves itself without asking the user. If your provider cannot enter plan mode on its own, end your turn with the plan and wait for the user's approval.",
+  "To present it: enter plan mode (Claude Code: EnterPlanMode), write the plan, then present it (ExitPlanMode). Do not call ExitPlanMode outside plan mode — there it approves itself without asking the user. If your provider cannot enter plan mode on its own, end your turn with the plan and wait for the user's approval. When the ExitPlanMode call you made from plan mode returns that the user approved your plan, implement that plan: do not re-enter plan mode or present it again because of a review step from before the approval.",
   `Skip this for small, contained fixes, for work under a plan already approved in this thread (by the user, or automatically by auto-review), for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan.`,
 ].join("\n\n");
 

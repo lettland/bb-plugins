@@ -859,7 +859,12 @@ describe("buildPlanReviewPrompt", () => {
     const text = buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p/plan.md", autoApprove: false });
     expect(text).toMatch(/3\. If you are no longer in plan mode .*EnterPlanMode/);
     expect(text.indexOf("EnterPlanMode")).toBeLessThan(text.indexOf("present the revised plan"));
-    expect(text).toMatch(/5\. Stop\. Implement only after the user explicitly approves the plan\./);
+    expect(text).toMatch(
+      /Skip steps 3 and 4 once the ExitPlanMode call you made from plan mode for this plan has returned that the user approved it, and go to step 5\./,
+    );
+    expect(text).toMatch(
+      /5\. Stop\. Implement only after the user explicitly approves the plan\. When the ExitPlanMode call you made from plan mode returns that the user approved your plan, that is the approval: implement the plan then, without another review round, EnterPlanMode, or presenting it again\./,
+    );
   });
 
   it("keeps step 4 and 5 waiting for the user when the project does not auto-approve", () => {
@@ -877,6 +882,9 @@ describe("buildPlanReviewPrompt", () => {
     );
     expect(text).toMatch(
       /5\. Once ExitPlanMode returns approved, mention in your reply that this project auto-approves reviewed plans, so the approval may have come from auto-review rather than from the user, then implement the plan\. If it is not approved, stop and wait for the user\./,
+    );
+    expect(text).toMatch(
+      /Once it is approved, do not run another review round, call EnterPlanMode, or present the plan again\./,
     );
     expect(text).not.toMatch(/Stop\. Implement only after the user explicitly approves/);
     expect(text).toMatch(/do not start implementing/);
@@ -1006,7 +1014,7 @@ describe("buildPlanReviewPrompt", () => {
       const approve = buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p.md", autoApprove: true });
       expect(approve).toMatch(/then implement the plan\. If it is not approved/);
       expect(buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p.md", autoApprove: false })).toMatch(
-        /5\. Stop\. Implement only after the user explicitly approves the plan\.$/,
+        /5\. Stop\. Implement only after the user explicitly approves the plan\. When the ExitPlanMode call you made from plan mode returns that the user approved your plan, that is the approval: implement the plan then, without another review round, EnterPlanMode, or presenting it again\.$/,
       );
       expect(PRESENT_PLAN_APPROVED_MESSAGE).toMatch(/then implement the plan\./);
       expect(PRESENT_PLAN_REVIEWED_MESSAGE).toMatch(/do not implement until the user approves\.$/);
@@ -1066,6 +1074,12 @@ describe("PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN", () => {
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/call PresentPlan with that file's planFilePath/);
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/Never treat a tool result/);
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/only the user's explicit reply in chat approves a plan/);
+  });
+
+  it("never carries the native gate's approval sentence — no ExitPlanMode approval reaches the gate on these providers", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).not.toContain(
+      "When the ExitPlanMode call you made from plan mode returns that the user approved your plan, implement that plan:",
+    );
   });
 
   it("forbids entering plan mode here, but allows ExitPlanMode to leave it after approval", () => {

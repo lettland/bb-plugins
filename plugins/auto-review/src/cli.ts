@@ -292,6 +292,8 @@ export function registerAutoReviewCli(
               // Leftover from the removed per-thread skip flag.
               "skip",
               ...PLAN_GATE_KEYS,
+              // Survives the gate's own disarms by design; a reset ends its one-shot life too.
+              "planReleased",
               ...PRESENT_PLAN_KEYS,
             ]);
             await removeDeferral(bb, threadId);

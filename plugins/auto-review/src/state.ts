@@ -156,6 +156,10 @@ export const threadStateSchema = z.object({
   planReviewArmedSeq: z.number().int().nonnegative().optional(),
   /** Set once the plan was sent back for a full review after `review-code` was never loaded; a second miss releases it. */
   planReviewRedone: z.literal(true).optional(),
+  /** The last plan the gate left with the user, for `gatePlan`'s same-turn re-presentation check. */
+  planReleased: z
+    .object({ interactionId: z.string(), planHash: z.string(), releasedSeq: z.number().int().nonnegative() })
+    .optional(),
   /**
    * Set when the provider-agnostic `PresentPlan` tool armed a plan review for
    * this thread; the next `PresentPlan` call on a fresh arm FOR THE SAME PATH

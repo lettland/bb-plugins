@@ -83,6 +83,8 @@ interface HostOptions {
   resolveThrows?: boolean;
   /** Resolving an `allow_once` (only) fails — the global `resolveThrows` would also break the deny. */
   resolveAllowThrows?: boolean;
+  /** Reading an interaction back (`interactions.get`) fails, so an earlier approval cannot be verified. */
+  interactionsGetThrows?: boolean;
   /** Listing `item/completed` events fails, so no proof the review ran can be read. */
   completedEventsThrow?: boolean;
   /** Listing `turn/completed` events fails, so no turn boundary can be read. */
@@ -279,6 +281,7 @@ function createHost(options: HostOptions = {}) {
   const metadata = bucket(THREAD_ID);
   const sends: Array<{ threadId: string; mode: string; input: unknown }> = [];
   const resolutions: Array<{ interactionId: string; resolution: unknown }> = [];
+  let resolvedInteractions: Record<string, { status: string; resolution: unknown }> = {};
   const deletedQueued: string[] = [];
   const timelineLimits: Array<string | undefined> = [];
   let hostRef: { bb: { storage: { kv: KvLike } } } | null = null;
@@ -603,6 +606,18 @@ function createHost(options: HostOptions = {}) {
         },
       },
       interactions: {
+        get: async (args: { threadId: string; interactionId: string }) => {
+          if (options.interactionsGetThrows === true) {
+            throw new Error("interactions.get unavailable");
+          }
+          const resolved = resolvedInteractions[args.interactionId] ?? null;
+          return {
+            ...planInteraction("# Plan\n\nDo the thing.", args.interactionId),
+            status: resolved === null ? "pending" : resolved.status,
+            resolvedAt: resolved === null ? null : 2,
+            resolution: resolved === null ? null : resolved.resolution,
+          };
+        },
         resolve: async (args: { threadId: string; interactionId: string; resolution: unknown }) => {
           if (options.resolveThrows === true) {
             throw new Error("interaction already settled");
@@ -803,6 +818,10 @@ function createHost(options: HostOptions = {}) {
     },
     setQueuedRows: (next: QueuedRow[]) => {
       queuedRows = next;
+    },
+    /** What `interactions.get` reads back for an interaction (default: pending, unresolved). */
+    setResolvedInteraction: (interactionId: string, resolved: { status: string; resolution: unknown }) => {
+      resolvedInteractions = { ...resolvedInteractions, [interactionId]: resolved };
     },
     /** The working tree as a shell command would leave it — no timeline row. */
     setWorkingTree: (next: TreeFile[]) => {
@@ -4273,6 +4292,171 @@ describe("auto-review plugin", () => {
       expect(host.resolutions).toEqual([DENY]);
       expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
       await host.harness.dispose();
+    });
+
+    describe("a re-presentation of the plan the gate left with the user", () => {
+      /** The gate held the first plan, dispatched its review and left the revised plan with the user. */
+      async function releasedHost(options: HostOptions = {}) {
+        const host = await hostWith(options, false);
+        await holdAndDispatch(host);
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        return host;
+      }
+
+      const REAPPROVE = {
+        threadId: THREAD_ID,
+        interactionId: "pint-3",
+        resolution: { decision: "allow_once", grantedPermissions: null },
+      };
+
+      it("re-approves a byte-identical re-presentation in the same turn", async () => {
+        const host = await releasedHost();
+        host.setResolvedInteraction("pint-2", { status: "resolved", resolution: { decision: "allow_once" } });
+        await emitPlan(host, planInteraction("# Plan v2", "pint-3"));
+        expect(host.resolutions).toEqual([DENY, REAPPROVE]);
+        expect(host.sends).toHaveLength(1);
+        expect(host.metadata.planReleased).toBeUndefined();
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "fired", reason: "plan-already-approved" });
+        expect(
+          host.harness.logEntries.some(
+            (entry) =>
+              entry.level === "info" &&
+              entry.message.includes("approved plan pint-3 in thread") &&
+              entry.message.includes("the user approved the identical plan pint-2 earlier in this turn"),
+          ),
+        ).toBe(true);
+        await host.harness.dispose();
+      });
+
+      it("holds a third identical presentation: the record was used up", async () => {
+        const host = await releasedHost();
+        host.setResolvedInteraction("pint-2", { status: "resolved", resolution: { decision: "allow_once" } });
+        await emitPlan(host, planInteraction("# Plan v2", "pint-3"));
+        await emitPlan(host, planInteraction("# Plan v2", "pint-4"));
+        expect(host.sends).toHaveLength(2);
+        expect(host.resolutions.map((r) => r.interactionId)).toEqual(["pint-1", "pint-3", "pint-4"]);
+        expect(host.resolutions.at(-1)).toMatchObject({ resolution: { decision: "deny" } });
+        await host.harness.dispose();
+      });
+
+      it("re-approves on an allow_for_session too, still resolving the new plan allow_once", async () => {
+        const host = await releasedHost();
+        host.setResolvedInteraction("pint-2", { status: "resolved", resolution: { decision: "allow_for_session" } });
+        await emitPlan(host, planInteraction("# Plan v2", "pint-3"));
+        expect(host.resolutions).toEqual([DENY, REAPPROVE]);
+        await host.harness.dispose();
+      });
+
+      it.each([
+        ["deny", { status: "resolved", resolution: { decision: "deny" } }],
+        ["pending", { status: "pending", resolution: null }],
+        ["resolving", { status: "resolving", resolution: null }],
+        ["interrupted", { status: "interrupted", resolution: null }],
+      ])("holds the re-presentation when the earlier interaction reads back %s", async (_status, earlier) => {
+        const host = await releasedHost();
+        host.setResolvedInteraction("pint-2", earlier);
+        await emitPlan(host, planInteraction("# Plan v2", "pint-3"));
+        expect(host.sends).toHaveLength(2);
+        expect(host.resolutions.at(-1)).toMatchObject({ interactionId: "pint-3", resolution: { decision: "deny" } });
+        await host.harness.dispose();
+      });
+
+      it("holds the re-presentation when the release could not record its cursor", async () => {
+        const host = await hostWith({}, false);
+        await holdAndDispatch(host);
+        // Reads one to three are the arm, the deny and the dispatch; the next
+        // timeline read is the release's own cursor capture.
+        host.failTimelineRead(1);
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.metadata.planReleased).toBeUndefined();
+        host.setResolvedInteraction("pint-2", { status: "resolved", resolution: { decision: "allow_once" } });
+        await emitPlan(host, planInteraction("# Plan v2", "pint-3"));
+        expect(host.sends).toHaveLength(2);
+        expect(host.resolutions.at(-1)).toMatchObject({ resolution: { decision: "deny" } });
+        await host.harness.dispose();
+      });
+
+      it("records the plan when the auto-approve fails and the plan falls to the user", async () => {
+        const host = await hostWith({ resolveAllowThrows: true });
+        await holdAndDispatch(host);
+        host.completeItem({ seq: 101, item: READ });
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions).toEqual([DENY]);
+        expect(host.metadata.planReleased).toMatchObject({ interactionId: "pint-2", releasedSeq: 100 });
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+        await host.harness.dispose();
+      });
+
+      it("holds a re-presentation whose plan text changed", async () => {
+        const host = await releasedHost();
+        host.setResolvedInteraction("pint-2", { status: "resolved", resolution: { decision: "allow_once" } });
+        await emitPlan(host, planInteraction("# Plan v3", "pint-3"));
+        expect(host.sends).toHaveLength(2);
+        expect(host.resolutions.at(-1)).toMatchObject({ resolution: { decision: "deny" } });
+        await host.harness.dispose();
+      });
+
+      it("holds the re-presentation once a turn ended after the release", async () => {
+        const host = await releasedHost();
+        host.setResolvedInteraction("pint-2", { status: "resolved", resolution: { decision: "allow_once" } });
+        host.completeTurn(101);
+        await emitPlan(host, planInteraction("# Plan v2", "pint-3"));
+        expect(host.sends).toHaveLength(2);
+        expect(host.resolutions.at(-1)).toMatchObject({ resolution: { decision: "deny" } });
+        await host.harness.dispose();
+      });
+
+      it("holds the re-presentation once new input was accepted after the release", async () => {
+        const host = await releasedHost();
+        host.setResolvedInteraction("pint-2", { status: "resolved", resolution: { decision: "allow_once" } });
+        host.requestTurn({ seq: 101, initiator: "user", text: "one more thought" });
+        await emitPlan(host, planInteraction("# Plan v2", "pint-3"));
+        expect(host.sends).toHaveLength(2);
+        expect(host.resolutions.at(-1)).toMatchObject({ resolution: { decision: "deny" } });
+        await host.harness.dispose();
+      });
+
+      it("holds the re-presentation, with a warn, when the earlier approval cannot be verified", async () => {
+        for (const options of [
+          { interactionsGetThrows: true },
+          { turnEventsThrow: true },
+          { resolveAllowThrows: true },
+        ] as const) {
+          const host = await releasedHost(options);
+          host.setResolvedInteraction("pint-2", { status: "resolved", resolution: { decision: "allow_once" } });
+          await emitPlan(host, planInteraction("# Plan v2", "pint-3"));
+          expect(host.sends).toHaveLength(2);
+          expect(host.resolutions.at(-1)).toMatchObject({ resolution: { decision: "deny" } });
+          expect(
+            warnings(host).some((message) => message.includes("leaving it for a normal review")),
+          ).toBe(true);
+          await host.harness.dispose();
+        }
+      });
+
+      it("holds the re-presentation when the provider offers no allow_once", async () => {
+        const host = await releasedHost();
+        const denyOnly = planInteraction("# Plan v2", "pint-3");
+        denyOnly.payload.availableDecisions = ["deny"];
+        await emitPlan(host, denyOnly);
+        expect(host.sends).toHaveLength(2);
+        expect(host.resolutions.at(-1)).toMatchObject({ interactionId: "pint-3", resolution: { decision: "deny" } });
+        await host.harness.dispose();
+      });
+
+      it("never records an auto-approved plan, so its re-presentation is held", async () => {
+        const host = await hostWith();
+        await holdAndDispatch(host);
+        host.completeItem({ seq: 101, item: READ });
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions).toEqual([DENY, APPROVE]);
+        expect(host.metadata.planReleased).toBeUndefined();
+        host.setResolvedInteraction("pint-2", { status: "resolved", resolution: { decision: "allow_once" } });
+        await emitPlan(host, planInteraction("# Plan v2", "pint-3"));
+        expect(host.sends).toHaveLength(2);
+        expect(host.resolutions.map((r) => r.interactionId)).toEqual(["pint-1", "pint-2", "pint-3"]);
+        await host.harness.dispose();
+      });
     });
 
     it("falls back to leaving the plan for the user when the approval cannot be resolved", async () => {
