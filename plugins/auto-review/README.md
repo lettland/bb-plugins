@@ -449,11 +449,11 @@ It ships enabled (opt-out).
   changes something reviews it.
   When nothing disables it, a released turn leaves out what changed while it was parked (see
   `changed-while-parked` above).
-- Never fires alongside a message you queued. If a user message is waiting when the turn
-  ends, or its turn has already started (also one you send while the review is still being
-  prepared), the review is carried into that turn. It fires once a turn that changes
-  something ends with nothing of yours queued, covering every turn since; if your message
-  only asks a question, the work stays carried (`no-new-work`).
+- Never fires alongside a message you queued. If a user message is waiting when the turn ends, or
+  its turn has already started (also one you send while auto-review is still working out what the
+  turn changed), the review is carried into that turn. It fires once a turn that changes something
+  ends with nothing of yours queued, covering every turn since; if your message only asks a
+  question, the work stays carried (`no-new-work`).
 - Commits only a complete, working change. The review turn gets the full list of files the
   turn authored, checks that nothing the staged change depends on is left out, and runs the
   project's typecheck/build and tests. If the work is unfinished, broken, or could only be

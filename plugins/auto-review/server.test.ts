@@ -6630,6 +6630,7 @@ describe("auto-review plugin: no new work", () => {
     await emitIdle(host);
     expect(host.sends).toHaveLength(0);
     expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+    expect(host.metadata.lastIdle).toBeUndefined();
 
     host.setQueuedRows([]);
     host.setEnvThreads(idleThread);
@@ -6649,14 +6650,14 @@ describe("auto-review plugin: no new work", () => {
     await host.harness.dispose();
   });
 
-  it("dispatches as before when a wake-up starts mid-detection and its request cannot be read", async () => {
+  it("carries the review when a turn starts mid-detection and its request cannot be read", async () => {
     const host = await carriedBehindQueue();
     host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 220)]);
     host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
     host.setMaxSeq(230);
     await emitActive(host);
-    // A wake-up whose request cannot be read is not known to be the user's:
-    // the idle keeps today's dispatch path instead of carrying.
+    // The thread is busy and a turn whose request cannot be read may be the
+    // user's: the review is carried instead of being sent into it.
     host.onNextStatusRead(() => {
       host.setEnvThreads(busyThread);
       host.setTurnRequestsThrow(true);
@@ -6664,6 +6665,25 @@ describe("auto-review plugin: no new work", () => {
     });
     await emitIdle(host);
     expect(warned(host, "running turn of")).toBe(true);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+    await host.harness.dispose();
+  });
+
+  it("dispatches as before when a wake-up starts mid-detection with nothing of the user's queued", async () => {
+    const host = await carriedBehindQueue();
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 220)]);
+    host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
+    host.setMaxSeq(230);
+    await emitActive(host);
+    // The wake-up is readable and not the user's, and none of their messages
+    // queue behind it: the idle dispatches as before the re-check existed.
+    host.onNextStatusRead(() => {
+      host.setEnvThreads(busyThread);
+      host.requestTurn({ seq: 240, initiator: "system", text: "child-1 finished" });
+      host.setMaxSeq(250);
+    });
+    await emitIdle(host);
     expect(host.sends).toHaveLength(1);
     expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
     await host.harness.dispose();

@@ -80,7 +80,8 @@ async function userTurnQueued(
 
 /**
  * Whether the turn running now is the user's, read from the requests after
- * `sinceSeq`. False when the read fails, so the caller dispatches as before.
+ * `sinceSeq`. True when the read fails: the thread is busy, so the review is
+ * carried rather than sent into a turn that may be the user's.
  */
 async function userTurnRunning(
   ctx: ReviewContext,
@@ -91,11 +92,11 @@ async function userTurnRunning(
     return (await userTurnRunningSince(ctx.bb, threadId, sinceSeq)) !== null;
   } catch (error) {
     ctx.bb.log.warn(
-      `auto-review: could not read whether the running turn of ${threadId} is the user's; reviewing anyway: ${
+      `auto-review: could not read whether the running turn of ${threadId} is the user's; carrying the review: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
-    return false;
+    return true;
   }
 }
 
@@ -148,6 +149,8 @@ async function eligibleTurnStart(
     await standDown(ctx, thread, state, "user-stopped");
     return null;
   }
+  // Any running turn carries here; the re-check before dispatch in
+  // evaluate() carries a running turn only when it is the user's.
   const { busy, queued } = await userTurnQueued(ctx, thread.id);
   if (queued) {
     await carryOver(ctx, thread, state, busy);
@@ -371,7 +374,9 @@ export async function evaluate(
   // Detection can take minutes; a user turn that started or was queued
   // meanwhile still carries the review, as at the start of the idle. A
   // wake-up that started meanwhile carries only what the user queued
-  // behind it; with none of theirs, it dispatches as before.
+  // behind it; with none of theirs, it dispatches as before. A message
+  // sent after this check, while dispatchReview prepares the send, can
+  // still land beside the review.
   const { busy, userQueued } = await userTurnQueued(ctx, thread.id);
   if (userQueued || (busy && (await userTurnRunning(ctx, thread.id, lastIdleFloor(state))))) {
     await carryOver(ctx, thread, state, busy);
