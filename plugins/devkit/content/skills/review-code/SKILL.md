@@ -271,7 +271,12 @@ The review always ends at the user's approval:
 
 1. If you are no longer in plan mode (a review turn injected into the thread can take you out of
    it) and your provider can re-enter it, re-enter it first (Claude Code: `EnterPlanMode`).
-   Outside plan mode, Claude Code's `ExitPlanMode` approves itself without asking the user.
+   Outside plan mode, Claude Code's `ExitPlanMode` approves itself without asking the user. Skip
+   steps 1 and 2 once the plan-approval call you made from plan mode for this plan has returned
+   approved, and go to step 3.
 2. Present the revised plan for approval (Claude Code: `ExitPlanMode`) with a short summary of
    what the review changed. Without a plan-approval tool, end your turn with the revised plan.
-3. Stop. Implement only after the user explicitly approves the plan.
+3. Stop. Implement only after the user explicitly approves the plan. When the plan-approval call
+   you made from plan mode (Claude Code: ExitPlanMode) returns that the user approved the plan,
+   that is the approval and ends this review: implement then, without more closure rounds,
+   EnterPlanMode, or presenting the plan again.

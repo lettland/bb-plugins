@@ -574,6 +574,15 @@ describe("review-code content", () => {
     expect(section5).toContain("fresh baseline");
   });
 
+  it("ends the plan-scope review once the plan-approval call returns approved", () => {
+    expect(normalized).toContain(
+      "Skip steps 1 and 2 once the plan-approval call you made from plan mode for this plan has returned approved, and go to step 3.",
+    );
+    expect(normalized).toContain(
+      "that is the approval and ends this review: implement then, without more closure rounds, EnterPlanMode, or presenting the plan again",
+    );
+  });
+
   it("hashes every hook directory git could run, plus the config snapshot and .gitignore files", () => {
     const section3Start = content.indexOf("## 3.");
     const section4Start = content.indexOf("## 4.");
