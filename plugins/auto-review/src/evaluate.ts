@@ -60,7 +60,7 @@ import { keepCursor, standDown } from "./turn-end.js";
 async function userTurnQueued(
   ctx: ReviewContext,
   threadId: string,
-): Promise<{ busy: boolean; queued: boolean }> {
+): Promise<{ busy: boolean; queued: boolean; userQueued: boolean }> {
   const { bb } = ctx;
   const now = Date.now();
   const [{ status }, rows] = await Promise.all([
@@ -68,18 +68,14 @@ async function userTurnQueued(
     bb.sdk.threads.queuedMessages.list({ threadId }),
   ]);
   const busy = isBusyStatus(status);
-  return {
-    busy,
-    queued:
-      busy ||
-      rows.some(
-        (row) =>
-          row.initiator === "user" &&
-          row.origin !== "plugin" &&
-          row.failureReason === null &&
-          (row.sendAt === null || row.sendAt <= now),
-      ),
-  };
+  const userQueued = rows.some(
+    (row) =>
+      row.initiator === "user" &&
+      row.origin !== "plugin" &&
+      row.failureReason === null &&
+      (row.sendAt === null || row.sendAt <= now),
+  );
+  return { busy, queued: busy || userQueued, userQueued };
 }
 
 /**
@@ -374,10 +370,10 @@ export async function evaluate(
   }
   // Detection can take minutes; a user turn that started or was queued
   // meanwhile still carries the review, as at the start of the idle. A
-  // wake-up that started meanwhile is not the user's turn and dispatches
-  // as before.
-  const { busy, queued } = await userTurnQueued(ctx, thread.id);
-  if (queued && (!busy || (await userTurnRunning(ctx, thread.id, lastIdleFloor(state))))) {
+  // wake-up that started meanwhile carries only what the user queued
+  // behind it; with none of theirs, it dispatches as before.
+  const { busy, userQueued } = await userTurnQueued(ctx, thread.id);
+  if (userQueued || (busy && (await userTurnRunning(ctx, thread.id, lastIdleFloor(state))))) {
     await carryOver(ctx, thread, state, busy);
     return;
   }

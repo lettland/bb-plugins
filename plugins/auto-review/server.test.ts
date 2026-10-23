@@ -6613,6 +6613,42 @@ describe("auto-review plugin: no new work", () => {
     await host.harness.dispose();
   });
 
+  it("carries the review when a message queues behind a wake-up that starts mid-detection", async () => {
+    const host = await carriedBehindQueue();
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 220)]);
+    host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
+    host.setMaxSeq(230);
+    await emitActive(host);
+    // The wake-up is not the user's turn, but their message queued behind it
+    // still carries the review instead of sending it into the wake-up.
+    host.onNextStatusRead(() => {
+      host.setEnvThreads(busyThread);
+      host.requestTurn({ seq: 240, initiator: "system", text: "child-1 finished" });
+      host.setQueuedRows([userMessage("u2")]);
+      host.setMaxSeq(250);
+    });
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+
+    host.setQueuedRows([]);
+    host.setEnvThreads(idleThread);
+    host.setSiblingRows(THREAD_ID, [
+      fileChangeRow("src/a.ts"),
+      fileChangeRow("src/c.ts", 220),
+      fileChangeRow("src/d.ts", 250),
+    ]);
+    host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }, { path: "src/d.ts" }]);
+    host.setMaxSeq(270);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({
+      outcome: "fired",
+      scopePaths: ["src/a.ts", "src/c.ts", "src/d.ts"],
+    });
+    await host.harness.dispose();
+  });
+
   it("dispatches as before when a wake-up starts mid-detection and its request cannot be read", async () => {
     const host = await carriedBehindQueue();
     host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 220)]);
