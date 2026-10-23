@@ -1,8 +1,7 @@
-import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import type { PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
 import { clearPlanBaseline, planScope, settlePlanBaseline, stagePlanPending } from "./baseline-store.js";
-import { effectiveConfig, readProjectConfig, type FireReason } from "./config.js";
+import { effectiveConfig, readProjectConfig } from "./config.js";
 import {
   queuedRowExists,
   recordFire,
@@ -12,9 +11,9 @@ import {
 } from "./context.js";
 import { captureSinceSeq, tryCaptureSinceSeq } from "./detect.js";
 import { passesThreadGate, planGateServes } from "./gate.js";
+import { approvePlan, planHash, reapproveSamePlan } from "./plan-approve.js";
+import { answerPlanHoldQuestion } from "./plan-hold-answer.js";
 import {
-  EVENT_PAGE_MAX,
-  isImmediateReactionToDeny,
   planApprovalOf,
   planGateAction,
   planReleaseReason,
@@ -22,25 +21,18 @@ import {
   reviewRanSince,
   userQuestionOf,
   warnPlanUnreviewed,
-  type PendingUserQuestion,
   type PlanApproval,
 } from "./plan.js";
-import { buildPlanReviewPrompt, buildPlanReviewRedoPrompt, PLAN_HOLD_ANSWER } from "./prompt.js";
+import { buildPlanReviewPrompt, buildPlanReviewRedoPrompt } from "./prompt.js";
 import { REPORT_REVIEW_TOOL_NAME } from "./report-tool.js";
 import {
   PLAN_GATE_KEYS,
-  planDenyFresh,
   planHoldExpired,
   readState,
   withThreadLock,
   writeState,
   type ThreadState,
 } from "./state.js";
-
-/** Sha256 hex of the plan text, for the one-shot `planReleased` record. */
-function planHash(plan: string): string {
-  return createHash("sha256").update(plan).digest("hex");
-}
 
 /**
  * The plan gate's own tools: completing one of these is not the agent working on the review.
@@ -255,125 +247,6 @@ async function releaseReviewedPlan(
 }
 
 /**
- * Resolve a plan approval `allow_once` and record the fire under `reason`;
- * `failureLead` and `successLine` are the caller's warn lead and success line.
- * False (warned) leaves the plan where its caller says.
- */
-async function resolvePlanApproval(
-  ctx: ReviewContext,
-  thread: GateThreadLike,
-  approval: PlanApproval,
-  reason: FireReason,
-  failureLead: string,
-  successLine: string,
-): Promise<boolean> {
-  const { bb } = ctx;
-  try {
-    await bb.sdk.threads.interactions.resolve({
-      threadId: thread.id,
-      interactionId: approval.interactionId,
-      resolution: { decision: "allow_once", grantedPermissions: null },
-    });
-  } catch (error) {
-    bb.log.warn(
-      `${failureLead}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return false;
-  }
-  await recordFire(ctx, thread.projectId, thread.id, "fired", reason);
-  bb.log.info(successLine);
-  return true;
-}
-
-/** Resolve the reviewed plan `allow_once`; false (logged) leaves it with the user. */
-async function approvePlan(
-  ctx: ReviewContext,
-  thread: GateThreadLike,
-  approval: PlanApproval,
-): Promise<boolean> {
-  return resolvePlanApproval(
-    ctx,
-    thread,
-    approval,
-    "plan-approved",
-    `auto-review: could not auto-approve the reviewed plan in ${thread.id}; leaving it for the user`,
-    `auto-review: auto-approved the reviewed plan ${approval.interactionId} in thread ${thread.id}`,
-  );
-}
-
-/**
- * Whether a plan presented again right after the gate left an identical one
- * with the user is that plan re-presented in the same turn, and can be
- * approved again on that earlier approval instead of being held for another
- * review round — the gate has disarmed, so the hold's usual "a review is
- * still pending" guarantee is gone, and only this record (`planReleased`,
- * written at the release) vouches for the repetition. The guarantees are
- * checkable: the identical plan text (same hash), the earlier interaction
- * resolved as an approval (`allow_once` or `allow_for_session`), and no
- * `turn/completed` or `turn/input/accepted` since the release — no turn ended
- * and no message was delivered, so the re-presentation cannot carry anything
- * new. The record is one-shot: removed before any check, so a different plan,
- * a held plan or a later turn can never reuse it.
- */
-async function reapproveSamePlan(
-  ctx: ReviewContext,
-  thread: GateThreadLike,
-  state: ThreadState,
-  approval: PlanApproval,
-): Promise<boolean> {
-  const { bb } = ctx;
-  const released = state.planReleased;
-  if (released === undefined) {
-    return false;
-  }
-  await writeState(bb, thread.id, {}, ["planReleased"]);
-  if (!approval.canApprove || released.planHash !== planHash(approval.plan)) {
-    return false;
-  }
-  try {
-    const earlier = await bb.sdk.threads.interactions.get({
-      threadId: thread.id,
-      interactionId: released.interactionId,
-    });
-    const resolution = earlier.resolution;
-    if (
-      earlier.status !== "resolved" ||
-      resolution === null ||
-      !("decision" in resolution) ||
-      (resolution.decision !== "allow_once" && resolution.decision !== "allow_for_session")
-    ) {
-      return false;
-    }
-    const events = await bb.sdk.threads.events.list({
-      threadId: thread.id,
-      afterSeq: String(released.releasedSeq),
-      types: ["turn/completed", "turn/input/accepted"],
-      limit: "1",
-    });
-    if (events.length > 0) {
-      return false;
-    }
-  } catch (error) {
-    bb.log.warn(
-      `auto-review: could not check the earlier approval of this plan in ${thread.id}; leaving it for a normal review: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return false;
-  }
-  return resolvePlanApproval(
-    ctx,
-    thread,
-    approval,
-    "plan-already-approved",
-    `auto-review: could not re-approve the re-presented plan in ${thread.id}; leaving it for a normal review`,
-    `auto-review: approved plan ${approval.interactionId} in thread ${thread.id} again: the identical plan ${released.interactionId} was approved earlier in this turn`,
-  );
-}
-
-/**
  * Send a plan back for a full review: re-arm the gate with a fresh clock and
  * cursor, mark the cycle as redone so the next release cannot redo again, and
  * drop the first round's queued id, delivery cursor and deny cursor so none of
@@ -526,83 +399,6 @@ async function denyPlan(
     }
   }
   return true;
-}
-
-/**
- * Answer, in the user's name, a `user_question` the agent raises as its
- * very next tool call after a plan deny — the deny's own reason reaching it
- * before the queued review does (see `gatePlan`). Absent, there is nothing
- * to do. Present, it is one-shot: removed right away, before any of the
- * checks below, so whether they pass or fail, a later question must not
- * find it still armed.
- */
-export async function answerPlanHoldQuestion(
-  ctx: ReviewContext,
-  thread: GateThreadLike,
-  question: PendingUserQuestion,
-): Promise<void> {
-  const { bb } = ctx;
-  const state = await readState(bb, thread.id);
-  if (state.planDenied === undefined) {
-    return;
-  }
-  const { sinceSeq } = state.planDenied;
-  await writeState(bb, thread.id, {}, ["planDenied"]);
-  if (!planDenyFresh(state, Date.now())) {
-    return;
-  }
-  const project = await readProjectConfig(bb, thread.projectId);
-  const config = effectiveConfig(ctx.globals, project);
-  if (!config.enabled) {
-    return;
-  }
-  let events: Awaited<ReturnType<typeof bb.sdk.threads.events.list>>;
-  try {
-    events = await bb.sdk.threads.events.list({
-      threadId: thread.id,
-      afterSeq: String(sinceSeq),
-      types: ["item/started"],
-      order: "asc",
-      limit: String(EVENT_PAGE_MAX),
-    });
-  } catch (error) {
-    bb.log.warn(
-      `auto-review: could not read events to check the plan-hold reaction in ${thread.id}; leaving it for the user: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return;
-  }
-  // `isImmediateReactionToDeny` needs every event since the deny, and the log
-  // is paged: a full page may hide later tool work, so it fails closed too.
-  if (events.length >= EVENT_PAGE_MAX || !isImmediateReactionToDeny(events)) {
-    // Real tool work happened since the deny, so this question is not
-    // necessarily about the held plan — leave it with the user.
-    return;
-  }
-  try {
-    await bb.sdk.threads.interactions.resolve({
-      threadId: thread.id,
-      interactionId: question.interactionId,
-      resolution: {
-        kind: "user_answer",
-        answers: Object.fromEntries(
-          question.questionIds.map((id) => [id, { selected: [], freeText: PLAN_HOLD_ANSWER }]),
-        ),
-      },
-    });
-  } catch (error) {
-    bb.log.warn(
-      `auto-review: could not auto-answer the plan-hold question in ${thread.id}; leaving it for the user: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return;
-  }
-  await recordFire(ctx, thread.projectId, thread.id, "fired", "plan-hold-answered");
-  bb.log.info(
-    `auto-review: auto-answered the plan-hold question ${question.interactionId} in thread ${thread.id}`,
-  );
 }
 
 export async function onInteractionPending(

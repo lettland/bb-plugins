@@ -1,14 +1,8 @@
-import type {
-  BbPluginApi,
-  PluginCliContext,
-  PluginCliResult,
-} from "@get-bb/plugin-sdk";
+import type { BbPluginApi, PluginCliResult } from "@get-bb/plugin-sdk";
 import {
-  defineAutoReviewSettings,
   effectiveConfig,
   readLastFire,
   readProjectConfig,
-  writeProjectConfig,
   type GlobalDefaults,
   type LastFire,
 } from "./config.js";
@@ -16,6 +10,7 @@ import { setAutoApprove } from "./cli-auto-approve.js";
 import { reviewStatusView, showFindings } from "./cli-findings.js";
 import { lastParkedAtOf, lastParkedLine, providerParkReleaseText, skippedText } from "./cli-park.js";
 import { json } from "./cli-result.js";
+import { resolveProjectId, setScope, type SettingsHandle } from "./cli-scope.js";
 import { removeDeferral } from "./deferrals.js";
 import { isBusyStatus, planGateServes } from "./gate.js";
 import { recordUnfinishedReview } from "./review-outcome.js";
@@ -27,8 +22,6 @@ import {
   withThreadLock,
   writeState,
 } from "./state.js";
-
-type SettingsHandle = ReturnType<typeof defineAutoReviewSettings>;
 
 interface ParsedArgs {
   positionals: string[];
@@ -108,65 +101,6 @@ function deferredWaitText(heldBy: string[] | undefined, canStandDown: boolean): 
   );
 }
 
-async function resolveProjectId(
-  bb: BbPluginApi,
-  context: PluginCliContext,
-): Promise<string | null> {
-  if (context.threadId === undefined || context.threadId === null) {
-    return null;
-  }
-  const thread = await bb.sdk.threads.get({ threadId: context.threadId });
-  return thread.projectId;
-}
-
-async function setScope(
-  bb: BbPluginApi,
-  settings: SettingsHandle,
-  context: PluginCliContext,
-  parsed: ParsedArgs,
-  enabled: boolean,
-): Promise<PluginCliResult> {
-  const wantsJson = parsed.flags.has("json");
-  const projectFlag = parsed.flags.get("project");
-  if (parsed.flags.has("global") && projectFlag !== undefined) {
-    return {
-      exitCode: 2,
-      stderr: "Specify only one of --global or --project <id>.\n",
-    };
-  }
-  const global = parsed.flags.has("global") || projectFlag === undefined;
-
-  if (global) {
-    await settings.experimental_set({ enabled });
-    const payload = { ok: true, scope: "global", enabled };
-    return wantsJson
-      ? json(payload)
-      : {
-          exitCode: 0,
-          stdout: `Auto-review ${enabled ? "enabled" : "disabled"} globally.\n`,
-        };
-  }
-
-  const projectId =
-    typeof projectFlag === "string"
-      ? projectFlag
-      : await resolveProjectId(bb, context);
-  if (projectId === null) {
-    return {
-      exitCode: 2,
-      stderr: "A project id is required: pass --project <id> or run inside a thread.\n",
-    };
-  }
-  await writeProjectConfig(bb, projectId, { enabled });
-  const payload = { ok: true, scope: "project", projectId, enabled };
-  return wantsJson
-    ? json(payload)
-    : {
-        exitCode: 0,
-        stdout: `Auto-review ${enabled ? "enabled" : "disabled"} for project ${projectId}.\n`,
-      };
-}
-
 export function registerAutoReviewCli(
   bb: BbPluginApi,
   settings: SettingsHandle,
@@ -221,10 +155,18 @@ export function registerAutoReviewCli(
       const wantsJson = parsed.flags.has("json");
 
       if (command === "enable") {
-        return setScope(bb, settings, context, parsed, true);
+        return setScope(bb, settings, context, {
+          projectFlag: parsed.flags.get("project"),
+          global: parsed.flags.has("global"),
+          wantsJson: parsed.flags.has("json"),
+        }, true);
       }
       if (command === "disable") {
-        return setScope(bb, settings, context, parsed, false);
+        return setScope(bb, settings, context, {
+          projectFlag: parsed.flags.get("project"),
+          global: parsed.flags.has("global"),
+          wantsJson: parsed.flags.has("json"),
+        }, false);
       }
 
       if (command === "auto-approve") {
