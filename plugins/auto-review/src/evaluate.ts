@@ -18,7 +18,6 @@ import {
   runningChildIds,
   stoppedByUser,
   turnChangedPaths,
-  userTurnRunningSince,
   type AvailableWorkspace,
   type TurnChanges,
 } from "./detect.js";
@@ -26,7 +25,7 @@ import { parkedFire } from "./detect-park.js";
 import type { ParkBaseline } from "./detect-upstream.js";
 import type { ThreadListEntry } from "./detect-workspace.js";
 import { dispatchReview } from "./dispatch.js";
-import { isBusyStatus, selfIsWorktree } from "./gate.js";
+import { selfIsWorktree } from "./gate.js";
 import { lastIdleFloor, refreshIdleSnapshot, refreshLastIdle } from "./last-idle.js";
 import { noNewWork, parkBaseline, parkRelease } from "./no-new-work.js";
 import {
@@ -51,54 +50,7 @@ import {
 } from "./state.js";
 import { parkStandDown } from "./park-stand-down.js";
 import { keepCursor, standDown } from "./turn-end.js";
-
-/**
- * Whether the user's next turn is already lined up: a message they queued
- * during this turn, or a turn already started because core drained the queue
- * before this idle was handled (`busy`). Scheduled and failed rows do not count.
- */
-async function userTurnQueued(
-  ctx: ReviewContext,
-  threadId: string,
-): Promise<{ busy: boolean; queued: boolean; userQueued: boolean }> {
-  const { bb } = ctx;
-  const now = Date.now();
-  const [{ status }, rows] = await Promise.all([
-    bb.sdk.threads.get({ threadId }),
-    bb.sdk.threads.queuedMessages.list({ threadId }),
-  ]);
-  const busy = isBusyStatus(status);
-  const userQueued = rows.some(
-    (row) =>
-      row.initiator === "user" &&
-      row.origin !== "plugin" &&
-      row.failureReason === null &&
-      (row.sendAt === null || row.sendAt <= now),
-  );
-  return { busy, queued: busy || userQueued, userQueued };
-}
-
-/**
- * Whether the turn running now is the user's, read from the requests after
- * `sinceSeq`. True when the read fails: the thread is busy, so the review is
- * carried rather than sent into a turn that may be the user's.
- */
-async function userTurnRunning(
-  ctx: ReviewContext,
-  threadId: string,
-  sinceSeq: number,
-): Promise<boolean> {
-  try {
-    return (await userTurnRunningSince(ctx.bb, threadId, sinceSeq)) !== null;
-  } catch (error) {
-    ctx.bb.log.warn(
-      `auto-review: could not read whether the running turn of ${threadId} is the user's; carrying the review: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return true;
-  }
-}
+import { userTurnQueued, userTurnRunning } from "./user-turn.js";
 
 /**
  * Fold this turn's review into the user's next turn instead of firing it
