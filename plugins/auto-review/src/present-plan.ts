@@ -117,7 +117,8 @@ async function releasePlan(
   const reviewRan =
     reviewWorked &&
     state.presentPlanArmedSeq !== undefined &&
-    (await reviewRanSince(bb, ctx.threadId, state.presentPlanArmedSeq, PRESENT_PLAN_GATE_TOOLS, true, false));  await settlePlanBaseline(bb, ctx.threadId, planFilePath, reviewWorked);
+    (await reviewRanSince(bb, ctx.threadId, state.presentPlanArmedSeq, PRESENT_PLAN_GATE_TOOLS, true, false));
+  await settlePlanBaseline(bb, ctx.threadId, planFilePath, reviewWorked);
   if (reviewRan && config.autoApprovePlans) {
     await clearPlanBaseline(bb, ctx.threadId, planFilePath);
     await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-approved");

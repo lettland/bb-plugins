@@ -122,14 +122,13 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   `baseline:code:<thread>`), computes each delta with `diff` (jsdiff) and embeds it in the prompt
   as a ```diff block, so the agent runs no shell command for it. Arming a review stages what it
   reads as `pending`; a review that ran and left no open Blocker (plan) or Blocker/security
-  Concern (code) promotes it, else it is dropped; a plan review that spans several turns
-  promotes it too, since child-thread reviewers end the turn and bb wakes the agent later.
-  A code copy is valid only while HEAD is still
-  the sha it was taken at; a finding flagged `security` on a file ends that file's baseline;
-  files over 256 KB, more than 200 files, and deltas over 40 KB (plan) / 80 KB (code, total) fall
-  back to a full review; records untouched for 7 days are dropped. The reply states
-  `delta vs baseline` or `full (no baseline)`; an auto-approval, a redo and a thread deletion
-  clear a plan's baseline.
+  Concern (code) promotes it, else it is dropped; a plan review that spans several turns promotes
+  it too, since child-thread reviewers end the turn and bb wakes the agent later. A code copy is
+  valid only while HEAD is still the sha it was taken at; a finding flagged `security` on a file
+  ends that file's baseline; files over 256 KB, more than 200 files, and deltas over 40 KB
+  (plan) / 80 KB (code, total) fall back to a full review; records untouched for 7 days are
+  dropped. The reply states `delta vs baseline` or `full (no baseline)`; an auto-approval, a redo
+  and a thread deletion clear a plan's baseline.
 - Reviews plans too, on every provider, through two paths kept strictly separate by
   provider capability so one plan is never reviewed twice. On Claude Code (and its
   `claude-code-<slug>` profile providers), whose ExitPlanMode routes to a real
