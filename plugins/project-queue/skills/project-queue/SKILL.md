@@ -39,5 +39,9 @@ multi-line prompt, pass `--prompt "$(cat brief.md)"`; there is no
 - From the SDK, pass `pluginSubmission: { pluginId: "project-queue", data: { queue: true } }`
   to `bb.sdk.threads.spawn`.
 
+The id `bb--project-queue` from the former bb builtin is no longer read: a
+submission that passes it starts without queuing, and threads the builtin holds
+are not carried over. To switch from the builtin, follow the plugin README.
+
 Run `bb project-queue list --json` to see what blocks each thread. A thread with
 no blockers starts on the next recheck, within 30 seconds.

@@ -27,3 +27,5 @@ This is a workflow aid, not a security control: any caller that can create a thr
 - `bb project-queue release <thread-id> [--json]` stops holding a queued thread.
 
 The SDK equivalent is `bb.sdk.threads.spawn({ …, pluginSubmission: { pluginId: "project-queue", data: { queue: true } } })`.
+
+The id `bb--project-queue` from the former bb builtin is no longer read: a submission that passes it starts without queuing, and threads the builtin holds are not carried over. To switch from the builtin, follow the plugin README.

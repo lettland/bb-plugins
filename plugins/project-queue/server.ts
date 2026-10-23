@@ -89,13 +89,15 @@ function waitDecision(
   projectName: string,
 ): MessageDispatchHookDecision {
   const reason = `${blockerCount} other thread${blockerCount === 1 ? "" : "s"} running in ${projectName}`;
-  return {
-    action: "wait",
-    reason:
-      reason.length <= MAX_REASON_LENGTH
-        ? reason
-        : `${reason.slice(0, MAX_REASON_LENGTH - 1)}…`,
-  };
+  if (reason.length <= MAX_REASON_LENGTH) {
+    return { action: "wait", reason };
+  }
+  let truncated = reason.slice(0, MAX_REASON_LENGTH - 1);
+  const last = truncated.charCodeAt(truncated.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) {
+    truncated = truncated.slice(0, -1);
+  }
+  return { action: "wait", reason: `${truncated}…` };
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -295,14 +297,14 @@ export default async function projectQueuePlugin(
       [...queued].map(async (id): Promise<QueuedView | null> => {
         try {
           const thread = await bb.sdk.threads.get({ threadId: id });
-          const reason = staleReason(thread);
-          if (reason !== null) return { id, state: "stale", reason };
           if (
             projectFilter !== undefined &&
             thread.projectId !== projectFilter
           ) {
             return null;
           }
+          const reason = staleReason(thread);
+          if (reason !== null) return { id, state: "stale", reason };
           const [blockers, project] = await Promise.all([
             blockersOf(thread),
             projectName(thread.projectId),

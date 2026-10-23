@@ -25,6 +25,8 @@ bb plugin install <local clone of this repo>/plugins/project-queue
 
 This plugin replaces the fork's builtin `bb--project-queue`. SDK callers must now pass `pluginId: "project-queue"`.
 
+On a bb build that still bundles the builtin Project queue, switch before you install this plugin. While only the builtin is enabled, run `bb project-queue list` and wait until it is empty, or release one thread with `bb project-queue release <id>` and wait for it to finish before releasing the next. Then run `bb plugin disable bb--project-queue`. Disabling releases every thread the builtin still holds at once, and with both enabled bb has two `project-queue` commands and two "Start when project is idle" menu items.
+
 ## Development
 
 ```sh

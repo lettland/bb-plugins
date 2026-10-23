@@ -241,6 +241,29 @@ describe("hold decisions", () => {
     expect(decision.reason.endsWith("…")).toBe(true);
   });
 
+  it("truncates without splitting a surrogate pair", async () => {
+    const { hook } = await setup({
+      running: [running("thr_busy")],
+      threads: { thr_busy: { projectId: "proj_1" } },
+    });
+    const prefix = "1 other thread running in ";
+    const projectName =
+      "x".repeat(MAX_REASON_LENGTH - prefix.length - 2) +
+      "🚀" +
+      "y".repeat(10);
+
+    const decision = await hook(
+      dispatchContext({
+        projectName,
+        submission: queueIntent(),
+      }),
+    );
+
+    if (decision.action !== "wait") throw new Error("expected a wait");
+    expect(decision.reason).toBe(prefix + "x".repeat(MAX_REASON_LENGTH - prefix.length - 2) + "…");
+    expect(decision.reason.length).toBeLessThanOrEqual(MAX_REASON_LENGTH);
+  });
+
   it("loads persisted ids before the hook is registered", async () => {
     const { hook } = await setup({
       stored: ["thr_new"],
@@ -748,5 +771,29 @@ describe("cli", () => {
     expect(JSON.parse(result.stdout).queued).toMatchObject([
       { id: "thr_b", projectId: "proj_2" },
     ]);
+  });
+
+  it("does not report another project's stale threads", async () => {
+    const fake = await setup({
+      stored: ["thr_stale", "thr_b", "thr_gone"],
+      threads: {
+        thr_stale: { projectId: "proj_1", status: "active" },
+        thr_b: { projectId: "proj_2", status: "pending" },
+        thr_gone: { projectId: "proj_2", status: "active" },
+      },
+    });
+
+    const result = await fake.harness.runCli([
+      "list",
+      "--project",
+      "proj_2",
+      "--json",
+    ]);
+
+    expect(JSON.parse(result.stdout).queued).toMatchObject([
+      { id: "thr_b", projectId: "proj_2" },
+      { id: "thr_gone", state: "stale", reason: "thread is active" },
+    ]);
+    expect(await storedIds(fake)).toEqual(["thr_stale", "thr_b"]);
   });
 });
