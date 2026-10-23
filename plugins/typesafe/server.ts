@@ -58,7 +58,7 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Model",
       description: "Pinned Jev model id, so classification does not drift.",
-      default: "jev-1.13.0",
+      default: "jev-1.14.0",
     },
     triage: {
       type: "boolean",

@@ -23,7 +23,7 @@ function okResponse(body: unknown): Response {
 
 function triageResponse() {
   return {
-    model: "jev-1.13.0",
+    model: "jev-1.14.0",
     answers: {
       kind: {
         type: "choice",
@@ -153,7 +153,7 @@ describe("typesafe_decide tool", () => {
     await plugin(host.bb);
     fetchMock.mockResolvedValue(
       okResponse({
-        model: "jev-1.13.0",
+        model: "jev-1.14.0",
         answers: {
           pick: { type: "choice", choice: "not-offered", confidence: 0.9, probabilities: { a: 1 } },
         },
@@ -193,7 +193,7 @@ describe("typesafe_decide tool", () => {
     await plugin(host.bb);
     fetchMock.mockResolvedValue(
       okResponse({
-        model: "jev-1.13.0",
+        model: "jev-1.14.0",
         answers: {
           pick: { type: "choice", choice: "a", confidence: 0.9, probabilities: { a: 0.9, b: 0.1 } },
           why: { type: "noul", noul: 0.3 },
@@ -223,7 +223,7 @@ describe("typesafe_decide tool", () => {
     expect(result.isError).toBeUndefined();
     const text = result.content[0].text;
     expect(JSON.parse(text)).toEqual({
-      model: "jev-1.13.0",
+      model: "jev-1.14.0",
       answers: {
         pick: { type: "choice", choice: "a", confidence: 0.9, probabilities: { a: 0.9, b: 0.1 } },
         why: { type: "noul", noul: 0.3 },

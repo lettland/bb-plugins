@@ -33,7 +33,7 @@ function decideWith(state: string, questions: QuestionMap = minimalQuestions()) 
   return decide({
     state,
     questions,
-    model: "jev-1.13.0",
+    model: "jev-1.14.0",
     apiKey: TEST_KEY,
     timeoutMs: 1500,
   });
@@ -63,7 +63,7 @@ describe("decide", () => {
   it("parses all three answer types and strips unknown fields", async () => {
     fetchMock.mockResolvedValue(
       okResponse({
-        model: "jev-1.13.0",
+        model: "jev-1.14.0",
         request_id: "req-1",
         answers: {
           pick: {
@@ -94,7 +94,7 @@ describe("decide", () => {
     expect(outcome).toEqual({
       kind: "ok",
       value: {
-        model: "jev-1.13.0",
+        model: "jev-1.14.0",
         answers: {
           pick: {
             type: "choice",
@@ -120,7 +120,7 @@ describe("decide", () => {
     expect(init.headers.Authorization).toBe(`Bearer ${TEST_KEY}`);
     expect(init.headers["Content-Type"]).toBe("application/json");
     expect(JSON.parse(init.body)).toEqual({
-      model: "jev-1.13.0",
+      model: "jev-1.14.0",
       state: "state text",
       questions: {
         pick: { type: "choice", instructions: "Pick one", criteria: { a: "A", b: "B" } },
@@ -133,7 +133,7 @@ describe("decide", () => {
   it("clamps confidence and probabilities to [0,1] but not score", async () => {
     fetchMock.mockResolvedValue(
       okResponse({
-        model: "jev-1.13.0",
+        model: "jev-1.14.0",
         answers: {
           pick: {
             type: "choice",
@@ -191,7 +191,7 @@ describe("decide", () => {
   it("maps a non-finite answer number to a bad-response error", async () => {
     fetchMock.mockResolvedValue(
       okResponse({
-        model: "jev-1.13.0",
+        model: "jev-1.14.0",
         answers: { q: { type: "noul", noul: Number.NaN } },
         usage: { input_tokens: 1, output_tokens: 1 },
       }),
@@ -211,7 +211,7 @@ describe("decide", () => {
     const outcome = await decide({
       state: "s",
       questions: minimalQuestions(),
-      model: "jev-1.13.0",
+      model: "jev-1.14.0",
       apiKey: null,
       timeoutMs: 1500,
     });
@@ -222,7 +222,7 @@ describe("decide", () => {
   it("redacts every secret kind from the sent state but keeps the URL host", async () => {
     fetchMock.mockResolvedValue(
       okResponse({
-        model: "jev-1.13.0",
+        model: "jev-1.14.0",
         answers: minimalAnswers(),
         usage: { input_tokens: 1, output_tokens: 1 },
       }),
@@ -261,7 +261,7 @@ describe("decide", () => {
     vi.useRealTimers();
     fetchMock.mockResolvedValue(
       okResponse({
-        model: "jev-1.13.0",
+        model: "jev-1.14.0",
         answers: minimalAnswers(),
         usage: { input_tokens: 1, output_tokens: 1 },
       }),
@@ -289,19 +289,19 @@ describe("decide", () => {
     const log = (line: string) => lines.push(line);
     fetchMock.mockResolvedValue(
       okResponse({
-        model: "jev-1.13.0",
+        model: "jev-1.14.0",
         answers: minimalAnswers(),
         usage: { input_tokens: 1, output_tokens: 1 },
       }),
     );
     const state = "sensitive-state-content";
     await decide(
-      { state, questions: minimalQuestions(), model: "jev-1.13.0", apiKey: TEST_KEY, timeoutMs: 1500 },
+      { state, questions: minimalQuestions(), model: "jev-1.14.0", apiKey: TEST_KEY, timeoutMs: 1500 },
       { log },
     );
     fetchMock.mockImplementation(() => new Promise<Response>(() => {}));
     const second = decide(
-      { state, questions: minimalQuestions(), model: "jev-1.13.0", apiKey: TEST_KEY, timeoutMs: 1500 },
+      { state, questions: minimalQuestions(), model: "jev-1.14.0", apiKey: TEST_KEY, timeoutMs: 1500 },
       { log },
     );
     await vi.advanceTimersByTimeAsync(1500);
