@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createFakePluginHost,
   makePluginAgentConfigurationContext,
@@ -132,6 +132,17 @@ describe("parseRules", () => {
     ['[{"instructions": "x", "skipProject": "bb-*"}]', "skipProject"],
   ])("rejects %s", (json, message) => {
     expect(() => parseRules(json)).toThrow(message);
+  });
+
+  it("wraps a non-Error JSON.parse failure", () => {
+    const parse = vi.spyOn(JSON, "parse").mockImplementation(() => {
+      throw "boom";
+    });
+    try {
+      expect(() => parseRules("[]")).toThrow("not valid JSON: boom");
+    } finally {
+      parse.mockRestore();
+    }
   });
 
   it("backs the setting's write validation", () => {

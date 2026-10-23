@@ -10,6 +10,7 @@ export default defineConfig({
       include: ["server.ts", "src/**"],
       reporter: ["text-summary", "lcov"],
       exclude: ["node_modules/**", "dist/**", "**/*.test.{ts,tsx}", "vitest.config.ts"],
+      thresholds: { statements: 100, branches: 100, functions: 100, lines: 100 },
     },
   },
 });

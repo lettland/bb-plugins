@@ -26,6 +26,7 @@ export default async function plugin(bb: BbPluginApi) {
       return rules;
     } catch (error) {
       bb.log.warn(
+        // v8 ignore next -- @preserve parseRules only throws Error, so the non-Error arm is unreachable.
         `rules setting ignored: ${error instanceof Error ? error.message : String(error)}`,
       );
       return [];

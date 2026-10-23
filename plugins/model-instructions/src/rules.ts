@@ -55,6 +55,7 @@ export const rulesSettingSchema = z.string().superRefine((json, ctx) => {
   } catch (error) {
     ctx.addIssue({
       code: "custom",
+      // v8 ignore next -- @preserve parseRules only throws Error, so the non-Error arm is unreachable.
       message: error instanceof Error ? error.message : String(error),
     });
   }
