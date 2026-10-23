@@ -2767,6 +2767,8 @@ describe("auto-review plugin", () => {
         expect(host.metadata.reviewTurnEndSeq).toBe(108);
         expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 130 });
         expect(host.metadata.userTurnAuthored).toBe(true);
+        // Counted, not set aside.
+        expect(setAsides(host)).toHaveLength(0);
         const approvalCursor = { ...(host.metadata.turnStart as object) };
 
         // Later wake-up turns change files; the hold ends with a follow-up review
@@ -2792,8 +2794,9 @@ describe("auto-review plugin", () => {
           host.lifecycle(125, "turn-120");
         });
         expect(host.metadata.userTurnStart).toBeUndefined();
-        expect(setAsides(host)).toHaveLength(1);
-        expect(setAsides(host)[0]).toContain("pint-1");
+        expect(setAsides(host)).toEqual([
+          `auto-review: the plan approval pint-1 at seq 125 in thread ${THREAD_ID} is set aside (auto-review resolved it itself), so the work under it is covered by the review itself`,
+        ]);
 
         host.setEnvThreads(idleChild);
         await holdTurn(host, wakeUp(150), ["src/fix.ts"]);
@@ -2811,58 +2814,134 @@ describe("auto-review plugin", () => {
         host.lifecycle(106, "turn-105", { status: "resolving" });
         host.lifecycle(107, "turn-105");
         // Then a wake-up turn that changes nothing, and the idle ends the hold.
-        // (The set-aside is the cut-off's proof: unrecognized, the approval at
-        // 107 would sit above the delivery cursor 100 and count.)
+        // (The set-aside is the rule's proof: the approval resolved inside the
+        // review's own turn, after the review was delivered at cursor 100.)
         await holdTurn(host, wakeUp(120));
-        expect(setAsides(host)).toHaveLength(1);
+        expect(setAsides(host)).toEqual([
+          `auto-review: the plan approval pint-1 at seq 107 in thread ${THREAD_ID} is set aside (it was resolved inside the review's own turn, after the review was delivered), so the work under it is covered by the review itself`,
+        ]);
         expect(host.metadata.phase).toBe("idle");
         expect(host.sends).toHaveLength(0);
         await host.harness.dispose();
       });
 
-      it("does not count an approval in the turn the review queued behind, but one after the review turn counts", async () => {
+      it("counts an approval in the wake-up turn the review queued behind, and fires the follow-up review", async () => {
         const host = editingHost();
         await plugin(host.bb);
         await startReview(host, THREAD_ID, Date.now() - 10_000);
-        // The pre-send cursor is 100; the review was delivered later, at cursor 140.
+        // The pre-send cursor is 100; the review was delivered later, at cursor
+        // 140, after the wake-up turn it queued behind had ended.
         Object.assign(host.metadata, { reviewDeliveredAt: Date.now() - 5_000, reviewDeliveredSeq: 140, lastCodeReviewSeq: 100 });
-        // The user's turn the review queued behind ends after the cursor; its plan
-        // approval sits below the delivery cursor, so it is not the user's to count.
-        await holdTurn(host, userRequest(110), undefined, () => {
+        // The approval sits below the delivery cursor, but the turn it resolved
+        // in is a wake-up's, not the review's own: it counts as the user's.
+        await holdTurn(host, wakeUp(110), undefined, () => {
           host.lifecycle(125, "turn-110");
           reviewTurn(host, 140, 160);
         });
         expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 120 });
-        expect(setAsides(host)).toHaveLength(1);
-        // The cut-off becomes the review turn's end, not the earlier turn's.
+        expect(host.metadata.userTurnAuthored).toBe(true);
+        // The turn it lands in sets no stop floor.
+        expect(host.metadata.userStopFloorSeq).toBeUndefined();
+        expect(setAsides(host)).toHaveLength(0);
+        // The review turn is still recognized, and the latch takes its end.
         expect(host.metadata.reviewTurnEndSeq).toBe(160);
 
-        // A wake-up approval after the review turn counts — it is not set
-        // aside, and the turn it lands in sets no stop floor.
-        await holdTurn(host, wakeUp(180), undefined, () => {
-          host.lifecycle(185, "turn-180");
-        });
-        expect(setAsides(host)).toHaveLength(1);
-        expect(host.metadata.userTurnAuthored).toBe(true);
-        expect(host.metadata.userStopFloorSeq).toBe(130);
+        // A turn of the user's own keeps the window the approval opened and
+        // earns the follow-up review (one code review per user message).
+        await holdTurn(host, userRequest(170), ["src/fix.ts"]);
+        expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 120 });
 
         host.setEnvThreads(idleChild);
-        await holdTurn(host, wakeUp(210), ["src/fix.ts"]);
+        await holdTurn(host, wakeUp(210));
         expect(host.sends).toHaveLength(1);
         expect((await lastFire(host)).scopePaths).toContain("src/fix.ts");
         await host.harness.dispose();
       });
 
-      it("counts a user approval above the delivery cursor when no turn is recognized as the review's own", async () => {
+      it("sets aside only an approval the steered review turn resolved after the review was delivered", async () => {
         const host = editingHost();
         await plugin(host.bb);
-        // No turn carries the code-review opening, so the cut-off stays the delivery cursor.
+        await startReview(host, THREAD_ID, Date.now() - 10_000);
+        // Sent from pre-send cursor 100 and steered into the user's running
+        // turn, where it is delivered at cursor 140, mid-turn.
+        Object.assign(host.metadata, { reviewDeliveredAt: Date.now() - 5_000, reviewDeliveredSeq: 140, lastCodeReviewSeq: 100 });
+        host.requestTurn(userRequest(110));
+        host.setMaxSeq(120);
+        await emitActive(host);
+        // The user approves a plan before the steer lands, and another while
+        // the review runs in the same turn.
+        host.lifecycle(120, "turn-110");
+        host.requestTurn({
+          seq: 130,
+          initiator: "user",
+          auto: true,
+          turnId: "turn-110",
+          expectedTurnId: "turn-110",
+          text: `${CODE_REVIEW_OPENING} Review them, apply fixes, and record the result.`,
+        });
+        host.setMaxSeq(140);
+        host.lifecycle(160, "turn-110");
+        host.setMaxSeq(200);
+        host.completeTurnOf(110, 200);
+        await emitIdle(host);
+        // The steered turn is the review turn, and the latch takes its end.
+        expect(host.metadata.reviewTurnEndSeq).toBe(200);
+        expect(setAsides(host)).toEqual([
+          `auto-review: the plan approval pint-1 at seq 160 in thread ${THREAD_ID} is set aside (it was resolved inside the review's own turn, after the review was delivered), so the work under it is covered by the review itself`,
+        ]);
+        // The earlier approval counts as the user's.
+        expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 120 });
+        expect(host.metadata.userTurnAuthored).toBe(true);
+
+        host.setEnvThreads(idleChild);
+        await holdTurn(host, wakeUp(220), ["src/fix.ts"]);
+        expect(host.sends).toHaveLength(1);
+        expect((await lastFire(host)).scopePaths).toContain("src/fix.ts");
+        await host.harness.dispose();
+      });
+
+      it("marks the review turn once: a later turn carrying the opening again is not it, and its approval counts", async () => {
+        const host = editingHost();
+        await plugin(host.bb);
+        await reportedReview(host);
+        reviewTurn(host, 105, 108);
+        // A re-steer carrying the code-review opening again ends behind a
+        // wake-up turn, with the user's plan approval inside it.
+        await holdTurn(host, wakeUp(110), undefined, () => {
+          reviewTurn(host, 120, 140);
+          host.lifecycle(130, "turn-120");
+        });
+        // The latch keeps the first review turn's end.
+        expect(host.metadata.reviewTurnEndSeq).toBe(108);
+        expect(setAsides(host)).toHaveLength(0);
+        expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 120 });
+        expect(host.metadata.userTurnAuthored).toBe(true);
+
+        host.setEnvThreads(idleChild);
+        await holdTurn(host, wakeUp(160), ["src/fix.ts"]);
+        expect(host.sends).toHaveLength(1);
+        expect((await lastFire(host)).scopePaths).toContain("src/fix.ts");
+        await host.harness.dispose();
+      });
+
+      it("counts a user approval when a steer only quotes the code-review opening after other text", async () => {
+        const host = editingHost();
+        await plugin(host.bb);
+        // The steer's text names the opening only after other text, so no turn
+        // is recognized as the review's own: the approval counts (fail-open).
         await deliveredQueued(host);
         await holdTurn(host, wakeUp(120), ["src/fix.ts"], () => {
-          host.lifecycle(125, "turn-120");
+          host.requestTurn({
+            seq: 125,
+            initiator: "user",
+            steer: true,
+            text: `First, a note to keep. ${CODE_REVIEW_OPENING} Review them.`,
+          });
+          host.lifecycle(130, "turn-120");
         });
         expect(host.metadata.reviewTurnEndSeq).toBeUndefined();
         expect(host.metadata.userTurnAuthored).toBe(true);
+        expect(setAsides(host)).toHaveLength(0);
 
         host.setEnvThreads(idleChild);
         await holdTurn(host, wakeUp(150));
@@ -2961,27 +3040,44 @@ describe("auto-review plugin", () => {
         await host.harness.dispose();
       });
 
-      it("falls back to the hold's turn-start cursor for approvals when no delivery cursor was recorded", async () => {
+      it("judges the review turn's approvals against the pre-send cursor when no delivery cursor was recorded", async () => {
+        const host = editingHost({ envThreads: idleChild });
+        await plugin(host.bb);
+        reviewTurn(host, 105, 108);
+        host.lifecycle(107, "turn-105");
+        // Delivered without a recorded cursor: the pre-send cursor 100 stands
+        // in when the review turn's approvals are judged.
+        await startReview(host, THREAD_ID, Date.now() - 10_000);
+        Object.assign(host.metadata, { reviewDeliveredAt: Date.now() - 5_000, lastCodeReviewSeq: 100 });
+        await holdTurn(host, wakeUp(120));
+        expect(setAsides(host)).toEqual([
+          `auto-review: the plan approval pint-1 at seq 107 in thread ${THREAD_ID} is set aside (it was resolved inside the review's own turn, after the review was delivered), so the work under it is covered by the review itself`,
+        ]);
+        expect(host.metadata.phase).toBe("idle");
+        expect(host.sends).toHaveLength(0);
+        await host.harness.dispose();
+      });
+
+      it("judges the review turn's approvals against the hold's turn-start cursor when no other was recorded", async () => {
         const host = editingHost();
         await plugin(host.bb);
         await startReview(host, THREAD_ID, Date.now() - 10_000);
         Object.assign(host.metadata, { reviewDeliveredAt: Date.now() - 5_000 });
-        // The turn started at cursor 130; an approval logged before it does not
-        // count, one after it does.
-        await holdTurn(host, wakeUp(120), ["src/fix.ts"], () => {
-          host.lifecycle(125, "turn-120");
-          host.lifecycle(135, "turn-120");
+        // The review turn queued behind a wake-up turn; with no delivery or
+        // pre-send cursor recorded, its approval is judged against the hold's
+        // turn start.
+        await holdTurn(host, wakeUp(110), undefined, () => {
+          reviewTurn(host, 140, 160);
+          host.lifecycle(150, "turn-140");
         });
-        expect(host.metadata.reviewTurnEndSeq).toBeUndefined();
-        expect(host.metadata.userTurnAuthored).toBe(true);
-
-        host.setEnvThreads(idleChild);
-        await holdTurn(host, wakeUp(150));
-        expect(host.sends).toHaveLength(1);
+        expect(host.metadata.reviewTurnEndSeq).toBe(160);
+        expect(setAsides(host)).toEqual([
+          `auto-review: the plan approval pint-1 at seq 150 in thread ${THREAD_ID} is set aside (it was resolved inside the review's own turn, after the review was delivered), so the work under it is covered by the review itself`,
+        ]);
         await host.harness.dispose();
       });
 
-      it("counts the hold as the user's when the review's own turn cannot be read, and leaves the cut-off unset", async () => {
+      it("counts the hold as the user's when the review's own turn cannot be read, and marks no review turn", async () => {
         const host = editingHost();
         await plugin(host.bb);
         await reportedReview(host);
@@ -4241,7 +4337,7 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
-  it("reset clears the review turn's cut-off with the rest of the latch", async () => {
+  it("reset clears the review turn's recorded end with the rest of the latch", async () => {
     const host = createHost();
     await plugin(host.bb);
     Object.assign(host.metadata, { phase: "awaiting-review", reviewTurnEndSeq: 108 });

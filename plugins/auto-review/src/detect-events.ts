@@ -222,7 +222,10 @@ export class UnreadTurnError extends Error {
  * such as one the review prompt was steered into, and is not the user's. The
  * plan approvals the turn resolved are read from its interaction lifecycle
  * events whatever requests it took, so a turn with none of the user's own
- * input still names them. Whether the turn is the review's own comes from the
+ * input still names them. This assumes a plan approval resolves inside the
+ * turn that requested it — the turn blocks until the interaction resolves —
+ * so an approval that resolves after that turn's idle is not re-read. Whether
+ * the turn is the review's own comes from the
  * same requests: any input accepted into it that carries the code-review
  * prompt's opening marks it (`reviewTurn`), steered into the turn or not.
  *
