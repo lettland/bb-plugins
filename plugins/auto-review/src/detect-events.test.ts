@@ -159,24 +159,37 @@ describe("endedTurn", () => {
         request(3, "creq-1", "user"),
         accepted(4, "turn-1", "creq-1"),
         completed(5, "turn-1"),
+        lifecycle(1295, "turn-1", "pending", null),
         lifecycle(1296, "turn-1", "resolving", null),
         lifecycle(1297, "turn-1", "resolved", { decision }),
       ]);
       expect(await endedTurn(bb, "thr", 0)).toEqual({
         users: true,
         completedSeq: 5,
-        approvedPlans: [{ id: "pint-1", seq: 1297 }],
+        approvedPlans: [{ id: "pint-1", seq: 1297, requestedSeq: 1295 }],
         reviewTurn: false,
       });
     },
   );
 
   it("lists a plan approval even when no input was accepted into the turn since the cursor", async () => {
+    // The pending request sat in another turn's scope: it is matched by
+    // interaction id, not by the ended turn.
+    const { bb } = logOf([completed(8, "turn-2"), lifecycle(1296, "turn-1", "pending", null), lifecycle(1297, "turn-2", "resolved")]);
+    expect(await endedTurn(bb, "thr", 5)).toEqual({
+      users: false,
+      completedSeq: 8,
+      approvedPlans: [{ id: "pint-1", seq: 1297, requestedSeq: 1296 }],
+      reviewTurn: false,
+    });
+  });
+
+  it("leaves an approval's request seq undefined when no pending event is in the window", async () => {
     const { bb } = logOf([completed(8, "turn-2"), lifecycle(1297, "turn-2", "resolved")]);
     expect(await endedTurn(bb, "thr", 5)).toEqual({
       users: false,
       completedSeq: 8,
-      approvedPlans: [{ id: "pint-1", seq: 1297 }],
+      approvedPlans: [{ id: "pint-1", seq: 1297, requestedSeq: undefined }],
       reviewTurn: false,
     });
   });

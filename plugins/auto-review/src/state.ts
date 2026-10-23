@@ -114,8 +114,8 @@ export const threadStateSchema = z.object({
    * code-review opening its request carried. Set once by `noteUserTurn`, from
    * the first turn it read that mark on, and never moved, it marks the turn
    * whose plan approvals are judged against the review's delivery: one the
-   * review turn resolved after the review was delivered never counts as the
-   * user's, whatever the review reports later, and one resolved anywhere else
+   * review turn requested after the review was delivered never counts as the
+   * user's, whatever the review reports later, and one requested anywhere else
    * in the hold — a turn before or after the review's, or in the review turn
    * before the delivery — counts. A latch key, so every reset clears it
    * together with the phase it belongs to and it never leaks into the next

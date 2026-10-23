@@ -427,7 +427,7 @@ It ships enabled (opt-out).
   dropped when the thread is deleted.
   A plan you approve during the hold counts as your own turn wherever it lands: in a turn the
   review waited behind, in the review's own turn before the review prompt was delivered there, or
-  in any turn after the review's own. Only a plan approved inside the review's own turn after the
+  in any turn after the review's own. Only a plan requested inside the review's own turn after the
   review was delivered, and one auto-review approves itself, does not count: work under such a
   plan is covered by the review itself and gets no follow-up review, and each set-aside approval
   is logged as an `auto-review:` info line with the interaction id, visible with `bb plugin logs

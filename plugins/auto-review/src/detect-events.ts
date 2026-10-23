@@ -152,8 +152,12 @@ function isCodeReviewRequest(data: TurnRequestData): boolean {
  * `allow_for_session` of a plan; a deny, an interaction still `resolving`, or
  * an approval of anything else is not one. The event carries no resolver, so
  * the caller tells an approval the user gave from one auto-review gave itself.
+ * `requestedSeq` rides along: when the interaction was asked for.
  */
-function approvedPlanOf(event: EventOf<"system/interaction/lifecycle">): ApprovedPlan | null {
+function approvedPlanOf(
+  event: EventOf<"system/interaction/lifecycle">,
+  requestedSeq: number | undefined,
+): ApprovedPlan | null {
   const { interaction } = event.data;
   if (
     interaction.payload.kind !== "approval" ||
@@ -170,13 +174,21 @@ function approvedPlanOf(event: EventOf<"system/interaction/lifecycle">): Approve
   ) {
     return null;
   }
-  return { id: interaction.id, seq: event.seq };
+  return { id: interaction.id, seq: event.seq, requestedSeq };
 }
 
-/** A plan approval a turn resolved, with the seq of the lifecycle event that resolved it. */
+/**
+ * A plan approval a turn resolved, with the seq of the lifecycle event that
+ * resolved it and the seq of the interaction's `pending` event — when the
+ * approval was requested, which is not when it resolved: the turn blocks in
+ * between. `requestedSeq` is undefined when no `pending` event for the
+ * interaction is among the lifecycle events the turn was read from; the
+ * request can predate that window.
+ */
 export interface ApprovedPlan {
   id: string;
   seq: number;
+  requestedSeq: number | undefined;
 }
 
 export interface EndedTurn {
@@ -252,10 +264,19 @@ export async function endedTurn(
     const accepted = (await collect(eventsSince(bb, threadId, sinceSeq, "turn/input/accepted"))).filter(
       ({ scope }) => scope.kind === "turn" && scope.turnId === turnId,
     );
-    const approvedPlans = (await collect(eventsSince(bb, threadId, sinceSeq, "system/interaction/lifecycle")))
+    // A plan approval resolves inside the turn that requested it, but the request itself can
+    // predate the window: the pending step is matched by interaction id across every lifecycle
+    // event read, not by the ended turn's scope.
+    const lifecycle = await collect(eventsSince(bb, threadId, sinceSeq, "system/interaction/lifecycle"));
+    const requestedSeqOf = new Map(
+      lifecycle
+        .filter((event) => event.data.interaction.status === "pending")
+        .map((event) => [event.data.interaction.id, event.seq]),
+    );
+    const approvedPlans = lifecycle
       .filter(({ scope }) => scope.kind === "turn" && scope.turnId === turnId)
       .flatMap((event) => {
-        const approval = approvedPlanOf(event);
+        const approval = approvedPlanOf(event, requestedSeqOf.get(event.data.interaction.id));
         return approval === null ? [] : [approval];
       });
     if (accepted.length === 0) {

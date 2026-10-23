@@ -64,7 +64,7 @@ export async function reviewContinuationPending(
  * turn so marked is recorded as the review turn, once, and a later turn marked
  * again is a re-steer, not it. `approvedPlans` are the plan approvals the turn
  * resolved; the caller sets the ones auto-review gave itself, and the ones the
- * review turn resolved after the review was delivered, aside — every other
+ * review turn requested after the review was delivered, aside — every other
  * approval counts as the user's.
  */
 export type HoldTurn =
@@ -150,13 +150,18 @@ async function userTurnAuthored(
  * The plan approvals of an ended turn that count as the user's own: not one
  * auto-review resolved itself (`state.autoResolvedPlanIds`, written before the
  * resolve it vouches for), and — in the review's own turn only — not one
- * resolved after the review was delivered (`deliveredSeq`, undefined for every
- * other turn): while the review runs there, the plans approved in its turn are
- * its own business, but one the turn already held when the review arrived is
- * the user's, and so is every approval of any other turn in the hold. Every
- * approval set aside is logged with its interaction id and seq: the lifecycle
- * event carries no resolver, so the log is the record of why the work under it
- * gets no follow-up review.
+ * requested after the review was delivered (`deliveredSeq`, the review's
+ * delivery cursor, undefined for every other turn and left undefined too when
+ * no delivery or pre-send cursor was recorded): while the review runs there,
+ * the plans its turn asks for are its own business, but one the turn was
+ * already blocked on when the review arrived is the user's, and so is every
+ * approval of any other turn in the hold. The judgment reads when the approval
+ * was requested (`requestedSeq`), not when it resolved, and fails open: an
+ * approval whose request predates the delivery, whose pending event was not
+ * found, or with no cursor to judge it against counts too. Every approval set
+ * aside is logged with its interaction id and seq: the lifecycle event carries
+ * no resolver, so the log is the record of why the work under it gets no
+ * follow-up review.
  */
 function countUserApprovals(
   bb: ReviewContext["bb"],
@@ -170,17 +175,19 @@ function countUserApprovals(
   const auto = state.autoResolvedPlanIds ?? [];
   const counted: ApprovedPlan[] = [];
   for (const approval of approvals) {
-    if (!auto.includes(approval.id) && (deliveredSeq === undefined || approval.seq <= deliveredSeq)) {
-      counted.push(approval);
+    const requestedAfterDelivery =
+      deliveredSeq !== undefined && approval.requestedSeq !== undefined && approval.requestedSeq > deliveredSeq;
+    if (auto.includes(approval.id) || requestedAfterDelivery) {
+      bb.log.info(
+        `auto-review: the plan approval ${approval.id} at seq ${approval.seq} in thread ${threadId} is set aside (${
+          auto.includes(approval.id)
+            ? "auto-review resolved it itself"
+            : "it was requested and resolved inside the review's own turn, after the review was delivered"
+        }), so the work under it is covered by the review itself`,
+      );
       continue;
     }
-    bb.log.info(
-      `auto-review: the plan approval ${approval.id} at seq ${approval.seq} in thread ${threadId} is set aside (${
-        auto.includes(approval.id)
-          ? "auto-review resolved it itself"
-          : "it was resolved inside the review's own turn, after the review was delivered"
-      }), so the work under it is covered by the review itself`,
-    );
+    counted.push(approval);
   }
   return counted;
 }
@@ -196,8 +203,8 @@ function countUserApprovals(
  * the review. The review's own turn is recognized by the code-review opening
  * its request carried — the first turn so marked, recorded once, never moved,
  * as `reviewTurnEndSeq`; a later turn carrying the opening again is a
- * re-steer, not the review turn. An approval the review turn resolved after
- * the review was delivered is set aside; one resolved anywhere else in the
+ * re-steer, not the review turn. An approval the review turn requested after
+ * the review was delivered is set aside; one requested anywhere else in the
  * hold — in a turn before or after the review's, or in the review turn before
  * the delivery — counts as the user's. A later turn that resolved
  * an approval of the user's counts as a turn of theirs as well: it starts the
@@ -232,29 +239,27 @@ export async function noteUserTurn(
       break;
     }
     let byApproval = false;
+    // The review turn is the first turn read that carries the code-review
+    // opening: it sets the latch below, and its approvals are judged against
+    // the review's delivery — the cursor the review was delivered at, or the
+    // one taken before it was sent; with neither recorded, every one of them
+    // counts. A turn marked again once the latch is set is a re-steer, not the
+    // review turn, and every turn but the review turn counts its approvals in full.
+    const reviewTurnsOwn = ended.read && held.reviewTurnEndSeq === undefined && ended.reviewTurn;
     if (ended.read) {
-      // The review turn is the first turn read that carries the code-review
-      // opening: it sets the latch below, and its approvals are judged against
-      // the review's delivery — the cursor the review was delivered at, the
-      // one taken before it was sent, or the hold's turn start. A turn marked
-      // again once the latch is set is a re-steer, not the review turn, and
-      // every turn but the review turn counts its approvals in full.
-      const reviewTurnsOwn = held.reviewTurnEndSeq === undefined && ended.reviewTurn;
       byApproval =
         countUserApprovals(
           bb,
           thread.id,
           held,
           ended.approvedPlans,
-          reviewTurnsOwn ? (held.reviewDeliveredSeq ?? held.lastCodeReviewSeq ?? turnStart.sinceSeq) : undefined,
+          reviewTurnsOwn ? (held.reviewDeliveredSeq ?? held.lastCodeReviewSeq) : undefined,
         ).length > 0;
     }
     const users = !ended.read || ended.users || byApproval;
     const patch: Partial<ThreadState> = {
       ...(ended.completedSeq === undefined ? {} : { handledTurnEndSeq: ended.completedSeq }),
-      ...(held.reviewTurnEndSeq === undefined && ended.read && ended.reviewTurn
-        ? { reviewTurnEndSeq: ended.completedSeq }
-        : {}),
+      ...(reviewTurnsOwn ? { reviewTurnEndSeq: ended.completedSeq } : {}),
       ...(users && held.userTurnStart === undefined ? { userTurnStart: turnStart } : {}),
       ...(users &&
       held.userTurnAuthored !== true &&
