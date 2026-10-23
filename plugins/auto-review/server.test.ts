@@ -4322,7 +4322,7 @@ describe("auto-review plugin", () => {
             (entry) =>
               entry.level === "info" &&
               entry.message.includes("approved plan pint-3 in thread") &&
-              entry.message.includes("the user approved the identical plan pint-2 earlier in this turn"),
+              entry.message.includes("the identical plan pint-2 was approved earlier in this turn"),
           ),
         ).toBe(true);
         await host.harness.dispose();
@@ -4436,11 +4436,16 @@ describe("auto-review plugin", () => {
 
       it("holds the re-presentation when the provider offers no allow_once", async () => {
         const host = await releasedHost();
+        host.setResolvedInteraction("pint-2", { status: "resolved", resolution: { decision: "allow_once" } });
         const denyOnly = planInteraction("# Plan v2", "pint-3");
         denyOnly.payload.availableDecisions = ["deny"];
         await emitPlan(host, denyOnly);
         expect(host.sends).toHaveLength(2);
-        expect(host.resolutions.at(-1)).toMatchObject({ interactionId: "pint-3", resolution: { decision: "deny" } });
+        expect(host.resolutions).toEqual([
+          DENY,
+          { threadId: THREAD_ID, interactionId: "pint-3", resolution: { decision: "deny" } },
+        ]);
+        expect(warnings(host).some((message) => message.includes("could not re-approve"))).toBe(false);
         await host.harness.dispose();
       });
 

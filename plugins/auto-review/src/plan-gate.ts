@@ -256,7 +256,7 @@ async function releaseReviewedPlan(
 
 /**
  * Resolve a plan approval `allow_once` and record the fire under `reason`;
- * `resolved` and `approved` are the caller's warn lead and success line.
+ * `failureLead` and `successLine` are the caller's warn lead and success line.
  * False (warned) leaves the plan where its caller says.
  */
 async function resolvePlanApproval(
@@ -264,8 +264,8 @@ async function resolvePlanApproval(
   thread: GateThreadLike,
   approval: PlanApproval,
   reason: FireReason,
-  resolved: string,
-  approved: string,
+  failureLead: string,
+  successLine: string,
 ): Promise<boolean> {
   const { bb } = ctx;
   try {
@@ -276,14 +276,14 @@ async function resolvePlanApproval(
     });
   } catch (error) {
     bb.log.warn(
-      `${resolved}: ${
+      `${failureLead}: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
     return false;
   }
   await recordFire(ctx, thread.projectId, thread.id, "fired", reason);
-  bb.log.info(approved);
+  bb.log.info(successLine);
   return true;
 }
 
@@ -325,8 +325,11 @@ async function reapproveSamePlan(
 ): Promise<boolean> {
   const { bb } = ctx;
   const released = state.planReleased;
+  if (released === undefined) {
+    return false;
+  }
   await writeState(bb, thread.id, {}, ["planReleased"]);
-  if (released === undefined || !approval.canApprove || released.planHash !== planHash(approval.plan)) {
+  if (!approval.canApprove || released.planHash !== planHash(approval.plan)) {
     return false;
   }
   try {
@@ -366,7 +369,7 @@ async function reapproveSamePlan(
     approval,
     "plan-already-approved",
     `auto-review: could not re-approve the re-presented plan in ${thread.id}; leaving it for a normal review`,
-    `auto-review: approved plan ${approval.interactionId} in thread ${thread.id} again: the user approved the identical plan ${released.interactionId} earlier in this turn`,
+    `auto-review: approved plan ${approval.interactionId} in thread ${thread.id} again: the identical plan ${released.interactionId} was approved earlier in this turn`,
   );
 }
 
