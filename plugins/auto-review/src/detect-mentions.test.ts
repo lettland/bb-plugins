@@ -33,6 +33,13 @@ describe("lexCommands", () => {
     ]);
   });
 
+  it("serves a heredoc inside a command-less quoted substitution as an empty command", () => {
+    expect(shapes('cat "$( <<EOF\nbody\nEOF\n)"')).toEqual([
+      { words: [], redirects: [], heredocs: ["body"] },
+      { words: ["cat", "$(   \n)"], redirects: [], heredocs: [] },
+    ]);
+  });
+
   it("reads a heredoc operator before the redirect, with a dash and an unquoted tag", () => {
     expect(shapes("cat <<-EOF > lib/new.ts\n\tbody > lib/c.ts\n\tEOF\nls")).toEqual([
       { words: ["cat"], redirects: ["lib/new.ts"], heredocs: ["\tbody > lib/c.ts"] },

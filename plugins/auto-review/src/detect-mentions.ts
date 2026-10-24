@@ -115,10 +115,7 @@ function withoutMarkers(lexing: Lexing, text: string): string {
               before
             : before.slice(open + 2),
           SUBSTITUTION_LIMIT,
-        ).at(-1)?.words ??
-        // v8 ignore start -- @preserve unhit, not provably dead: a command-less quoted "$( <<TAG" substitution (detect-prepare.ts:61) lexes to no command (lexCommands, detect-mentions.ts:293) and would reach this fallback; the suite has no such input.
-        [];
-      // v8 ignore stop
+        ).at(-1)?.words ?? [];
       lexing.commands.push({ words: inner, redirects: [], inputs: [], heredocs: [body], depth: lexing.depth + 1 });
     }
     return "";
@@ -182,11 +179,11 @@ function openSubstitution(lexing: Lexing): void {
 function closeSubstitution(lexing: Lexing): void {
   endCommand(lexing);
   const open = lexing.subs.pop();
-  // v8 ignore else -- @preserve the caller only closes a substitution whose record is open (both callers, detect-mentions.ts:198 and :270, run only while lexing.subs is not empty), so the pop never misses.
+  // v8 ignore else -- @preserve the caller only closes a substitution whose record is open (both callers, detect-mentions.ts:205 and :277, run only while lexing.subs is not empty), so the pop never misses.
   if (open !== undefined) {
     Object.assign(lexing, open.outer, {
       word: `${open.outer.word ??
-        // v8 ignore start -- @preserve openSubstitution (detect-mentions.ts:191) is called only when lexing.word ends with "$" (detect-mentions.ts:190), so the saved open.outer.word is a string and the empty fallback cannot run.
+        // v8 ignore start -- @preserve openSubstitution (detect-mentions.ts:198) is called only when lexing.word ends with "$" (detect-mentions.ts:197), so the saved open.outer.word is a string and the empty fallback cannot run.
         ""
         // v8 ignore stop
       }()`,
@@ -296,7 +293,7 @@ export function commandStart(words: readonly Word[], wrappers = true): number {
   let at = 0;
   while (at < words.length) {
     const text = words[at]?.text ??
-      // v8 ignore start -- @preserve the loop condition at detect-mentions.ts:298 (at < words.length) proves words[at] is present, so the empty fallback cannot run.
+      // v8 ignore start -- @preserve the loop condition at detect-mentions.ts:294 (at < words.length) proves words[at] is present, so the empty fallback cannot run.
       "";
     // v8 ignore stop
     if (!ENV_ASSIGNMENT.test(text) && !KEYWORDS.has(text) && !(wrappers && PLAIN_WRAPPERS.has(text))) {
@@ -327,7 +324,7 @@ export function gitCommand(args: readonly Word[]): { sub: string; rest: Word[]; 
   let relocated = false;
   while ((args[at]?.text ?? "").startsWith("-")) {
     const option = args[at]?.text ??
-      // v8 ignore start -- @preserve the loop condition at detect-mentions.ts:329 is true only when args[at] holds text starting with "-", so args[at] is present and the empty fallback cannot run.
+      // v8 ignore start -- @preserve the loop condition at detect-mentions.ts:325 is true only when args[at] holds text starting with "-", so args[at] is present and the empty fallback cannot run.
       "";
     // v8 ignore stop
     relocated ||= GIT_RELOCATING.test(option);
