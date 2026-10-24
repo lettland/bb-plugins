@@ -317,7 +317,7 @@ function TriageBoard() {
         rpc={rpc}
         open={editingTask !== null}
         onOpenChange={(next) => {
-          // v8 ignore else -- @preserve the edit-mode composer has no open trigger (app.tsx:322 open={editingTask !== null}), so Radix only reports closes and onOpenChange(true) can never fire.
+          // v8 ignore else -- @preserve the edit-mode composer has no open trigger (app.tsx:318 open={editingTask !== null}), so Radix only reports closes and onOpenChange(true) can never fire.
           if (!next) setEditingNumber(null);
         }}
         onSaved={refresh}
