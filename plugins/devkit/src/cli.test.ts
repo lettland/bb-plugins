@@ -132,6 +132,13 @@ describe("runDevkitCli", () => {
     expect(r.stdout).toBe("Run one with 'bb devkit run <name>':\ncommit: commit it\nplan: plan it\nreview: review it\n");
   });
 
+  it("keeps both lines of duplicate index entries in the command and skill lists", async () => {
+    const cmd = { slug: "cmd-commit", description: "Command — commit it", category: "cmd", keywords: [], tokens: [] };
+    const dup = { index: { generatedAt: "t", categories: [], skills: [cmd, cmd] }, dataRoot };
+    expect((await runDevkitCli(["commands"], dup)).stdout).toBe("Run one with 'bb devkit run <name>':\ncommit: commit it\ncommit: commit it\n");
+    expect((await runDevkitCli(["skills", "list"], dup)).stdout).toBe("cmd-commit: Command — commit it\ncmd-commit: Command — commit it\n");
+  });
+
   it("commands reports an empty list when no cmd-* skills exist", async () => {
     const bare = { index: { generatedAt: "t", categories: [], skills: [] }, dataRoot };
     const r = await runDevkitCli(["commands"], bare);
