@@ -264,8 +264,9 @@ const DropdownMenuItem = React.forwardRef<
       return (
         <button
           ref={ref as React.RefCallback<HTMLButtonElement> | null}
-          // The rest carries div-typed event handlers; strip them so the
-          // compact button spread stays button-typed.
+          // Radix types the rest with div event handlers. Retype it for the
+          // button; the handlers still pass through at runtime, and the
+          // explicit props below win.
           {...(domProps as Omit<typeof domProps, keyof React.DOMAttributes<unknown>>)}
           type="button"
           role={role}
@@ -354,7 +355,7 @@ const DropdownMenuCheckboxItem = React.forwardRef<
       return (
         <button
           ref={ref as React.RefCallback<HTMLButtonElement> | null}
-          // Same handler strip as the plain item above.
+          // Same retype as the plain item above.
           {...(domProps as Omit<typeof domProps, keyof React.DOMAttributes<unknown>>)}
           type="button"
           role="menuitemcheckbox"
