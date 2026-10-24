@@ -682,7 +682,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (current.thread_id) return toTask(current);
     const claimed = db
       .prepare(
-        "UPDATE triage_tasks SET run_state = 'dispatching', scheduled_at = NULL, updated_at = ? WHERE id = ? AND thread_id IS NULL AND run_state IN ('queued','scheduled','failed')",
+        "UPDATE triage_tasks SET run_state = 'dispatching', scheduled_at = NULL, updated_at = ? WHERE id = ? AND thread_id IS NULL AND run_state IN ('queued','scheduled','failed','stopped')",
       )
       .run(Date.now(), current.id);
     if (claimed.changes === 0) return toTask(getTaskRow(number));
