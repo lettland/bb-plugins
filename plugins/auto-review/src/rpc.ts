@@ -46,6 +46,7 @@ export function registerAutoReviewRpc(ctx: ReviewContext): void {
       const stored = await readProjectConfig(bb, input.projectId);
       return {
         projectId: input.projectId,
+        // v8 ignore next -- @preserve the setter above always stores a boolean, so the read-back never misses the key.
         autoApprovePlans: stored.autoApprovePlans ?? false,
       };
     },

@@ -408,3 +408,18 @@ describe("familyMatcher", () => {
     });
   });
 });
+
+describe("familyMatcher edges", () => {
+  it("reads a command of assignments alone as naming no path", () => {
+    expect(names(["ENV=production"], "lib/c.ts")).toBe(false);
+  });
+
+  it("stops reading nested shells at the depth cap", () => {
+    // `eval` re-parses its whole argument line, so it nests without any quoting.
+    const wrap = (text: string, times: number) => `eval `.repeat(times) + text;
+    // A write read out of the nested command names its directory; past the cap the command is
+    // never parsed, so only its bare tokens remain.
+    expect(names([wrap("cp tpl deep/x", 8)], "deep/x/under.txt", targets)).toBe(true);
+    expect(names([wrap("cp tpl deep/x", 9)], "deep/x/under.txt", targets)).toBe(false);
+  });
+});

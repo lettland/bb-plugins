@@ -291,7 +291,7 @@ const readRow = (seq: number, extra: Record<string, unknown> = {}): FakeRow =>
   itemRow(seq, { type: "toolCall", tool: "Read", status: "completed", ...extra });
 
 /** A `bb` whose event log serves `rows` like the server: filtered by type and cursor, oldest first, paged. */
-function eventsBb(rows: FakeRow[], options: { itemsThrow?: boolean } = {}) {
+function eventsBb(rows: FakeRow[], options: { itemsThrow?: boolean; asString?: boolean; ignoreTypes?: boolean } = {}) {
   const calls: Array<{ types: readonly string[]; afterSeq: string }> = [];
   const warnings: string[] = [];
   const bb = {
@@ -302,10 +302,10 @@ function eventsBb(rows: FakeRow[], options: { itemsThrow?: boolean } = {}) {
           list: async (args: { afterSeq: string; types: readonly string[]; limit: string }) => {
             calls.push({ types: args.types, afterSeq: args.afterSeq });
             if (options.itemsThrow === true && args.types.includes("item/completed")) {
-              throw new Error("events unavailable");
+              throw options.asString === true ? "kaboom" : new Error("events unavailable");
             }
             return rows
-              .filter((row) => args.types.includes(row.type) && row.seq > Number(args.afterSeq))
+              .filter((row) => (options.ignoreTypes === true || args.types.includes(row.type)) && row.seq > Number(args.afterSeq))
               .sort((a, b) => a.seq - b.seq)
               .slice(0, Number(args.limit))
               .map((row) => ({
@@ -482,5 +482,28 @@ describe("planSkillCheck", () => {
     expect(await planSkillCheck(withPlugins("throws").bb, "t", "devkit", 100)).toBe("missing");
     expect(await planSkillCheck(withPlugins([], [itemRow(101, AGENT_LOAD)]).bb, "t", "devkit", 100)).toBe("loaded");
     expect(await planSkillCheck(withPlugins([]).bb, "t", "devkit", undefined)).toBe("unknown");
+  });
+});
+
+describe("plan evidence reads that fail or lie", () => {
+  const GATE_TOOLS = ["ExitPlanMode", "EnterPlanMode", "AskUserQuestion"];
+
+  it("reports an unread plan-review check and leaves the plan for the user, whatever the error", async () => {
+    const notAnError = eventsBb([], { itemsThrow: true, asString: true });
+    expect(await reviewRanSince(notAnError.bb, "t", 100, GATE_TOOLS, false, true)).toBe(false);
+    expect(notAnError.warnings[0]).toContain("could not read events to check the plan review ran in t");
+    expect(notAnError.warnings[0]).toContain("kaboom");
+  });
+
+  it("reports an unread skill check as unknown, whatever the error", async () => {
+    const notAnError = eventsBb([], { itemsThrow: true, asString: true });
+    expect(await reviewSkillLoaded(notAnError.bb, "t", 100)).toBe("unknown");
+    expect(notAnError.warnings[0]).toContain("could not read events to check review-code was loaded in t");
+    expect(notAnError.warnings[0]).toContain("kaboom");
+  });
+
+  it("skips rows of another type that a page returns unasked, and still finds the load", async () => {
+    const mixed = eventsBb([{ seq: 101, type: "turn/completed" }, itemRow(102, AGENT_LOAD)], { ignoreTypes: true });
+    expect(await reviewSkillLoaded(mixed.bb, "t", 100)).toBe("loaded");
   });
 });

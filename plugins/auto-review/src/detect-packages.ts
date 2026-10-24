@@ -23,6 +23,7 @@ export function packageWords(name: string, args: readonly Word[]): string[] {
   const values = VALUE_OPTIONS[name];
   const words: string[] = [];
   for (let at = 0; at < args.length; at += 1) {
+    // v8 ignore next -- @preserve the loop bound proves args[at] is present, and a value skip stays inside it.
     const text = args[at]?.text ?? "";
     if (text === "--") {
       break;

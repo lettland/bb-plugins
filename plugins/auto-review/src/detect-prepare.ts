@@ -83,13 +83,13 @@ function scanSubstitutionParen(char: string, scan: Scan): Step {
   const open = scan.subs.length - 1;
   scan.blank = true;
   if (char === "(") {
-    scan.subs[open] = (scan.subs[open] ?? 0) + 1;
-  } else if ((scan.subs[open] ?? 0) === 0) {
+    scan.subs[open] += 1;
+  } else if (scan.subs[open] === 0) {
     scan.subs.pop();
     scan.quote = '"';
     scan.blank = false;
   } else {
-    scan.subs[open] = (scan.subs[open] ?? 0) - 1;
+    scan.subs[open] -= 1;
   }
   return { keep: char, width: 1 };
 }
@@ -104,6 +104,7 @@ function scanHeredoc(text: string, at: number, scan: Scan, prepared: Prepared): 
   if (found === null) {
     return null;
   }
+  // v8 ignore next -- @preserve the tag alternative that matched always fills one of the three tag groups.
   scan.pending.push({ dash: found[1] === "-", tag: found[2] ?? found[3] ?? found[4] ?? "", index: prepared.bodies.length });
   prepared.bodies.push(null);
   scan.blank = true;

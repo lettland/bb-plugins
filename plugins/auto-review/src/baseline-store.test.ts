@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { describe, expect, it } from "vitest";
 import {
@@ -443,5 +444,104 @@ describe("code baselines", () => {
     expect([...f.kv.keys()].filter((key) => key.startsWith("baseline:"))).toEqual([
       expect.stringContaining("baseline:plan:thread-2:"),
     ]);
+  });
+});
+
+describe("baseline records that cannot be stored or read", () => {
+  function failingFake(failures: { get?: unknown; set?: unknown; delete?: unknown; list?: unknown; findingsGet?: unknown }) {
+    const kv = new Map<string, unknown>();
+    const warnings: string[] = [];
+    const bb = {
+      storage: {
+        kv: {
+          get: async (key: string) => {
+            if (key.startsWith("findings:") && failures.findingsGet !== undefined) {
+              throw failures.findingsGet;
+            }
+            if (failures.get !== undefined) {
+              throw failures.get;
+            }
+            return kv.get(key) ?? null;
+          },
+          set: async (key: string, value: unknown) => {
+            if (failures.set !== undefined) {
+              throw failures.set;
+            }
+            kv.set(key, value);
+          },
+          delete: async (key: string) => {
+            if (failures.delete !== undefined) {
+              throw failures.delete;
+            }
+            kv.delete(key);
+          },
+          list: async (prefix: string) => {
+            if (failures.list !== undefined) {
+              throw failures.list;
+            }
+            return [...kv.keys()].filter((key) => key.startsWith(prefix));
+          },
+        },
+      },
+      log: { warn: (message: string) => warnings.push(message), info: () => undefined },
+    } as unknown as BbPluginApi;
+    return { bb, kv, warnings };
+  }
+
+  const THREAD = "thread-1";
+  const PLAN = "/w/docs/plans/p.md";
+
+  it("reports an unreadable record and reviews in full, whatever the error", async () => {
+    const failing = failingFake({ get: "kaboom" });
+    await settlePlanBaseline(failing.bb, THREAD, PLAN, true);
+    expect(failing.warnings[0]).toContain("could not read the review baseline");
+    expect(failing.warnings[0]).toContain("kaboom");
+  });
+
+  it("drops a stored record that no longer parses", async () => {
+    const failing = failingFake({});
+    failing.kv.set(`baseline:code:${THREAD}`, "garbage");
+    await settleCodeBaseline(failing.bb, THREAD, Date.now());
+    expect(failing.warnings[0]).toContain(`discarding an unparseable review baseline (baseline:code:${THREAD})`);
+  });
+
+  it("reports a delete that failed, whatever the error", async () => {
+    const failing = failingFake({ delete: "kaboom" });
+    await clearPlanBaseline(failing.bb, THREAD, PLAN);
+    expect(failing.warnings[0]).toContain("could not delete the review baseline");
+    expect(failing.warnings[0]).toContain("kaboom");
+  });
+
+  it("reports a listing that failed, whatever the error", async () => {
+    const failing = failingFake({ list: "kaboom" });
+    await deleteBaselines(failing.bb, THREAD);
+    expect(failing.warnings[0]).toContain(`could not list the plan baselines of ${THREAD}`);
+    expect(failing.warnings[0]).toContain("kaboom");
+  });
+
+  it("a plan without a path settles and clears nothing", async () => {
+    const failing = failingFake({});
+    await settlePlanBaseline(failing.bb, THREAD, null, true);
+    await clearPlanBaseline(failing.bb, THREAD, null);
+    expect(failing.kv.size).toBe(0);
+    expect(failing.warnings).toEqual([]);
+  });
+
+  it("a report on a baseline without a pending stage keeps the copies and drops the stage key", async () => {
+    const f = failingFake({});
+    await f.bb.storage.kv.set(`baseline:code:${THREAD}`, { copies: { "src/a.ts": { content: "x", headSha: "h", at: NOW } } });
+    await recordCodeReport(f.bb, THREAD, { findings: [] }, false);
+    expect(f.kv.get(`baseline:code:${THREAD}`)).toMatchObject({ copies: { "src/a.ts": { content: "x" } }, clean: true });
+    expect(f.kv.get(`baseline:code:${THREAD}`)).not.toHaveProperty("pending");
+  });
+
+  it("a staged plan whose findings cannot be read promotes nothing", async () => {
+    const failing = failingFake({ findingsGet: "kaboom" });
+    await failing.bb.storage.kv.set(`baseline:plan:${THREAD}:${createHash("sha256").update(PLAN).digest("hex")}`, {
+      pending: { content: "v1\n", at: NOW },
+    });
+    await settlePlanBaseline(failing.bb, THREAD, PLAN, true);
+    expect(failing.warnings[0]).toContain(`could not read the findings of ${THREAD}`);
+    expect(failing.warnings[0]).toContain("kaboom");
   });
 });

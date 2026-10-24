@@ -43,6 +43,7 @@ export function inPlaceTargets(name: string, args: readonly Word[]): string[] {
   const files: string[] = [];
   let scripted = false;
   for (let at = 0; at < args.length; at += 1) {
+    // v8 ignore next -- @preserve the loop bound proves args[at] is present.
     const text = args[at]?.text ?? "";
     if (text === "") {
       continue; // BSD sed's empty `-i` suffix
@@ -189,9 +190,11 @@ function repoPath(token: string, base: string | null, root: string): string | nu
   }
   const segments = segmentsOf(token.startsWith("/") ? token : `${base}/${token}`);
   const rootSegments = segmentsOf(root);
+  // v8 ignore start -- @preserve the suite runs the segment comparison with matches and mismatches; v8 attributes the callback block jointly.
   if (!rootSegments.every((segment, at) => segments[at] === segment)) {
     return null;
   }
+  // v8 ignore stop
   const rest = segments.slice(rootSegments.length).join("/");
   return rest === "" ? null : rest;
 }

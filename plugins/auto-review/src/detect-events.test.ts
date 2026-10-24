@@ -1,7 +1,15 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { describe, expect, it } from "vitest";
 import { AUTO_REVIEW_MARKER, CODE_REVIEW_OPENING } from "./prompt.js";
-import { endedTurn, EVENT_PAGE_MAX, NoTurnCompletedError, quietSincePark, UnreadTurnError } from "./detect-events.js";
+import {
+  endedTurn,
+  EVENT_PAGE_MAX,
+  firstUserTurnSince,
+  NoTurnCompletedError,
+  quietSincePark,
+  tryCaptureSinceSeq,
+  UnreadTurnError,
+} from "./detect-events.js";
 
 interface Row {
   seq: number;
@@ -305,5 +313,71 @@ describe("quietSincePark", () => {
       },
     } as unknown as BbPluginApi;
     expect(await quietSincePark(bb, "thr", 5)).toBe(false);
+  });
+});
+
+describe("detect-events coverage of failure shapes", () => {
+  it("reports a cursor it cannot read, whatever the error", async () => {
+    const warnings: string[] = [];
+    const bb = {
+      sdk: { threads: { timeline: async () => { throw "kaboom"; } } },
+      log: { warn: (message: string) => warnings.push(message) },
+    } as unknown as BbPluginApi;
+    expect(await tryCaptureSinceSeq(bb, "thr", "the test cursor")).toBeUndefined();
+    expect(warnings[0]).toContain("kaboom");
+  });
+
+  it("ignores rows of another type that a page returns unasked", async () => {
+    const bb = {
+      sdk: {
+        threads: {
+          events: {
+            list: async () => [
+              { seq: 2, type: "turn/started", scope: { kind: "turn", turnId: "turn-0" }, data: {} },
+              request(3, "creq-1", "user"),
+            ],
+          },
+        },
+      },
+    } as unknown as BbPluginApi;
+    expect(await firstUserTurnSince(bb, "thr", 0)).toBe(3);
+  });
+
+  it("keeps the earliest pending seq of an interaction whatever order the lifecycle rows came in", async () => {
+    const { bb } = logOf([
+      request(3, "creq-1", "user"),
+      accepted(4, "turn-1", "creq-1"),
+      completed(5, "turn-1"),
+      lifecycle(20, "turn-1", "pending"),
+      lifecycle(25, "turn-1", "pending"),
+      lifecycle(40, "turn-1", "resolved"),
+    ]);
+    expect(await endedTurn(bb, "thr", 0)).toEqual({
+      users: true,
+      completedSeq: 5,
+      approvedPlans: [{ id: "pint-1", seq: 40, requestedSeq: 20 }],
+      reviewTurn: false,
+    });
+  });
+
+  it("an unreadable turn names the turn's end and the raw failure, whatever the error", async () => {
+    const bb = {
+      sdk: {
+        threads: {
+          events: {
+            list: async (args: { types?: string[] }) => {
+              if (args.types?.[0] !== "turn/completed") {
+                throw "kaboom";
+              }
+              return [completed(5, "turn-1")];
+            },
+          },
+        },
+      },
+    } as unknown as BbPluginApi;
+    const failure = await endedTurn(bb, "thr", 0).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(UnreadTurnError);
+    expect((failure as UnreadTurnError).completedSeq).toBe(5);
+    expect((failure as Error).message).toBe("kaboom");
   });
 });

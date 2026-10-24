@@ -199,6 +199,9 @@ describe("the review-code latch in sendReview", () => {
     options: {
       reviewMode: ReviewMode;
       plugins: unknown[] | "throws";
+      pluginsThrowAs?: unknown;
+      timelineThrows?: boolean;
+      sendThrows?: unknown;
       /** Extra sdk stubs, such as `environments`, for a test that drives the workspace reads. */
       environments?: Record<string, unknown>;
     },
@@ -208,6 +211,9 @@ describe("the review-code latch in sendReview", () => {
     const sdk = {
       plugins: {
         list: async () => {
+          if (options.pluginsThrowAs !== undefined) {
+            throw options.pluginsThrowAs;
+          }
           if (options.plugins === "throws") {
             throw new Error("plugin list unavailable");
           }
@@ -215,12 +221,22 @@ describe("the review-code latch in sendReview", () => {
         },
       },
       threads: {
-        timeline: async () => ({ rows: [], maxSeq: 500 }),
+        timeline: async () => {
+          if (options.timelineThrows === true) {
+            throw new Error("timeline down");
+          }
+          return { rows: [], maxSeq: 500 };
+        },
         updatePluginMetadata: async (args: MetadataCall) => {
           calls.push(args);
           return {};
         },
-        send: async () => ({ delivery: "queued", queuedMessage: { id: "qm-1" } }),
+        send: async () => {
+          if (options.sendThrows !== undefined) {
+            throw options.sendThrows;
+          }
+          return { delivery: "queued", queuedMessage: { id: "qm-1" } };
+        },
       },
       // An undefined value is fine: the fake sdk ignores an override that is no object.
       environments: options.environments,
@@ -323,5 +339,170 @@ describe("the review-code latch in sendReview", () => {
         });
       },
     );
+  });
+});
+
+describe("dispatchReview when the reads or the send fail", () => {
+  const THREAD_ID = "thr_1";
+  type MetadataCall = { set?: Record<string, unknown>; remove?: string[] };
+  const devkit = { enabled: true, status: "running", cliCommand: { name: "devkit" } };
+
+  async function withDispatch(
+    options: {
+      reviewMode: ReviewMode;
+      plugins: unknown[] | "throws";
+      pluginsThrowAs?: unknown;
+      timelineThrows?: boolean;
+      sendThrows?: unknown;
+    },
+    body: (calls: MetadataCall[], bb: Awaited<ReturnType<typeof createFakePluginHost>>["bb"]) => Promise<void>,
+  ) {
+    const calls: MetadataCall[] = [];
+    const sdk = {
+      plugins: {
+        list: async () => {
+          if (options.pluginsThrowAs !== undefined) {
+            throw options.pluginsThrowAs;
+          }
+          if (options.plugins === "throws") {
+            throw new Error("plugin list unavailable");
+          }
+          return { plugins: options.plugins };
+        },
+      },
+      threads: {
+        timeline: async () => {
+          if (options.timelineThrows === true) {
+            throw new Error("timeline down");
+          }
+          return { rows: [], maxSeq: 500 };
+        },
+        updatePluginMetadata: async (args: MetadataCall) => {
+          calls.push(args);
+          return {};
+        },
+        send: async () => {
+          if (options.sendThrows !== undefined) {
+            throw options.sendThrows;
+          }
+          return { delivery: "queued", queuedMessage: { id: "qm-1" } };
+        },
+      },
+    } as unknown as CreateFakePluginHostOptions["sdk"];
+    const host = createFakePluginHost({ pluginId: "auto-review", sdk, agentSkillIds: ["auto-review"] });
+    try {
+      await dispatchReview(await createReviewContext(host.bb), {
+        thread: {
+          parentThreadId: null,
+          originPluginId: null,
+          visibility: "public",
+          environmentId: null,
+          providerId: "prov-1",
+          archivedAt: null,
+          id: THREAD_ID,
+          projectId: "project-1",
+        },
+        state: {} as ThreadState,
+        environmentId: "env-1",
+        config: { reviewMode: options.reviewMode } as EffectiveConfig,
+        decision: { commit: true, merge: false },
+        base: "main",
+        isWorktree: false,
+        scope: ["a.ts"],
+        turn: { paths: ["a.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [], parkedCommits: [], parkedPaths: [] },
+      });
+      await body(calls, host.bb);
+    } finally {
+      await host.harness.dispose();
+    }
+  }
+
+  it("dispatches without a cursor when the timeline cannot be read", async () => {
+    await withDispatch({ reviewMode: "devkit", plugins: [], timelineThrows: true }, async (calls) => {
+      expect(calls[0].set).toMatchObject({ phase: "awaiting-review", reviewSkillRequired: true });
+      expect(calls[0].set?.lastCodeReviewSeq).toBeUndefined();
+    });
+  });
+
+  it("treats an unreadable plugin list as unknown, whatever the error", async () => {
+    await withDispatch({ reviewMode: "auto", plugins: [], pluginsThrowAs: "kaboom" }, async (calls) => {
+      expect(calls[0].set).toMatchObject({ phase: "awaiting-review" });
+      expect(calls[0].set?.reviewSkillRequired).toBeUndefined();
+      expect(calls[0].remove).toContain("reviewSkillRequired");
+    });
+  });
+
+  it("resets the latch and records the failure when the send fails, whatever the error", async () => {
+    await withDispatch({ reviewMode: "devkit", plugins: [], sendThrows: "kaboom" }, async (calls, bb) => {
+      expect(calls[0].set).toMatchObject({ phase: "awaiting-review" });
+      expect(calls.at(-1)?.set).toMatchObject({ phase: "idle" });
+      expect(calls.at(-1)?.remove).toContain("lastCodeReviewSeq");
+      const store = (await bb.storage.kv.get(`findings:${THREAD_ID}`)) as {
+        lastReport?: { outcome: string };
+        incidents?: Array<{ kind: string; detail: string }>;
+      };
+      expect(store.lastReport).toMatchObject({ outcome: "unavailable" });
+      expect(store.incidents).toEqual([expect.objectContaining({ kind: "send-failed", detail: "kaboom" })]);
+    });
+  });
+});
+
+describe("committedSinceHead without a tree", () => {
+  it("gives null when the turn-start snapshot carries no tree", () => {
+    const bare = { turnStart: { sinceSeq: 0, startedAt: 1_000 } } as unknown as ThreadState;
+    const turn = { paths: ["a.ts"], commits: ["c1"], committedPaths: ["a.ts"], foreignCommits: [], upstreamCommits: [], parkedCommits: [], parkedPaths: [] };
+    expect(committedSinceHead(turn, bare)).toBeNull();
+    expect(commitScanHead(turn, bare)).toBeNull();
+  });
+});
+
+describe("dispatchReview with a foreign commit", () => {
+  it("names the other thread's commits in the prompt it sends", async () => {
+    const calls: Array<{ set?: Record<string, unknown>; remove?: string[] }> = [];
+    const sdk = {
+      plugins: { list: async () => ({ plugins: [] }) },
+      threads: {
+        timeline: async () => ({ rows: [], maxSeq: 500 }),
+        updatePluginMetadata: async (args: { set?: Record<string, unknown>; remove?: string[] }) => {
+          calls.push(args);
+          return {};
+        },
+        send: async () => ({ delivery: "queued", queuedMessage: { id: "qm-1" } }),
+      },
+    } as unknown as CreateFakePluginHostOptions["sdk"];
+    const host = createFakePluginHost({ pluginId: "auto-review", sdk, agentSkillIds: ["auto-review"] });
+    try {
+      await dispatchReview(await createReviewContext(host.bb), {
+        thread: {
+          parentThreadId: null,
+          originPluginId: null,
+          visibility: "public",
+          environmentId: null,
+          providerId: "prov-1",
+          archivedAt: null,
+          id: "thr_1",
+          projectId: "project-1",
+        },
+        state: {} as ThreadState,
+        environmentId: "env-1",
+        config: { reviewMode: "self" } as EffectiveConfig,
+        decision: { commit: true, merge: false },
+        base: "main",
+        isWorktree: false,
+        scope: ["a.ts"],
+        turn: {
+          paths: ["a.ts"],
+          commits: [],
+          committedPaths: [],
+          foreignCommits: [{ sha: "abc1234" }],
+          upstreamCommits: [],
+          parkedCommits: [],
+          parkedPaths: [],
+        },
+      } as never);
+      expect(calls[0].set).toMatchObject({ phase: "awaiting-review" });
+    } finally {
+      await host.harness.dispose();
+    }
   });
 });

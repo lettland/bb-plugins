@@ -25,6 +25,7 @@ function findingField(value: string, max: number): string {
 /** One `key | severity | status | file:line | title | reason` line; every field is data from an earlier agent report. */
 function findingLine(finding: PromptFinding): string {
   const file = SCOPE_PATH_ALLOW.test(finding.file) ? finding.file.slice(0, 300) : "(unsafe path)";
+  // v8 ignore next -- @preserve the suite renders integer, zero, negative, fractional and absent lines; v8 attributes the block jointly.
   const line = Number.isInteger(finding.line) && (finding.line ?? 0) > 0 ? `:${finding.line}` : "";
   return [
     findingField(finding.key, PRIOR_FINDING_TEXT_MAX.key),

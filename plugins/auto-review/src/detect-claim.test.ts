@@ -393,6 +393,12 @@ describe("classifyRows", () => {
       expect(classify(tool({ input: { cmd: "npm run build" } }, { toolName: "assist" })).opaque).toBe("npm");
     });
 
+    it("reads a tool command's scratch write as scratch", () => {
+      const scratch = classify(tool({ command: "echo hi > /tmp/blob" }, { toolName: "assist" }));
+      expect(scratch.writes).toEqual([]);
+      expect(scratch.scratch.flatMap(({ tokens }) => tokens)).toEqual(["/tmp/blob"]);
+    });
+
     it("reads an array command as the shell line its words make, quoted", () => {
       const run = classify(tool({ command: ["bash", "-lc", "npm run codegen"] }, { toolName: "assist" }));
       expect(run.opaque).toBe("npm");

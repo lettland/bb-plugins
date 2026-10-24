@@ -1292,6 +1292,18 @@ describe("auto-review cli: findings", () => {
       const missing = await host.run(["findings", "ghost"]);
       expect(missing.exitCode).toBe(1);
       expect(missing.stderr).toBe("Thread ghost not found or unavailable.\n");
+      const missingJson = await host.run(["findings", "ghost", "--json"]);
+      expect(missingJson.exitCode).toBe(1);
+      expect(parse(missingJson.stdout)).toMatchObject({ ok: false, threadId: "ghost", error: "Thread ghost not found or unavailable." });
+    });
+  });
+
+  it("shows no findings and no report when the thread has none", async () => {
+    await withHost({}, async (host) => {
+      const empty = await host.run(["findings"], THREAD_ID);
+      expect(empty.stdout).toContain("lastReport: none");
+      expect(empty.stdout).toContain("findings: none");
+      expect(parse((await host.run(["findings", "--json"], THREAD_ID)).stdout)).toMatchObject({ lastReport: null });
     });
   });
 
@@ -1442,6 +1454,16 @@ describe("auto-review cli: status — review result", () => {
         openFindings: MAX_PROMPT_FINDINGS + 2,
         omittedFromPrompt: 2,
       });
+    });
+  });
+});
+
+describe("auto-review cli: reset without a thread", () => {
+  it("refuses with a usage line when no thread id is given or known", async () => {
+    await withHost({}, async (host) => {
+      const result = await host.run(["reset"]);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toBe("A thread id is required: bb auto-review reset <thread-id>\n");
     });
   });
 });

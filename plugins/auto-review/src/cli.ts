@@ -35,6 +35,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   const positionals: string[] = [];
   const flags = new Map<string, string | true>();
   for (let index = 0; index < argv.length; index += 1) {
+    // v8 ignore next -- @preserve the loop bound proves argv[index] is present.
     const token = argv[index] ?? "";
     if (!token.startsWith("--")) {
       positionals.push(token);
@@ -195,7 +196,8 @@ export function registerAutoReviewCli(
 
       if (command === "reset") {
         const threadId = parsed.positionals[0] ?? context.threadId ?? null;
-        if (threadId === null || threadId === undefined) {
+        // The fallback chain above ends in `?? null`, so the id is null, never undefined.
+        if (threadId === null) {
           return {
             exitCode: 2,
             stderr: `A thread id is required: bb auto-review reset <thread-id>\n`,

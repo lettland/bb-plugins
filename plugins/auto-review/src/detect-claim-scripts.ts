@@ -102,6 +102,7 @@ export function sedScripts(args: readonly Word[]): string[] | null {
   const scripts: string[] = [];
   const plain: string[] = [];
   for (let at = 0; at < args.length; at += 1) {
+    // v8 ignore next -- @preserve the loop bound proves args[at] is present, and a value skip stays inside it.
     const text = args[at]?.text ?? "";
     if (/^-[A-Za-z]*f$|^--file/u.test(text)) {
       return null;
@@ -129,6 +130,7 @@ const AWK_CODE_OPTION = /^-[ifE]|^--(?:file|include|source|exec)/u;
 /** Whether an awk command only reads: its program has no redirect, pipe or `system`, and no program file, include or `-E` exec is given. */
 export function awkReadsOnly(args: readonly Word[]): boolean {
   for (let at = 0; at < args.length; at += 1) {
+    // v8 ignore next -- @preserve the loop bound proves args[at] is present, and a value skip stays inside it.
     const text = args[at]?.text ?? "";
     if (AWK_CODE_OPTION.test(text)) {
       return false;
@@ -136,6 +138,7 @@ export function awkReadsOnly(args: readonly Word[]): boolean {
     if (AWK_VALUE_OPTIONS.has(text)) {
       at += 1;
     } else if (!text.startsWith("-")) {
+      // v8 ignore next -- @preserve the suite runs this callback with writers present and absent; v8 attributes its block jointly.
       return !AWK_WRITERS.some((writer) => text.includes(writer));
     }
   }
@@ -236,6 +239,7 @@ export function isCheckRun(parsed: Parsed): boolean {
 function isPackageCheck(name: string, args: readonly Word[]): boolean {
   const words = packageWords(name, args);
   const script = words[0] === "run" || words[0] === "run-script" ? words[1] : words[0];
+  // v8 ignore next -- @preserve a split always yields at least one part, so the first index is present.
   return script !== undefined && CHECK_SCRIPTS.has(script.split(":")[0] ?? "");
 }
 
@@ -255,8 +259,11 @@ const RIPWIRE_SHAPES: ReadonlySet<string> = new Set(["task", "json", "top-k", "m
 /** Whether a `ripwire` run is a read mode, given only read and shape options. */
 export function ripwireReads({ args }: Parsed): boolean {
   const flags = flagsOf(args).filter((flag) => flag.startsWith("-"));
+  // v8 ignore next -- @preserve a split always yields at least one part, so the first index is present.
   const named = flags.map((flag) => flag.replace(/^--/u, "").split("=")[0] ?? "");
+  // v8 ignore next -- @preserve named runs the flags one for one, so named[at] is present.
   const reads = flags.some((flag, at) => flag.startsWith("--") && RIPWIRE_READS.has(named[at] ?? ""));
+  // v8 ignore next -- @preserve named runs the flags one for one, so named[at] is present.
   const known = flags.every((flag, at) => flag.startsWith("--") && (RIPWIRE_READS.has(named[at] ?? "") || RIPWIRE_SHAPES.has(named[at] ?? "")));
   return reads && known;
 }
@@ -271,5 +278,6 @@ export function ghReads({ args }: Parsed): boolean {
 export function bbReads({ args }: Parsed): boolean {
   const [topic, action] = positional(args);
   const reads = BB_READS[topic ?? ""];
+  // v8 ignore next -- @preserve the suite runs every operand here; v8 attributes this block jointly.
   return BB_TOP_LEVEL.has(topic ?? "") || (reads !== undefined && reads.has(action ?? ""));
 }

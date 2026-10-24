@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { globMatcher, globQualifies } from "./detect-globs.js";
-import { commandOf, gitCommand, lexCommands, lexText } from "./detect-mentions.js";
+import { commandOf, commandStart, gitCommand, lexCommands, lexText } from "./detect-mentions.js";
 
 const LIMIT = 8_192;
 
@@ -189,5 +189,88 @@ describe("globQualifies", () => {
 
   it("rejects a glob past the length cap", () => {
     expect(globQualifies(`lib/${"a*".repeat(200)}.ts`)).toBe(false);
+  });
+});
+
+describe("lexText edges", () => {
+  it("keeps the text of a quoted word that never closes", () => {
+    expect(lexText("echo 'abc", LIMIT).commands[0]?.words.map(({ text }) => text)).toEqual(["echo", "abc"]);
+  });
+
+  it("reads a duplicate redirect (2>&1) transparently after the command", () => {
+    expect(shapes("git show 2>&1 lib/a.ts")).toEqual([
+      { words: ["git", "show", "lib/a.ts"], redirects: [], heredocs: [] },
+    ],
+    );
+  });
+
+  it("joins a line continuation into one command", () => {
+    expect(shapes("echo a \\\n lib/a.ts")).toEqual([
+      { words: ["echo", "a", "lib/a.ts"], redirects: [], heredocs: [] },
+    ]);
+  });
+
+  it("marks a word quoted that began with a double quote", () => {
+    expect(lexText('echo "a b"', LIMIT).commands[0]?.words[1]).toEqual({ text: "a b", quoted: true });
+  });
+
+  it("a heredoc whose body never began leaves nothing to read", () => {
+    expect(shapes("cat <<EOF")).toEqual([{ words: ["cat"], redirects: [], heredocs: [] }]);
+  });
+
+  it("reads a heredoc inside a quoted command substitution against the command that runs it", () => {
+    const out = shapes('x="$(cat <<EOF\nbody\nEOF\n)"');
+    expect(out.some((shape) => shape.heredocs.includes("body"))).toBe(true);
+  });
+
+  it("reads a heredoc of an escaped substitution as its own command text", () => {
+    const out = shapes("echo \\$(cat <<EOF\nbody\nEOF\n)");
+    expect(out.some((shape) => shape.heredocs.includes("body"))).toBe(true);
+  });
+});
+
+describe("commandStart", () => {
+  it("skips plain wrappers only when asked to", () => {
+    const words = [{ text: "time", quoted: false }, { text: "ls", quoted: false }];
+    expect(commandStart(words)).toBe(1);
+    expect(commandStart(words, false)).toBe(0);
+  });
+});
+
+describe("gitCommand", () => {
+  it("is null when git's options end the command, and reads relocating options", () => {
+    expect(gitCommand([{ text: "-C", quoted: false }])).toBeNull();
+    expect(
+      gitCommand([{ text: "--git-dir", quoted: false }, { text: "/x", quoted: false }, { text: "status", quoted: false }]),
+    ).toEqual({
+      sub: "status",
+      rest: [],
+      relocated: true,
+    });
+    expect(
+      gitCommand([
+        { text: "--no-pager", quoted: false },
+        { text: "status", quoted: false },
+        { text: "origin/main", quoted: false },
+      ]),
+    ).toEqual({
+      sub: "status",
+      rest: [{ text: "origin/main", quoted: false }],
+      relocated: false,
+    });
+  });
+});
+
+describe("lexText: substitutions at the edges", () => {
+  it("a substitution that opens the text reads its commands, then carries on", () => {
+    const shapesOut = shapes("$(cat <<EOF\nbody\nEOF\n) lib/a.ts");
+    expect(shapesOut[0]).toEqual({ words: ["cat"], redirects: [], heredocs: ["body"] });
+    expect(shapesOut.at(-1)?.words).toContain("lib/a.ts");
+  });
+
+  it("a quoted heredoc whose body never began leaves no commands behind", () => {
+    const lexed = lexText('x="$(cat <<EOF', LIMIT);
+    expect(lexed.unterminated).toBe(true);
+    expect(lexed.commands.every((command) => command.heredocs.length === 0)).toBe(true);
   });
 });

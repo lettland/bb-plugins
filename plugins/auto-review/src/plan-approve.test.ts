@@ -35,6 +35,7 @@ function fakeBb(
     raw?: Record<string, unknown>;
     failWriteAt?: number[];
     failResolve?: boolean;
+    failInteraction?: boolean;
     failuresAs?: "error" | "string";
     wipeListOnReread?: boolean;
   } = {},
@@ -80,6 +81,9 @@ function fakeBb(
           },
           get: async () => {
             calls.push("interaction");
+            if (options.failInteraction === true) {
+              throw failure("interaction read failed");
+            }
             return { status: "resolved", resolution: { decision: "allow_once", grantedPermissions: null } };
           },
         },
@@ -188,5 +192,15 @@ describe("reapproveSamePlan", () => {
     expect(fake.calls).toEqual(["metadata", "interaction", "events", "metadata", "resolve", "metadata"]);
     expect(fake.writes.at(-1)?.set?.autoResolvedPlanIds).toEqual([]);
     expect(fake.warnings.some((message) => message.includes("could not re-approve"))).toBe(true);
+  });
+
+  it("leaves the plan for a normal review when its earlier approval cannot be re-read, whatever the error", async () => {
+    const failing = fakeBb({ failInteraction: true });
+    expect(await reapproveSamePlan({ bb: failing.bb } as ReviewContext, threadOf(), state, approvalOf())).toBe(false);
+    expect(failing.warnings[0]).toContain("could not check the earlier approval of this plan in thr-1");
+    expect(failing.warnings[0]).toContain("interaction read failed");
+    const notAnError = fakeBb({ failInteraction: true, failuresAs: "string" });
+    expect(await reapproveSamePlan({ bb: notAnError.bb } as ReviewContext, threadOf(), state, approvalOf())).toBe(false);
+    expect(notAnError.warnings[0]).toContain("interaction read failed");
   });
 });

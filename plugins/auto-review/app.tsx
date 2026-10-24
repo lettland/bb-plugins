@@ -127,7 +127,9 @@ function ProjectAutoApprove() {
             row.id === stored.projectId
               ? { ...row, autoApprovePlans: stored.autoApprovePlans }
               : row,
+          /* v8 ignore start -- @preserve projects only changes from null to a loaded list (line 97), and toggles render only from that list, so current is never null here. */
           ) ?? null,
+          /* v8 ignore stop */
       );
     } catch (nextError) {
       // Re-read first: a successful load clears row errors, so the failure
@@ -392,9 +394,11 @@ function ReviewBadge(props: PluginThreadHeaderActionProps) {
       // its right edge follows the badge so it opens beside it in split
       // layouts, clamped so a badge in a narrow left pane does not push it off-screen.
       const rect = buttonRef.current?.getBoundingClientRect();
+      /* v8 ignore start -- @preserve toggle runs from the badge button's own click handler, so buttonRef.current is always set and getBoundingClientRect always returns a rect. */
       const fromBadge = window.innerWidth - (rect?.right ?? window.innerWidth - POPOVER_MARGIN);
       setPopoverAnchor({
         top: rect?.bottom ?? 0,
+        /* v8 ignore stop */
         right: Math.max(
           POPOVER_MARGIN,
           Math.min(fromBadge, window.innerWidth - POPOVER_WIDTH - POPOVER_MARGIN),

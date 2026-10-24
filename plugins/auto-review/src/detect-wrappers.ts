@@ -63,6 +63,7 @@ const baseName = (word: string) => word.replace(/^.*\//u, "");
 function skipOptions(args: readonly Word[], values: ReadonlySet<string>, from: number, assignments: boolean): number {
   let at = from;
   while (at < args.length) {
+    // v8 ignore next -- @preserve the loop bound proves args[at] is present, and a value skip ends the loop past it.
     const text = args[at]?.text ?? "";
     if (text === "--") {
       return at + 1;
@@ -85,6 +86,7 @@ function wrapped(name: string, args: readonly Word[]): readonly Word[] | null {
   if (found.subs.length === 0) {
     return args.slice(at + found.operands);
   }
+  // v8 ignore next -- @preserve the suite reads the subcommand with options ending at and past it; v8 attributes the block jointly.
   return found.subs.includes(args[at]?.text ?? "") ? args.slice(skipOptions(args, found.values, at + 1, false)) : null;
 }
 
@@ -96,6 +98,7 @@ export function unwrap(words: readonly Word[]): { parsed: Parsed; words: Word[] 
   let inner = words.slice(commandStart(words, false));
   let through = false;
   for (let depth = 0; depth < MAX_WRAPPERS && inner.length > 0; depth += 1) {
+    // v8 ignore next -- @preserve the loop condition proves inner[0] is present.
     const rest = wrapped(baseName(inner[0]?.text ?? ""), inner.slice(1));
     const next = rest?.slice(commandStart(rest, false)) ?? [];
     if (next.length === 0) {

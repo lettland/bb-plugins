@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rowTexts } from "./detect-rows.js";
+import { rowTexts, shellFields } from "./detect-rows.js";
 import { siblingWrittenPaths } from "./detect-sibling-writes.js";
 
 const ROOT = "/w";
@@ -57,5 +57,44 @@ describe("a tool's string argument that is a single token", () => {
 
   it("names its own path", () => {
     expect(names({ path: "src/a.ts" }, "src/a.ts")).toBe(true);
+  });
+});
+
+describe("the shell lines of a tool's arguments", () => {
+  it("reads a shell field held in an array or an object, at any depth", () => {
+    expect(shellFields([{ command: "npm ci" }])).toEqual(["npm ci"]);
+    expect(shellFields({ steps: [{ script: ["bash", "-lc", "npm run codegen"] }] })).toEqual([
+      "bash -lc 'npm run codegen'",
+    ]);
+    expect(shellFields({ command: { nested: {} } })).toEqual([]);
+    expect(shellFields({ command: "git status" })).toEqual(["git status"]);
+  });
+});
+
+describe("a search row's named texts", () => {
+  const searchRow = (path: string | null, query: string) => ({
+    kind: "work",
+    workKind: "search",
+    status: "completed",
+    startedAt: 20_000,
+    createdAt: 20_000,
+    completedAt: 21_000,
+    approvalStatus: null,
+    cmd: null,
+    path,
+    query,
+  });
+
+  it("names the path and the query of a search with one", () => {
+    const texts = rowTexts([searchRow("lib/", "a.ts")] as never, 10_000, { pending: 30_000, unended: 30_000 }, { includeUnapproved: true });
+    expect(texts).toEqual([
+      { text: "lib/", cwd: null, shell: false },
+      { text: "a.ts", cwd: null, shell: false },
+    ]);
+  });
+
+  it("names only the query of a search without a path", () => {
+    const texts = rowTexts([searchRow(null, "a.ts")] as never, 10_000, { pending: 30_000, unended: 30_000 }, { includeUnapproved: true });
+    expect(texts).toEqual([{ text: "a.ts", cwd: null, shell: false }]);
   });
 });

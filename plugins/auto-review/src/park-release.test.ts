@@ -69,6 +69,15 @@ describe("parkRelease", () => {
       "auto-review: could not read whether the user wrote since thr was parked; reviewing anyway: events unavailable",
     ]);
   });
+
+  it("warns the same whatever the error is", async () => {
+    lookups.firstUserTurnSince.mockRejectedValue("kaboom");
+    const { ctx, warnings } = context();
+    expect(await parkRelease(ctx, thread, parked)).toBe("unreadable");
+    expect(warnings).toEqual([
+      "auto-review: could not read whether the user wrote since thr was parked; reviewing anyway: kaboom",
+    ]);
+  });
 });
 
 describe("parkBaseline", () => {

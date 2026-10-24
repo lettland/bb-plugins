@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { siblingWrittenPaths, writeTargets } from "./detect-sibling-writes.js";
+import { repoRelative, shellDirectory, siblingWrittenPaths, writeTargets } from "./detect-sibling-writes.js";
 
 const ROOT = "/w";
 
@@ -388,5 +388,58 @@ describe("where a sibling's shell is", () => {
     ];
     expect([...siblingWrittenPaths(["lib/a.ts", "lib/b.ts"], items, [], ROOT)]).toEqual([["lib/a.ts", "sib-1"]]);
     expect(written(rows(["cd /w && echo x > lib/a.ts"]))).toEqual([]);
+  });
+});
+
+describe("relative and carried directories", () => {
+  const wrote = (items: Array<{ threadId: string; text: string; cwd: string | null }>) =>
+    [...siblingWrittenPaths(["sub/a.ts", "lib/a.ts", "a.ts"], items, [], ROOT).keys()].sort();
+
+  it("resolves a row's relative cwd against the root", () => {
+    expect(wrote([{ threadId: "sib-1", text: "sed -i s/x/y/ a.ts", cwd: "sub" }])).toEqual(["sub/a.ts"]);
+  });
+
+  it("a cd to anywhere but the root loses the base, so a cwd-less row resolves nothing relative", () => {
+    const carried = [
+      { threadId: "sib-1", text: "cd sub", cwd: "" },
+      { threadId: "sib-1", text: "sed -i s/x/y/ a.ts", cwd: null },
+    ];
+    expect(wrote(carried)).toEqual([]);
+  });
+});
+
+describe("repoRelative", () => {
+  it("is null outside the root, and reads a /private path by its alias", () => {
+    expect(repoRelative("/elsewhere/lib/a.ts", ROOT, ROOT)).toBeNull();
+    expect(repoRelative("/private", ROOT, ROOT)).toBeNull();
+    expect(repoRelative("/private/tmp/x", "/", "/")).toBe("tmp/x");
+  });
+
+  it("is the empty string for the root itself, and null outside it", () => {
+    expect(repoRelative("/w", "/w", "/w")).toBe("");
+    expect(repoRelative("/elsewhere/lib/a.ts", ROOT, ROOT)).toBeNull();
+    expect(repoRelative("/private", ROOT, ROOT)).toBeNull();
+    expect(repoRelative("/private/tmp/x", "/", "/")).toBe("tmp/x");
+  });
+});
+
+describe("shellDirectory", () => {
+  it("guesses from the root when no cwd is known, and nulls once a cd or popd leaves the checkout", () => {
+    expect(shellDirectory({ cwd: null, steps: [] }, ROOT)).toEqual({ dir: ROOT, loose: true });
+    expect(shellDirectory({ cwd: "lib", steps: [] }, ROOT)).toEqual({ dir: `${ROOT}/lib`, loose: false });
+    expect(shellDirectory({ cwd: null, steps: [{ name: "popd", target: "x" }] }, ROOT)).toBeNull();
+    expect(shellDirectory({ cwd: null, steps: [{ name: "cd", target: "/elsewhere" }] }, ROOT)).toBeNull();
+  });
+});
+
+describe("shellDirectory: a directory change back to the root", () => {
+  it("keeps the directory without guessing once a step returned to the root", () => {
+    expect(
+      shellDirectory({ cwd: "/w", steps: [{ name: "cd", target: "/w" }] }, "/w"),
+    ).toEqual({ dir: "/w", loose: false });
+  });
+
+  it("a write onto the checkout root itself resolves to nothing", () => {
+    expect(credited(["lib/a.ts"], "cp lib/a.ts .")).toEqual([]);
   });
 });

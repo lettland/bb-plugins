@@ -45,9 +45,11 @@ export async function onThreadActive(
     // that lands before the snapshot would be absorbed into it.
     const [sinceSeq, tree] = await Promise.all([
       captureSinceSeq(bb, thread.id),
+      // v8 ignore start -- @preserve the thread gate above rejects a thread without an environment, so the null side cannot run here.
       thread.environmentId === null
         ? Promise.resolve(undefined)
         : captureTree(bb, thread.environmentId),
+      // v8 ignore stop
     ]);
     await writeState(
       bb,

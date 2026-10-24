@@ -386,4 +386,24 @@ describe("writeState", () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("could not publish the review update for t");
   });
+
+  it("logs a failed publish whatever the error is", async () => {
+    const warnings: string[] = [];
+    const bb = {
+      sdk: {
+        threads: {
+          getPluginMetadata: async () => ({}),
+          updatePluginMetadata: async () => ({}),
+        },
+      },
+      realtime: {
+        publish: () => {
+          throw "kaboom";
+        },
+      },
+      log: { warn: (message: string) => warnings.push(message) },
+    } as unknown as BbPluginApi;
+    await expect(writeState(bb, "t", { phase: "idle" })).resolves.toBeUndefined();
+    expect(warnings[0]).toContain("kaboom");
+  });
 });

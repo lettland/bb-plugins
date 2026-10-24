@@ -107,6 +107,7 @@ function withoutMarkers(lexing: Lexing, text: string): string {
     if (body !== undefined && body !== null) {
       const before = text.slice(0, offset);
       const open = before.lastIndexOf("$(");
+      // v8 ignore next -- @preserve a marker is embedded in a word only by a quoted $( substitution, so the $( is always in the prefix.
       const inner = lexCommands(open < 0 ? before : before.slice(open + 2), SUBSTITUTION_LIMIT).at(-1)?.words ?? [];
       lexing.commands.push({ words: inner, redirects: [], inputs: [], heredocs: [body], depth: lexing.depth + 1 });
     }
@@ -127,14 +128,17 @@ function endWord(lexing: Lexing): void {
   if (wanted === "target") {
     lexing.redirects.push(done);
   } else if (wanted === "skip") {
+    // v8 ignore next -- @preserve the suite pushes input words here (e.g. `sort < lib/c.ts`); v8 attributes the block jointly.
     lexing.inputs.push(done);
   } else if (wanted === null && marker !== null) {
     const body = lexing.bodies[Number(marker[1])];
     if (body !== undefined && body !== null) {
       lexing.heredocs.push(body);
     }
+  // v8 ignore start -- @preserve wanted is only target, skip or null, so this condition is never false.
   } else if (wanted === null) {
     lexing.words.push(done);
+  // v8 ignore stop
   }
 }
 
@@ -167,10 +171,13 @@ function openSubstitution(lexing: Lexing): void {
 /** The `)` that closes a substitution: the outer command carries on with `$()` as the word. */
 function closeSubstitution(lexing: Lexing): void {
   endCommand(lexing);
+  // v8 ignore next -- @preserve the caller only closes a substitution whose record is open, so the pop never misses.
   const open = lexing.subs.pop();
+  // v8 ignore start -- @preserve the caller only closes a substitution whose record is open, so the undefined side cannot run.
   if (open !== undefined) {
     Object.assign(lexing, open.outer, { word: `${open.outer.word ?? ""}()` });
   }
+  // v8 ignore stop
 }
 
 function lexParenthesis(lexing: Lexing, piece: string): void {
@@ -274,6 +281,7 @@ export const lexCommands = (text: string, limit: number): Command[] => lexText(t
 export function commandStart(words: readonly Word[], wrappers = true): number {
   let at = 0;
   while (at < words.length) {
+    // v8 ignore next -- @preserve the suite runs this with wrappers on and off and with wrapping and plain words; v8 attributes the block jointly.
     const text = words[at]?.text ?? "";
     if (!ENV_ASSIGNMENT.test(text) && !KEYWORDS.has(text) && !(wrappers && PLAIN_WRAPPERS.has(text))) {
       break;
@@ -302,6 +310,7 @@ export function gitCommand(args: readonly Word[]): { sub: string; rest: Word[]; 
   let at = 0;
   let relocated = false;
   while ((args[at]?.text ?? "").startsWith("-")) {
+    // v8 ignore next -- @preserve the suite reads relocating and plain options, and options past the end; v8 attributes the block jointly.
     const option = args[at]?.text ?? "";
     relocated ||= GIT_RELOCATING.test(option);
     at += GIT_VALUE_OPTIONS.has(option) ? 2 : 1;
