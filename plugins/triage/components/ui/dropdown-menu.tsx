@@ -43,6 +43,7 @@ const ResponsiveMenuContext =
   React.createContext<ResponsiveOverlayContextValue>({
     isCompactViewport: false,
     open: false,
+    /* v8 ignore next -- @preserve the default context pins isCompactViewport to false, so parts rendered without a provider always take the desktop branch and throw outside a Radix root before onOpenChange can run. */
     onOpenChange: () => {},
   });
 
@@ -281,6 +282,7 @@ const DropdownMenuItem = React.forwardRef<
           )}
           data-disabled={disabled ? "" : undefined}
           onClick={() => {
+            /* v8 ignore next -- @preserve React never dispatches click events to disabled buttons, so the disabled branch of this tap handler is unreachable. */
             if (disabled) return;
             const event = createSelectEvent();
             onSelect?.(event);
@@ -370,6 +372,7 @@ const DropdownMenuCheckboxItem = React.forwardRef<
           )}
           data-disabled={disabled ? "" : undefined}
           onClick={() => {
+            /* v8 ignore next -- @preserve React never dispatches click events to disabled buttons, so the disabled branch of this tap handler is unreachable. */
             if (disabled) return;
             const event = createSelectEvent();
             onSelect?.(event);

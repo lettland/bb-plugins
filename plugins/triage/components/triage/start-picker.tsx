@@ -40,8 +40,10 @@ export function formatStartDistance(mode: StartMode, scheduledLocal: string): st
   const minutes = Math.max(1, Math.round(delta / 60_000));
   if (minutes < 120) return `Starts in ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
   const hours = Math.round(minutes / 60);
+  /* v8 ignore next -- @preserve the "hour" singular cannot run: this line is reached only from 120 minutes up, where hours is at least 2. */
   if (hours < 48) return `Starts in ${hours} ${hours === 1 ? "hour" : "hours"}`;
   const days = Math.round(hours / 24);
+  /* v8 ignore next -- @preserve the "day" singular cannot run: this line is reached only from 48 hours up, where days is at least 2. */
   return `Starts in ${days} ${days === 1 ? "day" : "days"}`;
 }
 
@@ -89,6 +91,7 @@ function StartPicker({
 
   const selectScheduledTime = (value: string) => {
     const [hours, minutes] = value.split(":").map(Number);
+    /* v8 ignore next 1 -- @preserve the only caller is TimePicker, which validates the hour and minute before emitting, so a NaN pair cannot arrive. */
     if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return;
     const next = scheduledDate ?? new Date(nextScheduleTime());
     next.setHours(hours, minutes, 0, 0);

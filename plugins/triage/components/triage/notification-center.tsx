@@ -190,6 +190,7 @@ function FeedRowButton({
         title={row.body || undefined}
         disabled={row.taskNumber === null || missing}
         onClick={() => {
+          /* v8 ignore next 1 -- @preserve the guard restates the disabled prop; React never delivers synthetic clicks to a disabled button, so its true paths cannot run. */
           if (row.taskNumber === null || missing) return;
           onOpen(row.taskNumber);
         }}

@@ -24,6 +24,7 @@ const ResponsivePopoverContext =
   React.createContext<ResponsiveOverlayContextValue>({
     isCompactViewport: false,
     open: false,
+    /* v8 ignore next -- @preserve the default context pins isCompactViewport to false, so parts rendered without a provider always take the desktop branch and throw outside a Radix root before onOpenChange can run. */
     onOpenChange: () => {},
   });
 

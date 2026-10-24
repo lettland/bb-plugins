@@ -126,6 +126,7 @@ function ManageStagesDialog({ stages, rpc, onChanged }: ManageStagesDialogProps)
                   setNames((current) => ({ ...current, [stage.id]: event.target.value }))
                 }
                 onBlur={() => {
+                  /* v8 ignore next 1 -- @preserve the mount effect seeds names with every stage id, so the lookup's fallback never runs. */
                   const next = (names[stage.id] ?? "").trim();
                   if (next && next !== stage.name) {
                     void handle(

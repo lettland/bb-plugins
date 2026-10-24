@@ -588,6 +588,7 @@ export default async function plugin(bb: BbPluginApi) {
     body: string;
     level: "info" | "success" | "attention";
   }) => {
+    /* v8 ignore next 3 -- @preserve no current caller reaches the untitled side: every notify() call site (moveTask, dispatchTask, thread idle and failure handlers, thread.deleted) passes a real card number. */
     const title = input.taskNumber === null
       ? input.action
       : `Triage #${input.taskNumber} · ${input.action}`;
@@ -635,6 +636,7 @@ export default async function plugin(bb: BbPluginApi) {
         taskNumber: number,
         action: `Moved to ${stage.name}`,
         taskTitle: task.title,
+        /* v8 ignore next -- @preserve the only notify-with-summary caller is the triage_move_task tool, whose zod schema requires summary.trim().min(1); the rpc and cli moveTask callers pass shouldNotify=false, so the fallback body cannot run. */
         body: summary?.trim() || "The assigned agent moved this card.",
         level: stage.system_role === "attention" ? "attention" : "success",
       });

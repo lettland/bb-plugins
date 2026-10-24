@@ -1,7 +1,6 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { expect, test } from "vitest";
 import { experimental_scanPublicSdkOnly } from "@get-bb/plugin-sdk/testing";
 
 test("plugin imports use public SDK and declared dependencies", () => {
@@ -13,6 +12,6 @@ test("plugin imports use public SDK and declared dependencies", () => {
   // These aliases resolve inside the plugin through tsconfig paths.
   allow.push(/^@\/(?:components|lib|hooks)\//);
   const result = experimental_scanPublicSdkOnly(root, { allow });
-  assert.deepEqual(result.privateDependencies, []);
-  assert.deepEqual(result.violations, []);
+  expect(result.privateDependencies).toStrictEqual([]);
+  expect(result.violations).toStrictEqual([]);
 });

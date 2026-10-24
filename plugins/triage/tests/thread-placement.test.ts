@@ -1,5 +1,4 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
+import { expect, test } from "vitest";
 import { createFakePluginHost, makeThreadResponse, makePluginAgentConfigurationContext } from "@get-bb/plugin-sdk/testing";
 import plugin from "../server.ts";
 
@@ -31,35 +30,35 @@ test("import preserves the existing session and concurrent retries create one ca
   const { harness, thread, importThread } = await setup();
   try {
     const [first, second] = await Promise.all([importThread(), importThread()]);
-    assert.equal(first.number, second.number);
-    assert.equal(first.threadId, thread.id);
-    assert.equal(first.title, "Existing conversation");
-    assert.equal(thread.visibility, "hidden");
-    assert.equal(harness.inspection.sdk.callsTo("threads.spawn").length, 0);
-    assert.equal(harness.inspection.sdk.callsTo("threads.send").length, 0);
+    expect(first.number).toBe(second.number);
+    expect(first.threadId).toBe(thread.id);
+    expect(first.title).toBe("Existing conversation");
+    expect(thread.visibility).toBe("hidden");
+    expect(harness.inspection.sdk.callsTo("threads.spawn").length).toBe(0);
+    expect(harness.inspection.sdk.callsTo("threads.send").length).toBe(0);
     const config = await harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: thread.id } }));
-    assert.ok(JSON.stringify(config).includes("triage_move_task"));
+    expect(JSON.stringify(config).includes("triage_move_task")).toBeTruthy();
     await harness.behavior.callRpc("setThreadSidebar", { number: first.number, visible: true });
-    assert.equal(thread.visibility, "visible");
+    expect(thread.visibility).toBe("visible");
     await harness.behavior.callRpc("setThreadSidebar", { number: first.number, visible: false });
-    assert.equal(thread.visibility, "hidden");
+    expect(thread.visibility).toBe("hidden");
   } finally { await harness.lifecycle.dispose(); }
 });
 
 test("a failed visibility update leaves a reusable card and accessible conversation", async () => {
   const { harness, thread, importThread } = await setup({ failUpdate: true });
   try {
-    await assert.rejects(importThread(), /Host disconnected/);
-    assert.equal(thread.visibility, "visible");
+    await expect(importThread()).rejects.toThrow(/Host disconnected/);
+    expect(thread.visibility).toBe("visible");
     const retry = await importThread();
-    assert.equal(retry.number, 1);
-    assert.equal(thread.visibility, "hidden");
+    expect(retry.number).toBe(1);
+    expect(thread.visibility).toBe("hidden");
   } finally { await harness.lifecycle.dispose(); }
 });
 
 test("archived sessions cannot be imported", async () => {
   const { harness, importThread } = await setup({ archived: true });
-  try { await assert.rejects(importThread(), /unarchived/); }
+  try { await expect(importThread()).rejects.toThrow(/unarchived/); }
   finally { await harness.lifecycle.dispose(); }
 });
 
@@ -67,13 +66,13 @@ test("global setting defaults off and toggles existing linked sessions", async (
   const { harness, thread, importThread } = await setup();
   try {
     await importThread();
-    assert.equal(thread.visibility, "hidden");
+    expect(thread.visibility).toBe("hidden");
     await harness.behavior.setSettings({ showThreadsInSidebar: true });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(thread.visibility, "visible");
+    expect(thread.visibility).toBe("visible");
     await harness.behavior.setSettings({ showThreadsInSidebar: false });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(thread.visibility, "hidden");
+    expect(thread.visibility).toBe("hidden");
   } finally { await harness.lifecycle.dispose(); }
 });
 
@@ -85,8 +84,8 @@ test("rapid setting changes and individual actions keep the latest choice", asyn
     await harness.behavior.setSettings({ showThreadsInSidebar: false });
     await harness.behavior.callRpc("setThreadSidebar", { number: task.number, visible: true });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(thread.visibility, "visible");
-    await assert.rejects(harness.behavior.callRpc("setThreadSidebar", { number: 9999, visible: true }), /not found/);
+    expect(thread.visibility).toBe("visible");
+    await expect(harness.behavior.callRpc("setThreadSidebar", { number: 9999, visible: true })).rejects.toThrow(/not found/);
   } finally { await harness.lifecycle.dispose(); }
 });
 
@@ -95,7 +94,7 @@ test("new Triage sessions respect the default-off setting and opt-in", async () 
     const { harness, thread } = await setup();
     try {
       harness.inspection.sdk.stub("threads.spawn", async (args: { visibility?: "visible" | "hidden" }) => {
-        assert.equal(args.visibility, enabled ? "visible" : "hidden");
+        expect(args.visibility).toBe(enabled ? "visible" : "hidden");
         return { ...thread, visibility: args.visibility };
       });
       if (enabled) await harness.behavior.setSettings({ showThreadsInSidebar: true });
@@ -108,7 +107,7 @@ test("new Triage sessions respect the default-off setting and opt-in", async () 
           input: [{ type: "text", text: "Do work" }],
         },
       });
-      assert.equal(harness.inspection.sdk.callsTo("threads.spawn").length, 1);
+      expect(harness.inspection.sdk.callsTo("threads.spawn").length).toBe(1);
     } finally { await harness.lifecycle.dispose(); }
   }
 });
@@ -124,15 +123,15 @@ test("snapshot reports actual sidebar visibility and settings persist", async ()
       const snapshot = await harness.behavior.callRpc("snapshot", null) as { tasks: { sidebarVisible: boolean }[] };
       return snapshot.tasks[0]!.sidebarVisible;
     };
-    assert.equal(await visible(), false);
+    expect(await visible()).toBe(false);
     await harness.behavior.callRpc("setThreadSidebar", { number: task.number, visible: true });
-    assert.equal(await visible(), true);
+    expect(await visible()).toBe(true);
     thread.visibility = "hidden";
-    assert.equal(await visible(), false);
+    expect(await visible()).toBe(false);
     await harness.behavior.callRpc("setShowInSidebar", { visible: true });
     await harness.lifecycle.reload(async (bb) => {
       const settings = bb.settings.define({ showInSidebar: { type: "boolean", label: "Show Triage in sidebar", default: false } });
-      assert.equal((await settings.get()).showInSidebar, true);
+      expect((await settings.get()).showInSidebar).toBe(true);
     });
   } finally { await harness.lifecycle.dispose(); }
 });
@@ -145,8 +144,8 @@ test("drag reorder moves a stage across multiple positions and preserves the oth
     const snapshot = await harness.behavior.callRpc("snapshot", null) as { stages: { id: string }[] };
     const ids = snapshot.stages.map(stage => stage.id);
     const result = await harness.behavior.callRpc("reorderStage", { id: ids[0], targetId: ids[3] }) as { stages: { id: string; position: number }[] };
-    assert.deepEqual(result.stages.map(stage => stage.id), [...ids.slice(1, 4), ids[0], ...ids.slice(4)]);
-    assert.deepEqual(result.stages.map(stage => stage.position), ids.map((_, index) => index));
+    expect(result.stages.map(stage => stage.id)).toStrictEqual([...ids.slice(1, 4), ids[0], ...ids.slice(4)]);
+    expect(result.stages.map(stage => stage.position)).toStrictEqual(ids.map((_, index) => index));
   } finally { await harness.lifecycle.dispose(); }
 });
 
@@ -162,9 +161,9 @@ test("project options expose the configured default machine and Personal label",
     ]);
     harness.inspection.sdk.stub("hosts.list", async () => []);
     const snapshot = await harness.behavior.callRpc("snapshot", null) as { projects: { id: string; name: string; defaultMachineId: string | null }[] };
-    assert.equal(snapshot.projects[0]!.name, "Personal");
-    assert.equal(snapshot.projects[0]!.defaultMachineId, null);
-    assert.equal(snapshot.projects[1]!.defaultMachineId, "chosen");
+    expect(snapshot.projects[0]!.name).toBe("Personal");
+    expect(snapshot.projects[0]!.defaultMachineId).toBe(null);
+    expect(snapshot.projects[1]!.defaultMachineId).toBe("chosen");
   } finally { await harness.lifecycle.dispose(); }
 });
 
@@ -173,11 +172,11 @@ test("title renaming synchronizes the thread without changing workflow state", a
   try {
     const task = await importThread();
     const renamed = await harness.behavior.callRpc("renameTask", { number: task.number, title: "  Revised title  " }) as any;
-    assert.equal(renamed.title, "Revised title");
-    assert.equal(renamed.stageId, "stage-todo");
-    assert.equal(renamed.runState, "idle");
-    assert.ok(harness.inspection.sdk.callsTo("threads.update").some((call) => JSON.stringify(call).includes("Triage #1: Revised title")));
-    await assert.rejects(harness.behavior.callRpc("renameTask", { number: task.number, title: " " }));
+    expect(renamed.title).toBe("Revised title");
+    expect(renamed.stageId).toBe("stage-todo");
+    expect(renamed.runState).toBe("idle");
+    expect(harness.inspection.sdk.callsTo("threads.update").some((call) => JSON.stringify(call).includes("Triage #1: Revised title"))).toBeTruthy();
+    await expect(harness.behavior.callRpc("renameTask", { number: task.number, title: " " })).rejects.toBeDefined();
   } finally { await harness.lifecycle.dispose(); }
 });
 
@@ -188,10 +187,10 @@ test("agent instructions explain completion and attention using current stage na
     await harness.behavior.callRpc("renameStage", { id: "stage-completed", name: "Shipped" });
     const config = await harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: thread.id } }));
     const instructions = JSON.stringify(config);
-    assert.match(instructions, /Before your final response/);
-    assert.match(instructions, /call triage_move_task with Shipped/);
-    assert.match(instructions, /Do not leave finished work/);
-    assert.match(instructions, /approve, decide, provide access/);
+    expect(instructions).toMatch(/Before your final response/);
+    expect(instructions).toMatch(/call triage_move_task with Shipped/);
+    expect(instructions).toMatch(/Do not leave finished work/);
+    expect(instructions).toMatch(/approve, decide, provide access/);
   } finally { await harness.lifecycle.dispose(); }
 });
 
@@ -206,12 +205,12 @@ test("idle preserves completion and new work returns to In Progress", async () =
     harness.inspection.sdk.stub("hosts.list", async () => []);
     const read = async () => (await harness.behavior.callRpc("snapshot", null) as { tasks: { stageId: string; runState: string }[] }).tasks[0]!;
     const completed = await read();
-    assert.equal(completed.stageId, "stage-completed");
-    assert.equal(completed.runState, "completed");
+    expect(completed.stageId).toBe("stage-completed");
+    expect(completed.runState).toBe("completed");
     await harness.behavior.emitThreadEvent("thread.active", { thread });
     const resumed = await read();
-    assert.equal(resumed.stageId, "stage-progress");
-    assert.equal(resumed.runState, "working");
+    expect(resumed.stageId).toBe("stage-progress");
+    expect(resumed.runState).toBe("working");
   } finally { await harness.lifecycle.dispose(); }
 });
 
@@ -224,7 +223,7 @@ test("snapshot displays the linked environment's actual branch", async () => {
     harness.inspection.sdk.stub("hosts.list", async () => []);
     harness.inspection.sdk.stub("environments.get", async () => ({ branchName: "feature/notifications", isGitRepo: true }));
     const snapshot = await harness.behavior.callRpc("snapshot", null) as { tasks: { branchName: string }[] };
-    assert.equal(snapshot.tasks[0]?.branchName, "feature/notifications");
+    expect(snapshot.tasks[0]?.branchName).toBe("feature/notifications");
   } finally { await harness.lifecycle.dispose(); }
 });
 
@@ -232,9 +231,9 @@ test("stage tool rejects another thread and preserves the owner's card", async (
   const { harness, thread, importThread } = await setup();
   try {
     const task = await importThread();
-    await assert.rejects(harness.behavior.callAgentTool("triage_move_task", {
+    await expect(harness.behavior.callAgentTool("triage_move_task", {
       number: task.number, stage: "Completed", summary: "Done",
-    }, { threadId: "unrelated-thread" }), /not assigned/);
+    }, { threadId: "unrelated-thread" })).rejects.toThrow(/not assigned/);
     await harness.behavior.callAgentTool("triage_move_task", {
       number: task.number, stage: "Completed", summary: "Verified and complete",
     }, { threadId: thread.id });
@@ -242,8 +241,8 @@ test("stage tool rejects another thread and preserves the owner's card", async (
     harness.inspection.sdk.stub("projects.list", async () => []);
     harness.inspection.sdk.stub("hosts.list", async () => []);
     const snapshot = await harness.behavior.callRpc("snapshot", null) as { tasks: { stageId: string; runState: string }[] };
-    assert.equal(snapshot.tasks[0]?.stageId, "stage-completed");
-    assert.equal(snapshot.tasks[0]?.runState, "completed");
+    expect(snapshot.tasks[0]?.stageId).toBe("stage-completed");
+    expect(snapshot.tasks[0]?.runState).toBe("completed");
   } finally { await harness.lifecycle.dispose(); }
 });
 
@@ -255,8 +254,8 @@ test("an unavailable environment does not break the board snapshot", async () =>
     harness.inspection.sdk.stub("projects.list", async () => []);
     harness.inspection.sdk.stub("hosts.list", async () => []);
     const snapshot = await harness.behavior.callRpc("snapshot", null) as { tasks: { number: number; sidebarVisible: boolean }[] };
-    assert.equal(snapshot.tasks.length, 1);
-    assert.equal(snapshot.tasks[0]?.sidebarVisible, false);
+    expect(snapshot.tasks.length).toBe(1);
+    expect(snapshot.tasks[0]?.sidebarVisible).toBe(false);
   } finally { await harness.lifecycle.dispose(); }
 });
 
@@ -278,7 +277,7 @@ test("reload discards queued sidebar writes from the disposed plugin", async () 
     await harness.lifecycle.dispose();
     release();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(writes, 1);
+    expect(writes).toBe(1);
   } finally { release(); await harness.lifecycle.dispose(); }
 });
 
@@ -304,27 +303,27 @@ test("editing persists the prompt and schedule across reload and runs the update
     const updated = await harness.behavior.callRpc("updateTask", changes) as {
       description: string; scheduledAt: number | null; runState: string;
     };
-    assert.equal(updated.description, "Updated prompt");
-    assert.equal(updated.scheduledAt, scheduledAt);
-    assert.equal(updated.runState, "scheduled");
+    expect(updated.description).toBe("Updated prompt");
+    expect(updated.scheduledAt).toBe(scheduledAt);
+    expect(updated.runState).toBe("scheduled");
     ({ harness } = await harness.lifecycle.reload(plugin));
     harness.inspection.sdk.stub("projects.list", async () => []);
     harness.inspection.sdk.stub("hosts.list", async () => []);
     const snapshot = await harness.behavior.callRpc("snapshot", null) as {
       tasks: { description: string; scheduledAt: number | null }[];
     };
-    assert.equal(snapshot.tasks[0]!.description, "Updated prompt");
-    assert.equal(snapshot.tasks[0]!.scheduledAt, scheduledAt);
+    expect(snapshot.tasks[0]!.description).toBe("Updated prompt");
+    expect(snapshot.tasks[0]!.scheduledAt).toBe(scheduledAt);
     const manual = await harness.behavior.callRpc("updateTask", { ...changes, scheduledAt: null }) as {
       scheduledAt: number | null; runState: string;
     };
-    assert.equal(manual.scheduledAt, null);
-    assert.equal(manual.runState, "queued");
+    expect(manual.scheduledAt).toBe(null);
+    expect(manual.runState).toBe("queued");
     harness.inspection.sdk.stub("threads.spawn", async (args: { input: { type: string; text?: string; visibility?: string }[] }) => {
-      assert.deepEqual(args.input.filter((part) => part.visibility !== "agent-only"), [{ type: "text", text: "Updated prompt" }]);
+      expect(args.input.filter((part) => part.visibility !== "agent-only")).toStrictEqual([{ type: "text", text: "Updated prompt" }]);
       return thread;
     });
     await harness.behavior.callRpc("runTask", { number: created.number });
-    assert.equal(harness.inspection.sdk.callsTo("threads.spawn").length, 1);
+    expect(harness.inspection.sdk.callsTo("threads.spawn").length).toBe(1);
   } finally { await harness.lifecycle.dispose(); }
 });

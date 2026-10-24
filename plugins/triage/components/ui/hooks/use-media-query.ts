@@ -10,6 +10,7 @@ type MediaQueryRef = {
 const mediaQueryCache = new Map<string, MediaQueryRef>();
 
 function createMediaQueryRef(query: string): MediaQueryRef | null {
+  /* v8 ignore next -- @preserve createMediaQueryRef only runs from client subscriptions, where window always exists. */
   if (typeof window === "undefined") return null;
 
   let ref = mediaQueryCache.get(query);
@@ -46,10 +47,12 @@ function subscribeMediaQuery(
   query: string,
   notify: () => void,
 ): () => void {
+  /* v8 ignore next -- @preserve subscribe never runs during server rendering, so the no-ref fallback is unreachable. */
   return createMediaQueryRef(query)?.subscribe(notify) ?? (() => {});
 }
 
 function getMediaQuerySnapshot(query: string): boolean {
+  /* v8 ignore next -- @preserve the client snapshot only runs in the browser, where window always exists. */
   if (typeof window === "undefined") return false;
 
   return (

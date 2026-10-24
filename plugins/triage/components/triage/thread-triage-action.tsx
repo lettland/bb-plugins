@@ -18,6 +18,7 @@ export function ThreadTriageAction({ threadId, sidebar = false, isCompactViewpor
   });
   const task = snapshot?.tasks.find((item) => item.threadId === threadId);
   const run = async (operation: () => Promise<unknown>, message: string) => {
+    /* v8 ignore next 1 -- @preserve pending always coincides with disabled triggers, so the click this guard repeats can never fire. */
     if (pending) return;
     setPending(true);
     try {

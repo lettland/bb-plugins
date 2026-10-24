@@ -67,6 +67,7 @@ version pinned in the repo's `.nvmrc`:
 ```sh
 npm install --include=dev --legacy-peer-deps
 npm test
+npm run test:coverage
 bb plugin build
 ```
 
@@ -118,8 +119,8 @@ subsequent agent configuration. Importing does not interrupt a running turn.
 ## Compatibility and verification
 
 Requires BB 0.42+ and Plugin SDK 0.4.47 or newer. This repository's GitHub
-Actions workflow runs `npm test` (`tsc --noEmit` plus the test suite) on every
-push and pull request.
+Actions workflow runs `npm run test:coverage` (`tsc --noEmit` plus the test
+suite with 100% coverage thresholds) on every push and pull request.
 
 New cards start in To Do. Agent execution moves them to In Progress; agents are
 instructed to explicitly report completion or a need for attention. Ending a turn
