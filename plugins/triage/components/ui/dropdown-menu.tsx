@@ -246,6 +246,7 @@ const DropdownMenuItem = React.forwardRef<
       role = "menuitem",
       "aria-checked": ariaChecked,
       textValue: _textValue,
+      asChild: _asChild,
       children,
       onPointerEnter: callerPointerEnter,
       onKeyDown: callerKeyDown,
@@ -263,6 +264,9 @@ const DropdownMenuItem = React.forwardRef<
       return (
         <button
           ref={ref as React.RefCallback<HTMLButtonElement> | null}
+          // The rest carries div-typed event handlers; strip them so the
+          // compact button spread stays button-typed.
+          {...(domProps as Omit<typeof domProps, keyof React.DOMAttributes<unknown>>)}
           type="button"
           role={role}
           disabled={disabled}
@@ -333,6 +337,7 @@ const DropdownMenuCheckboxItem = React.forwardRef<
       onCheckedChange,
       disabled,
       textValue: _textValue,
+      asChild: _asChild,
       onPointerEnter: callerPointerEnter,
       onKeyDown: callerKeyDown,
       ...domProps
@@ -349,6 +354,8 @@ const DropdownMenuCheckboxItem = React.forwardRef<
       return (
         <button
           ref={ref as React.RefCallback<HTMLButtonElement> | null}
+          // Same handler strip as the plain item above.
+          {...(domProps as Omit<typeof domProps, keyof React.DOMAttributes<unknown>>)}
           type="button"
           role="menuitemcheckbox"
           aria-checked={
