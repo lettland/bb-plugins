@@ -44,6 +44,5 @@ export function scriptTokens(args: readonly Word[], heredocs: readonly string[])
   const inline = flag >= 0 ? [args[flag + 1]?.text ?? ""] : [];
   return [...heredocs, ...inline]
     .filter((body) => SCRIPT_WRITE.test(body))
-    // A body that matched SCRIPT_WRITE always holds word characters, so the token match never misses.
-    .flatMap((body) => literalWriteTargets(body) ?? body.match(SCRIPT_TOKEN)!);
+    .flatMap((body) => literalWriteTargets(body) ?? body.match(SCRIPT_TOKEN) ?? /* v8 ignore start -- @preserve a body that matched SCRIPT_WRITE holds word characters, so SCRIPT_TOKEN always matches. */ [] /* v8 ignore stop */);
 }
