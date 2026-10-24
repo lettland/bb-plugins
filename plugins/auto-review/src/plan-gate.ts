@@ -136,12 +136,13 @@ async function armReview(
     if (result.delivery === "queued") {
       queuedMessageId = result.queuedMessage.id;
       await writeState(bb, thread.id, { planReviewEntryId: queuedMessageId });
-    // v8 ignore start -- @preserve the SDK answers queued or sent and nothing else, so this side cannot run.
-    } else if (result.delivery === "sent") {
-      // Straight into the turn, so there is no dispatch event: the cursor
-      // right after the send is where the review's delivery starts.
-      await markReviewDelivered(ctx, thread.id);
-    // v8 ignore stop
+    } else {
+      // v8 ignore else -- @preserve the SDK answers queued or sent and nothing else (sendMessageResponseSchema is a discriminated union of "sent" and "queued" delivery literals, node_modules/@get-bb/plugin-sdk/bundled-types/bb-plugin-sdk.d.ts:12313 and :12316), so this side cannot run.
+      if (result.delivery === "sent") {
+        // Straight into the turn, so there is no dispatch event: the cursor
+        // right after the send is where the review's delivery starts.
+        await markReviewDelivered(ctx, thread.id);
+      }
     }
   } catch (error) {
     // Nothing was queued, so leave the plan with the user untouched.

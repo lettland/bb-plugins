@@ -134,10 +134,11 @@ function endWord(lexing: Lexing): void {
     if (body !== undefined && body !== null) {
       lexing.heredocs.push(body);
     }
-  // v8 ignore start -- @preserve wanted is only target, skip or null, so this condition is never false.
-  } else if (wanted === null) {
-    lexing.words.push(done);
-  // v8 ignore stop
+  } else {
+    // v8 ignore else -- @preserve wanted is only "target", "skip", or null (lexing.expecting's type, detect-mentions.ts:80), so this condition is never false.
+    if (wanted === null) {
+      lexing.words.push(done);
+    }
   }
 }
 
