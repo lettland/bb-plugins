@@ -10,6 +10,7 @@ import {
 } from "@get-bb/plugin-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import plugin, { MAX_REASON_LENGTH } from "./server.js";
+import { MAX_PROJECT_CACHE } from "./src/shared.js";
 
 type RunningThread = Awaited<
   ReturnType<BbPluginApi["sdk"]["threads"]["listRunning"]>
@@ -287,6 +288,47 @@ describe("hold decisions", () => {
       action: "proceed",
     });
   });
+
+  it("serves a repeat blocker lookup from the project cache", async () => {
+    const fake = await setup({
+      running: [running("thr_busy")],
+      threads: { thr_busy: { projectId: "proj_1" } },
+    });
+
+    await expect(
+      fake.hook(dispatchContext({ submission: queueIntent() })),
+    ).resolves.toEqual({
+      action: "wait",
+      reason: "1 other thread running in Alpha",
+    });
+    const lookups = fake.harness.sdk.callsTo("threads.get").length;
+
+    await expect(fake.hook(dispatchContext())).resolves.toEqual({
+      action: "wait",
+      reason: "1 other thread running in Alpha",
+    });
+    expect(fake.harness.sdk.callsTo("threads.get")).toHaveLength(lookups);
+  });
+
+  it("evicts the project cache when it reaches its cap", async () => {
+    const runningIds = Array.from(
+      { length: MAX_PROJECT_CACHE + 1 },
+      (_, index) => `thr_run_${index}`,
+    );
+    const { hook } = await setup({
+      running: runningIds.map(running),
+      threads: Object.fromEntries(
+        runningIds.map((id) => [id, { projectId: "proj_1" }]),
+      ),
+    });
+
+    await expect(
+      hook(dispatchContext({ submission: queueIntent() })),
+    ).resolves.toEqual({
+      action: "wait",
+      reason: `${MAX_PROJECT_CACHE + 1} other threads running in Alpha`,
+    });
+  });
 });
 
 describe("queue intent", () => {
@@ -331,6 +373,22 @@ describe("queue intent", () => {
 
     await fake.hook(dispatchContext({ submission: queueIntent() }));
 
+    expect(await storedIds(fake)).toEqual(["thr_new"]);
+  });
+
+  it("does not duplicate an id that is already queued", async () => {
+    const fake = await setup({
+      stored: ["thr_new"],
+      running: [running("thr_busy")],
+      threads: { thr_busy: { projectId: "proj_1" } },
+    });
+
+    await expect(
+      fake.hook(dispatchContext({ submission: queueIntent() })),
+    ).resolves.toEqual({
+      action: "wait",
+      reason: "1 other thread running in Alpha",
+    });
     expect(await storedIds(fake)).toEqual(["thr_new"]);
   });
 });
@@ -475,6 +533,43 @@ describe("removal", () => {
 
     expect(await storedIds(fake)).toEqual(["thr_new"]);
   });
+
+  it("ignores a cancelled message for a thread it never queued", async () => {
+    const fake = await setup();
+
+    await fake.harness.emitThreadEvent("message.cancelled", {
+      entry: makeQueueEntry({ threadId: "thr_other" }),
+    });
+
+    expect(fake.harness.sdk.callsTo("threads.get")).toHaveLength(0);
+    expect(await storedIds(fake)).toBeUndefined();
+  });
+
+  it("drops the id on a cancelled message when the thread is gone", async () => {
+    const fake = await setup({
+      stored: ["thr_new"],
+      threads: { thr_new: new HttpError(404) },
+    });
+
+    await fake.harness.emitThreadEvent("message.cancelled", {
+      entry: makeQueueEntry({ threadId: "thr_new" }),
+    });
+
+    expect(await storedIds(fake)).toEqual([]);
+  });
+
+  it("ignores an active event for a thread it never queued", async () => {
+    const fake = await setup({
+      stored: ["thr_kept"],
+      threads: { thr_kept: { status: "pending" } },
+    });
+
+    await fake.harness.emitThreadEvent("thread.active", {
+      thread: makeThreadResponse({ id: "thr_unknown", status: "active" }),
+    });
+
+    expect(await storedIds(fake)).toEqual(["thr_kept"]);
+  });
 });
 
 describe("failures never throw", () => {
@@ -517,6 +612,52 @@ describe("failures never throw", () => {
     await expect(
       fake.hook(dispatchContext({ submission: queueIntent() })),
     ).resolves.toEqual({ action: "proceed" });
+  });
+
+  it("logs and continues when a recheck fails", async () => {
+    const fake = await setup({
+      stored: ["thr_new"],
+      threads: { thr_new: { status: "pending" } },
+    });
+    vi.spyOn(fake.bb.experimental_hooks, "recheck").mockRejectedValue(
+      new Error("recheck failed"),
+    );
+
+    await fake.harness.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse(),
+      lastAssistantText: null,
+    });
+
+    expect(fake.harness.logEntries).toContainEqual({
+      level: "warn",
+      message: "Could not recheck held dispatches: recheck failed",
+    });
+  });
+
+  it("keeps the id in memory when saving fails and saves it with the next write", async () => {
+    const fake = await setup({
+      running: [running("thr_busy")],
+      threads: { thr_busy: { projectId: "proj_1" } },
+    });
+    vi.spyOn(fake.bb.storage.kv, "set").mockRejectedValueOnce(
+      new Error("disk full"),
+    );
+
+    await expect(
+      fake.hook(dispatchContext({ submission: queueIntent() })),
+    ).resolves.toEqual({
+      action: "wait",
+      reason: "1 other thread running in Alpha",
+    });
+    expect(fake.harness.logEntries).toContainEqual({
+      level: "warn",
+      message: "Could not save the queued thread ids: disk full",
+    });
+
+    const result = await fake.harness.runCli(["release", "thr_new"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(await storedIds(fake)).toEqual([]);
   });
 });
 
@@ -795,5 +936,137 @@ describe("cli", () => {
       { id: "thr_gone", state: "stale", reason: "thread is active" },
     ]);
     expect(await storedIds(fake)).toEqual(["thr_stale", "thr_b"]);
+  });
+
+  it("rejects a whitespace-only prompt", async () => {
+    const { harness } = await setup();
+
+    const result = await harness.runCli(["spawn", "--prompt", "   ", "--json"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("invalid_value");
+    expect(result.stdout).toContain("The prompt is empty");
+    expect(harness.sdk.callsTo("threads.spawn")).toHaveLength(0);
+  });
+
+  it("passes provider, model, level, mode, and environment to the spawn", async () => {
+    const { harness } = await setup();
+
+    const result = await harness.runCli(
+      [
+        "spawn",
+        "--prompt",
+        "go",
+        "--provider",
+        "codex",
+        "--model",
+        "gpt-5.3",
+        "--reasoning-level",
+        "high",
+        "--permission-mode",
+        "auto",
+        "--environment",
+        "env_1",
+      ],
+      { projectId: "proj_ctx" },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(harness.sdk.callsTo("threads.spawn")).toEqual([
+      [
+        expect.objectContaining({
+          providerId: "codex",
+          model: "gpt-5.3",
+          reasoningLevel: "high",
+          permissionMode: "auto",
+          environment: { type: "reuse", environmentId: "env_1" },
+        }),
+      ],
+    ]);
+  });
+
+  it("reports a held spawn in plain text", async () => {
+    const { harness } = await setup({ stored: ["thr_spawned"] });
+
+    const result = await harness.runCli(["spawn", "--prompt", "go"], {
+      projectId: "proj_ctx",
+    });
+
+    expect(result.stdout).toBe(
+      "Thread thr_spawned queued; it starts when no other thread in the project is running.",
+    );
+  });
+
+  it("says the queue is empty", async () => {
+    const { harness } = await setup();
+
+    const result = await harness.runCli(["list"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("No queued threads.");
+  });
+
+  it("prints stale, unknown, untitled, and blocked threads in text", async () => {
+    const fake = await setup({
+      stored: [
+        "thr_blocked",
+        "thr_untitled",
+        "thr_fallback",
+        "thr_stale",
+        "thr_unknown",
+      ],
+      running: [running("thr_busy")],
+      threads: {
+        thr_blocked: { projectId: "proj_1", status: "pending", title: "Plan" },
+        thr_untitled: { projectId: "proj_1", status: "pending" },
+        thr_fallback: { projectId: "proj_err", status: "pending" },
+        thr_stale: { projectId: "proj_1", status: "active" },
+        thr_unknown: new Error("boom"),
+        thr_busy: { projectId: "proj_1" },
+      },
+    });
+    fake.harness.sdk.stub(
+      "projects.get",
+      async ({ projectId }: { projectId: string }) => {
+        if (projectId === "proj_err") throw new Error("db offline");
+        return { id: projectId, name: `Project ${projectId}` };
+      },
+    );
+
+    const result = await fake.harness.runCli(["list"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe(
+      [
+        "thr_blocked  Plan  Project proj_1  blocked by thr_busy",
+        "thr_untitled  (untitled)  Project proj_1  blocked by thr_busy",
+        "thr_fallback  (untitled)  proj_err  no blockers, starts on the next recheck",
+        "thr_stale  stale (thread is active), removed from the queue",
+        "thr_unknown  could not be read: boom",
+      ].join("\n"),
+    );
+    expect(fake.harness.logEntries).toContainEqual({
+      level: "warn",
+      message: "Could not read project proj_err: db offline",
+    });
+    expect(await storedIds(fake)).toEqual([
+      "thr_blocked",
+      "thr_untitled",
+      "thr_fallback",
+      "thr_unknown",
+    ]);
+  });
+
+  it("reports a release as JSON when asked", async () => {
+    const fake = await setup({ stored: ["thr_new"] });
+
+    const result = await fake.harness.runCli(["release", "thr_new", "--json"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      threadId: "thr_new",
+      released: true,
+    });
+    expect(await storedIds(fake)).toEqual([]);
   });
 });

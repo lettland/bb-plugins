@@ -158,4 +158,21 @@ describe("run", () => {
       }),
     );
   });
+
+  it("stringifies a non-Error rejection in the toast", async () => {
+    const error = vi.spyOn(toast, "error").mockReturnValue("toast");
+    const { composer } = mountComposer({
+      kind: "new-thread",
+      projectId: "proj_1",
+    });
+    vi.spyOn(composer, "submit").mockRejectedValue("queue offline");
+
+    await sendMenuItem.run({ composer });
+
+    await waitFor(() =>
+      expect(error).toHaveBeenCalledWith("Could not queue the thread", {
+        description: "queue offline",
+      }),
+    );
+  });
 });
