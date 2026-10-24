@@ -100,6 +100,26 @@ describe("loadIndex", () => {
     expect(idx.skills).toEqual([]);
     expect(warn).toHaveBeenCalledOnce();
   });
+
+  it("formats a non-Error index load failure with String(error)", async () => {
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:fs/promises")>();
+      return { ...actual, readFile: async () => { throw "boom"; } };
+    });
+    try {
+      const { loadIndex: freshLoadIndex } = await import("./server.js");
+      const warn = vi.fn();
+      const idx = await freshLoadIndex(dataRoot, warn);
+      expect(idx).toEqual({ generatedAt: "", categories: [], skills: [] });
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0]![0]).toContain("could not load skill index");
+      expect(warn.mock.calls[0]![0]).toContain("boom");
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
 });
 
 describe("buildToolSpecs", () => {
@@ -260,6 +280,28 @@ describe("plugin entrypoint", () => {
     expect(f.warn).not.toHaveBeenCalled();
     const out = await f.tools[0]!.execute({ topic: "go testing", limit: 3 });
     expect(String(out)).toContain("- go-testing:");
+  });
+
+  it("warns and registers an empty-surface index when the committed index fails to load", async () => {
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:fs/promises")>();
+      return { ...actual, readFile: async () => { throw new Error("no index on disk"); } };
+    });
+    try {
+      const { default: freshPlugin } = await import("./server.js");
+      const f = fakeBb();
+      await freshPlugin(f.bb);
+      expect(f.warn).toHaveBeenCalledOnce();
+      expect(f.warn.mock.calls[0]![0]).toContain("could not load skill index");
+      expect(f.warn.mock.calls[0]![0]).toContain("no index on disk");
+      expect(f.tools.map((t) => t.name)).toEqual(["devkit_find_skills", "devkit_load_skill", "devkit_docs"]);
+      const out = await f.tools[0]!.execute({ topic: "anything", limit: 3 });
+      expect(String(out)).toContain("empty");
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
   });
 
   it("contributes the always-on instruction", async () => {

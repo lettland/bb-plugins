@@ -7,9 +7,10 @@ export default defineConfig({
     exclude: ["node_modules/**", "dist/**"],
     coverage: {
       provider: "v8",
-      include: ["server.ts", "src/**"],
+      include: ["server.ts", "src/**", "scripts/build-index.mjs"],
       reporter: ["text-summary", "lcov"],
-      exclude: ["node_modules/**", "dist/**", "scripts/**", "**/*.test.{ts,tsx,mts,mjs}", "**/*.d.mts", "vitest.config.ts"],
+      thresholds: { statements: 100, branches: 100, functions: 100, lines: 100 },
+      exclude: ["node_modules/**", "dist/**", "**/*.test.{ts,tsx,mts,mjs}", "**/*.d.mts", "vitest.config.ts"],
     },
   },
 });

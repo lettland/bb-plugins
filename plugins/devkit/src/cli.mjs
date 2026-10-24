@@ -59,6 +59,7 @@ async function dispatch(instruction, requestedMessage, deps) {
   return { exitCode: 0, stdout: `${instruction}\n` };
 }
 
+/* v8 ignore next -- @preserve both sort keys derive from unique slugs, so the comparator equality arm is unreachable */
 const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 /** Validate the review target for `impl`/`plan`; returns an error result or undefined. */

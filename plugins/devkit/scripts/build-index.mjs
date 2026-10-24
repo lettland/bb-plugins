@@ -80,6 +80,7 @@ export async function buildIndex(contentDir) {
     if (!SLUG_RE.test(slug)) errors.push(`${slug}: slug violates the name pattern`);
     if (description.length === 0) errors.push(`${slug}: empty description`);
     if (description.length > MAX_DESCRIPTION) errors.push(`${slug}: description exceeds ${MAX_DESCRIPTION} chars`);
+    /* v8 ignore next -- @preserve a single readdir cannot return two entries with one name, so a duplicate slug is impossible */
     if (seen.has(slug)) errors.push(`${slug}: duplicate slug`);
     seen.set(slug, true);
 

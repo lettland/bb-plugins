@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { loadSkill, MAX_BODY_BYTES } from "./loader.mjs";
 
 let dataRoot: string;
@@ -131,6 +131,28 @@ describe("loadSkill", () => {
     const r = await loadSkill(dataRoot, "exact");
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.truncated).toBe(false);
+  });
+
+  it("reports out_of_bounds when the resolved path escapes the data root", async () => {
+    // A "/" data root fires the containment re-check: the resolved target is not under root + sep.
+    const r = await loadSkill("/", "go-essentials");
+    expect(r).toEqual({ ok: false, code: "out_of_bounds", message: "Resolved path escaped the data root." });
+  });
+
+  it("maps a read failure without an fs code to read_failed", async () => {
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:fs/promises")>();
+      return { ...actual, readFile: async () => { throw new Error("disk gone"); } };
+    });
+    try {
+      const { loadSkill: freshLoadSkill } = await import("./loader.mjs");
+      const r = await freshLoadSkill(dataRoot, "go-essentials");
+      expect(r).toEqual({ ok: false, code: "read_failed", message: "Could not read skill 'go-essentials'." });
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
   });
 });
 
