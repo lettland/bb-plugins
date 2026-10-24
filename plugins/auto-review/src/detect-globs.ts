@@ -17,15 +17,20 @@ export function isGlob(token: string): boolean {
  */
 export function globQualifies(glob: string): boolean {
   const segments = glob.split("/");
-  // v8 ignore next -- @preserve a split always yields at least one segment, so the first index is present.
-  const first = segments[0] ?? "";
+  const first = segments[0] ??
+    // v8 ignore start -- @preserve split (detect-globs.ts:19) always yields at least one segment, so the first index is present and the empty fallback cannot run.
+    "";
+  // v8 ignore stop
   return (
     glob.length <= MAX_GLOB_LENGTH &&
     segments.length >= 2 &&
     first !== "" &&
     !isGlob(first) &&
-    // v8 ignore next -- @preserve split("/") always yields at least one segment, so the last index is always present.
-    /[^*?.]/u.test(segments[segments.length - 1] ?? "")
+    /[^*?.]/u.test(segments[segments.length - 1] ??
+      // v8 ignore start -- @preserve split (detect-globs.ts:19) always yields at least one segment, so the last index is present and the empty fallback cannot run.
+      ""
+      // v8 ignore stop
+    )
   );
 }
 
@@ -35,8 +40,15 @@ function classMatches(body: string, char: string): boolean {
   let hit = false;
   for (let at = 0; at < set.length; at += 1) {
     if (set[at + 1] === "-" && at + 2 < set.length) {
-      // v8 ignore next -- @preserve the guard above proves both range endpoints are present in the set.
-      hit ||= char >= (set[at] ?? "") && char <= (set[at + 2] ?? "");
+      hit ||= char >= (set[at] ??
+        // v8 ignore start -- @preserve the guard (detect-globs.ts:37) proves both range endpoints are present in the set, so the empty fallback cannot run.
+        ""
+        // v8 ignore stop
+      ) && char <= (set[at + 2] ??
+        // v8 ignore start -- @preserve the guard (detect-globs.ts:37) proves both range endpoints are present in the set, so the empty fallback cannot run.
+        ""
+        // v8 ignore stop
+      );
       at += 2;
     } else {
       hit ||= set[at] === char;

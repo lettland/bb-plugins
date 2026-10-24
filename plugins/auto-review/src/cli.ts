@@ -35,8 +35,10 @@ function parseArgs(argv: string[]): ParsedArgs {
   const positionals: string[] = [];
   const flags = new Map<string, string | true>();
   for (let index = 0; index < argv.length; index += 1) {
-    // v8 ignore next -- @preserve the loop bound proves argv[index] is present.
-    const token = argv[index] ?? "";
+    const token = argv[index] ??
+      // v8 ignore start -- @preserve the loop bound (cli.ts:37) proves argv[index] is present, so the empty fallback cannot run.
+      "";
+    // v8 ignore stop
     if (!token.startsWith("--")) {
       positionals.push(token);
       continue;

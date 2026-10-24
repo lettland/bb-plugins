@@ -25,8 +25,15 @@ function findingField(value: string, max: number): string {
 /** One `key | severity | status | file:line | title | reason` line; every field is data from an earlier agent report. */
 function findingLine(finding: PromptFinding): string {
   const file = SCOPE_PATH_ALLOW.test(finding.file) ? finding.file.slice(0, 300) : "(unsafe path)";
-  // v8 ignore next -- @preserve Number.isInteger (this line, prompt-findings.ts:29) is true only for a number, so finding.line is defined when `(finding.line ?? 0)` runs and the fallback cannot run.
-  const line = Number.isInteger(finding.line) && (finding.line ?? 0) > 0 ? `:${finding.line}` : "";
+  const line =
+    Number.isInteger(finding.line) &&
+    (finding.line ??
+      // v8 ignore start -- @preserve Number.isInteger (prompt-findings.ts:29) is true only for a number, so finding.line is defined when this fallback is reached and the `0` cannot run.
+      0
+      // v8 ignore stop
+    ) > 0
+      ? `:${finding.line}`
+      : "";
   return [
     findingField(finding.key, PRIOR_FINDING_TEXT_MAX.key),
     findingField(finding.severity, PRIOR_FINDING_TEXT_MAX.severity),

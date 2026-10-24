@@ -63,8 +63,10 @@ const baseName = (word: string) => word.replace(/^.*\//u, "");
 function skipOptions(args: readonly Word[], values: ReadonlySet<string>, from: number, assignments: boolean): number {
   let at = from;
   while (at < args.length) {
-    // v8 ignore next -- @preserve the loop bound proves args[at] is present, and a value skip ends the loop past it.
-    const text = args[at]?.text ?? "";
+    const text = args[at]?.text ??
+      // v8 ignore start -- @preserve the loop bound (detect-wrappers.ts:65) proves args[at] is present, a value skip ends the loop past it, and the empty fallback cannot run.
+      "";
+    // v8 ignore stop
     if (text === "--") {
       return at + 1;
     }
@@ -97,8 +99,14 @@ export function unwrap(words: readonly Word[]): { parsed: Parsed; words: Word[] 
   let inner = words.slice(commandStart(words, false));
   let through = false;
   for (let depth = 0; depth < MAX_WRAPPERS && inner.length > 0; depth += 1) {
-    // v8 ignore next -- @preserve the loop condition proves inner[0] is present.
-    const rest = wrapped(baseName(inner[0]?.text ?? ""), inner.slice(1));
+    const rest = wrapped(
+      baseName(inner[0]?.text ??
+        // v8 ignore start -- @preserve the loop condition (detect-wrappers.ts:99) proves inner[0] is present, so the optional chain yields a string and the empty fallback cannot run.
+        ""
+        // v8 ignore stop
+      ),
+      inner.slice(1),
+    );
     const next = rest?.slice(commandStart(rest, false)) ?? [];
     if (next.length === 0) {
       break;

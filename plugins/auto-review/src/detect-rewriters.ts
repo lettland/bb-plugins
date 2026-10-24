@@ -141,8 +141,10 @@ function runsRewritingScript({ name, args }: Parsed): boolean {
   if (name === "make") {
     const targets: string[] = [];
     for (let at = 0; at < args.length; at += 1) {
-      // v8 ignore next -- @preserve the loop bound proves args[at] is present.
-      const text = args[at]?.text ?? "";
+      const text = args[at]?.text ??
+        // v8 ignore start -- @preserve the loop bound (detect-rewriters.ts:143) proves args[at] is present, so the empty fallback cannot run.
+        "";
+      // v8 ignore stop
       if (text === "-C" || text === "-f") {
         at += 1;
       } else if (!text.startsWith("-") && !text.includes("=")) {
@@ -171,8 +173,10 @@ export function shellScript({ name, args }: Parsed): string | null {
 /** The first word of a script runner's arguments that is not an option or an option's value; a shell's `-euo pipefail` takes one too. */
 function runnerOperand(name: string, args: readonly Word[]): string | undefined {
   for (let at = 0; at < args.length; at += 1) {
-    // v8 ignore next -- @preserve the loop bound proves args[at] is present.
-    const text = args[at]?.text ?? "";
+    const text = args[at]?.text ??
+      // v8 ignore start -- @preserve the loop bound (detect-rewriters.ts:175) proves args[at] is present, so the empty fallback cannot run.
+      "";
+    // v8 ignore stop
     if (text === "--") {
       return args[at + 1]?.text;
     }

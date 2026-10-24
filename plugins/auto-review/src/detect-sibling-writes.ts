@@ -43,8 +43,10 @@ export function inPlaceTargets(name: string, args: readonly Word[]): string[] {
   const files: string[] = [];
   let scripted = false;
   for (let at = 0; at < args.length; at += 1) {
-    // v8 ignore next -- @preserve the loop bound proves args[at] is present.
-    const text = args[at]?.text ?? "";
+    const text = args[at]?.text ??
+      // v8 ignore start -- @preserve the loop bound (detect-sibling-writes.ts:45) proves args[at] is present, so the empty fallback cannot run.
+      "";
+    // v8 ignore stop
     if (text === "") {
       continue; // BSD sed's empty `-i` suffix
     }
