@@ -65,6 +65,7 @@ export class TriageStore {
     this.#entries.set(threadId, entry);
     if (this.#entries.size > TRIAGE_STORE_CAP) {
       const oldest = this.#entries.keys().next();
+      // v8 ignore next -- @preserve set() just added an entry, so the key iterator is never done.
       if (oldest.done !== true) this.#entries.delete(oldest.value);
     }
   }

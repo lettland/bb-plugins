@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import {
   createFakePluginHost,
   makeMessageDispatchHookContext,
@@ -6,7 +7,7 @@ import {
 } from "@get-bb/plugin-sdk/testing";
 import type { FakeAgentToolRecord, FakePluginHost } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server.js";
-import { parseSkipProjects } from "./server.js";
+import { parseSkipProjects, skipProjectsSettingSchema } from "./server.js";
 import { TOOL_INSTRUCTIONS, decideParamsSchema } from "./src/tool.js";
 import { TriageStore, TRIAGE_STORE_CAP, buildTriageEntry } from "./src/triage.js";
 
@@ -188,6 +189,162 @@ describe("typesafe_decide tool", () => {
     await host.harness.dispose();
   });
 
+  it("maps a timeout to the exact timeout error text", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    fetchMock.mockImplementation(() => new Promise<Response>(() => {}));
+    const record = decideTool(host);
+    const pending = record.execute(
+      { state: "s", questions: { q: { type: "noul", instructions: "Why?" } } },
+      TOOL_CTX,
+    );
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(await pending).toEqual({
+      content: [{ type: "text", text: "TypeSafe unavailable (timeout) — continue with your own judgment." }],
+      isError: true,
+    });
+    await host.harness.dispose();
+  });
+
+  it("maps an API body failing the schema to the exact bad-response error text", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    fetchMock.mockResolvedValue(okResponse({ unexpected: true }));
+    const record = decideTool(host);
+    const result = await record.execute(
+      { state: "s", questions: { q: { type: "noul", instructions: "Why?" } } },
+      TOOL_CTX,
+    );
+    expect(result).toEqual({
+      content: [{ type: "text", text: "TypeSafe unavailable (bad response) — continue with your own judgment." }],
+      isError: true,
+    });
+    await host.harness.dispose();
+  });
+
+  it("returns the untruncated invalid-arguments error for a small schema failure", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    const record = decideTool(host);
+    const input = { state: "s", questions: {} };
+    const parsed = decideParamsSchema.safeParse(input);
+    if (parsed.success) throw new Error("expected the empty questions object to fail validation");
+    const result = await record.execute(input, TOOL_CTX);
+    expect(result).toEqual({
+      content: [
+        { type: "text", text: `TypeSafe invalid arguments (${z.prettifyError(parsed.error)}) — fix the call.` },
+      ],
+      isError: true,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    await host.harness.dispose();
+  });
+
+  it("truncates an invalid-arguments error longer than 300 characters", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    const record = decideTool(host);
+    const questions = Object.fromEntries(
+      Array.from({ length: 8 }, (_, i) => [`q${i}`, { type: "bogus", instructions: "x" }]),
+    );
+    const input = { state: "s", questions };
+    const parsed = decideParamsSchema.safeParse(input);
+    if (parsed.success) throw new Error("expected the bogus question types to fail validation");
+    const full = z.prettifyError(parsed.error);
+    expect(full.length).toBeGreaterThan(300);
+    const result = await record.execute(input, TOOL_CTX);
+    expect(result).toEqual({
+      content: [
+        {
+          type: "text",
+          text: `TypeSafe invalid arguments (${full.slice(0, 297)}...) — fix the call.`,
+        },
+      ],
+      isError: true,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    await host.harness.dispose();
+  });
+
+  it("serializes an object state before sending it", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    fetchMock.mockResolvedValue(
+      okResponse({
+        model: "jev-1.14.0",
+        answers: { q: { type: "noul", noul: 0.5 } },
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
+    const record = decideTool(host);
+    const result = (await record.execute(
+      {
+        state: { context: "Which database?", rows: 3 },
+        questions: { q: { type: "noul", instructions: "Why?" } },
+      },
+      TOOL_CTX,
+    )) as { content: Array<{ type: string; text: string }>; isError?: boolean };
+    expect(result.isError).toBeUndefined();
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+    expect(body.state).toBe('{"context":"Which database?","rows":3}');
+    await host.harness.dispose();
+  });
+
+  it("maps a missing answer for a requested question to the bad-response error", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    fetchMock.mockResolvedValue(
+      okResponse({
+        model: "jev-1.14.0",
+        answers: {
+          pick: { type: "choice", choice: "a", confidence: 0.9, probabilities: { a: 1 } },
+        },
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
+    const record = decideTool(host);
+    const result = await record.execute(
+      {
+        state: "s",
+        questions: {
+          pick: { type: "choice", instructions: "Pick", criteria: { a: "A" } },
+          why: { type: "noul", instructions: "Why?" },
+        },
+      },
+      TOOL_CTX,
+    );
+    expect(result).toEqual({
+      content: [{ type: "text", text: "TypeSafe unavailable (bad response) — continue with your own judgment." }],
+      isError: true,
+    });
+    await host.harness.dispose();
+  });
+
+  it("maps a wrong-type answer to the bad-response error", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    fetchMock.mockResolvedValue(
+      okResponse({
+        model: "jev-1.14.0",
+        answers: { pick: { type: "noul", noul: 0.5 } },
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
+    const record = decideTool(host);
+    const result = await record.execute(
+      {
+        state: "s",
+        questions: { pick: { type: "choice", instructions: "Pick", criteria: { a: "A" } } },
+      },
+      TOOL_CTX,
+    );
+    expect(result).toEqual({
+      content: [{ type: "text", text: "TypeSafe unavailable (bad response) — continue with your own judgment." }],
+      isError: true,
+    });
+    await host.harness.dispose();
+  });
+
   it("returns compact JSON with answers keyed by question name", async () => {
     const host = createHost({ apiKey: TEST_KEY });
     await plugin(host.bb);
@@ -273,6 +430,31 @@ describe("agent configuration", () => {
       makePluginAgentConfigurationContext({ project: { name: "kept-project" } }),
     );
     expect(kept.tools.map((tool) => tool.name)).toEqual(["typesafe_decide"]);
+    await host.harness.dispose();
+  });
+
+  it("applies a settings change to the model and skip globs without a reload", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    fetchMock.mockResolvedValue(
+      okResponse({
+        model: "jev-2.0.0",
+        answers: { q: { type: "noul", noul: 0.5 } },
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
+    await host.harness.setSettings({ model: "jev-2.0.0", skipProjects: '["now-*"]' });
+    const record = decideTool(host);
+    await record.execute(
+      { state: "s", questions: { q: { type: "noul", instructions: "Why?" } } },
+      TOOL_CTX,
+    );
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+    expect(body.model).toBe("jev-2.0.0");
+    const resolved = await host.harness.resolveAgentConfiguration(
+      makePluginAgentConfigurationContext({ project: { name: "now-skipped" } }),
+    );
+    expect(resolved.tools).toEqual([]);
     await host.harness.dispose();
   });
 });
@@ -441,6 +623,55 @@ describe("message.dispatch triage hook", () => {
     expect(logged).not.toContain(TEST_KEY);
     await host.harness.dispose();
   });
+
+  it("proceeds with a warning and stores nothing when the dispatch input is malformed", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    const decision = await hookOf(host)(
+      makeMessageDispatchHookContext({ input: { text: undefined as unknown as string } }),
+    );
+    expect(decision).toEqual({ action: "proceed" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(host.harness.logEntries.some((entry) => entry.message.startsWith("triage skipped:"))).toBe(true);
+    expect(
+      host.harness.registrations.instructionProvider?.({ threadId: "thread-1", projectId: "p" }),
+    ).toBeNull();
+    await host.harness.dispose();
+  });
+
+  it("proceeds with a warning when triage throws a non-Error", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    // A text object whose replace throws stands in for any non-Error failure.
+    const hostile = { replace: () => { throw "boom"; } };
+    const decision = await hookOf(host)(
+      makeMessageDispatchHookContext({ input: { text: hostile as unknown as string } }),
+    );
+    expect(decision).toEqual({ action: "proceed" });
+    expect(host.harness.logEntries.some((entry) => entry.message.includes("triage skipped: boom"))).toBe(
+      true,
+    );
+    await host.harness.dispose();
+  });
+
+  it("proceeds and stores nothing when the answers cannot build an entry", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    fetchMock.mockResolvedValue(
+      okResponse({
+        model: "jev-1.14.0",
+        answers: {},
+        usage: { input_tokens: 5, output_tokens: 1 },
+      }),
+    );
+    const decision = await hookOf(host)(makeMessageDispatchHookContext());
+    expect(decision).toEqual({ action: "proceed" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      host.harness.registrations.instructionProvider?.({ threadId: "thread-1", projectId: "p" }),
+    ).toBeNull();
+    await host.harness.dispose();
+  });
 });
 
 describe("triage store", () => {
@@ -464,6 +695,37 @@ describe("triage store", () => {
           probabilities: { invented_kind: 0.9 },
         },
         needs_plan: { type: "noul", noul: 0.5 },
+      }),
+    ).toBeNull();
+  });
+
+  it("rejects answers without a kind answer", () => {
+    expect(buildTriageEntry({ needs_plan: { type: "noul", noul: 0.5 } })).toBeNull();
+  });
+
+  it("rejects a kind answer without a probability for its choice", () => {
+    expect(
+      buildTriageEntry({
+        kind: {
+          type: "choice",
+          choice: "question",
+          confidence: 0.9,
+          probabilities: { small_change: 0.9 },
+        },
+        needs_plan: { type: "noul", noul: 0.5 },
+      }),
+    ).toBeNull();
+  });
+
+  it("rejects answers without a needs_plan answer", () => {
+    expect(
+      buildTriageEntry({
+        kind: {
+          type: "choice",
+          choice: "question",
+          confidence: 0.9,
+          probabilities: { question: 0.9 },
+        },
       }),
     ).toBeNull();
   });
@@ -503,5 +765,44 @@ describe("startup", () => {
     );
     expect(parseSkipProjects('["a-*", "b"]')).toEqual(["a-*", "b"]);
     await host.harness.dispose();
+  });
+
+  it("reports the schema problem when a skipProjects entry is not a non-empty string", () => {
+    expect(() => parseSkipProjects('[""]')).toThrowError(
+      "Too small: expected string to have >=1 characters",
+    );
+  });
+
+  it("wraps a non-Error JSON parse failure in parseSkipProjects", () => {
+    const parseSpy = vi.spyOn(JSON, "parse").mockImplementation(() => {
+      throw "boom";
+    });
+    try {
+      expect(() => parseSkipProjects("junk")).toThrowError("not valid JSON: boom");
+    } finally {
+      parseSpy.mockRestore();
+    }
+  });
+
+  it("accepts a valid setting value and reports the JSON problem for an invalid one", () => {
+    expect(skipProjectsSettingSchema.safeParse('["a-*", "b"]').success).toBe(true);
+    const bad = skipProjectsSettingSchema.safeParse("not json");
+    expect(bad.success).toBe(false);
+    if (bad.success) throw new Error("expected the setting value to fail validation");
+    expect(bad.error.issues[0]?.message).toContain("not valid JSON");
+  });
+
+  it("reports a non-Error JSON failure through the setting schema", () => {
+    const parseSpy = vi.spyOn(JSON, "parse").mockImplementation(() => {
+      throw "boom";
+    });
+    try {
+      const bad = skipProjectsSettingSchema.safeParse("junk");
+      expect(bad.success).toBe(false);
+      if (bad.success) throw new Error("expected the setting value to fail validation");
+      expect(bad.error.issues[0]?.message).toBe("not valid JSON: boom");
+    } finally {
+      parseSpy.mockRestore();
+    }
   });
 });

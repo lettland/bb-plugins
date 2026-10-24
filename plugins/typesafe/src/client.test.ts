@@ -183,6 +183,27 @@ describe("decide", () => {
     expect(await decideWith("s")).toEqual({ kind: "bad-response" });
   });
 
+  it("maps a fetch rejection to a bad-response error", async () => {
+    fetchMock.mockRejectedValue(new Error("connection refused"));
+    expect(await decideWith("s")).toEqual({ kind: "bad-response" });
+  });
+
+  it("forwards a non-string question field to the API unchanged", async () => {
+    fetchMock.mockResolvedValue(
+      okResponse({
+        model: "jev-1.14.0",
+        answers: minimalAnswers(),
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
+    const outcome = await decideWith("s", {
+      q: { type: "noul", instructions: null as unknown as string },
+    });
+    expect(outcome.kind).toBe("ok");
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+    expect(body.questions.q.instructions).toBeNull();
+  });
+
   it("maps a body failing the schema to a bad-response error", async () => {
     fetchMock.mockResolvedValue(okResponse({ unexpected: true }));
     expect(await decideWith("s")).toEqual({ kind: "bad-response" });

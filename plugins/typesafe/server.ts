@@ -31,6 +31,7 @@ export const skipProjectsSettingSchema = z.string().superRefine((json, ctx) => {
   try {
     parseSkipProjects(json);
   } catch (error) {
+    // v8 ignore next -- @preserve parseSkipProjects only ever throws Errors, so the String fallback never runs.
     ctx.addIssue({
       code: "custom",
       message: error instanceof Error ? error.message : String(error),
@@ -95,6 +96,7 @@ export default async function plugin(bb: BbPluginApi) {
     try {
       skipProjects = parseSkipProjects(next.skipProjects);
     } catch (error) {
+      // v8 ignore next -- @preserve parseSkipProjects only ever throws Errors, so the String fallback never runs.
       bb.log.warn(
         `skipProjects setting ignored: ${error instanceof Error ? error.message : String(error)}`,
       );
