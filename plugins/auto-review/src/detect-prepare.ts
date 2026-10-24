@@ -83,13 +83,29 @@ function scanSubstitutionParen(char: string, scan: Scan): Step {
   const open = scan.subs.length - 1;
   scan.blank = true;
   if (char === "(") {
-    scan.subs[open] = (scan.subs[open] ?? /* v8 ignore start -- @preserve scan.subs is not empty here, so subs[open] is a number. */ 0 /* v8 ignore stop */) + 1;
-  } else if ((scan.subs[open] ?? /* v8 ignore start -- @preserve scan.subs is not empty here, so subs[open] is a number. */ 0 /* v8 ignore stop */) === 0) {
+    scan.subs[open] =
+      (scan.subs[open] ??
+        // v8 ignore start -- @preserve scan.subs is not empty here (scanStep checks scan.subs.length > 0 before the call), so subs[open] is a number.
+        0
+        // v8 ignore stop
+      ) + 1;
+  } else if (
+    (scan.subs[open] ??
+      // v8 ignore start -- @preserve scan.subs is not empty here (scanStep checks scan.subs.length > 0 before the call), so subs[open] is a number.
+      0
+      // v8 ignore stop
+    ) === 0
+  ) {
     scan.subs.pop();
     scan.quote = '"';
     scan.blank = false;
   } else {
-    scan.subs[open] = (scan.subs[open] ?? /* v8 ignore start -- @preserve scan.subs is not empty here, so subs[open] is a number. */ 0 /* v8 ignore stop */) - 1;
+    scan.subs[open] =
+      (scan.subs[open] ??
+        // v8 ignore start -- @preserve scan.subs is not empty here (scanStep checks scan.subs.length > 0 before the call), so subs[open] is a number.
+        0
+        // v8 ignore stop
+      ) - 1;
   }
   return { keep: char, width: 1 };
 }

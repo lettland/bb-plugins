@@ -91,7 +91,13 @@ export async function claimOwnChanges(context: ClaimContext): Promise<ClaimOutco
       ? resolution?.sweep
       : `${family.opaque} ran, and the files it writes cannot be listed`;
   if (reason !== undefined || resolution === undefined) {
-    return sweep(reason ?? /* v8 ignore start -- @preserve resolution is undefined only when family.opaque is set, and then reason holds the opaque message. */ "the writes could not be resolved" /* v8 ignore stop */, kin);
+    return sweep(
+      reason ??
+        // v8 ignore start -- @preserve resolution is undefined only when family.opaque is set, and then reason holds the opaque message.
+        "the writes could not be resolved",
+      // v8 ignore stop
+      kin,
+    );
   }
   const familyPaths = new Set([...context.ownPaths, ...kin.paths, ...resolution.claimed]);
   const commits = context.commits.filter((commit) => {
