@@ -308,6 +308,7 @@ const DropdownMenuItem = React.forwardRef<
           inset && "pl-8",
           className,
         )}
+        asChild={_asChild}
         disabled={disabled}
         role={role}
         aria-checked={ariaChecked}
@@ -409,6 +410,7 @@ const DropdownMenuCheckboxItem = React.forwardRef<
           MENU_ITEM_LAST_HOVERED_CLASS,
           className,
         )}
+        asChild={_asChild}
         checked={checked}
         onSelect={onSelect}
         onCheckedChange={onCheckedChange}

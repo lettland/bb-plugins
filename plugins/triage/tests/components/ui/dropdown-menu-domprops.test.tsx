@@ -83,3 +83,30 @@ describe("compact dropdown items forward dom props", () => {
     expect(item.getAttributeNames().some((name) => name.toLowerCase() === "aschild")).toBe(false);
   });
 });
+
+describe("desktop dropdown items keep asChild", () => {
+  it("merges asChild onto the child element instead of rendering a wrapper", () => {
+    render(
+      <OverlayHarness>
+        {({ open, setOpen }) => (
+          <DropdownMenu open={open} onOpenChange={setOpen}>
+            <DropdownMenuTrigger>Actions</DropdownMenuTrigger>
+            <DropdownMenuContent>
+              <DropdownMenuItem asChild data-testid="slot-item" aria-label="Merged item">
+                <button type="button">Slotted item</button>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+      </OverlayHarness>,
+    );
+    fireEvent.keyDown(screen.getByText("Actions"), { key: "Enter" });
+    // The slotted element owns the item role and props directly; a wrapper
+    // would hold the role while the button stayed plain.
+    const item = screen.getByTestId("slot-item");
+    expect(item.tagName).toBe("BUTTON");
+    expect(item.getAttribute("role")).toBe("menuitem");
+    expect(item.getAttribute("aria-label")).toBe("Merged item");
+    expect(document.querySelectorAll('[role="menuitem"]')).toHaveLength(1);
+  });
+});
