@@ -4,7 +4,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRunner, HEARTBEAT_TIMEOUT_MS, MAX_CONCURRENT } from "./cli.js";
 import type { Exec, ExecResult, Job, JobOutcome, Runner, RunnerHealth } from "./cli.js";
-import { THROTTLE_MS } from "./heartbeat.js";
+import { FileDelivery } from "./file-delivery.js";
+import { THROTTLE_MS, TtlCache } from "./heartbeat.js";
 import type { ThreadLike } from "./heartbeat.js";
 import { AGENT_TICK_MS, createTracker } from "./tracker.js";
 import type { TrackerSdk } from "./tracker.js";
@@ -90,7 +91,7 @@ function harness(options: Options = {}) {
     eventsError: false as boolean | "string",
     eventsGate: null as Promise<void> | null,
     interactionsRows: [] as { turnId: string | null }[],
-    interactionsError: false,
+    interactionsError: false as boolean | "string",
     interactionsGate: null as Promise<void> | null,
     seedFailures: 0,
     envPath: repoDir as string | null,
@@ -101,8 +102,8 @@ function harness(options: Options = {}) {
     getError: false,
     gate: null as Promise<void> | null,
     settingsDelayMs: 0,
-    settingsError: false,
-    threadsListError: false,
+    settingsError: false as boolean | "string",
+    threadsListError: false as boolean | "string",
     listRunningCalls: 0,
     runningIds: null as string[] | null,
     projectGetCalls: 0,
@@ -161,13 +162,15 @@ function harness(options: Options = {}) {
         async list(args) {
           interactionCalls.push({ ...args, signal: args.signal instanceof AbortSignal ? "AbortSignal" : args.signal });
           if (state.interactionsGate !== null) await state.interactionsGate;
-          if (state.interactionsError) throw new Error("interactions down");
+          if (state.interactionsError === true) throw new Error("interactions down");
+          if (state.interactionsError === "string") throw "interactions down";
           return state.interactionsRows.map((row) => ({ ...row }));
         },
       },
       async listRunning() {
         state.listRunningCalls++;
-        if (state.threadsListError) throw new Error("down");
+        if (state.threadsListError === true) throw new Error("down");
+        if (state.threadsListError === "string") throw "down";
         const ids = state.runningIds ?? [...threads.values()].filter((t) => t.status === "active").map((t) => t.id);
         return ids.map((id) => ({ id }));
       },
@@ -208,7 +211,8 @@ function harness(options: Options = {}) {
     sdk,
     settings: {
       get: async () => {
-        if (state.settingsError) throw new Error("settings unavailable");
+        if (state.settingsError === true) throw new Error("settings unavailable");
+        if (state.settingsError === "string") throw "settings unavailable";
         if (state.settingsDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, state.settingsDelayMs));
         return { ...settings };
       },
@@ -434,6 +438,47 @@ describe("agent time", () => {
     expect(h.heartbeats()).toHaveLength(2);
   });
 
+  it("sends nothing from a start whose timer idle cleared during its settings read", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.state.settingsDelayMs = 5;
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    // The start send is parked on its settings read when the thread goes idle.
+    void h.idle("thr_1");
+    await vi.advanceTimersByTimeAsync(20);
+    // Only the idle's closing heartbeat went out; the stale start sent nothing.
+    expect(h.heartbeats()).toHaveLength(1);
+    expect(h.tracker.stateSize().timers).toBe(0);
+  });
+
+  it("sends nothing from a tick whose timer idle cleared during its settings read", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    h.state.settingsDelayMs = 5;
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    // The tick is parked on its settings read when the thread goes idle.
+    expect(h.tracker.stateSize().timers).toBe(1);
+    void h.idle("thr_1");
+    await vi.advanceTimersByTimeAsync(20);
+    expect(h.heartbeats()).toHaveLength(2);
+    expect(h.tracker.stateSize().timers).toBe(0);
+  });
+
+  it("releases nothing when a tick finds tracking off after idle already cleared its timer", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    h.state.settingsDelayMs = 5;
+    h.settings.trackAgentActivity = false;
+    await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
+    expect(h.tracker.stateSize().timers).toBe(1);
+    void h.idle("thr_1");
+    await vi.advanceTimersByTimeAsync(20);
+    // The stale tick must not re-run the stop's untime or mark the thread not timed.
+    expect(h.tracker.stateSize()).toMatchObject({ timers: 0, notTimed: 0 });
+    expect(h.heartbeats()).toHaveLength(1);
+  });
+
   it("leaves no per-thread state after idle, archive, delete or dispose", async () => {
     const h = harness({ threads: [thread("thr_1"), thread("thr_2"), thread("thr_3"), thread("thr_4")] });
     for (const id of ["thr_1", "thr_2", "thr_3", "thr_4"]) h.tracker.onActive(h.threads.get(id)!);
@@ -564,6 +609,15 @@ describe("waiting for a pending interaction", () => {
     h.state.interactionsError = true;
     await vi.advanceTimersByTimeAsync(AGENT_TICK_MS);
     expect(h.log.warn).toHaveBeenCalledTimes(2);
+  });
+
+  it("names a non-Error interactions failure only as error, and still times the thread", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.state.interactionsError = "string";
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    expect(h.heartbeats()).toHaveLength(1);
+    expect(h.log.warn).toHaveBeenCalledWith("could not read pending interactions: error");
   });
 
   it("asks for the thread's pending interactions with an abort signal", async () => {
@@ -707,6 +761,13 @@ describe("settings read failures", () => {
     expect(h.log.warn).toHaveBeenCalledWith("could not finish thread time: Error");
     expect(String(h.log.warn.mock.calls[0]![0])).not.toContain("settings unavailable");
   });
+
+  it("names a non-Error settings failure only as error when a stop cannot read settings", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.state.settingsError = "string";
+    await h.idle("thr_1");
+    expect(h.log.warn).toHaveBeenCalledWith("could not finish thread time: error");
+  });
 });
 
 describe("startup reconciliation", () => {
@@ -733,6 +794,13 @@ describe("startup reconciliation", () => {
     h.state.threadsListError = true;
     await h.tracker.reconcile();
     expect(h.log.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("names a non-Error list failure only as error", async () => {
+    const h = harness();
+    h.state.threadsListError = "string";
+    await h.tracker.reconcile();
+    expect(h.log.warn).toHaveBeenCalledWith("could not list running threads: error");
   });
 });
 
@@ -1124,6 +1192,29 @@ describe("threads that are not timed", () => {
     expect(starting.tracker.stateSize()).toMatchObject({ timers: 0, notTimed: 0 });
   });
 
+  it("remembers nothing for a payload whose thread is gone before its read answers", async () => {
+    const h = harness({ threads: [thread("thr_1")] });
+    h.state.settingsDelayMs = 10;
+    h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+    await vi.advanceTimersByTimeAsync(1);
+    h.settings.trackAgentActivity = false;
+    h.tracker.onGone("thr_1");
+    await vi.advanceTimersByTimeAsync(20);
+    // The read saw tracking off, but the thread is gone, so nothing is remembered.
+    expect(h.tracker.stateSize()).toMatchObject({ confirming: 0, notTimed: 0 });
+  });
+
+  it("remembers nothing for a payload whose read answered after the settings changed", async () => {
+    const h = harness({ threads: [thread("thr_1")], settings: { trackAgentActivity: false } });
+    h.state.settingsDelayMs = 10;
+    h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+    await vi.advanceTimersByTimeAsync(1);
+    h.tracker.onSettingsChanged();
+    await vi.advanceTimersByTimeAsync(20);
+    // The read saw tracking off, but the answer is stale, so nothing is remembered.
+    expect(h.tracker.stateSize()).toMatchObject({ confirming: 0, notTimed: 0 });
+  });
+
   it("marks a running timer's thread as not timed when a tick finds it excluded", async () => {
     const h = harness({ threads: [thread("thr_1")] });
     h.tracker.onActive(h.threads.get("thr_1")!);
@@ -1197,6 +1288,32 @@ describe("failures at the edges", () => {
     await h.tracker.reconcile();
     await settle();
     expect(h.tracker.stateSize().timers).toBe(1);
+  });
+
+  it("releases a timer whose start submit rejects after idle already cleared it", async () => {
+    const park: { resolve: (outcome: JobOutcome) => void; reject: (error: Error) => void }[] = [];
+    const sent: Job[] = [];
+    const runner: Runner = {
+      submit(job) {
+        sent.push(job);
+        return new Promise((resolve, reject) => park.push({ resolve, reject }));
+      },
+      health: () => ({ lastHeartbeatAt: null, lastError: null }),
+      verify: async () => undefined,
+      dispose: () => undefined,
+    };
+    const h = harness({ threads: [thread("thr_1")], runner });
+    h.tracker.onActive(h.threads.get("thr_1")!);
+    await settle();
+    // The idle's final stop queues behind the start's in-flight flush, which fails under it.
+    void h.idle("thr_1");
+    await settle();
+    park[0]!.reject(new Error("spawn lost"));
+    await settle();
+    await settle();
+    // The rejected start send must not resurrect the cleared timer; the stop's own send failed with a warning.
+    expect(h.tracker.stateSize().timers).toBe(0);
+    expect(h.log.warn).toHaveBeenCalledWith("could not finish thread time: Error");
   });
 });
 
@@ -1375,6 +1492,19 @@ describe("file delivery", () => {
       h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
       await drain();
       expect(h.tracker.stateSize().files.buffered).toBe(1);
+    });
+
+    it("stops before counting anything when the thread is dropped during a page's scope check", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      const before = h.heartbeats().length;
+      // Many rows, so the scope checks are still in flight on a later event-loop turn.
+      for (let i = 0; i < 100; i++) edit(h, `f${i}.ts`);
+      setImmediate(() => h.tracker.onGone("thr_1"));
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain();
+      expect(h.tracker.stateSize().files).toMatchObject({ threads: 0, buffered: 0 });
+      expect(h.heartbeats()).toHaveLength(before);
     });
   });
 
@@ -2328,6 +2458,130 @@ describe("file delivery", () => {
       h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
       await drain();
       expect(h.log.warn).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("a flush interrupted mid-chunk", () => {
+    /** A runner that parks each job, answers it after a real turn, and then runs `trigger`. */
+    function parkingRunner(sent: Job[], trigger: () => void): Runner {
+      return {
+        submit(job) {
+          sent.push(job);
+          return new Promise((resolve) => {
+            setImmediate(() => resolve("ok"));
+            setImmediate(trigger);
+          });
+        },
+        health: () => ({ lastHeartbeatAt: null, lastError: null }),
+        verify: async () => undefined,
+        dispose: () => undefined,
+      };
+    }
+
+    /** 200 phantom edits plus one real file, so the second chunk re-checks a real path on disk. */
+    function chunkAndAHalf(h: ReturnType<typeof harness>) {
+      for (let i = 0; i < 200; i++) edit(h, `f${i}.ts`);
+      writeFileSync(path.join(repoDir, "saved.ts"), "x");
+      edit(h, "saved.ts");
+    }
+
+    it("counts the chunk in flight as filtered when the settings reset the state under it", async () => {
+      const sent: Job[] = [];
+      let trigger: () => void = () => undefined;
+      const h = harness({ threads: [thread("thr_1")], runner: parkingRunner(sent, () => trigger()) });
+      await start(h);
+      chunkAndAHalf(h);
+      trigger = () => {
+        h.settings.fileActivity = "off";
+        h.tracker.onSettingsChanged();
+      };
+      await h.idle("thr_1");
+      // The start heartbeat, then the final stop's first chunk; the second chunk never went out.
+      expect(sent).toHaveLength(2);
+      expect(files(sent[1]!)).toHaveLength(200);
+      const status = await h.tracker.status();
+      expect(status.droppedFiles).toMatchObject({ filtered: 1 });
+      expect(status.pendingFiles).toBe(0);
+    });
+
+    it("sends nothing more when the thread is dropped mid-chunk", async () => {
+      const sent: Job[] = [];
+      let trigger: () => void = () => undefined;
+      const h = harness({ threads: [thread("thr_1")], runner: parkingRunner(sent, () => trigger()) });
+      await start(h);
+      chunkAndAHalf(h);
+      trigger = () => h.tracker.onGone("thr_1");
+      await h.idle("thr_1");
+      expect(sent).toHaveLength(2);
+      expect(files(sent[1]!)).toHaveLength(200);
+      expect(h.tracker.stateSize().files).toMatchObject({ threads: 0, buffered: 0 });
+      expect((await h.tracker.status()).pendingFiles).toBe(0);
+    });
+
+    it("sends nothing when the flush cannot read its settings", async () => {
+      const h = harness({ threads: [thread("thr_1")] });
+      edit(h, "a.ts");
+      let open!: () => void;
+      h.state.eventsGate = new Promise<void>((resolve) => (open = resolve));
+      const stopped = h.idle("thr_1");
+      await drainUntil(async () => desc(h).length === 1);
+      // The stop's pull is parked inside its seeded read; fail every settings read from here on.
+      h.state.settingsError = true;
+      h.state.eventsGate = null;
+      open();
+      await stopped;
+      expect(h.jobs).toHaveLength(0);
+      expect(h.tracker.stateSize().files.threads).toBe(1);
+      expect(h.log.warn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("the delivery on its own", () => {
+    it("puts a chunk back and sends nothing when the build holds it back", async () => {
+      const jobs: Job[] = [];
+      const row: EventRow = {
+        seq: 1,
+        createdAt: T0 + 1,
+        data: {
+          item: {
+            type: "fileChange",
+            status: "completed",
+            changes: [{ kind: "update", path: path.join(repoDir, "a.ts"), diff: DIFF }],
+          },
+        },
+      };
+      const delivery = new FileDelivery({
+        sdk: {
+          threads: {
+            events: {
+              list: async () => [row],
+            },
+          },
+          environments: {
+            get: async () => ({ branchName: "feat/x", path: repoDir }),
+            status: async () => ({ outcome: "unavailable" }),
+          },
+        },
+        settings: { get: async () => defaultSettings() },
+        runner: {
+          submit: async (job) => {
+            jobs.push(job);
+            return "ok" as JobOutcome;
+          },
+          health: () => ({ lastHeartbeatAt: null, lastError: null }),
+          verify: async () => undefined,
+          dispose: () => undefined,
+        },
+        log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+        environments: new TtlCache(60_000),
+      });
+      delivery.attach("t1", PROJECT, "env_1");
+      await delivery.pull("t1");
+      expect(delivery.size()).toMatchObject({ threads: 1, buffered: 1 });
+      await delivery.deliver({ id: "t1", project: PROJECT, environmentId: "env_1", final: false, build: () => null });
+      expect(jobs).toHaveLength(0);
+      expect(delivery.size()).toMatchObject({ threads: 1, buffered: 1 });
+      expect(delivery.stats().pendingFiles).toBe(1);
     });
   });
 });

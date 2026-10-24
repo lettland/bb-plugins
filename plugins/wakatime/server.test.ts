@@ -18,6 +18,7 @@ let host: FakePluginHost;
 let execCalls: { file: string; args: string[]; stdin: string | null }[];
 let eventRows: { seq: number; createdAt: number; data: unknown }[];
 let pendingInteractions: { turnId: string | null }[] = [];
+let projectListCalls = 0;
 let repoDir: string;
 let thread: ReturnType<typeof makeThreadResponse>;
 
@@ -55,7 +56,10 @@ async function start(settings: Record<string, string | boolean> = {}) {
           if (projectId !== PROJECT.id) throw new Error("not found");
           return PROJECT;
         },
-        list: async () => [PROJECT],
+        list: async () => {
+          projectListCalls++;
+          return [PROJECT];
+        },
       },
       system: {
         version: async () => {
@@ -81,6 +85,7 @@ beforeEach(() => {
   execCalls = [];
   eventRows = [];
   pendingInteractions = [];
+  projectListCalls = 0;
   repoDir = mkdtempSync(path.join(os.tmpdir(), "waka-repo-"));
   version = async () => ({ currentVersion: "9.8.7" });
   thread = makeThreadResponse({ id: "thr_1", projectId: PROJECT.id, title: "Fix login", status: "idle", environmentId: "env_1" });
@@ -405,5 +410,13 @@ describe("wakatime plugin", () => {
     expect(lines).toContain("excludeProjects entry #1 matches no project");
     expect(lines).toContain("excludeProjects entry #2 matches no project");
     expect(lines.join("\n")).not.toContain("ghost");
+  });
+
+  it("does not re-check excludeProjects when another setting changes", async () => {
+    await start({ excludeProjects: "ghost" });
+    expect(projectListCalls).toBe(1);
+    await host.harness.setSettings({ userCategory: "debugging" });
+    await flush();
+    expect(projectListCalls).toBe(1);
   });
 });

@@ -90,6 +90,13 @@ describe("buildArgv", () => {
     expect(argv.some((arg) => arg.startsWith("--alternate-branch"))).toBe(false);
     expect(argv).toContain("--entity=bb");
   });
+
+  it("falls back to bb when a value cleans away to nothing", () => {
+    const argv = buildArgv({ entity: "\u0007", category: "", timeMs: 1000 }, "\u0007");
+    expect(argv).toContain(`--entity=${APP_ENTITY}`);
+    expect(argv).toContain("--category=coding");
+    expect(argv).toContain(`--plugin=${APP_ENTITY}`);
+  });
 });
 
 describe("entityFor", () => {
@@ -271,6 +278,7 @@ describe("envInfoOf", () => {
     getFailures?: number;
     statusError?: boolean;
     branchName?: string | null;
+    currentBranch?: string | null;
   }) {
     let failures = overrides.getFailures ?? 0;
     const calls = { get: 0, status: 0 };
@@ -286,7 +294,7 @@ describe("envInfoOf", () => {
       async status() {
         calls.status++;
         if (overrides.statusError) throw new Error("git down");
-        return { outcome: "available", workspace: { branch: { currentBranch: "main" } } };
+        return { outcome: "available", workspace: { branch: { currentBranch: overrides.currentBranch ?? null } } };
       },
     };
     return { api, calls };
@@ -307,6 +315,13 @@ describe("envInfoOf", () => {
     expect(await envInfoOf(api, cache, "env_1")).toBeNull();
     expect(cache.size).toBe(0);
     expect(await envInfoOf(api, cache, "env_1")).toEqual({ branch: "feat/x", path: "/work/proj" });
+    expect(cache.size).toBe(1);
+  });
+
+  it("caches a null branch when the host has no checked-out branch to report", async () => {
+    const cache = new TtlCache<EnvInfo>(60_000);
+    const { api } = environments({ branchName: null, currentBranch: null });
+    expect(await envInfoOf(api, cache, "env_1")).toEqual({ branch: null, path: "/work/proj" });
     expect(cache.size).toBe(1);
   });
 });

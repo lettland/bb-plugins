@@ -145,6 +145,7 @@ export class FileDelivery {
     const run = (): Promise<void> => {
       state.waiting = null;
       const done: Promise<void> = this.pullOnce(state).finally(() => {
+        /* v8 ignore next -- @preserve defensive: run() reassigns running only after this finally has cleared it, so the check never fails. */
         if (state.running === done) state.running = null;
       });
       state.running = done;
@@ -240,6 +241,7 @@ export class FileDelivery {
 
   private async readPages(state: ThreadFiles, mode: FileMode): Promise<void> {
     for (;;) {
+      /* v8 ignore next -- @preserve unreachable: the seed always sets a position, and the same check after every read returns first. */
       if (state.lastSeq === null) return;
       const rows = await this.sdk.threads.events.list({
         threadId: state.id,

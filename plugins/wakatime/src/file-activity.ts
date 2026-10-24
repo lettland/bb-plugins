@@ -114,6 +114,7 @@ async function realpathDeepest(target: string): Promise<string> {
       return path.join(await realpath(current), ...tail.reverse());
     } catch {
       const parent = path.dirname(current);
+      /* v8 ignore next -- @preserve unreachable: the walk starts under a verified real root, so realpath succeeds before the filesystem root is reached. */
       if (parent === current) return target;
       tail.push(path.basename(current));
       current = parent;

@@ -10,6 +10,7 @@ export default defineConfig({
       provider: "v8",
       include: ["server.ts", "app.tsx", "src/**"],
       reporter: ["text-summary", "lcov"],
+      thresholds: { statements: 100, branches: 100, functions: 100, lines: 100 },
       exclude: ["node_modules/**", "dist/**", "**/*.test.{ts,tsx}", "vitest.config.ts", "vitest.setup.ts"],
     },
   },

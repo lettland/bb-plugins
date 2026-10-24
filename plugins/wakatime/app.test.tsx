@@ -155,6 +155,47 @@ describe("StatusPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(screen.getByText("/opt/wakatime-cli")).toBeTruthy());
   });
+
+  it("shows a failure that is not an Error as its string form", async () => {
+    render(() => {
+      throw "wakatime is down";
+    });
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("Could not load status: wakatime is down");
+  });
+
+  it("discards a status answer that a newer load already superseded", async () => {
+    const answers: ((status: WakatimeStatus) => void)[] = [];
+    render(() => new Promise<WakatimeStatus>((resolve) => answers.push(resolve)));
+    expect(screen.getByText("Loading status…")).toBeTruthy();
+    window.dispatchEvent(new Event("focus"));
+    answers[1]!({ ...BASE, cliPath: "/opt/new-cli" });
+    expect(await screen.findByText("/opt/new-cli")).toBeTruthy();
+    // The first load's late answer must not overwrite the newer one.
+    answers[0]!({ ...BASE, cliPath: "/opt/stale-cli" });
+    await act(async () => {});
+    expect(screen.queryByText("/opt/stale-cli")).toBeNull();
+    expect(screen.getByText("/opt/new-cli")).toBeTruthy();
+  });
+
+  it("discards a failed load that a newer one already superseded", async () => {
+    const pending: { resolve: (status: WakatimeStatus) => void; reject: (error: unknown) => void }[] = [];
+    render(
+      () =>
+        new Promise<WakatimeStatus>((resolve, reject) => {
+          pending.push({ resolve, reject });
+        }),
+    );
+    expect(screen.getByText("Loading status…")).toBeTruthy();
+    window.dispatchEvent(new Event("focus"));
+    pending[1]!.resolve({ ...BASE, cliPath: "/opt/new-cli" });
+    expect(await screen.findByText("/opt/new-cli")).toBeTruthy();
+    // The first load's late failure must not put the panel into the error state.
+    pending[0]!.reject(new Error("stale failure"));
+    await act(async () => {});
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByText("/opt/new-cli")).toBeTruthy();
+  });
 });
 
 describe("ActivityOverlay", () => {
