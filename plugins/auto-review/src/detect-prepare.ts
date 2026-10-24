@@ -120,8 +120,17 @@ function scanHeredoc(text: string, at: number, scan: Scan, prepared: Prepared): 
   if (found === null) {
     return null;
   }
-  // v8 ignore next -- @preserve the tag alternative that matched always fills one of the three tag groups.
-  scan.pending.push({ dash: found[1] === "-", tag: found[2] ?? found[3] ?? found[4] ?? "", index: prepared.bodies.length });
+  scan.pending.push({
+    dash: found[1] === "-",
+    tag:
+      found[2] ??
+      found[3] ??
+      found[4] ??
+      // v8 ignore start -- @preserve HEREDOC_TAG (detect-prepare.ts:7) requires one of three alternatives, and each captures one or more characters into group 2, 3, or 4, so the final fallback never runs.
+      "",
+    // v8 ignore stop
+    index: prepared.bodies.length,
+  });
   prepared.bodies.push(null);
   scan.blank = true;
   return { keep: ` \u0001${prepared.bodies.length - 1}\u0001 `, width: found[0].length };
