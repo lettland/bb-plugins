@@ -82,6 +82,10 @@ export async function ownerProcessExists(owner) {
   let startedAt;
   try {
     startedAt = await processStartedAt(identity);
+  // Unreachable: processStartedAt guards its only fallible call (the
+  // /proc/uptime read at process-identity.mjs:58) and returns null instead,
+  // and Date.parse and Number never throw on the string identities above.
+  /* node:coverage ignore next 3 */
   } catch {
     return true;
   }

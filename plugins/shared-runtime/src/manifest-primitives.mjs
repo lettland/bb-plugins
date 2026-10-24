@@ -63,7 +63,11 @@ export function assertAbsoluteContainerPath(value, label) {
     deny(`${label} must be an absolute container path`);
   }
   const normalized = path.posix.normalize(value);
+  // Unreachable deny body: posix.normalize (line 65 above) collapses every
+  // ".." segment of an absolute path, so normalized can never contain a
+  // parent segment and the deny below never runs.
   if (normalized.includes("/../") || normalized.endsWith("/..")) {
+    /* node:coverage ignore next 1 */
     deny(`${label} escapes its root`);
   }
   return normalized === "/" ? "/" : normalized.replace(/\/+$/, "");

@@ -41,7 +41,14 @@ function lockWaitMessage(label, owner) {
   const environmentId =
     typeof owner?.environmentId === "string" && owner.environmentId !== ""
       ? owner.environmentId
-      : `pid ${owner?.pid ?? "unknown"}`;
+      // Filesystem leases reach this line without an environmentId
+      // (project-lock.mjs:38 keeps only leases whose ownerProcessExists
+      // passed), but never without a pid: liveness requires an integer pid
+      // (process-identity.mjs:72), so the fallback below cannot run.
+      : `pid ${
+          owner?.pid ??
+          /* node:coverage ignore next */ "unknown"
+        }`;
   const operation =
     typeof owner?.operation === "string" && owner.operation !== ""
       ? owner.operation
@@ -101,12 +108,19 @@ function drainMemoryLock(lockAdapter, key, state) {
     reader.grant();
   }
   if (
+    // Unreachable body: this point is only reached with an empty writer and
+    // a non-empty queue (the early return above), so after the loop either
+    // the queue is still non-empty or every drained request became a reader,
+    // never an empty, reader-free, queue-free lock.
+    /* node:coverage disable */
     state.writer === null &&
     state.readers.size === 0 &&
     state.queue.length === 0 &&
     lockAdapter.get(key) === state
   ) {
+    /* node:coverage disable */
     lockAdapter.delete(key);
+    /* node:coverage enable */
   }
 }
 
@@ -146,8 +160,14 @@ export async function waitForMemoryLock(key, lockAdapter, options) {
       owner,
     };
     const abort = () => {
+      // Unreachable body: grant() (lock-state.mjs:134) removes the abort
+      // listener before setting granted, and the pre-aborted check (lock-state
+      // line 186) runs before the request is queued, so granted is always
+      // false here and the return below never runs.
       if (granted) {
+        /* node:coverage disable */
         return;
+        /* node:coverage enable */
       }
       const index = state.queue.indexOf(request);
       if (index !== -1) {

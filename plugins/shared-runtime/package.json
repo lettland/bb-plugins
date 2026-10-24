@@ -17,8 +17,8 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test \"test/**/*.test.mjs\"",
-    "test:coverage": "mkdir -p coverage && node --test --experimental-test-coverage --test-coverage-include=\"src/**\" --test-coverage-include=\"bin/**\" --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \"test/**/*.test.mjs\"",
+    "test": "node --experimental-test-module-mocks --test \"test/**/*.test.mjs\"",
+    "test:coverage": "mkdir -p coverage && node --test --experimental-test-module-mocks --experimental-test-coverage --test-coverage-include=\"src/**\" --test-coverage-include=\"bin/**\" --test-coverage-include=\"server.ts\" --test-coverage-include=\"assets/**\" --test-coverage-lines=99.71 --test-coverage-branches=99.03 --test-coverage-functions=98.88 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info --test-concurrency=1 \"test/**/*.test.mjs\"",
     "build": "bb plugin build"
   },
   "engines": {

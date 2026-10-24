@@ -38,7 +38,10 @@ async function main() {
 }
 
 main().catch((error) => {
-  const message = error instanceof CliError ? error.message : error?.stack ?? String(error);
+  const message =
+    error instanceof CliError
+      ? error.message
+      : error?.stack ?? String(error);
   process.stderr.write(`${message}\n`);
   process.exit(error instanceof CliError ? error.exitCode : 1);
 });

@@ -117,7 +117,10 @@ async function acquireFilesystemLock(key, options) {
           if (writers[0]?.id === owner.id && readers.length === 0) {
             return async () => releaseFilesystemLease(lockPath, leasePath);
           }
-          waitOwner = writers[0]?.id === owner.id ? readers[0] : writers[0];
+          waitOwner =
+            writers[0]?.id === owner.id
+              ? readers[0]
+              : writers[0];
         }
       } catch (error) {
         if (error?.code !== "ENOENT") {

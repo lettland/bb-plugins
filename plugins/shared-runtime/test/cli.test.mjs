@@ -36,6 +36,7 @@ if (key === "project list") {
 } else if (key === "plugin list") {
   process.stdout.write(JSON.stringify(state.wrapPlugins ? { plugins: state.plugins } : state.plugins));
 } else if (key === "plugin install") {
+  state.plugins = state.plugins ?? [];
   state.plugins.push({ id: "shared-runtime", source: args[args.length - 1] });
 } else if (key === "plugin remove") {
   state.plugins = state.plugins.filter((plugin) => plugin.id !== args[2]);
@@ -757,4 +758,106 @@ test("doctor verifies registration, manifest, and container mounts", async (t) =
       message: `manifest: Shared runtime manifest invalid: ${manifestPath} is not valid JSON`,
     },
   ]);
+});
+
+test("doctor reports unresolved mount sources and a vanished worktree root", async (t) => {
+  const fixture = await createFixture(t);
+  assert.equal((await fixture.run(["install", "--no-reload"])).code, 0);
+  await rm(fixture.worktreeRoot, { recursive: true, force: true });
+  await fixture.setMounts({
+    pform_dev_tracigo_go: [{ Destination: "/bb-worktrees", Source: "/gone/worktrees" }],
+    pform_dev_sveltekit: [{ Destination: "/bb-worktrees", Source: "/gone/worktrees" }],
+    pform_dev_zts: [{ Destination: "/bb-worktrees", Source: "/gone/worktrees" }],
+  });
+  const result = await fixture.run(["doctor", "--json"]);
+  assert.equal(result.code, 1);
+  const { findings } = JSON.parse(result.stdout);
+  assert.equal(findings[3].level, "warn");
+  assert.equal(findings[3].message, "isolation launcher not built yet (built on first quality operation)");
+  assert.deepEqual(
+    { level: findings[4].level, message: findings[4].message },
+    {
+      level: "warn",
+      message: "container go: /bb-worktrees is mounted from /gone/worktrees",
+    },
+  );
+});
+
+test("install derives the worktree root from the home directory without BB_WORKTREES_ROOT", async (t) => {
+  const fixture = await createFixture(t);
+  const result = await fixture.run(["install", "--no-reload"], {
+    env: { BB_WORKTREES_ROOT: undefined },
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(
+    (await fixture.readPolicy()).worktreeRoot,
+    path.join(fixture.home, ".bb", "worktrees"),
+  );
+});
+
+test("a wrapped plugin listing without a plugins array finds no installed plugin", async (t) => {
+  const fixture = await createFixture(t);
+  const state = await fixture.bbState();
+  await writeFile(
+    path.join(fixture.fixtureRoot, "bb-state.json"),
+    JSON.stringify({ ...state, wrapPlugins: true, plugins: undefined }),
+  );
+  const result = await fixture.run(["install", "--no-reload"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /plugin installed\./);
+  const calls = await fixture.bbCalls();
+  assert.deepEqual(
+    calls.map(({ args }) => args.join(" ")).at(-1),
+    `plugin install --yes ${pluginRoot}`,
+  );
+});
+
+test("list and doctor honour --runtime-root and render compose-less policies", async (t) => {
+  const fixture = await createFixture(t);
+  const customRoot = path.join(fixture.fixtureRoot, "custom-runtime");
+  const installed = await fixture.run(["install", "--runtime-root", customRoot, "--no-reload"]);
+  assert.equal(installed.code, 0, installed.stderr);
+  const policy = await fixture.readPolicy("proj_platform", customRoot);
+  delete policy.composeProject;
+  const noComposePath = path.join(customRoot, "projects", "proj_plain.json");
+  await writeFile(
+    noComposePath,
+    JSON.stringify({ ...policy, projectId: "proj_plain" }),
+    { mode: 0o600 },
+  );
+
+  const list = await fixture.run(["list", "--runtime-root", customRoot]);
+  assert.equal(list.code, 0, list.stderr);
+  assert.match(list.stdout, /^proj_platform  .*  compose=pform_dev  ok$/m);
+  assert.match(list.stdout, /^proj_plain  .*  compose=-  ok$/m);
+
+  const validated = await fixture.run(["validate", "--json"]);
+  assert.equal(validated.code, 0, validated.stderr);
+  const validatedDocument = JSON.parse(validated.stdout);
+  assert.equal(validatedDocument.containers.join(", "), "go, sveltekit, symfony");
+
+  await fixture.setMounts({
+    pform_dev_tracigo_go: [{ Destination: "/bb-worktrees" }],
+    pform_dev_sveltekit: [{ Destination: "/bb-worktrees" }],
+    pform_dev_zts: [{ Destination: "/bb-worktrees" }],
+  });
+  const doctor = await fixture.run(["doctor", "--runtime-root", customRoot, "--json"]);
+  assert.equal(doctor.code, 1);
+  const { findings } = JSON.parse(doctor.stdout);
+  const registration = findings.find((finding) => /registration proj_platform /.test(finding.message));
+  assert.equal(registration.level, "ok");
+  const goMount = findings.find((finding) => /container go: \/bb-worktrees is mounted from /.test(finding.message));
+  assert.equal(goMount.level, "warn");
+  assert.equal(goMount.message, "container go: /bb-worktrees is mounted from ");
+
+  const removed = await fixture.run([
+    "uninstall",
+    "--runtime-root",
+    customRoot,
+    "--project-id",
+    "proj_platform",
+    "--no-reload",
+  ]);
+  assert.equal(removed.code, 0, removed.stderr);
+  assert.match(removed.stdout, /Removed registration proj_platform\./);
 });

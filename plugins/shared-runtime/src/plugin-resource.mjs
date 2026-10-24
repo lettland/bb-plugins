@@ -52,8 +52,13 @@ async function resolvedRoots(options) {
 function rootAcceptsTarget(root, target) {
   if (!isInside(root.path, target)) return false;
   if (!root.skillSegmentRequired) return true;
+  // Unreachable lines: every root this module constructs (defaultRoots at
+  // plugin-resource.mjs:21 and resolvedRoots at :35) sets
+  // skillSegmentRequired to false, so the guard above always returns first.
+  /* node:coverage disable */
   const segments = path.relative(root.path, target).split(path.sep);
   return segments.includes("skills");
+  /* node:coverage enable */
 }
 
 async function findSkillRoot(target, allowedRoot) {

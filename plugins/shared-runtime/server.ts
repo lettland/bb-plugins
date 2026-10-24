@@ -33,7 +33,9 @@ type AgentTool = Parameters<BbPluginApi["agents"]["registerTool"]>[0];
 function registerRuntimeTool(bb: BbPluginApi, tool: AgentTool): void {
   bb.agents.registerTool(tool);
   const alias = RUNTIME_TOOL_ALIASES[tool.name as keyof typeof RUNTIME_TOOL_ALIASES];
-  if (alias) bb.agents.registerTool({ ...tool, name: alias });
+  if (alias) {
+    bb.agents.registerTool({ ...tool, name: alias });
+  }
 }
 
 type Presentation = NonNullable<AgentTool["presentation"]>;
@@ -194,7 +196,15 @@ export default async function plugin(bb: BbPluginApi) {
   registerRuntimeTool(bb, buildRuntimeGitTool({ workspaceFor }));
   registerRuntimeTool(
     bb,
-    buildRuntimeOpsTool({ policyFor: (id: string) => registry.policyFor(id), workspaceFor }),
+    buildRuntimeOpsTool({
+      workspaceFor,
+      // Unreachable arrow: the ops tool deliberately ignores this callback
+      // (runtime-tool.mjs:272 voids it), so the arrow body never runs; it
+      // only satisfies the factory's shape. Reported as an uncovered
+      // function: node:coverage cannot hide an isolated expression inside
+      // an object literal (its disable leaks to end-of-file).
+      policyFor: (id: string) => registry.policyFor(id),
+    }),
   );
 
   bb.agents.configure((context) => {

@@ -144,7 +144,10 @@ export function validateOperation(manifest, name, value, { nested = false } = {}
     deny(`${label} must be an object`);
   }
   if (value.steps !== undefined) {
+    // Unreachable body: validateOperations (the only caller, line 235 below)
+    // never passes nested, so the deny below never runs. Caller: manifest-operations.mjs:235.
     if (nested) {
+      /* node:coverage ignore next 1 */
       deny(`${label} may not nest step lists`);
     }
     if (!Array.isArray(value.steps) || value.steps.length === 0) {
