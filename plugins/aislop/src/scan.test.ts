@@ -125,6 +125,19 @@ describe("resolveBase", () => {
       expect(await resolveBase(exec, { directory: "/nowhere", scope, base: null, rootBranch: null })).toBeNull();
     }
   });
+
+  it("refuses a HEAD with no common ancestor with the base", async () => {
+    const { dir } = makeRepo();
+    // A parentless commit on a second root; merge-base has nothing to offer.
+    write(dir, "z.ts", "export const z = 1;\n");
+    sh(dir, "add", ".");
+    const tree = sh(dir, "write-tree");
+    const orphan = sh(dir, "commit-tree", tree, "-m", "orphan");
+    sh(dir, "update-ref", "refs/heads/orphan", orphan);
+    sh(dir, "symbolic-ref", "HEAD", "refs/heads/orphan");
+    const result = await scan(input({ directory: dir, base: "main" }), fakeNpx({ exitCode: 0, stdout: "", stderr: "" }).run);
+    expect(result).toEqual({ exitCode: 2, stdout: "", stderr: "HEAD has no common ancestor with main.\n", base: null });
+  });
 });
 
 describe("aislopArgs", () => {
@@ -187,6 +200,13 @@ describe("scan", () => {
     expect(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr)).toBeLessThan(1024 * 1024);
     expect(result.stdout).toContain("output truncated");
     expect(result.stderr).toContain("output truncated");
+  });
+
+  it("lets non-Scan errors from git bubble out", async () => {
+    const boom: Exec = async () => {
+      throw new Error("git exploded");
+    };
+    await expect(scan(input({ base: "main" }), boom)).rejects.toThrow("git exploded");
   });
 });
 

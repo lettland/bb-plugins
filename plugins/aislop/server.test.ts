@@ -113,6 +113,16 @@ describe("bb aislop scan", () => {
     });
   });
 
+  it("names the staged and changes scopes in the header", async () => {
+    const { harness } = await setup({
+      hostResult: { exitCode: 0, stdout: "", stderr: "", base: { ref: "HEAD", sha: SHA } },
+    });
+    const staged = await harness.runCli(["scan", "--scope", "staged"], { threadId: "thr-1" });
+    expect(staged.stderr).toBe("aislop: scanning staged changes in /work/repo\n");
+    const changes = await harness.runCli(["scan", "--scope", "changes"], { threadId: "thr-1" });
+    expect(changes.stderr).toBe("aislop: scanning uncommitted changes against HEAD in /work/repo\n");
+  });
+
   it("leaves off the header when the host could not resolve a base", async () => {
     const { harness } = await setup({
       hostResult: { exitCode: 2, stdout: "", stderr: "Unknown ref: nope\n", base: null },
