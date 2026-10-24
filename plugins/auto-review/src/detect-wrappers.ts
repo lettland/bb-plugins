@@ -86,7 +86,6 @@ function wrapped(name: string, args: readonly Word[]): readonly Word[] | null {
   if (found.subs.length === 0) {
     return args.slice(at + found.operands);
   }
-  // v8 ignore next -- @preserve the suite reads the subcommand with options ending at and past it; v8 attributes the block jointly.
   return found.subs.includes(args[at]?.text ?? "") ? args.slice(skipOptions(args, found.values, at + 1, false)) : null;
 }
 

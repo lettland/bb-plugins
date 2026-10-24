@@ -143,6 +143,7 @@ describe("ghReads and bbReads", () => {
     expect(bbReads({ args: [word("status")] } as never)).toBe(true);
     expect(bbReads({ args: [word("thread"), word("show"), word("thr")] } as never)).toBe(true);
     expect(bbReads({ args: [] } as never)).toBe(false);
+    expect(bbReads({ args: [word("thread")] } as never)).toBe(false);
     expect(bbReads({ args: [word("auto-review"), word("reset")] } as never)).toBe(false);
   });
 });

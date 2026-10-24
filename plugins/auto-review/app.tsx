@@ -394,11 +394,19 @@ function ReviewBadge(props: PluginThreadHeaderActionProps) {
       // its right edge follows the badge so it opens beside it in split
       // layouts, clamped so a badge in a narrow left pane does not push it off-screen.
       const rect = buttonRef.current?.getBoundingClientRect();
-      /* v8 ignore start -- @preserve toggle runs from the badge button's own click handler, so buttonRef.current is always set and getBoundingClientRect always returns a rect. */
-      const fromBadge = window.innerWidth - (rect?.right ?? window.innerWidth - POPOVER_MARGIN);
+      const fromBadge =
+        window.innerWidth -
+        (rect?.right ??
+          // v8 ignore start -- @preserve toggle runs only from the badge button's own onClick (line 428), so buttonRef.current is set and rect is defined.
+          window.innerWidth - POPOVER_MARGIN
+          // v8 ignore stop
+        );
       setPopoverAnchor({
-        top: rect?.bottom ?? 0,
-        /* v8 ignore stop */
+        top:
+          rect?.bottom ??
+          // v8 ignore start -- @preserve toggle runs only from the badge button's own onClick (line 428), so buttonRef.current is set and rect is defined.
+          0,
+        // v8 ignore stop
         right: Math.max(
           POPOVER_MARGIN,
           Math.min(fromBadge, window.innerWidth - POPOVER_WIDTH - POPOVER_MARGIN),

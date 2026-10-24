@@ -128,7 +128,6 @@ function endWord(lexing: Lexing): void {
   if (wanted === "target") {
     lexing.redirects.push(done);
   } else if (wanted === "skip") {
-    // v8 ignore next -- @preserve the suite pushes input words here (e.g. `sort < lib/c.ts`); v8 attributes the block jointly.
     lexing.inputs.push(done);
   } else if (wanted === null && marker !== null) {
     const body = lexing.bodies[Number(marker[1])];
@@ -171,13 +170,12 @@ function openSubstitution(lexing: Lexing): void {
 /** The `)` that closes a substitution: the outer command carries on with `$()` as the word. */
 function closeSubstitution(lexing: Lexing): void {
   endCommand(lexing);
-  // v8 ignore next -- @preserve the caller only closes a substitution whose record is open, so the pop never misses.
   const open = lexing.subs.pop();
-  // v8 ignore start -- @preserve the caller only closes a substitution whose record is open, so the undefined side cannot run.
+  // v8 ignore else -- @preserve the caller only closes a substitution whose record is open (both callers, detect-mentions.ts:191 and :263, run only while lexing.subs is not empty), so the pop never misses.
   if (open !== undefined) {
+    // v8 ignore next -- @preserve openSubstitution (detect-mentions.ts:184) is called only when lexing.word ends with "$", so the saved open.outer.word is a string and the `?? ""` fallback cannot run.
     Object.assign(lexing, open.outer, { word: `${open.outer.word ?? ""}()` });
   }
-  // v8 ignore stop
 }
 
 function lexParenthesis(lexing: Lexing, piece: string): void {
@@ -281,7 +279,7 @@ export const lexCommands = (text: string, limit: number): Command[] => lexText(t
 export function commandStart(words: readonly Word[], wrappers = true): number {
   let at = 0;
   while (at < words.length) {
-    // v8 ignore next -- @preserve the suite runs this with wrappers on and off and with wrapping and plain words; v8 attributes the block jointly.
+    // v8 ignore next -- @preserve the loop condition at detect-mentions.ts:281 (at < words.length) proves words[at] is present.
     const text = words[at]?.text ?? "";
     if (!ENV_ASSIGNMENT.test(text) && !KEYWORDS.has(text) && !(wrappers && PLAIN_WRAPPERS.has(text))) {
       break;
@@ -310,7 +308,7 @@ export function gitCommand(args: readonly Word[]): { sub: string; rest: Word[]; 
   let at = 0;
   let relocated = false;
   while ((args[at]?.text ?? "").startsWith("-")) {
-    // v8 ignore next -- @preserve the suite reads relocating and plain options, and options past the end; v8 attributes the block jointly.
+    // v8 ignore next -- @preserve the loop condition at detect-mentions.ts:310 is true only when args[at] holds text starting with "-", so args[at] is present.
     const option = args[at]?.text ?? "";
     relocated ||= GIT_RELOCATING.test(option);
     at += GIT_VALUE_OPTIONS.has(option) ? 2 : 1;

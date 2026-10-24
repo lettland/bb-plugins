@@ -190,11 +190,9 @@ function repoPath(token: string, base: string | null, root: string): string | nu
   }
   const segments = segmentsOf(token.startsWith("/") ? token : `${base}/${token}`);
   const rootSegments = segmentsOf(root);
-  // v8 ignore start -- @preserve the suite runs the segment comparison with matches and mismatches; v8 attributes the callback block jointly.
   if (!rootSegments.every((segment, at) => segments[at] === segment)) {
     return null;
   }
-  // v8 ignore stop
   const rest = segments.slice(rootSegments.length).join("/");
   return rest === "" ? null : rest;
 }

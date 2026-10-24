@@ -138,7 +138,6 @@ export function awkReadsOnly(args: readonly Word[]): boolean {
     if (AWK_VALUE_OPTIONS.has(text)) {
       at += 1;
     } else if (!text.startsWith("-")) {
-      // v8 ignore next -- @preserve the suite runs this callback with writers present and absent; v8 attributes its block jointly.
       return !AWK_WRITERS.some((writer) => text.includes(writer));
     }
   }
@@ -278,6 +277,5 @@ export function ghReads({ args }: Parsed): boolean {
 export function bbReads({ args }: Parsed): boolean {
   const [topic, action] = positional(args);
   const reads = BB_READS[topic ?? ""];
-  // v8 ignore next -- @preserve the suite runs every operand here; v8 attributes this block jointly.
   return BB_TOP_LEVEL.has(topic ?? "") || (reads !== undefined && reads.has(action ?? ""));
 }

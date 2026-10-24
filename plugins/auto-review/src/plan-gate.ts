@@ -302,12 +302,10 @@ async function holdOrReleasePlan(
   config: EffectiveConfig,
 ): Promise<void> {
   const { bb } = ctx;
-  // v8 ignore next -- @preserve the suite reads the queued id present and absent; v8 attributes the block jointly.
+  // v8 ignore next -- @preserve the only caller (gatePlan, plan-gate.ts:74) runs this when planGateAction returned "hold", which requires state.planReviewEntryId to be defined (plan.ts:380), so the null side cannot run.
   const entryId = state.planReviewEntryId ?? null;
-  // v8 ignore start -- @preserve the suite reads the queued row both present and gone; v8 attributes this block jointly.
   const queued =
     entryId !== null && (await queuedRowExists(ctx, thread.id, entryId));
-  // v8 ignore stop
   const expired = planHoldExpired(state, Date.now());
   if (queued && !expired) {
     // The review is still queued behind this approval; denying lets it in.
@@ -387,13 +385,11 @@ async function denyPlan(
       resolution: { decision: "deny" },
     });
   } catch (error) {
-    // v8 ignore start -- @preserve the suite resolves with an Error and with a bare string; v8 attributes the block jointly.
     bb.log.warn(
       `auto-review: could not hold the plan for review in ${thread.id}; leaving it for the user: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
-    // v8 ignore stop
     if (queuedMessageId !== null) {
       await withdrawQueuedReview(ctx, thread.id, queuedMessageId);
     }
@@ -407,7 +403,6 @@ async function denyPlan(
     } catch (error) {
       bb.log.warn(
         `auto-review: could not arm the plan-hold answer cursor in ${thread.id}; a hold question will not be auto-answered: ${
-          // v8 ignore next -- @preserve the suite arms with an Error and with a bare string; v8 attributes the block jointly.
           error instanceof Error ? error.message : String(error)
         }`,
       );
