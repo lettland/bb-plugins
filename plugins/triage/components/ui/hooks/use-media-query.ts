@@ -10,7 +10,7 @@ type MediaQueryRef = {
 const mediaQueryCache = new Map<string, MediaQueryRef>();
 
 function createMediaQueryRef(query: string): MediaQueryRef | null {
-  /* v8 ignore next -- @preserve createMediaQueryRef only runs from client subscriptions, where window always exists. */
+  // v8 ignore if -- @preserve createMediaQueryRef only runs from client subscriptions (use-media-query.ts:51 the subscribe path), where window always exists.
   if (typeof window === "undefined") return null;
 
   let ref = mediaQueryCache.get(query);
@@ -47,12 +47,15 @@ function subscribeMediaQuery(
   query: string,
   notify: () => void,
 ): () => void {
-  /* v8 ignore next -- @preserve subscribe never runs during server rendering, so the no-ref fallback is unreachable. */
-  return createMediaQueryRef(query)?.subscribe(notify) ?? (() => {});
+  return (
+    // v8 ignore start -- @preserve subscribe never runs during server rendering (use-media-query.ts:52 createMediaQueryRef(query)?.subscribe(notify), called only from useMediaQuery's useSyncExternalStore at use-media-query.ts:64), so the no-ref fallback is unreachable; the whole chain shares one v8 block, so the pair must cover it (ternary-style exception).
+    createMediaQueryRef(query)?.subscribe(notify) ?? (() => {})
+    // v8 ignore stop
+  );
 }
 
 function getMediaQuerySnapshot(query: string): boolean {
-  /* v8 ignore next -- @preserve the client snapshot only runs in the browser, where window always exists. */
+  // v8 ignore if -- @preserve the client snapshot only runs in the browser via useSyncExternalStore (use-media-query.ts:64), where window always exists.
   if (typeof window === "undefined") return false;
 
   return (

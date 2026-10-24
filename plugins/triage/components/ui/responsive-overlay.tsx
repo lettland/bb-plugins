@@ -32,7 +32,7 @@ type DrawerContentPointerDownOutsideEvent = Parameters<
 >[0];
 
 function resetDrawerKeyboardStyles(drawerElement: HTMLElement | null): void {
-  /* v8 ignore next -- @preserve the drawer content always mounts before any close transition, so the keyboard-style reset never runs with a null ref. */
+  // v8 ignore if -- @preserve the drawer content always mounts before any close transition (responsive-overlay.tsx:320 ref={drawerContentRef}), so the keyboard-style reset never runs with a null ref.
   if (drawerElement === null) return;
 
   drawerElement.style.height = "";
@@ -265,7 +265,7 @@ export function ResponsiveDrawerShell({
   }, []);
   const handleOpenChange = React.useCallback(
     (nextOpen: boolean) => {
-      /* v8 ignore next -- @preserve the shell renders no trigger inside the drawer root, so vaul only ever reports close transitions here; opens come through the controlled open prop. */
+      // v8 ignore else -- @preserve the shell renders no trigger inside the drawer root (responsive-overlay.tsx:313 open={open}), so vaul only ever reports close transitions here; opens come through the controlled open prop.
       if (!nextOpen) {
         resetClosingKeyboardState();
       }

@@ -41,7 +41,7 @@ function Segmented<Value extends string>({
 
   React.useLayoutEffect(() => {
     const list = listRef.current;
-    /* v8 ignore next -- @preserve the layout effect runs after mount, when the list ref is always set. */
+    // v8 ignore if -- @preserve the layout effect runs after mount with the ref attached (segmented.tsx:72 ref={listRef}), so the list ref is never null.
     if (!list) return;
 
     const measure = () => {

@@ -588,9 +588,11 @@ export default async function plugin(bb: BbPluginApi) {
     body: string;
     level: "info" | "success" | "attention";
   }) => {
-    /* v8 ignore next 3 -- @preserve no current caller reaches the untitled side: every notify() call site (moveTask, dispatchTask, thread idle and failure handlers, thread.deleted) passes a real card number. */
-    const title = input.taskNumber === null
-      ? input.action
+    const title =
+      // v8 ignore start -- @preserve no current caller reaches the untitled side: every notify() call site passes a real card number (moveTask server.ts:637, dispatchTask server.ts:730 and server.ts:745, thread idle server.ts:1299, agent failed server.ts:1320, thread.deleted server.ts:1336). The per-line split was measured: v8 keeps the dead arm's row and hides the live arm's instead, so the pair must cover the whole ternary.
+      input.taskNumber === null
+        ? input.action
+      // v8 ignore stop
       : `Triage #${input.taskNumber} · ${input.action}`;
     db.prepare(
       "INSERT INTO triage_notifications (id, task_number, action, task_title, title, body, level, read_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)",
@@ -636,8 +638,10 @@ export default async function plugin(bb: BbPluginApi) {
         taskNumber: number,
         action: `Moved to ${stage.name}`,
         taskTitle: task.title,
-        /* v8 ignore next -- @preserve the only notify-with-summary caller is the triage_move_task tool, whose zod schema requires summary.trim().min(1); the rpc and cli moveTask callers pass shouldNotify=false, so the fallback body cannot run. */
-        body: summary?.trim() || "The assigned agent moved this card.",
+        body: summary?.trim()
+          // v8 ignore start -- @preserve the only notify-with-summary caller is the triage_move_task tool, whose zod schema requires summary.trim().min(1) (server.ts:1242); the rpc and cli moveTask callers pass shouldNotify=false, so the fallback body cannot run.
+          || "The assigned agent moved this card.",
+        // v8 ignore stop
         level: stage.system_role === "attention" ? "attention" : "success",
       });
     } else {

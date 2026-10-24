@@ -40,11 +40,17 @@ export function formatStartDistance(mode: StartMode, scheduledLocal: string): st
   const minutes = Math.max(1, Math.round(delta / 60_000));
   if (minutes < 120) return `Starts in ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
   const hours = Math.round(minutes / 60);
-  /* v8 ignore next -- @preserve the "hour" singular cannot run: this line is reached only from 120 minutes up, where hours is at least 2. */
-  if (hours < 48) return `Starts in ${hours} ${hours === 1 ? "hour" : "hours"}`;
+  if (hours < 48) return `Starts in ${hours} ${
+    // v8 ignore start -- @preserve the singular "hour" cannot run: this line is reached only from 120 minutes up (start-picker.tsx:41 minutes < 120), where hours is at least 2. The per-line split was measured: v8 keeps the dead arm's row and hides the live arm's instead, so the pair must cover the whole ternary.
+    hours === 1 ? "hour" : "hours"
+    // v8 ignore stop
+  }`;
   const days = Math.round(hours / 24);
-  /* v8 ignore next -- @preserve the "day" singular cannot run: this line is reached only from 48 hours up, where days is at least 2. */
-  return `Starts in ${days} ${days === 1 ? "day" : "days"}`;
+  return `Starts in ${days} ${
+    // v8 ignore start -- @preserve the singular "day" cannot run: this line is reached only from 48 hours up (start-picker.tsx:43 hours < 48), where days is at least 2. The per-line split was measured: v8 keeps the dead arm's row and hides the live arm's instead, so the pair must cover the whole ternary.
+    days === 1 ? "day" : "days"
+    // v8 ignore stop
+  }`;
 }
 
 export interface StartPickerProps {
@@ -91,7 +97,7 @@ function StartPicker({
 
   const selectScheduledTime = (value: string) => {
     const [hours, minutes] = value.split(":").map(Number);
-    /* v8 ignore next 1 -- @preserve the only caller is TimePicker, which validates the hour and minute before emitting, so a NaN pair cannot arrive. */
+    // v8 ignore if -- @preserve the only caller is TimePicker, which normalizes the hour and minute before emitting (components/ui/time-picker.tsx:21 hour24 fallback), so a NaN pair cannot arrive.
     if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return;
     const next = scheduledDate ?? new Date(nextScheduleTime());
     next.setHours(hours, minutes, 0, 0);

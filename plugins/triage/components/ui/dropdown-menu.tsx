@@ -282,7 +282,7 @@ const DropdownMenuItem = React.forwardRef<
           )}
           data-disabled={disabled ? "" : undefined}
           onClick={() => {
-            /* v8 ignore next -- @preserve React never dispatches click events to disabled buttons, so the disabled branch of this tap handler is unreachable. */
+            // v8 ignore if -- @preserve React never dispatches click events to disabled buttons (dropdown-menu.tsx:274 disabled={disabled}), so the disabled branch of this tap handler is unreachable.
             if (disabled) return;
             const event = createSelectEvent();
             onSelect?.(event);
@@ -373,7 +373,7 @@ const DropdownMenuCheckboxItem = React.forwardRef<
           )}
           data-disabled={disabled ? "" : undefined}
           onClick={() => {
-            /* v8 ignore next -- @preserve React never dispatches click events to disabled buttons, so the disabled branch of this tap handler is unreachable. */
+            // v8 ignore if -- @preserve React never dispatches click events to disabled buttons (dropdown-menu.tsx:368 disabled={disabled}), so the disabled branch of this tap handler is unreachable.
             if (disabled) return;
             const event = createSelectEvent();
             onSelect?.(event);

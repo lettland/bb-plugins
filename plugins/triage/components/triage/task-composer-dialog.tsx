@@ -114,12 +114,11 @@ function TaskComposerDialog(props: TaskComposerDialogProps) {
 
     let scheduledAt = started ? task?.scheduledAt ?? null : null;
     if (!started && startMode === "later") {
-      /* v8 ignore start -- @preserve every path into "later" seeds a schedule through StartPicker, so this empty-date guard cannot fire. */
+      // v8 ignore if -- @preserve every path into "later" seeds a schedule through StartPicker (start-picker.tsx:86 selectMode seeds nextScheduleTime), so this empty-date guard cannot fire.
       if (!scheduledLocal) {
         toast.error("Pick a date and time to schedule this task");
         throw new Error("A schedule is required");
       }
-      /* v8 ignore stop */
       scheduledAt = new Date(scheduledLocal).getTime();
       if (!Number.isFinite(scheduledAt) || scheduledAt <= Date.now()) {
         toast.error("Choose a future date and time");
@@ -171,11 +170,15 @@ function TaskComposerDialog(props: TaskComposerDialogProps) {
     }
   };
 
-  /* v8 ignore next 1 -- @preserve the ternary only evaluates in create mode, because edit tasks always carry a project id, so its edit arm cannot run. */
   const defaultProjectId =
     savedRequest?.projectId ??
     task?.projectId ??
-    (props.mode === "create" ? props.defaultProjectId ?? undefined : undefined);
+    (props.mode === "create"
+      ? props.defaultProjectId ?? undefined
+      // v8 ignore start -- @preserve the ternary only evaluates in create mode, because edit tasks always carry a project id (task-composer-dialog.tsx:68 task = editing ? props.task), so its edit arm cannot run.
+      : undefined
+  );
+  // v8 ignore stop
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

@@ -514,3 +514,22 @@ describe("card actions", () => {
     await waitFor(() => expect(errorSpy).toHaveBeenCalledWith("plain string move refusal"));
   });
 });
+
+// drag highlight tests.
+describe("board drag highlight", () => {
+  test("drag leave keeps another column's highlight and clears its own", async () => {
+    renderBoard();
+    await screen.findByText("Live task");
+    fireEvent.dragStart(cardElement("Live task"), { dataTransfer: dragTransfer() });
+    const todo = columnOf("To Do");
+    fireEvent.dragOver(todo, { dataTransfer: dragTransfer() });
+    expect(todo.getAttribute("data-dropping")).toBe("");
+    // A leave bound for outside while another column holds the highlight
+    // reaches the keep arm: the highlight stays on the hovered column.
+    fireEvent.dragLeave(columnOf("In Progress"), { relatedTarget: document.body });
+    expect(todo.getAttribute("data-dropping")).toBe("");
+    // Leaving the hovered column itself clears it.
+    fireEvent.dragLeave(todo, { relatedTarget: document.body });
+    expect(todo.getAttribute("data-dropping")).toBe(null);
+  });
+});
