@@ -17,6 +17,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "tsc -p tsconfig.json && vitest run --config vitest.config.ts",
+    "test:coverage": "tsc -p tsconfig.json && vitest run --config vitest.config.ts --coverage",
     "build": "bb plugin build"
   },
   "engines": {
@@ -37,6 +38,7 @@
   "devDependencies": {
     "@get-bb/plugin-sdk": "0.6.39",
     "@types/node": "^22.20.4",
+    "@vitest/coverage-v8": "^4.1.11",
     "better-sqlite3": "^13.0.3",
     "cron-parser": "^5.10.2",
     "hono": "^4.13.13",

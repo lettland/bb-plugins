@@ -3,11 +3,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
+  checkClaudeProfile,
   claudeProfileLines,
   decidePin,
   isDirectory,
   resolveClaudeEnv,
   unpinThread,
+  warnMissingConfigDirs,
+  withTimeout,
   type ClaudeProfileDeps,
   type ConfigDirPin,
   type ProjectSource,
@@ -110,6 +113,45 @@ describe("decidePin", () => {
   });
 });
 
+describe("warnMissingConfigDirs", () => {
+  it("warns only for scopes whose claudeConfigDir is not a directory", () => {
+    const warnings: string[] = [];
+    const real = mkdtempSync(path.join(tmpdir(), "dir-skills-warn-"));
+    try {
+      warnMissingConfigDirs(
+        [
+          scope("work", "/w", "/profiles/gone"),
+          scope("plain", "/p", null),
+          scope("ok", "/o", real),
+        ],
+        { warn: (m: string) => void warnings.push(m) },
+      );
+    } finally {
+      rmSync(real, { recursive: true, force: true });
+    }
+    expect(warnings).toEqual([
+      'scope "work" claudeConfigDir /profiles/gone is not a directory; threads there start with the default profile',
+    ]);
+  });
+});
+
+describe("withTimeout", () => {
+  it("returns as soon as the task settles", async () => {
+    let done = false;
+    await withTimeout(
+      (async () => {
+        done = true;
+      })(),
+      5_000,
+    );
+    expect(done).toBe(true);
+  });
+
+  it("returns when the timeout wins over a never-settling task", async () => {
+    await withTimeout(new Promise<void>(() => {}), 1);
+  });
+});
+
 describe("isDirectory", () => {
   const tmp = mkdtempSync(path.join(tmpdir(), "dir-skills-profile-"));
   afterAll(() => rmSync(tmp, { recursive: true, force: true }));
@@ -162,6 +204,78 @@ describe("claudeProfileLines", () => {
     ).join("\n");
     expect(text).toMatch(/pinned for thread thr_9: none \(default profile: project not resolved;/);
     expect(text).toContain("unpin thr_9");
+  });
+
+  it("lists conflicting scopes", () => {
+    const other = scope("a-other", "/w", "/profiles/other");
+    const d = decidePin([work, other], [workSource], SERVER, () => true);
+    const text = claudeProfileLines(d, null, undefined).join("\n");
+    expect(text).toContain("conflicts with scope(s): work");
+  });
+
+  it("says the thread is not pinned yet", () => {
+    const d = decidePin([work], [workSource], SERVER, () => true);
+    const text = claudeProfileLines(d, null, "thr_9").join("\n");
+    expect(text).toContain("pinned for thread thr_9: not pinned yet");
+  });
+
+  it("shows a plain default profile for a null pin without a reason", () => {
+    const d = decidePin([work], [workSource], SERVER, () => true);
+    const text = claudeProfileLines(
+      d,
+      { dir: null, scope: null },
+      "thr_9",
+    ).join("\n");
+    expect(text).toContain("pinned for thread thr_9: none (default profile)");
+    expect(text).not.toContain("unpin");
+  });
+});
+
+describe("checkClaudeProfile", () => {
+  it("reports nothing without a project or thread", async () => {
+    const { deps } = setup({ sources: [workSource] });
+    expect(await checkClaudeProfile(deps, null, undefined)).toEqual({
+      decision: null,
+      pinned: null,
+    });
+  });
+
+  it("decides by project across all hosts and reads the thread pin", async () => {
+    const { deps } = setup({
+      sources: [{ path: "/w/repo", hostId: REMOTE }],
+      kv: {
+        "claude-config-dir:thr_1": { dir: "/profiles/work", scope: "work" },
+      },
+    });
+    const { decision, pinned } = await checkClaudeProfile(
+      deps,
+      "proj_1",
+      "thr_1",
+    );
+    expect(decision).toMatchObject({
+      status: "profile",
+      pin: { dir: "/profiles/work", scope: "work" },
+    });
+    expect(pinned).toEqual({ dir: "/profiles/work", scope: "work" });
+  });
+
+  it("leaves the pin out when only a project is given", async () => {
+    const { deps } = setup({ sources: [workSource] });
+    const { decision, pinned } = await checkClaudeProfile(
+      deps,
+      "proj_1",
+      undefined,
+    );
+    expect(decision?.status).toBe("profile");
+    expect(pinned).toBeNull();
+  });
+
+  it("leaves the decision out when only a thread is given", async () => {
+    const { deps } = setup({});
+    expect(await checkClaudeProfile(deps, null, "thr_1")).toEqual({
+      decision: null,
+      pinned: null,
+    });
   });
 });
 

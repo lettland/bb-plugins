@@ -198,9 +198,11 @@ export async function checkClaudeProfile(
   return { decision, pinned };
 }
 
+/* v8 ignore start -- @preserve exhaustive-switch guard: TypeScript narrows the default case's status to never, so this can only run if a new status is added without its case. */
 function assertNever(value: never): never {
   throw new Error(`unexpected status ${String(value)}`);
 }
+/* v8 ignore stop -- @preserve */
 
 const REASON_TEXT = {
   "unknown-project": "project not resolved",
@@ -235,6 +237,7 @@ export function claudeProfileLines(
         what = `none (scope ${decision.configured?.scope} sets ${decision.configured?.dir}, which is not a directory)`;
         hint = true;
         break;
+      /* v8 ignore next 2 -- @preserve exhaustive-switch guard: see assertNever above. */
       default:
         return assertNever(decision.status);
     }

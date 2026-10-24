@@ -8,6 +8,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  chmodSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -187,6 +188,7 @@ describe("detectScope", () => {
       ["a relative dir", agents("claude-acme")],
       ["a missing dir", agents("~/.does-not-exist")],
       ["a non-string dir", JSON.stringify([{ env: { CLAUDE_CONFIG_DIR: 7 } }])],
+      ["a non-object entry", JSON.stringify(["oops"])],
     ])("skips no-profile for %s", (_label, value) => {
       const w = world();
       expectSkip(w.inputs({ customAgents: [{ source: "provider-acp", value }] }), "no-profile");
@@ -204,6 +206,31 @@ describe("detectScope", () => {
           "no-profile",
         );
       }
+    });
+
+    it("skips no-profile when the home directory is missing", () => {
+      const w = world();
+      expectSkip(
+        w.inputs({ home: path.join(w.base, "absent-home") }),
+        "no-profile",
+      );
+    });
+
+    it("works without a default profile directory", () => {
+      const base = mkdtempSync(path.join(tmp, "nodefault-"));
+      const home = path.join(base, "home");
+      const profile = path.join(home, ".claude-acme");
+      const tree = path.join(home, "src", "acme");
+      mkdirSync(tree, { recursive: true });
+      settingsFile(profile, [WORK_MARKETPLACE]);
+      const app = repo(tree, "app", WORK_REMOTE);
+      expect(
+        detectScope({
+          home,
+          customAgents: [{ source: "provider-acp", value: agents("~/.claude-acme") }],
+          projects: [project("proj_app", WORK_REMOTE, app)],
+        }).ok,
+      ).toBe(true);
     });
 
     it("rejects a symlink that resolves to the default profile", () => {
@@ -284,6 +311,27 @@ describe("detectScope", () => {
       expectSkip(w.inputs(), "no-self-hosted-marketplace");
     });
 
+    it("skips when the profile settings.json is not an object", () => {
+      const w = world();
+      writeFileSync(path.join(w.profile, "settings.json"), "[]");
+      expectSkip(w.inputs(), "no-self-hosted-marketplace");
+    });
+
+    it("ignores marketplace entries that are not objects", () => {
+      const w = world();
+      writeFileSync(
+        path.join(w.profile, "settings.json"),
+        JSON.stringify({ extraKnownMarketplaces: { a: "nope", b: 7 } }),
+      );
+      expectSkip(w.inputs(), "no-self-hosted-marketplace");
+    });
+
+    it("ignores git marketplaces whose url does not parse", () => {
+      const w = world();
+      settingsFile(w.profile, ["not a remote", "https://git.example.com"]);
+      expectSkip(w.inputs(), "no-self-hosted-marketplace");
+    });
+
     it("ignores marketplaces that are not git sources", () => {
       const w = world();
       settingsFile(w.profile, ["acme/marketplace"], "github");
@@ -353,6 +401,44 @@ describe("detectScope", () => {
         }),
         "no-project-match",
       );
+    });
+
+    it("ignores pathless sources and keeps real ones", () => {
+      const w = world();
+      const result = detectScope(
+        w.inputs({
+          projects: [
+            {
+              id: "proj_app",
+              gitRemoteUrl: WORK_REMOTE,
+              sources: [{ path: null }, { path: w.app }],
+            },
+          ],
+        }),
+      );
+      expect(result.ok && result.matches).toEqual([
+        { projectId: "proj_app", path: w.app, key: WORK_KEY },
+      ]);
+    });
+
+    it("sorts matches by path regardless of project order", () => {
+      const w = world();
+      const aaa = repo(w.tree, "aaa", WORK_REMOTE);
+      const zzz = repo(w.tree, "zzz", WORK_REMOTE);
+      const result = detectScope(
+        w.inputs({
+          projects: [
+            project("proj_z", WORK_REMOTE, zzz),
+            project("proj_a", WORK_REMOTE, aaa),
+            project("proj_dup", WORK_REMOTE, zzz),
+          ],
+        }),
+      );
+      expect(result.ok && result.matches.map((m) => m.path)).toEqual([
+        aaa,
+        zzz,
+        zzz,
+      ]);
     });
   });
 
@@ -471,6 +557,28 @@ describe("detectScope", () => {
         `[remote "upstream"]\n\turl = ${WORK_REMOTE}\n[remote "origin"]\n\turl = https://github.com/me/sibling.git\n`,
       );
       expectSkip(w.inputs(), "parent-has-non-work-entries");
+    });
+
+    it("skips parent-has-non-work-entries for an origin section without a url", () => {
+      const w = world();
+      const sibling = path.join(w.tree, "sibling");
+      mkdirSync(path.join(sibling, ".git"), { recursive: true });
+      writeFileSync(
+        path.join(sibling, ".git", "config"),
+        `[remote "origin"]\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n`,
+      );
+      expectSkip(w.inputs(), "parent-has-non-work-entries");
+    });
+
+    it("skips parent-has-non-work-entries when the parent is unreadable", () => {
+      const w = world();
+      // Search (x) without read (r): checkouts stay resolvable, the listing fails.
+      chmodSync(w.tree, 0o111);
+      try {
+        expectSkip(w.inputs(), "parent-has-non-work-entries");
+      } finally {
+        chmodSync(w.tree, 0o755);
+      }
     });
   });
 
@@ -821,6 +929,54 @@ describe("runSetup", () => {
       const h = harness({ kv: pins, threads });
       expect((await runSetup(h.deps, { dryRun: true })).affectedThreads).toEqual([]);
     });
+
+    it("skips projects with no sources or pathless entries", async () => {
+      const w = world();
+      const h = harness({
+        w,
+        projects: [
+          { id: "proj_none", gitRemoteUrl: null },
+          { id: "proj_pathless", gitRemoteUrl: null, sources: [{ path: null }] },
+          project("proj_app", WORK_REMOTE, w.app),
+        ],
+        kv: { "claude-config-dir:thr_covered": { dir: null, scope: null } },
+        threads: { thr_covered: "proj_pathless" },
+      });
+      const report = await runSetup(h.deps, { dryRun: false });
+      expect(report.affectedThreads).toEqual([]);
+    });
+  });
+
+  it("reports exists when the file appears as a dangling symlink", async () => {
+    const h = harness();
+    mkdirSync(path.dirname(h.userFile), { recursive: true });
+    symlinkSync(path.join(h.w.base, "nowhere"), h.userFile);
+    const report = await runSetup(h.deps, { dryRun: false });
+    expect(report).toMatchObject({ outcome: "skipped", reason: "exists" });
+    expect(existsSync(path.join(h.w.base, "nowhere"))).toBe(false);
+  });
+
+  it("reports a fixed failure when recording the outcome throws", async () => {
+    const h = harness();
+    h.deps.kv.set = async () => {
+      throw new Error(`disk ${SENTINEL}`);
+    };
+    const result = await setupCommand(h.deps, [], false);
+    expect(result).toEqual({ exitCode: 1, stderr: "setup: failed\n" });
+  });
+
+  it("logs a fixed warning when auto-setup fails unexpectedly", async () => {
+    const h = harness();
+    h.deps.kv.set = async () => {
+      throw new Error(`disk ${SENTINEL}`);
+    };
+    await autoSetup(h.deps);
+    expect(h.logs).toContain("warn: auto-setup: failed");
+    expect(h.logs.join("\n")).not.toContain(SENTINEL);
+  });
+
+  it("gives no auto-setup line without a record", () => {
+    expect(autoSetupLine(undefined)).toBeNull();
   });
 });
 
@@ -858,6 +1014,31 @@ describe("writeScopesFile", () => {
     let thrown: unknown;
     try {
       writeScopesFile(target, { ...candidate, claudeConfigDir: w.home }, w.home);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(SetupError);
+    expect((thrown as Error).message).toBe("could not write scopes.json");
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it("leaves a directory at the target alone and reports exists", () => {
+    const w = world();
+    const dir = path.join(w.home, ".bb", "dir-skills");
+    const target = path.join(dir, "scopes.json");
+    mkdirSync(target, { recursive: true });
+    expect(writeScopesFile(target, candidate, w.home)).toBe("exists");
+    expect(statSync(target).isDirectory()).toBe(true);
+    expect(readdirSync(dir)).toEqual(["scopes.json"]);
+  });
+
+  it("fails with a fixed message when the target is unusable", () => {
+    const w = world();
+    const dir = path.join(w.home, ".bb", "dir-skills");
+    mkdirSync(dir, { recursive: true });
+    let thrown: unknown;
+    try {
+      writeScopesFile(path.join(dir, "bad\u0000name"), candidate, w.home);
     } catch (error) {
       thrown = error;
     }

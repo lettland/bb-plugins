@@ -5,6 +5,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
   activeScopes,
   configDirFor,
+  expandHome,
   loadScopes,
   parseScopes,
   selectSkills,
@@ -31,8 +32,45 @@ function dir(...parts: string[]): string {
   return p;
 }
 
+describe("expandHome", () => {
+  const home = "/home/test";
+
+  it("expands a bare tilde and ~/ paths", () => {
+    expect(expandHome("~", home)).toBe(home);
+    expect(expandHome("~/docs", home)).toBe(path.join(home, "docs"));
+  });
+
+  it("leaves other paths alone", () => {
+    expect(expandHome("/opt/x", home)).toBe("/opt/x");
+    expect(expandHome("relative", home)).toBe("relative");
+  });
+});
+
 describe("parseScopes", () => {
   const base = { name: "work", paths: ["/a"], skills: ["work-*"] };
+
+  it.each<[string, string]>([
+    ["an object", "{}"],
+    ["an array", "[]"],
+    ["null", "null"],
+    ["a string", '"x"'],
+  ])("rejects %s as the file root", (_label, text) => {
+    fileCounter += 1;
+    const file = path.join(tmp, `bad-${fileCounter}.json`);
+    writeFileSync(file, text);
+    expect(() => parseScopes(file)).toThrow(/expected \{ "scopes": \[\.\.\.\] \}/);
+  });
+
+  it("names a scope without a usable name by its position", () => {
+    const [first, second] = parseScopes(
+      scopesFile([
+        { paths: ["/a"], skills: ["x-*"] },
+        { name: "  ", paths: ["/b"], skills: ["x-*"] },
+      ]),
+    );
+    expect(first.name).toBe("scope-1");
+    expect(second.name).toBe("scope-2");
+  });
 
   it("leaves claudeConfigDir null when absent", () => {
     const [scope] = parseScopes(scopesFile([base]));
@@ -267,5 +305,30 @@ describe("configDirFor", () => {
     const expected = { dir: "/opt/claude-a", scope: "a", conflict: ["b"] };
     expect(configDirFor(scopes, [aRoot, bRoot])).toEqual(expected);
     expect(configDirFor(scopes, [bRoot, aRoot])).toEqual(expected);
+  });
+
+  it("sorts by name regardless of the input order", () => {
+    const scopes = [
+      { name: "b", paths: [bRoot], patterns: [], patternSources: [], claudeConfigDir: "/opt/claude-b" },
+      { name: "a", paths: [aRoot], patterns: [], patternSources: [], claudeConfigDir: "/opt/claude-a" },
+    ];
+    const expected = { dir: "/opt/claude-a", scope: "a", conflict: ["b"] };
+    expect(configDirFor([...scopes].reverse(), [aRoot, bRoot])).toEqual(expected);
+    expect(configDirFor(scopes, [aRoot, bRoot])).toEqual(expected);
+  });
+
+  it("treats same-named scopes as equal when sorting", () => {
+    const twin = (dir: string) => ({
+      name: "a",
+      paths: ["/t"],
+      patterns: [],
+      patternSources: [],
+      claudeConfigDir: dir,
+    });
+    expect(configDirFor([twin("/opt/one"), twin("/opt/one")], ["/t"])).toEqual({
+      dir: "/opt/one",
+      scope: "a",
+      conflict: [],
+    });
   });
 });
