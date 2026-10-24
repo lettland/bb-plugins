@@ -711,6 +711,13 @@ describe("runSetup", () => {
     expect(autoSetupLine(h.kv.get("auto-setup") as never)).toBe("auto-setup: wrote");
   });
 
+  it("reports no affected threads when the reload no longer finds the written scope", async () => {
+    const h = harness();
+    h.deps.reload = () => writeFileSync(h.userFile, '{"scopes":[]}');
+    const report = await runSetup(h.deps, { dryRun: false });
+    expect(report).toMatchObject({ outcome: "wrote", affectedThreads: [] });
+  });
+
   it("never refreshes an existing file", async () => {
     const h = harness();
     mkdirSync(path.dirname(h.userFile), { recursive: true });

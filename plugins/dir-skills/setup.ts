@@ -206,11 +206,9 @@ async function detectAndWrite(
   return {
     outcome: "wrote",
     ...found,
-    // v8 ignore start -- @preserve written is never undefined here: the file was just written from the candidate, so the reload always finds it.
     affectedThreads: written
       ? await affectedThreadsOf(deps, written, projects)
       : [],
-    // v8 ignore stop -- @preserve
   };
 }
 
