@@ -51,6 +51,8 @@ If you notice project-wide issues while reviewing, mention them as a brief note 
 - **Regression risk:** Could these changes break existing functionality?
 - **Boundary conditions:** Empty lists, null values, max values, concurrent access?
 - **Integration points:** Are connections to external systems robust?
+- **First-pass completeness:** does the fix cover every path of the defect, not just the reported repro? A fix that only handles the demonstrated case is a finding.
+- **Gate direction:** a new gate, suppression, or fallback needs both tests — it triggers when it should, and does not trigger when it should not.
 
 ## Calibration Rules
 

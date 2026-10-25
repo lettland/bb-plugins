@@ -302,3 +302,72 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+---
+
+## ranxianglei/billion-context (MIT + additional term)
+
+- Upstream: <https://github.com/ranxianglei/billion-context>
+- Provenance: commit `146b34f27838147e47a782142be6c3f7bd0f30d7` (default branch `master`), `LICENSE` blob SHA `eba0939b44fcea224b18b508937a133c51a47d21` (fetched 2026-10-25).
+- Derived files (adapted and near-verbatim rule text): `content/references/reviewer-senior-dev.md` (blind spots, expensive categories), `content/references/reviewer-senior-qa.md` (first-pass completeness, gate direction), `content/skills/review-code/SKILL.md` (scope fidelity, fix-path coverage), and repo-root `AGENTS.md` (plugin discipline rules).
+
+License text (verbatim):
+
+```text
+MIT License
+
+Copyright (c) 2026 ranxianglei
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Additional Term — Attribution on Product Surfaces
+(在 MIT 之上附加的条款 —— 产品出处标注)
+
+In addition to the conditions above, if you use or incorporate the Software
+(including its kernels, e.g. acp-kernel) in a product or service that end
+users can see or interact with — whether commercial or open source — you
+must make attribution clearly visible in at least one of the following places:
+
+  1. the product's home page;
+  2. its documentation; or
+  3. its "About" / "Credits" / "Acknowledgements" page.
+
+The attribution must state that the product uses billion-context (and
+acp-kernel, where applicable) and include a link to
+https://github.com/ranxianglei/billion-context (and
+https://github.com/ranxianglei/acp-kernel, where applicable).
+
+For purely server-side or embedded uses with no user-facing surface, carrying
+these notices in the shipped documentation satisfies this term.
+
+附加条款（中文）：
+
+除上述条件外，若将本软件（含其内核，如 acp-kernel）用于任何终端用户可见或可交互的
+产品或服务（无论商业或开源），须在下述至少一处显著位置标明出处：
+
+  1. 产品首页；
+  2. 产品文档；或
+  3. “关于 / 致谢 / Acknowledgements”页面。
+
+署名须说明该产品使用了 billion-context（涉及时包括 acp-kernel），并附指向
+https://github.com/ranxianglei/billion-context （及 https://github.com/ranxianglei/acp-kernel，
+涉及时）的链接。纯服务端或内嵌、无用户可见界面的用途，随附文档中包含上述声明即可。
+```

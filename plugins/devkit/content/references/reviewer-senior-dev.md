@@ -53,6 +53,8 @@ If you notice project-wide issues while reviewing, mention them as a brief note 
 - **Error handling:** Are errors handled appropriately, or silently swallowed?
 - **Naming:** Clear and consistent with the codebase?
 - **Complexity:** Unnecessary complexity that could be simplified?
+- **Common blind spots (check even when the diff looks clean):** cross-effects with concurrent edits to the same files, or state drift after a model/provider/config switch; silent data loss in read-modify-write merges, config overwrites, persistence/version migrations; fidelity of anything rewritten in transit (ids, ordering, wire/protocol shapes a mock upstream would not catch); identity/session stability across switches; invented fallback or default values (product judgment presented as engineering); symptom vs mechanism — whether the change removes the defect's producer or only hides its trace.
+- **Expensive categories, true severity:** diffs changing config schema, wire/protocol format, identity or session logic, security posture, update/install mechanisms, or fallback/default values are where an unnoticed mistake costs most — never soften these to a nit.
 
 ## Calibration Rules
 
