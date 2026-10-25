@@ -71,6 +71,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           parallel-finished: true
+          # Keep this list in sync with the matrix plugin list in the test job.
           carryforward: agent-hooks,aislop,auto-review,devkit,dir-skills,model-instructions,project-queue,shared-runtime,triage,typesafe,wakatime
           fail-on-error: false
 

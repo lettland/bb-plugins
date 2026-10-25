@@ -70,21 +70,27 @@ harness lists them as devDependencies.
 suite on pushes and pull requests to `master`. Every plugin runs
 `npm run test:coverage` (vitest's v8 provider, or Node's built-in coverage for
 `shared-runtime`). The vitest plugins enforce 100% coverage on all four
-metrics. `shared-runtime` gates lines, branches, and functions; Node's runner
+metrics within the include globs each `vitest.config.ts` defines; a new source
+file outside those globs escapes the gate, so review the globs whenever a
+plugin gains a top-level file. `shared-runtime` gates lines, branches, and
+functions; Node's runner
 has no statements threshold. Its floors are the measured lows, 99.71 / 99.03 /
-98.88: `node --test` merges coverage from child processes, and one merged run
-under load measured functions at 98.88, so the functions floor sits below the
-99.16 every idle single-process run reported. `shared-runtime` runs coverage
+98.88. The functions floor sits below the 99.16 that every idle single-process
+run reported because one merged run under load measured 98.88. Coverage runs
 single-process (`--test-concurrency=1`) for deterministic merges; plain
 `npm test` stays parallel. Each plugin uploads `lcov.info` to Coveralls as one
 flag per plugin of a parallel build; a final job closes it, carrying forward
 flags a run did not report. Uploads never fail the run.
 
 Coverage ignore comments are allowed only for code that cannot run, for example
-an exhaustive-switch default arm; every ignore states its reason. Vitest plugins
-use `// v8 ignore next -- @preserve <reason>` or `v8 ignore start`/`stop`, and
-`shared-runtime` uses `/* node:coverage ignore next */` or
-`node:coverage disable`/`enable`. Start and stop markers must sit on their own
+an exhaustive-switch default arm; every ignore states its reason. The common
+forms: vitest plugins use `// v8 ignore next -- @preserve <reason>` or
+`v8 ignore start`/`stop`, and `shared-runtime` uses
+`/* node:coverage ignore next */` or `node:coverage disable`/`enable`. The
+tree also uses `v8 ignore if`, `v8 ignore else`, `v8 ignore next N`, and
+block-comment forms of the same directives. The v8 form carries its reason
+inline after `@preserve`; the node form states its reason in a comment
+directly above the directive. Start and stop markers must sit on their own
 lines.
 
 ## Releasing
