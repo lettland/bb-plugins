@@ -203,9 +203,10 @@ function moveCommand(queue: QueueAccess) {
       const direction = input.positionals.direction;
       requireQueued(threadId, queue);
       if (!(DIRECTIONS as readonly string[]).includes(direction)) {
-        throw new PluginCliError(`Unknown direction ${direction}`, {
-          code: "invalid_value",
-        });
+        throw new PluginCliError(
+          `Unknown direction ${direction}; pass one of: ${DIRECTIONS.join(", ")}`,
+          { code: "invalid_value" },
+        );
       }
       await queue.moveQueued(threadId, direction as Direction);
       return {

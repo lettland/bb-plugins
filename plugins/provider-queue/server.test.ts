@@ -1936,7 +1936,9 @@ describe("cli", () => {
       ["move", "thr_b", "sideways"],
     );
     expect(badDirection.exitCode).toBe(1);
-    expect(badDirection.stderr).toContain("Unknown direction sideways");
+    expect(badDirection.stderr).toContain(
+      "Unknown direction sideways; pass one of: up, down, top, bottom",
+    );
 
     const jsonMoved = await fake.harness.runCli([
       "move",
