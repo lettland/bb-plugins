@@ -772,15 +772,14 @@ test("doctor reports unresolved mount sources and a vanished worktree root", asy
   const result = await fixture.run(["doctor", "--json"]);
   assert.equal(result.code, 1);
   const { findings } = JSON.parse(result.stdout);
-  assert.equal(findings[3].level, "warn");
-  assert.equal(findings[3].message, "isolation launcher not built yet (built on first quality operation)");
-  assert.deepEqual(
-    { level: findings[4].level, message: findings[4].message },
-    {
-      level: "warn",
-      message: "container go: /bb-worktrees is mounted from /gone/worktrees",
-    },
-  );
+  const launcherFinding = findings.find((finding) => /isolation launcher not built yet \(built on first quality operation\)/.test(finding.message));
+  assert.ok(launcherFinding, "expected an isolation launcher warn finding");
+  assert.equal(launcherFinding.level, "warn");
+  assert.equal(launcherFinding.message, "isolation launcher not built yet (built on first quality operation)");
+  const goMount = findings.find((finding) => /container go: \/bb-worktrees is mounted from \/gone\/worktrees/.test(finding.message));
+  assert.ok(goMount, "expected a container go mount warn finding");
+  assert.equal(goMount.level, "warn");
+  assert.equal(goMount.message, "container go: /bb-worktrees is mounted from /gone/worktrees");
 });
 
 test("install derives the worktree root from the home directory without BB_WORKTREES_ROOT", async (t) => {

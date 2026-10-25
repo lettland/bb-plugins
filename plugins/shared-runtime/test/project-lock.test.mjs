@@ -42,7 +42,6 @@ function fault(code) {
   return error;
 }
 
-
 async function makeRoot(t, prefix = "project-lock-") {
   const root = await realMkdtemp(path.join(tmpdir(), prefix));
   t.after(() => rm(root, { recursive: true, force: true }));

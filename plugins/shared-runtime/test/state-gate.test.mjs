@@ -40,7 +40,6 @@ function fault(code) {
   return error;
 }
 
-
 async function makeLockDirectory(t, prefix = "state-gate-") {
   const root = await realMkdtemp(path.join(tmpdir(), prefix));
   t.after(() => rm(root, { recursive: true, force: true }));

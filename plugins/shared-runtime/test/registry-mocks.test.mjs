@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import * as realFs from "node:fs";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { mock } from "node:test";
@@ -43,22 +43,45 @@ test("a host whose O_NOFOLLOW is not a number refuses to load policies", async (
   );
 });
 
+async function waitFor(predicate, label, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("timed out waiting for " + label);
+}
+
 test("a background refresh failure without a logger is swallowed", async (t) => {
-  const runtimeRoot = path.join(tmpdir(), "registry-mocks-nolog-");
-  const projectsRoot = path.join(runtimeRoot, "projects");
+  const root = await mkdtemp(path.join(tmpdir(), "registry-mocks-nolog-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const projectsRoot = path.join(root, "projects");
   await mkdir(projectsRoot, { recursive: true, mode: 0o700 });
   const policyPath = path.join(projectsRoot, "proj_alpha.json");
-  const registry = createRegistry({ runtimeRoot });
-  await registry.load();
-  await writeFile(policyPath, "{}\n", { mode: 0o600 });
-  await chmod(projectsRoot, 0o000);
+  let watcherEvents = 0;
+  watchImpl = (directory, options, listener) =>
+    realFs.watch(directory, options, (...event) => {
+      watcherEvents += 1;
+      listener(...event);
+    });
+  const registry = createRegistry({ runtimeRoot: root });
   try {
-    // The watcher debounce is 250ms; give the failing refresh time to run.
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    await registry.load();
+    assert.equal(registry.entries().length, 0);
+    await writeFile(policyPath, "{}\n", { mode: 0o600 });
+    await waitFor(() => watcherEvents > 0, "the projects watcher to fire");
+    await chmod(projectsRoot, 0o000);
+    // The debounced refresh now fails on the unreadable directory; give
+    // the failure its 250ms window, then require that nothing surfaced.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.deepEqual(registry.problems(), []);
+    assert.deepEqual(registry.entries(), []);
   } finally {
+    registry.dispose();
     await chmod(projectsRoot, 0o700);
   }
-  registry.dispose();
 });
 
 test("a failed directory watcher is re-armed on the next load", async (t) => {

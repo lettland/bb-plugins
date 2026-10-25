@@ -118,7 +118,6 @@ function drainMemoryLock(lockAdapter, key, state) {
     state.queue.length === 0 &&
     lockAdapter.get(key) === state
   ) {
-    /* node:coverage disable */
     lockAdapter.delete(key);
     /* node:coverage enable */
   }
@@ -160,10 +159,12 @@ export async function waitForMemoryLock(key, lockAdapter, options) {
       owner,
     };
     const abort = () => {
-      // Unreachable body: grant() (lock-state.mjs:134) removes the abort
-      // listener before setting granted, and the pre-aborted check (lock-state
-      // line 186) runs before the request is queued, so granted is always
-      // false here and the return below never runs.
+      // Unreachable body: grant() (lock-state.mjs:134) sets its flag and
+      // removes the abort listener synchronously before returning, and
+      // the pre-aborted check (lock-state.mjs:188) handles an
+      // already-aborted signal before the request is queued, so this
+      // handler can never run once the flag is set and the return
+      // below never runs.
       if (granted) {
         /* node:coverage disable */
         return;

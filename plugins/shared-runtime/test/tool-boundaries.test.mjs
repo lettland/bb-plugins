@@ -319,7 +319,23 @@ test("search passes missing paths to ripgrep instead of denying them", async (t)
       baseWorkspace({ hostRoot: root }),
       { query: "needle", path: "missing-dir" },
     ),
-    (error) => !/Shared runtime denied/.test(error.message),
+    (error) => {
+      // The failure must come from ripgrep itself: its error exit and its
+      // own stderr about the missing path, or a spawn miss when rg is not
+      // installed. Never a tool-boundary denial.
+      if (/Shared runtime denied/.test(error.message)) {
+        return false;
+      }
+      if (error.result) {
+        return (
+          error.result.signal === null &&
+          error.result.code > 1 &&
+          /No such file or directory/.test(error.result.stderr)
+        );
+      }
+      return error.code === "ENOENT";
+    },
+    "the missing search path reached ripgrep",
   );
 });
 

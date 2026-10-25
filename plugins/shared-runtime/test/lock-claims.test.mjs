@@ -356,7 +356,6 @@ test("recovery outranks a live contender without a creation timestamp", async (t
   await fsPromises.readFile(timeless, "utf8");
 });
 
-
 test("waiting on a claim that cannot be inspected surfaces the error", async (t) => {
   const root = await makeRoot(t);
   const ownerPath = path.join(root, "claim.owner.json");
@@ -391,7 +390,6 @@ test("waiting on a live claim without a timestamp reports an unknown time", asyn
 });
 
 test("scavenging an absent lock root is a no-op", async (t) => {
-
   const root = await makeRoot(t);
   await lockClaims.scavengeInitializationDebris(path.join(root, "absent"));
 });
@@ -421,9 +419,7 @@ test("scavenging skips debris that vanishes before inspection", async (t) => {
     return fsPromises.lstat(target);
   };
   await lockClaims.scavengeInitializationDebris(root, Date.now() + 1_000);
-  await lstat(retired).catch((error) => {
-    assert.equal(error?.code, "ENOENT", "retired debris is removed");
-  });
+  await assert.rejects(lstat(retired), { code: "ENOENT" }, "retired debris is removed");
   // The vanished debris is skipped, never removed.
   await lstat(debris);
 });
@@ -461,20 +457,47 @@ test("recovery yields to tied live contenders deterministically", async (t) => {
   const ownerPath = path.join(root, "claim.owner.json");
   await writeOwner(ownerPath, STALE_OWNER);
   const observed = await lockClaims.inspectOwnerClaim(ownerPath);
-  const tiedOwner = {
-    createdAt: 5_000_000_000_000,
-    pid: process.pid,
-    processIdentity: liveIdentity,
-  };
-  const contenderA = path.join(root, "claim.owner.json.recover-tied-a");
-  const contenderB = path.join(root, "claim.owner.json.recover-tied-b");
-  await writeOwner(contenderA, { ...tiedOwner, id: "tied-a" });
-  await writeOwner(contenderB, { ...tiedOwner, id: "tied-b" });
+  const pair = (id, stamp) => ({ ...liveOwner(id), createdAt: stamp });
+  const contenderA = path.join(
+    root,
+    `claim.owner.json.recover-${observed.identity.device}-${observed.identity.inode}-tied-a`,
+  );
+  const contenderB = path.join(
+    root,
+    `claim.owner.json.recover-${observed.identity.device}-${observed.identity.inode}-tied-b`,
+  );
+  await writeOwner(contenderA, pair("tied-a", 1_000_000_000_000));
+  await writeOwner(contenderB, pair("tied-b", 1_000_000_000_000));
 
+  // With equal stamps the localeCompare tie-break ranks the tied pair,
+  // and the pair outranks the later-staged recovery claim, so the claim
+  // survives.
+  assert.equal(await lockClaims.recoverOwnerClaim(ownerPath, observed), false);
+  await fsPromises.readFile(ownerPath, "utf8");
+  // Once both tied contenders carry a later stamp they lose to the
+  // earlier recovery claim, which retires the claim and leaves them alone.
+  await writeOwner(contenderA, pair("tied-a", 5_000_000_000_000));
+  await writeOwner(contenderB, pair("tied-b", 5_000_000_000_000));
   assert.equal(await lockClaims.recoverOwnerClaim(ownerPath, observed), true);
   await assert.rejects(fsPromises.readFile(ownerPath, "utf8"), { code: "ENOENT" });
-  // The tied live contenders lose only to the earlier-keyed recovery file and
-  // stay on disk.
   await fsPromises.readFile(contenderA, "utf8");
   await fsPromises.readFile(contenderB, "utf8");
+  await writeOwner(ownerPath, STALE_OWNER);
+  const tieObserved = await lockClaims.inspectOwnerClaim(ownerPath);
+  const tieContender = (suffix) =>
+    path.join(
+      root,
+      `claim.owner.json.recover-${tieObserved.identity.device}-${tieObserved.identity.inode}-${suffix}`,
+    );
+  await writeOwner(tieContender("tied-a"), pair("tied-a", 4_000_000_000_000));
+  await writeOwner(tieContender("tied-b"), pair("tied-b", 4_000_000_000_000));
+  // With a three-way createdAt tie the election falls to localeCompare alone, where the recovery path's leading pid digit outranks the contenders' letters; a flipped comparator elects a contender and fails this phase.
+  const realNow = Date.now;
+  Date.now = () => 4_000_000_000_000;
+  try {
+    assert.equal(await lockClaims.recoverOwnerClaim(ownerPath, tieObserved), true);
+  } finally {
+    Date.now = realNow;
+  }
+  await assert.rejects(fsPromises.readFile(ownerPath, "utf8"), { code: "ENOENT" });
 });

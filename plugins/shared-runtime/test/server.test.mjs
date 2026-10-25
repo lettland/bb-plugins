@@ -17,10 +17,12 @@ const fixtureHome = await realpath(await mkdtemp(path.join(tmpdir(), "shared-run
 const originalHome = process.env.HOME;
 const originalPath = process.env.PATH;
 process.env.HOME = fixtureHome;
-test.after(() => {
+test.after(async () => {
   process.env.HOME = originalHome;
   process.env.PATH = originalPath;
   delete process.env.FAKE_APP_ROOT;
+  await rm(fixtureRoot, { recursive: true, force: true });
+  await rm(fixtureHome, { recursive: true, force: true });
 });
 
 const gitEnvironment = {

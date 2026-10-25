@@ -33,12 +33,23 @@ mock.module("node:fs/promises", {
 
 const cliHost = await import("../src/cli-host.mjs");
 
+const originalBbCli = process.env.BB_CLI;
+const originalPath = process.env.PATH;
+
 test.afterEach(() => {
   for (const name of Object.keys(fsHooks)) {
     delete fsHooks[name];
   }
-  delete process.env.BB_CLI;
-  delete process.env.PATH;
+  if (originalBbCli === undefined) {
+    delete process.env.BB_CLI;
+  } else {
+    process.env.BB_CLI = originalBbCli;
+  }
+  if (originalPath === undefined) {
+    delete process.env.PATH;
+  } else {
+    process.env.PATH = originalPath;
+  }
 });
 
 test("pathExists rethrows lstat failures other than ENOENT", async (t) => {
@@ -53,6 +64,7 @@ test("pathExists rethrows lstat failures other than ENOENT", async (t) => {
 test("without BB_CLI and without a PATH hit, the CLI candidates are tried in order", async (t) => {
   delete process.env.BB_CLI;
   const emptyDirectory = await mkdtemp(path.join(tmpdir(), "cli-host-empty-"));
+  t.after(() => rm(emptyDirectory, { recursive: true, force: true }));
   process.env.PATH = emptyDirectory;
   // Candidate probes must not depend on the host: every path is absent here,
   // including the real /opt/homebrew/bin/bb of a developer machine.
@@ -86,6 +98,7 @@ test("a host without PATH finds no CLI on the search path", async (t) => {
 test("an executable candidate satisfies the CLI lookup without PATH", async (t) => {
   delete process.env.BB_CLI;
   const emptyDirectory = await mkdtemp(path.join(tmpdir(), "cli-host-candidate-"));
+  t.after(() => rm(emptyDirectory, { recursive: true, force: true }));
   process.env.PATH = emptyDirectory;
   const candidate = "/opt/homebrew/bin/bb";
   fsHooks.access = async (target) => {
@@ -157,7 +170,6 @@ test("doctor reports a policy file that fails only on re-verification", async (t
   );
   assert.equal(opens, 2, "the policy file was read twice");
 });
-
 
 test("a non-Error rejection from a command reaches the String(error) fallback", async (t) => {
   const work = await mkdtemp(path.join(tmpdir(), "bin-non-error-"));

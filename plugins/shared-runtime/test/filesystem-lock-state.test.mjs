@@ -58,7 +58,7 @@ test("a relative lock root is denied", async (t) => {
 });
 
 test("an already-aborted signal refuses to start the lock loop", async (t) => {
-    const root = await makeRoot(t);
+  const root = await makeRoot(t);
   await assert.rejects(
     ensureFilesystemLockState("key", AbortSignal.abort(), { lockRoot: root }),
     { name: "AbortError" },
@@ -66,7 +66,7 @@ test("an already-aborted signal refuses to start the lock loop", async (t) => {
 });
 
 test("an unreadable state marker retires the state and republishes it", async (t) => {
-    const root = await makeRoot(t);
+  const root = await makeRoot(t);
   const lockPath = path.join(root, "key.lock");
   await mkdir(lockPath);
   await writeFile(path.join(lockPath, "rw.json"), "corrupt", { mode: 0o600 });
@@ -85,7 +85,7 @@ test("an unreadable state marker retires the state and republishes it", async (t
 });
 
 test("a failed state publication is cleaned up and surfaces the error", async (t) => {
-    const root = await makeRoot(t);
+  const root = await makeRoot(t);
   const lockPath = path.join(root, "key.lock");
   fsHooks.writeFile = async (target, ...rest) => {
     if (target === path.join(lockPath, "owner.json")) {
@@ -101,7 +101,7 @@ test("a failed state publication is cleaned up and surfaces the error", async (t
 });
 
 test("a state published between the marker check and the claim is honoured", async (t) => {
-    const root = await makeRoot(t);
+  const root = await makeRoot(t);
   const lockPath = path.join(root, "key.lock");
   let reads = 0;
   fsHooks.readFile = async (filePath, ...rest) => {
@@ -118,7 +118,7 @@ test("a state published between the marker check and the claim is honoured", asy
 });
 
 test("a claim replaced before the ownership re-check is recovered and retried", async (t) => {
-    const root = await makeRoot(t);
+  const root = await makeRoot(t);
   const lockPath = path.join(root, "key.lock");
   const claimPath = `${lockPath}.owner.json`;
   let opens = 0;
@@ -138,7 +138,7 @@ test("a claim replaced before the ownership re-check is recovered and retried", 
 });
 
 test("a claim replaced before a legacy republication abandons that attempt", async (t) => {
-    const root = await makeRoot(t);
+  const root = await makeRoot(t);
   const lockPath = path.join(root, "key.lock");
   const claimPath = `${lockPath}.owner.json`;
   // An ownerless legacy state directory forces the republication path, whose
@@ -162,7 +162,7 @@ test("a claim replaced before a legacy republication abandons that attempt", asy
 });
 
 test("a lost republication race is retried until the state is published", async (t) => {
-    const root = await makeRoot(t);
+  const root = await makeRoot(t);
   const lockPath = path.join(root, "key.lock");
   await mkdir(lockPath);
   await writeFile(path.join(lockPath, "owner.json"), "{ broken\n", { mode: 0o600 });
@@ -181,7 +181,7 @@ test("a lost republication race is retried until the state is published", async 
 });
 
 test("a claim that vanishes before the ownership re-check is reinstalled", async (t) => {
-    const root = await makeRoot(t);
+  const root = await makeRoot(t);
   const lockPath = path.join(root, "key.lock");
   const claimPath = `${lockPath}.owner.json`;
   let opens = 0;
@@ -199,7 +199,7 @@ test("a claim that vanishes before the ownership re-check is reinstalled", async
 });
 
 test("an unreadable claim during the ownership re-check surfaces the error", async (t) => {
-    const root = await makeRoot(t);
+  const root = await makeRoot(t);
   const lockPath = path.join(root, "key.lock");
   const claimPath = `${lockPath}.owner.json`;
   fsHooks.open = async (...args) => {
@@ -215,7 +215,7 @@ test("an unreadable claim during the ownership re-check surfaces the error", asy
 });
 
 test("a stalled legacy wait is bounded by the signal", async (t) => {
-    const root = await makeRoot(t);
+  const root = await makeRoot(t);
   const lockPath = path.join(root, "key.lock");
   const liveOwner = {
     // A legacy owner without a parsable creation timestamp stays alive but is
