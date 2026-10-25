@@ -1,0 +1,57 @@
+{
+  "name": "@lettland/bb-plugin-provider-queue",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Start a queued thread only when its provider has a free slot.",
+  "license": "MIT",
+  "engines": {
+    "bb": ">=0.46.1",
+    "bbPluginSdk": ">=0.6.49"
+  },
+  "bb": {
+    "name": "Provider queue",
+    "description": "Start a queued thread only when its provider has a free slot.",
+    "branding": {
+      "icon": "ListOrdered"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx",
+    "skills": [
+      "skills"
+    ]
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "env -u BB_CLI bb plugin build .",
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.config.ts --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.49",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.20.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitest/coverage-v8": "^4.1.11",
+    "better-sqlite3": "^13.0.3",
+    "cron-parser": "^5.5.0",
+    "hono": "^4.13.9",
+    "jsdom": "^27.0.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "sonner": "^2.0.8",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

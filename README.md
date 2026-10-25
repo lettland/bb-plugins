@@ -18,6 +18,7 @@ The root [`.bb/plugins.json`](.bb/plugins.json) collection manifest indexes them
 | [Directory skills](plugins/dir-skills) | `dir-skills` |
 | [Model instructions](plugins/model-instructions) | `model-instructions` |
 | [Project queue](plugins/project-queue) | `project-queue` |
+| [Provider queue](plugins/provider-queue) | `provider-queue` |
 | [Shared Runtime](plugins/shared-runtime) | `shared-runtime` |
 | [Triage](plugins/triage) | `triage` |
 | [TypeSafe decisions](plugins/typesafe) | `typesafe` |
@@ -146,6 +147,7 @@ becomes installable only after its first `<id>/vX.Y.Z` release tag exists
 BSD-2-Clause ([`LICENSE`](LICENSE)). devkit includes third-party content
 under Apache-2.0 and MIT
 ([`plugins/devkit/THIRD_PARTY_NOTICES.md`](plugins/devkit/THIRD_PARTY_NOTICES.md)),
-and triage and project-queue are MIT
+and triage, project-queue and provider-queue are MIT
 ([`plugins/triage/LICENSE`](plugins/triage/LICENSE),
-[`plugins/project-queue/LICENSE`](plugins/project-queue/LICENSE)).
+[`plugins/project-queue/LICENSE`](plugins/project-queue/LICENSE),
+[`plugins/provider-queue/LICENSE`](plugins/provider-queue/LICENSE)).

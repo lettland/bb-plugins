@@ -139,6 +139,25 @@
       }
     },
     {
+      "id": "provider-queue",
+      "displayName": "Provider queue",
+      "description": "Start a queued thread only when its provider has a free slot.",
+      "icon": "ListOrdered",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/provider-queue",
+          "range": "0.x",
+          "tagPrefix": "provider-queue/"
+        }
+      }
+    },
+    {
       "id": "shared-runtime",
       "displayName": "Shared Runtime",
       "description": "Typed, project-confined shared container runtime for BB worktrees, driven by each repository's .bb-runtime.json",
