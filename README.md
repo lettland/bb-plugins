@@ -55,7 +55,7 @@ npm package). From a plugin directory:
 ```sh
 npm install --include=dev --legacy-peer-deps
 npm test
-npm run test:coverage   # writes coverage/lcov.info (plugins with runtime tests)
+npm run test:coverage   # writes coverage/lcov.info (all plugins)
 bb plugin build          # downloads the build toolchain on first use
 ```
 
@@ -67,12 +67,25 @@ harness lists them as devDependencies.
 ## CI and coverage
 
 [`.github/workflows/test.yml`](.github/workflows/test.yml) runs every plugin's
-suite on pushes and pull requests to `master`. Plugins with runtime tests run
+suite on pushes and pull requests to `master`. Every plugin runs
 `npm run test:coverage` (vitest's v8 provider, or Node's built-in coverage for
-`shared-runtime`) and upload `lcov.info` to Coveralls as one flag per plugin of a
-parallel build; a final job closes it, carrying forward flags a run did not
-report. Uploads never fail the run. triage runs plain `npm test`
-(`tsc --noEmit` plus a `tsx --test` suite) without coverage.
+`shared-runtime`). The vitest plugins enforce 100% coverage on all four
+metrics. `shared-runtime` gates lines, branches, and functions; Node's runner
+has no statements threshold. Its floors are the measured lows, 99.71 / 99.03 /
+98.88: `node --test` merges coverage from child processes, and one merged run
+under load measured functions at 98.88, so the functions floor sits below the
+99.16 every idle single-process run reported. `shared-runtime` runs coverage
+single-process (`--test-concurrency=1`) for deterministic merges; plain
+`npm test` stays parallel. Each plugin uploads `lcov.info` to Coveralls as one
+flag per plugin of a parallel build; a final job closes it, carrying forward
+flags a run did not report. Uploads never fail the run.
+
+Coverage ignore comments are allowed only for code that cannot run, for example
+an exhaustive-switch default arm; every ignore states its reason. Vitest plugins
+use `// v8 ignore next -- @preserve <reason>` or `v8 ignore start`/`stop`, and
+`shared-runtime` uses `/* node:coverage ignore next */` or
+`node:coverage disable`/`enable`. Start and stop markers must sit on their own
+lines.
 
 ## Releasing
 
