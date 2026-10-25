@@ -32,7 +32,6 @@ export interface ViewDeps {
 
 export async function snapshot(deps: ViewDeps): Promise<{
   providers: ProviderSummary[];
-  queueOrder: string[];
 }> {
   const { bb, caches, queue, limits } = deps;
   const [running, labels] = await Promise.all([
@@ -81,7 +80,6 @@ export async function snapshot(deps: ViewDeps): Promise<{
   }
   return {
     providers: [...summaries.values()],
-    queueOrder: queue.map((entry) => entry.threadId),
   };
 }
 

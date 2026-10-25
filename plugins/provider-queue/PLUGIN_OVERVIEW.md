@@ -29,15 +29,20 @@ limit, and for core.
 - **Approval windows.** A thread that runs but waits for the user (a pending
   interaction) does not hold a slot BY DESIGN, so answering an approval can
   leave the provider over the limit until a thread finishes — this is not a
-  bug.
+  bug. A recheck that admits one row can also momentarily overlap with a
+  thread that has not yet appeared in the running list, so the provider can
+  run one thread over the limit for a few seconds; the next recheck corrects
+  it.
 - **Ancestors never block.** A queued child can run beside its own parent and
   the parent's ancestors, so a parent waiting on its queued child cannot
   deadlock. The link is opt-in on the CLI: pass `--parent-self` or
   `--parent-thread`.
 - **Order is exact within a provider.** Free slots go to queued rows in queue
   order: a row starts only when `free slots > its position among the rows
-  queued for that provider`. `move` reorders a row (up/down swap with the
-  neighbor, top/bottom move to the ends).
+  queued for that provider`. `move` reorders within the provider: up/down
+  swap with the neighboring row of the same provider, top/bottom move to the
+  first/last position among that provider's rows, and rows on other providers
+  keep their relative order.
 - **Rechecks.** The plugin rechecks when a thread starts, goes idle, fails, is
   archived or deleted, when an interaction turns pending, and at least every
   30 seconds while any thread is queued.

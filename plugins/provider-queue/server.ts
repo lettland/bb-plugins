@@ -47,10 +47,7 @@ export type {
 export const rpcContract = defineRpcContract({
   snapshot: {
     input: z.null(),
-    output: z.object({
-      providers: z.array(providerSummarySchema),
-      queueOrder: z.array(z.string()),
-    }),
+    output: z.object({ providers: z.array(providerSummarySchema) }),
   },
   move: {
     input: z
@@ -78,18 +75,30 @@ export const rpcContract = defineRpcContract({
 
 type ThreadPayload = PluginThreadEventPayloads["thread.created"]["thread"];
 
+function warnIfMalformed(
+  bb: BbPluginApi,
+  key: string,
+  value: unknown,
+  parsed: boolean,
+): void {
+  const absent = value === null || value === undefined;
+  if (!parsed && !absent) {
+    bb.log.warn(`Stored ${key} is malformed; starting empty`);
+  }
+}
+
 export default async function providerQueuePlugin(
   bb: BbPluginApi,
 ): Promise<void> {
-  const storedEntries = queueEntriesSchema.safeParse(
-    await bb.storage.kv.get<unknown>(QUEUE_KEY),
-  );
+  const storedQueue = await bb.storage.kv.get<unknown>(QUEUE_KEY);
+  const storedEntries = queueEntriesSchema.safeParse(storedQueue);
+  warnIfMalformed(bb, QUEUE_KEY, storedQueue, storedEntries.success);
   const queue: QueueEntry[] = storedEntries.success
     ? storedEntries.data.map((entry) => ({ ...entry }))
     : [];
-  const storedLimits = limitsSchema.safeParse(
-    await bb.storage.kv.get<unknown>(LIMITS_KEY),
-  );
+  const storedLimitsValue = await bb.storage.kv.get<unknown>(LIMITS_KEY);
+  const storedLimits = limitsSchema.safeParse(storedLimitsValue);
+  warnIfMalformed(bb, LIMITS_KEY, storedLimitsValue, storedLimits.success);
   const limits: Record<string, number> = storedLimits.success
     ? { ...storedLimits.data }
     : {};
@@ -274,17 +283,25 @@ export default async function providerQueuePlugin(
   ): Promise<void> {
     const index = queue.findIndex((entry) => entry.threadId === threadId);
     if (index < 0) throw new Error(`${threadId} is not queued`);
-    const target =
-      direction === "up"
-        ? index - 1
-        : direction === "down"
-          ? index + 1
-          : direction === "top"
-            ? 0
-            : queue.length - 1;
-    if (target === index || target < 0 || target >= queue.length) return;
-    const [entry] = queue.splice(index, 1);
-    queue.splice(target, 0, entry);
+    const siblings = [...queue.entries()].filter(
+      ([, entry]) => entry.providerId === queue[index].providerId,
+    );
+    const at = siblings.findIndex(([position]) => position === index);
+    const offset = direction === "up" ? -1 : direction === "down" ? 1 : 0;
+    const swapWith = offset === 0 ? undefined : siblings[at + offset];
+    if (swapWith !== undefined) {
+      const displaced = queue[swapWith[0]];
+      queue[swapWith[0]] = queue[index];
+      queue[index] = displaced;
+    } else if (direction === "top" && at > 0) {
+      const [entry] = queue.splice(index, 1);
+      queue.splice(siblings[0][0], 0, entry);
+    } else if (direction === "bottom" && at < siblings.length - 1) {
+      const [entry] = queue.splice(index, 1);
+      queue.splice(siblings[siblings.length - 1][0], 0, entry);
+    } else {
+      return;
+    }
     await persist();
     await recheckDispatch();
     publish();
@@ -299,6 +316,11 @@ export default async function providerQueuePlugin(
     providerId: string,
     limit: number,
   ): Promise<void> {
+    const known = await bb.sdk.providers.list().then(
+      (providers) => providers.some((provider) => provider.id === providerId),
+      () => null,
+    );
+    if (known === false) throw new Error(`Unknown provider ${providerId}`);
     limits[providerId] = limit;
     await persist();
     await recheckDispatch();

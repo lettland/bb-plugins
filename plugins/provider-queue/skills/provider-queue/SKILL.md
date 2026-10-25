@@ -36,8 +36,12 @@ multi-line prompt, pass `--prompt "$(cat brief.md)"`; there is no
 - A thread waiting on the user does not count toward the limit, so answering
   an approval can leave the provider over the limit until a thread finishes.
 - `limit` with no arguments prints every configured limit and the default;
+  `limit <provider> <n>` sets it — `<n>` must be a whole number of 0 or more
+  (an empty value is rejected) and `<provider>` must be one bb knows — and
   `limit <provider> 0` pauses the provider. Free slots go to queued rows in
-  queue order; `move` reorders them.
+  queue order; `move` reorders a row within its own provider: up/down swap
+  with the neighboring row of that provider, top/bottom move to its first or
+  last row.
 - Disabling the plugin releases every held thread. It is a workflow aid, not
   a security control.
 - From the SDK, pass `pluginSubmission: { pluginId: "provider-queue", data: {

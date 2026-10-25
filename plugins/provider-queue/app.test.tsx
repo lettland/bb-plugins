@@ -25,7 +25,7 @@ const navPanel = app.navPanels[0]!;
 const EMPTY_TEXT =
   'Nothing queued. Use "Start when provider has a slot" in the new-thread composer, or bb provider-queue add.';
 
-type SnapshotPayload = { providers: ProviderSummary[]; queueOrder: string[] };
+type SnapshotPayload = { providers: ProviderSummary[] };
 type PanelRpcHandlers = PluginRpcTestHandlers<typeof rpcContract>;
 
 function fakeComposer(fields: Partial<PluginComposerApi>): PluginComposerApi {
@@ -84,12 +84,11 @@ const GLM_SNAPSHOT: SnapshotPayload = {
       ],
     }),
   ],
-  queueOrder: ["thr_q1", "thr_q2"],
 };
 
 function handlers(overrides: Partial<PanelRpcHandlers> = {}): PanelRpcHandlers {
   return {
-    snapshot: () => ({ providers: [], queueOrder: [] }),
+    snapshot: () => ({ providers: [] }),
     move: () => ({ ok: true }),
     release: () => ({ ok: true }),
     setLimit: () => ({ ok: true }),
@@ -114,6 +113,10 @@ function renderPanel(rpc: PanelRpcHandlers, providers?: PluginProvidersState) {
     { subPath: "" },
     { rpc, providers: providers ?? { status: "ready", providers: [] } },
   );
+}
+
+function limitInput(slot: ReturnType<typeof renderPanel>): HTMLInputElement {
+  return slot.getByRole("spinbutton") as HTMLInputElement;
 }
 
 afterEach(() => {
@@ -146,9 +149,7 @@ describe("registration", () => {
 
 describe("disabled state", () => {
   it("is disabled while submitting is blocked", () => {
-    expect(
-      isDisabled(fakeComposer({ isSubmittingBlocked: true })),
-    ).toBe(true);
+    expect(isDisabled(fakeComposer({ isSubmittingBlocked: true }))).toBe(true);
   });
 
   it("is enabled otherwise, whatever the project or scope", () => {
@@ -262,7 +263,6 @@ describe("panel", () => {
       handlers({
         snapshot: () => ({
           providers: [summary({ providerId: "glm", label: "GLM plan" })],
-          queueOrder: [],
         }),
       }),
     );
@@ -283,16 +283,74 @@ describe("panel", () => {
     expect(slot.getByText("Hold on — awaiting you")).toBeTruthy();
     expect(slot.getByText("1. First (thr_q1)")).toBeTruthy();
     expect(slot.getByText("2. Second (thr_q2)")).toBeTruthy();
-    expect(slot.inspection.rpcCalls).toEqual([{ method: "snapshot", input: null }]);
+    expect(slot.inspection.rpcCalls).toEqual([
+      { method: "snapshot", input: null },
+    ]);
+  });
+
+  it("labels the limit input with the provider label", async () => {
+    const slot = renderPanel(handlers({ snapshot: () => GLM_SNAPSHOT }));
+
+    await waitFor(() =>
+      expect(
+        slot.getByRole("spinbutton", { name: "Limit for GLM plan" }),
+      ).toBeTruthy(),
+    );
+  });
+
+  it("numbers queue rows and hides edge buttons per provider section", async () => {
+    const slot = renderPanel(
+      handlers({
+        snapshot: () => ({
+          providers: [
+            summary({
+              providerId: "alpha",
+              label: "Alpha",
+              queue: [
+                { threadId: "A1", title: "Alpha one", providerId: "alpha" },
+                { threadId: "A2", title: "Alpha two", providerId: "alpha" },
+              ],
+            }),
+            summary({
+              providerId: "glm",
+              label: "GLM plan",
+              queue: [
+                { threadId: "G1", title: "Gamma one", providerId: "glm" },
+                { threadId: "G2", title: "Gamma two", providerId: "glm" },
+              ],
+            }),
+          ],
+        }),
+      }),
+    );
+
+    await waitFor(() =>
+      expect(slot.getAllByRole("heading", { level: 2 })).toHaveLength(2),
+    );
+    expect(slot.getByText("1. Alpha one (A1)")).toBeTruthy();
+    expect(slot.getByText("2. Alpha two (A2)")).toBeTruthy();
+    expect(slot.getByText("1. Gamma one (G1)")).toBeTruthy();
+    expect(slot.getByText("2. Gamma two (G2)")).toBeTruthy();
+    expect(slot.queryByRole("button", { name: "Move Alpha one (A1) up" })).toBeNull();
+    expect(slot.queryByRole("button", { name: "Move Gamma one (G1) up" })).toBeNull();
+    expect(
+      slot.queryByRole("button", { name: "Move Alpha two (A2) down" }),
+    ).toBeNull();
+    expect(
+      slot.queryByRole("button", { name: "Move Gamma two (G2) down" }),
+    ).toBeNull();
+    expect(slot.getByRole("button", { name: "Move Alpha one (A1) down" })).toBeTruthy();
+    expect(slot.getByRole("button", { name: "Move Gamma two (G2) up" })).toBeTruthy();
+    expect(slot.getAllByRole("button", { name: /^Release / })).toHaveLength(4);
   });
 
   it("moves a row up and refreshes", async () => {
     const slot = renderPanel(handlers({ snapshot: () => GLM_SNAPSHOT }));
     await waitFor(() =>
-      expect(slot.getByRole("button", { name: "Move up" })).toBeTruthy(),
+      expect(slot.getByRole("button", { name: "Move Second (thr_q2) up" })).toBeTruthy(),
     );
 
-    fireEvent.click(slot.getByRole("button", { name: "Move up" }));
+    fireEvent.click(slot.getByRole("button", { name: "Move Second (thr_q2) up" }));
 
     await waitFor(() =>
       expect(slot.inspection.rpcCalls).toEqual([
@@ -306,10 +364,10 @@ describe("panel", () => {
   it("moves a row down and refreshes", async () => {
     const slot = renderPanel(handlers({ snapshot: () => GLM_SNAPSHOT }));
     await waitFor(() =>
-      expect(slot.getByRole("button", { name: "Move down" })).toBeTruthy(),
+      expect(slot.getByRole("button", { name: "Move First (thr_q1) down" })).toBeTruthy(),
     );
 
-    fireEvent.click(slot.getByRole("button", { name: "Move down" }));
+    fireEvent.click(slot.getByRole("button", { name: "Move First (thr_q1) down" }));
 
     await waitFor(() =>
       expect(slot.inspection.rpcCalls).toEqual([
@@ -323,10 +381,10 @@ describe("panel", () => {
   it("releases a row and refreshes", async () => {
     const slot = renderPanel(handlers({ snapshot: () => GLM_SNAPSHOT }));
     await waitFor(() =>
-      expect(slot.getAllByRole("button", { name: "Release" })).toHaveLength(2),
+      expect(slot.getByRole("button", { name: "Release First (thr_q1)" })).toBeTruthy(),
     );
 
-    fireEvent.click(slot.getAllByRole("button", { name: "Release" })[0]!);
+    fireEvent.click(slot.getByRole("button", { name: "Release First (thr_q1)" }));
 
     await waitFor(() =>
       expect(slot.inspection.rpcCalls).toEqual([
@@ -335,17 +393,6 @@ describe("panel", () => {
         { method: "snapshot", input: null },
       ]),
     );
-  });
-
-  it("hides the up button on the first queue row and the down button on the last", async () => {
-    const slot = renderPanel(handlers({ snapshot: () => GLM_SNAPSHOT }));
-    await waitFor(() =>
-      expect(slot.getByRole("button", { name: "Move up" })).toBeTruthy(),
-    );
-
-    expect(slot.getAllByRole("button", { name: "Move up" })).toHaveLength(1);
-    expect(slot.getAllByRole("button", { name: "Move down" })).toHaveLength(1);
-    expect(slot.getAllByRole("button", { name: "Release" })).toHaveLength(2);
   });
 
   it("toasts when a move is rejected", async () => {
@@ -359,10 +406,10 @@ describe("panel", () => {
       }),
     );
     await waitFor(() =>
-      expect(slot.getByRole("button", { name: "Move up" })).toBeTruthy(),
+      expect(slot.getByRole("button", { name: "Move Second (thr_q2) up" })).toBeTruthy(),
     );
 
-    fireEvent.click(slot.getByRole("button", { name: "Move up" }));
+    fireEvent.click(slot.getByRole("button", { name: "Move Second (thr_q2) up" }));
 
     await waitFor(() =>
       expect(error).toHaveBeenCalledWith("Could not move the thread", {
@@ -382,10 +429,10 @@ describe("panel", () => {
       }),
     );
     await waitFor(() =>
-      expect(slot.getAllByRole("button", { name: "Release" })).toHaveLength(2),
+      expect(slot.getByRole("button", { name: "Release First (thr_q1)" })).toBeTruthy(),
     );
 
-    fireEvent.click(slot.getAllByRole("button", { name: "Release" })[0]!);
+    fireEvent.click(slot.getByRole("button", { name: "Release First (thr_q1)" }));
 
     await waitFor(() =>
       expect(error).toHaveBeenCalledWith("Could not release the thread", {
@@ -396,11 +443,9 @@ describe("panel", () => {
 
   it("sets a valid limit and refreshes", async () => {
     const slot = renderPanel(handlers({ snapshot: () => GLM_SNAPSHOT }));
-    await waitFor(() => expect(slot.getByRole("spinbutton")).toBeTruthy());
+    await waitFor(() => expect(limitInput(slot)).toBeTruthy());
 
-    fireEvent.change(slot.getByRole("spinbutton"), {
-      target: { value: "5" },
-    });
+    fireEvent.change(limitInput(slot), { target: { value: "5" } });
     fireEvent.click(slot.getByRole("button", { name: "Set limit" }));
 
     await waitFor(() =>
@@ -412,14 +457,44 @@ describe("panel", () => {
     );
   });
 
+  it("rejects an empty limit draft without any rpc call", async () => {
+    const error = vi.spyOn(toast, "error").mockReturnValue("toast");
+    const slot = renderPanel(handlers({ snapshot: () => GLM_SNAPSHOT }));
+    await waitFor(() => expect(limitInput(slot)).toBeTruthy());
+
+    fireEvent.change(limitInput(slot), { target: { value: "" } });
+    fireEvent.click(slot.getByRole("button", { name: "Set limit" }));
+
+    await waitFor(() =>
+      expect(error).toHaveBeenCalledWith("Enter a number for the limit"),
+    );
+    expect(slot.inspection.rpcCalls).toEqual([
+      { method: "snapshot", input: null },
+    ]);
+  });
+
+  it("rejects a whitespace-only limit draft without any rpc call", async () => {
+    const error = vi.spyOn(toast, "error").mockReturnValue("toast");
+    const slot = renderPanel(handlers({ snapshot: () => GLM_SNAPSHOT }));
+    await waitFor(() => expect(limitInput(slot)).toBeTruthy());
+
+    fireEvent.change(limitInput(slot), { target: { value: "   " } });
+    fireEvent.click(slot.getByRole("button", { name: "Set limit" }));
+
+    await waitFor(() =>
+      expect(error).toHaveBeenCalledWith("Enter a number for the limit"),
+    );
+    expect(slot.inspection.rpcCalls).toEqual([
+      { method: "snapshot", input: null },
+    ]);
+  });
+
   it("rejects a negative limit without any rpc call", async () => {
     const error = vi.spyOn(toast, "error").mockReturnValue("toast");
     const slot = renderPanel(handlers({ snapshot: () => GLM_SNAPSHOT }));
-    await waitFor(() => expect(slot.getByRole("spinbutton")).toBeTruthy());
+    await waitFor(() => expect(limitInput(slot)).toBeTruthy());
 
-    fireEvent.change(slot.getByRole("spinbutton"), {
-      target: { value: "-1" },
-    });
+    fireEvent.change(limitInput(slot), { target: { value: "-1" } });
     fireEvent.click(slot.getByRole("button", { name: "Set limit" }));
 
     await waitFor(() =>
@@ -427,17 +502,17 @@ describe("panel", () => {
         "The limit must be a whole number of 0 or more",
       ),
     );
-    expect(slot.inspection.rpcCalls).toEqual([{ method: "snapshot", input: null }]);
+    expect(slot.inspection.rpcCalls).toEqual([
+      { method: "snapshot", input: null },
+    ]);
   });
 
   it("rejects a fractional limit without any rpc call", async () => {
     const error = vi.spyOn(toast, "error").mockReturnValue("toast");
     const slot = renderPanel(handlers({ snapshot: () => GLM_SNAPSHOT }));
-    await waitFor(() => expect(slot.getByRole("spinbutton")).toBeTruthy());
+    await waitFor(() => expect(limitInput(slot)).toBeTruthy());
 
-    fireEvent.change(slot.getByRole("spinbutton"), {
-      target: { value: "1.5" },
-    });
+    fireEvent.change(limitInput(slot), { target: { value: "1.5" } });
     fireEvent.click(slot.getByRole("button", { name: "Set limit" }));
 
     await waitFor(() =>
@@ -445,7 +520,9 @@ describe("panel", () => {
         "The limit must be a whole number of 0 or more",
       ),
     );
-    expect(slot.inspection.rpcCalls).toEqual([{ method: "snapshot", input: null }]);
+    expect(slot.inspection.rpcCalls).toEqual([
+      { method: "snapshot", input: null },
+    ]);
   });
 
   it("toasts when setting the limit is rejected", async () => {
@@ -458,7 +535,7 @@ describe("panel", () => {
         },
       }),
     );
-    await waitFor(() => expect(slot.getByRole("spinbutton")).toBeTruthy());
+    await waitFor(() => expect(limitInput(slot)).toBeTruthy());
 
     fireEvent.click(slot.getByRole("button", { name: "Set limit" }));
 
@@ -467,6 +544,103 @@ describe("panel", () => {
         description: "busy",
       }),
     );
+  });
+
+  it("resyncs an untouched limit draft when the server limit changes", async () => {
+    let snapshotPayload: SnapshotPayload = GLM_SNAPSHOT;
+    const slot = renderPanel(handlers({ snapshot: () => snapshotPayload }));
+    await waitFor(() => expect(limitInput(slot).value).toBe("2"));
+
+    snapshotPayload = {
+      providers: GLM_SNAPSHOT.providers.map((provider) => ({
+        ...provider,
+        limit: 5,
+      })),
+    };
+    await slot.behavior.emitRealtime("provider-queue", { kind: "state" });
+
+    await waitFor(() => expect(limitInput(slot).value).toBe("5"));
+  });
+
+  it("keeps an edited limit draft while the input is focused", async () => {
+    let snapshotPayload: SnapshotPayload = GLM_SNAPSHOT;
+    const slot = renderPanel(handlers({ snapshot: () => snapshotPayload }));
+    await waitFor(() => expect(limitInput(slot).value).toBe("2"));
+
+    limitInput(slot).focus();
+    fireEvent.change(limitInput(slot), { target: { value: "7" } });
+    snapshotPayload = {
+      providers: GLM_SNAPSHOT.providers.map((provider) => ({
+        ...provider,
+        limit: 5,
+      })),
+    };
+    await slot.behavior.emitRealtime("provider-queue", { kind: "state" });
+    await waitFor(() => expect(slot.inspection.rpcCalls).toHaveLength(2));
+
+    expect(limitInput(slot).value).toBe("7");
+  });
+
+  it("resyncs a stale edited draft once the input is not focused", async () => {
+    let snapshotPayload: SnapshotPayload = GLM_SNAPSHOT;
+    const slot = renderPanel(handlers({ snapshot: () => snapshotPayload }));
+    await waitFor(() => expect(limitInput(slot).value).toBe("2"));
+
+    limitInput(slot).focus();
+    fireEvent.change(limitInput(slot), { target: { value: "7" } });
+    limitInput(slot).blur();
+    snapshotPayload = {
+      providers: GLM_SNAPSHOT.providers.map((provider) => ({
+        ...provider,
+        limit: 5,
+      })),
+    };
+    await slot.behavior.emitRealtime("provider-queue", { kind: "state" });
+    await waitFor(() => expect(slot.inspection.rpcCalls).toHaveLength(2));
+
+    expect(limitInput(slot).value).toBe("5");
+  });
+
+  it("submits the typed limit after the input blurs on the click", async () => {
+    const slot = renderPanel(handlers({ snapshot: () => GLM_SNAPSHOT }));
+    await waitFor(() => expect(limitInput(slot).value).toBe("2"));
+
+    fireEvent.focus(limitInput(slot));
+    fireEvent.change(limitInput(slot), { target: { value: "9" } });
+    expect(limitInput(slot).value).toBe("9");
+
+    fireEvent.blur(limitInput(slot));
+    fireEvent.click(slot.getByRole("button", { name: "Set limit" }));
+
+    await waitFor(() =>
+      expect(slot.inspection.rpcCalls).toEqual([
+        { method: "snapshot", input: null },
+        { method: "setLimit", input: { providerId: "glm", limit: 9 } },
+        { method: "snapshot", input: null },
+      ]),
+    );
+  });
+
+  it("renders the editor for an idle provider with a configured limit", async () => {
+    const slot = renderPanel(
+      handlers({
+        snapshot: () => ({
+          providers: [
+            summary({ providerId: "paused", label: "Paused", limit: 0 }),
+          ],
+        }),
+      }),
+    );
+
+    await waitFor(() =>
+      expect(
+        slot.getByRole("heading", { level: 2, name: "Paused" }),
+      ).toBeTruthy(),
+    );
+    expect(
+      slot.getByRole("spinbutton", { name: "Limit for Paused" }),
+    ).toBeTruthy();
+    expect(slot.getByText("0 running + 0 awaiting you, limit 0")).toBeTruthy();
   });
 
   it("falls back to the directory name and then the raw provider id", async () => {
@@ -490,7 +664,6 @@ describe("panel", () => {
               ],
             }),
           ],
-          queueOrder: ["thr_q"],
         }),
       }),
       directoryWith([{ id: "rawprovider", displayName: "Raw Provider" }]),

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   definePluginApp,
   experimental_useProviders,
@@ -10,7 +10,7 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import type { rpcContract } from "./server.js";
-import type { ProviderSummary } from "./src/shared.js";
+import { DEFAULT_LIMIT, type ProviderSummary } from "./src/shared.js";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -34,17 +34,34 @@ const startWhenProviderFree: ComposerSendMenuItem = {
   },
 };
 
-type QueueSnapshot = { providers: ProviderSummary[]; queueOrder: string[] };
+type QueueSnapshot = { providers: ProviderSummary[] };
 
 function ProviderSection(props: {
   summary: ProviderSummary;
-  queueOrder: readonly string[];
   directory: PluginProvidersState["providers"];
   rpc: PluginRpcClient<typeof rpcContract>;
   refresh: () => void;
 }) {
-  const { summary, queueOrder, directory, rpc, refresh } = props;
+  const { summary, directory, rpc, refresh } = props;
   const [limitDraft, setLimitDraft] = useState(String(summary.limit));
+  const limitInputRef = useRef<HTMLInputElement | null>(null);
+  // The server limit the draft currently reflects; the draft is dirty once
+  // the user types past it.
+  const syncedLimitRef = useRef(summary.limit);
+
+  // A limit changed elsewhere (CLI, another panel) must not sit stale in this
+  // draft: resync when the user has not typed since the last sync or is not
+  // editing this input right now. A dirty draft is left alone only while its
+  // input is focused; once unfocused, the next limit change resyncs it.
+  useEffect(() => {
+    if (
+      limitDraft === String(syncedLimitRef.current) ||
+      limitInputRef.current !== document.activeElement
+    ) {
+      syncedLimitRef.current = summary.limit;
+      setLimitDraft(String(summary.limit));
+    }
+  }, [summary.limit]);
 
   const label =
     summary.label !== summary.providerId
@@ -53,6 +70,10 @@ function ProviderSection(props: {
           ?.displayName ?? summary.providerId);
 
   function submitLimit(): void {
+    if (limitDraft.trim() === "") {
+      toast.error("Enter a number for the limit");
+      return;
+    }
     const limit = Number(limitDraft);
     if (!Number.isInteger(limit) || limit < 0) {
       toast.error("The limit must be a whole number of 0 or more");
@@ -92,8 +113,10 @@ function ProviderSection(props: {
       <h2>{label}</h2>
       <p>{summary.running.length} running + {summary.awaiting.length} awaiting you, limit {summary.limit}</p>
       <input
+        ref={limitInputRef}
         type="number"
         min={0}
+        aria-label={`Limit for ${label}`}
         value={limitDraft}
         onChange={(event) => setLimitDraft(event.target.value)}
       />
@@ -111,24 +134,24 @@ function ProviderSection(props: {
         ))}
       </ul>
       <ul>
-        {summary.queue.map((row) => (
+        {summary.queue.map((row, index) => (
           <li key={row.threadId}>
             <span>
-              {queueOrder.indexOf(row.threadId) + 1}. {row.title} ({row.threadId})
+              {index + 1}. {row.title} ({row.threadId})
             </span>
-            {row.threadId !== queueOrder[0] && (
+            {index !== 0 && (
               <button
                 type="button"
-                aria-label="Move up"
+                aria-label={`Move ${row.title} (${row.threadId}) up`}
                 onClick={() => moveRow(row.threadId, "up")}
               >
                 ↑
               </button>
             )}
-            {row.threadId !== queueOrder[queueOrder.length - 1] && (
+            {index !== summary.queue.length - 1 && (
               <button
                 type="button"
-                aria-label="Move down"
+                aria-label={`Move ${row.title} (${row.threadId}) down`}
                 onClick={() => moveRow(row.threadId, "down")}
               >
                 ↓
@@ -136,7 +159,7 @@ function ProviderSection(props: {
             )}
             <button
               type="button"
-              aria-label="Release"
+              aria-label={`Release ${row.title} (${row.threadId})`}
               onClick={() => releaseRow(row.threadId)}
             >
               ✕
@@ -186,7 +209,8 @@ function ProviderQueuePanel() {
       (candidate) =>
         candidate.running.length === 0 &&
         candidate.awaiting.length === 0 &&
-        candidate.queue.length === 0,
+        candidate.queue.length === 0 &&
+        candidate.limit === DEFAULT_LIMIT,
     )
   ) {
     return (
@@ -203,7 +227,6 @@ function ProviderQueuePanel() {
         <ProviderSection
           key={summary.providerId}
           summary={summary}
-          queueOrder={snapshot.queueOrder}
           directory={directory}
           rpc={rpc}
           refresh={refresh}

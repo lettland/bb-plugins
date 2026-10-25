@@ -133,6 +133,9 @@ export async function isBlockedForDisplay(
   try {
     const pending = await bb.sdk.threads.interactions.list({ threadId });
     const blocked = pending.length > 0;
+    if (caches.blockedCache.size >= MAX_PROVIDER_CACHE) {
+      caches.blockedCache.clear();
+    }
     caches.blockedCache.set(threadId, { blocked, at: Date.now() });
     return blocked;
   } catch (error) {

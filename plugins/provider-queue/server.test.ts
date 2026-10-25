@@ -29,7 +29,6 @@ type InteractionPending =
   PluginThreadEventPayloads["interaction.pending"]["interaction"];
 type Snapshot = {
   providers: ProviderSummary[];
-  queueOrder: string[];
 };
 
 const PLUGIN_ID = "provider-queue";
@@ -951,7 +950,6 @@ describe("state reload", () => {
       "snapshot",
       null,
     )) as Snapshot;
-    expect(snap.queueOrder).toEqual(["thr_a", "thr_b"]);
     expect(snap.providers).toEqual([
       {
         providerId: PROVIDER,
@@ -986,6 +984,52 @@ describe("state reload", () => {
 });
 
 describe("limit handling", () => {
+  it("warns and starts empty when the stored queue is malformed", async () => {
+    const fake = await setup({
+      storedEntries: { not: "a list" },
+    });
+
+    expect(fake.harness.logEntries).toContainEqual({
+      level: "warn",
+      message: "Stored queue-entries is malformed; starting empty",
+    });
+    await expect(
+      fake.hook(dispatchContext({ submission: queueIntent() })),
+    ).resolves.toEqual({ action: "proceed" });
+  });
+
+  it("warns and starts empty when the stored limits are malformed", async () => {
+    const fake = await setup({
+      storedLimits: { p1: -1 },
+      running: [running("thr_a"), running("thr_b")],
+      threads: {
+        thr_a: { providerId: PROVIDER },
+        thr_b: { providerId: PROVIDER },
+      },
+    });
+
+    expect(fake.harness.logEntries).toContainEqual({
+      level: "warn",
+      message: "Stored provider-limits is malformed; starting empty",
+    });
+    await expect(
+      fake.hook(dispatchContext({ submission: queueIntent() })),
+    ).resolves.toMatchObject({
+      action: "wait",
+      reason: `2 threads running on ${PROVIDER}, limit ${DEFAULT_LIMIT}`,
+    });
+  });
+
+  it("does not warn when storage is absent", async () => {
+    const fake = await setup();
+
+    expect(
+      fake.harness.logEntries.some((entry) =>
+        entry.message.includes("is malformed"),
+      ),
+    ).toBe(false);
+  });
+
   it("uses the default for an unlisted provider", async () => {
     const { hook } = await setup({
       storedLimits: { other: 9 },
@@ -1008,6 +1052,7 @@ describe("limit handling", () => {
     const fake = await setup({
       storedEntries: [{ threadId: "thr_new", providerId: PROVIDER }],
       threads: { thr_new: { status: "pending" } },
+      providers: [provider(PROVIDER, "Codex")],
     });
     const rechecksBefore = fake.harness.recheckCount;
     const signalsBefore = fake.harness.realtimeSignals.length;
@@ -1019,6 +1064,31 @@ describe("limit handling", () => {
     expect(await storedLimits(fake)).toEqual({ [PROVIDER]: 0 });
     expect(fake.harness.recheckCount).toBe(rechecksBefore + 1);
     expect(fake.harness.realtimeSignals).toHaveLength(signalsBefore + 1);
+  });
+
+  it("rejects a limit for a provider the directory does not know", async () => {
+    const fake = await setup({
+      storedLimits: { p1: 3 },
+      providers: [provider("p1", "Codex")],
+    });
+
+    await expect(
+      fake.harness.callRpc("setLimit", { providerId: "ghost", limit: 5 }),
+    ).rejects.toThrow("Unknown provider ghost");
+    expect(await storedLimits(fake)).toEqual({ p1: 3 });
+    expect(fake.harness.realtimeSignals).toHaveLength(0);
+  });
+
+  it("still sets a limit when the provider directory is unavailable", async () => {
+    const fake = await setup();
+    fake.harness.sdk.stub("providers.list", async () => {
+      throw new Error("directory offline");
+    });
+
+    await expect(
+      fake.harness.callRpc("setLimit", { providerId: "ghost", limit: 3 }),
+    ).resolves.toEqual({ ok: true });
+    expect(await storedLimits(fake)).toEqual({ ghost: 3 });
   });
 
   it("rejects an invalid rpc input", async () => {
@@ -1116,7 +1186,6 @@ describe("rpc snapshot", () => {
 
     const snap = await snapshotOf(fake);
 
-    expect(snap.queueOrder).toEqual(["thr_q1", "thr_q2", "thr_q3"]);
     expect(snap.providers).toEqual([
       {
         providerId: "p_lim",
@@ -1250,16 +1319,39 @@ describe("rpc snapshot", () => {
     ]);
     expect(fake.harness.recheckCount).toBe(1);
   });
+
+  it("clears the display cache when it reaches its cap", async () => {
+    const ids = Array.from({ length: 5_001 }, (_, index) => `thr_run_${index}`);
+    const threads: Record<string, ThreadRecord | Error> = {};
+    for (const id of ids) threads[id] = { providerId: PROVIDER };
+    const fake = await setup({
+      running: ids.map(running),
+      threads,
+    });
+
+    await snapshotOf(fake);
+    const firstPass = fake.harness.sdk.callsTo(
+      "threads.interactions.list",
+    ).length;
+    await snapshotOf(fake);
+    const total = fake.harness.sdk.callsTo(
+      "threads.interactions.list",
+    ).length;
+
+    expect(firstPass).toBe(5_001);
+    // Pass 2 refreshes thr_run_0..4999; thr_run_4999's insert hits the cap
+    // (pass 1's leftover entry makes 5000) and clears, so thr_run_5000 is
+    // re-queried too: 5001 + 5001.
+    expect(total).toBe(10_002);
+  });
 });
 
 describe("rpc move and release", () => {
   it.each([
     ["up", ["thr_b", "thr_a", "thr_c"]],
-    ["down", ["thr_a", "thr_c", "thr_b"]],
     ["top", ["thr_b", "thr_a", "thr_c"]],
-    ["bottom", ["thr_a", "thr_c", "thr_b"]],
   ] as const)(
-    "moves a queued row %s",
+    "moves a queued row %s within its provider",
     async (direction, expectedOrder) => {
       const entries = [
         { threadId: "thr_a", providerId: PROVIDER },
@@ -1284,13 +1376,52 @@ describe("rpc move and release", () => {
     },
   );
 
-  it("leaves the order alone when there is no neighbor to swap with", async () => {
+  it("moves rows within their provider only", async () => {
+    const entries = [
+      { threadId: "thr_a1", providerId: "p1" },
+      { threadId: "thr_g1", providerId: "p2" },
+      { threadId: "thr_a2", providerId: "p1" },
+      { threadId: "thr_g2", providerId: "p2" },
+    ];
+    const cases = [
+      { direction: "up", threadId: "thr_g2", expected: ["thr_a1", "thr_g2", "thr_a2", "thr_g1"] },
+      {
+        direction: "down",
+        threadId: "thr_a1",
+        expected: ["thr_a2", "thr_g1", "thr_a1", "thr_g2"],
+      },
+      {
+        direction: "top",
+        threadId: "thr_g2",
+        expected: ["thr_a1", "thr_g2", "thr_g1", "thr_a2"],
+      },
+      {
+        direction: "bottom",
+        threadId: "thr_g1",
+        expected: ["thr_a1", "thr_a2", "thr_g2", "thr_g1"],
+      },
+    ] as const;
+    for (const { direction, threadId, expected } of cases) {
+      const fake = await setup({ storedEntries: entries });
+      await expect(
+        fake.harness.callRpc("move", { threadId, direction }),
+      ).resolves.toEqual({ ok: true });
+      expect(await storedEntries(fake)).toEqual(
+        expected.map((threadId) =>
+          entries.find((entry) => entry.threadId === threadId),
+        ),
+      );
+    }
+  });
+
+  it("leaves the order alone when a row has no same-provider neighbor", async () => {
     const entries = [
       { threadId: "thr_a", providerId: PROVIDER },
       { threadId: "thr_b", providerId: PROVIDER },
     ];
     for (const direction of ["up", "down", "top", "bottom"] as const) {
       const fake = await setup({ storedEntries: entries });
+      const signalsBefore = fake.harness.realtimeSignals.length;
       await expect(
         fake.harness.callRpc("move", {
           threadId: direction === "up" || direction === "top" ? "thr_a" : "thr_b",
@@ -1298,6 +1429,7 @@ describe("rpc move and release", () => {
         }),
       ).resolves.toEqual({ ok: true });
       expect(await storedEntries(fake)).toEqual(entries);
+      expect(fake.harness.realtimeSignals).toHaveLength(signalsBefore);
     }
   });
 
@@ -1706,6 +1838,35 @@ describe("cli", () => {
     );
   });
 
+  it("numbers rows within their provider", async () => {
+    const fake = await setup({
+      storedEntries: [
+        { threadId: "thr_a1", providerId: "p1" },
+        { threadId: "thr_g1", providerId: "p2" },
+        { threadId: "thr_a2", providerId: "p1" },
+      ],
+      threads: {
+        thr_a1: { providerId: "p1", status: "pending" },
+        thr_g1: { providerId: "p2", status: "pending" },
+        thr_a2: { providerId: "p1", status: "pending" },
+      },
+      providers: [provider("p1", "Codex"), provider("p2", "Droid")],
+    });
+
+    const result = await fake.harness.runCli(["list"]);
+
+    expect(result.stdout).toBe(
+      [
+        "1. thr_a1  (untitled)  Codex  starts on the next recheck",
+        "1. thr_g1  (untitled)  Droid  starts on the next recheck",
+        "2. thr_a2  (untitled)  Codex  starts on the next recheck",
+        "",
+        "Codex: 0 running + 0 awaiting you, limit 2",
+        "Droid: 0 running + 0 awaiting you, limit 2",
+      ].join("\n"),
+    );
+  });
+
   it("strips control and bidi characters from the text list", async () => {
     const { harness } = await setup({
       storedEntries: [{ threadId: "thr_wait1", providerId: "p1" }],
@@ -1791,7 +1952,10 @@ describe("cli", () => {
   });
 
   it("shows and sets provider limits", async () => {
-    const fake = await setup({ storedLimits: { p1: 3 } });
+    const fake = await setup({
+      storedLimits: { p1: 3 },
+      providers: [provider("p1", "Codex"), provider("p2", "Droid")],
+    });
 
     const all = await fake.harness.runCli(["limit"]);
     expect(all.stdout).toBe("p1: 3\n(default 2 for every other provider)");
@@ -1806,10 +1970,16 @@ describe("cli", () => {
     expect(set.stdout).toBe("Set p2 limit to 5.");
     expect(await storedLimits(fake)).toEqual({ p1: 3, p2: 5 });
     expect(fake.harness.recheckCount).toBe(1);
+
+    const unknown = await fake.harness.runCli(["limit", "ghost", "5"]);
+    expect(unknown.exitCode).toBe(1);
+    expect(unknown.stderr).toContain("Unknown provider ghost");
   });
 
   it("announces a paused provider when the limit is set to 0", async () => {
-    const fake = await setup();
+    const fake = await setup({
+      providers: [provider("p1", "Codex")],
+    });
 
     const result = await fake.harness.runCli(["limit", "p1", "0"]);
 
@@ -1836,10 +2006,21 @@ describe("cli", () => {
     expect(fractional.stderr).toContain(
       "The limit must be a whole number of 0 or more, not 1.5",
     );
+
+    for (const empty of ["", "  "]) {
+      const result = await harness.runCli(["limit", "p1", empty]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain(
+        "The limit must be a whole number of 0 or more; got an empty value",
+      );
+    }
   });
 
   it("emits limits as JSON", async () => {
-    const fake = await setup({ storedLimits: { p1: 3 } });
+    const fake = await setup({
+      storedLimits: { p1: 3 },
+      providers: [provider("p1", "Codex"), provider("p2", "Droid")],
+    });
 
     const all = await fake.harness.runCli(["limit", "--json"]);
     expect(JSON.parse(all.stdout)).toEqual({ limits: { p1: 3 }, defaultLimit: 2 });

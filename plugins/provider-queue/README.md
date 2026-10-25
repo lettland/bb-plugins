@@ -7,9 +7,11 @@ on.
 
 - `bb provider-queue spawn` to queue a new thread from a terminal or an agent.
 - `bb provider-queue add <thread-id>` to queue a thread that already exists.
-- `bb provider-queue list` to see what each queued thread waits on, `bb
-  provider-queue move` to reorder, `bb provider-queue release` to stop holding
-  one, and `bb provider-queue limit` to show or set per-provider limits.
+- `bb provider-queue list` to see what each queued thread waits on (numbered
+  within its provider), `bb provider-queue move` to reorder a thread within
+  its provider, `bb provider-queue release` to stop holding one, and `bb
+  provider-queue limit` to show or set per-provider limits. `limit` values
+  must be whole numbers of 0 or more, and the provider must be one bb knows.
 
 Queuing is opt-in for each thread and covers its first message only. Threads
 that were never queued start immediately and are never held, but they do count

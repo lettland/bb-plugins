@@ -18,7 +18,7 @@ import { spawnCommand } from "./spawn.js";
 interface QueueAccess {
   isQueued(threadId: string): boolean;
   listViews(providerFilter: string | undefined): Promise<QueuedView[]>;
-  snapshot(): Promise<{ providers: ProviderSummary[]; queueOrder: string[] }>;
+  snapshot(): Promise<{ providers: ProviderSummary[] }>;
   enqueue(threadId: string, providerId: string): Promise<void>;
   moveQueued(threadId: string, direction: Direction): Promise<void>;
   releaseQueued(threadId: string): Promise<void>;
@@ -152,11 +152,12 @@ function listCommand(queue: QueueAccess) {
           (providerFilter === undefined ||
             summary.providerId === providerFilter),
       );
-      let queuedCount = 0;
+      const numbered = new Map<string, number>();
       const lines = views.map((view) => {
         if (view.state !== "queued") return printableLine(formatView(view));
-        queuedCount += 1;
-        return printableLine(`${queuedCount}. ${formatView(view)}`);
+        const next = (numbered.get(view.providerId) ?? 0) + 1;
+        numbered.set(view.providerId, next);
+        return printableLine(`${next}. ${formatView(view)}`);
       });
       if (lines.length === 0) lines.push("No queued threads.");
       if (providers.length > 0) {
@@ -181,9 +182,9 @@ function listCommand(queue: QueueAccess) {
 
 function moveCommand(queue: QueueAccess) {
   return cliCommand({
-    summary: "Move a queued thread within the queue order",
+    summary: "Move a queued thread within its provider's queue order",
     description:
-      "up and down swap with the neighboring row; top and bottom move to the ends of the queue.",
+      "up and down swap with the neighboring row on the same provider; top and bottom move to the first and last position among that provider's queued threads.",
     positionals: [
       {
         name: "thread-id",
@@ -287,6 +288,12 @@ function limitCommand(queue: QueueAccess) {
                 configured === undefined ? `default ${DEFAULT_LIMIT}` : configured
               }`,
         };
+      }
+      if (limit.trim() === "") {
+        throw new PluginCliError(
+          "The limit must be a whole number of 0 or more; got an empty value",
+          { code: "invalid_value" },
+        );
       }
       const value = Number(limit);
       if (!Number.isInteger(value) || value < 0) {
