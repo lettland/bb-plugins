@@ -54,7 +54,7 @@ function procStat(startTicks) {
 }
 
 function serveProcfs({ startTicks = 0, uptime = null, liveStat = true } = {}) {
-  fsHooks.readFile = async (filePath) => {
+  fsHooks.readFile = async (filePath, ...rest) => {
     if (filePath === "/proc/sys/kernel/random/boot_id") {
       return BOOT_ID;
     }
@@ -76,7 +76,7 @@ function serveProcfs({ startTicks = 0, uptime = null, liveStat = true } = {}) {
       error.code = "ENOENT";
       throw error;
     }
-    return fsPromises.readFile(filePath);
+    return fsPromises.readFile(filePath, ...rest);
   };
 }
 
@@ -118,14 +118,14 @@ test("a readable /proc yields the boot-id and start-tick identity", async (t) =>
 });
 
 test("a /proc stat without start ticks falls back to ps output", async (t) => {
-  fsHooks.readFile = async (filePath) => {
+  fsHooks.readFile = async (filePath, ...rest) => {
     if (filePath === "/proc/sys/kernel/random/boot_id") {
       return BOOT_ID;
     }
     if (filePath === "/proc/4242/stat") {
       return " 4242 (node) S 0 1 2\n";
     }
-    return fsPromises.readFile(filePath);
+    return fsPromises.readFile(filePath, ...rest);
   };
   spawnHooks.spawn = (command, args) => {
     assert.equal(command, "/bin/ps");

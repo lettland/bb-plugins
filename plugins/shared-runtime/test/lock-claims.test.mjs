@@ -151,13 +151,13 @@ test("an unreadable legacy lock directory surfaces the read error", async (t) =>
   const root = await makeRoot(t);
   const directory = path.join(root, "legacy.lock");
   await mkdir(directory);
-  fsHooks.readFile = async (filePath) => {
+  fsHooks.readFile = async (filePath, ...rest) => {
     if (filePath === path.join(directory, "owner.json")) {
       const error = new Error("denied");
       error.code = "EACCES";
       throw error;
     }
-    return fsPromises.readFile(filePath);
+    return fsPromises.readFile(filePath, ...rest);
   };
   await assert.rejects(
     lockClaims.inspectLegacyLockDirectory(directory, ["owner.json"], undefined),
@@ -172,7 +172,7 @@ test("a legacy owner that appears as live between the two reads is preserved", a
   const legacyLiveOwner = liveOwner("legacy-live");
   await writeOwner(path.join(directory, "owner.json"), { broken: true });
   let reads = 0;
-  fsHooks.readFile = async (filePath) => {
+  fsHooks.readFile = async (filePath, ...rest) => {
     if (filePath === path.join(directory, "owner.json")) {
       reads += 1;
       if (reads === 1) {
@@ -180,7 +180,7 @@ test("a legacy owner that appears as live between the two reads is preserved", a
       }
       return `${JSON.stringify(legacyLiveOwner)}\n`;
     }
-    return fsPromises.readFile(filePath);
+    return fsPromises.readFile(filePath, ...rest);
   };
   const state = await lockClaims.inspectLegacyLockDirectory(directory, ["owner.json"], undefined);
   assert.deepEqual(state, { owner: legacyLiveOwner, replace: false });
