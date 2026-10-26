@@ -1,6 +1,6 @@
 {
   "name": "@lettland/bb-plugin-project-queue",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Start a new thread only when no other thread in its project is running.",
   "license": "MIT",

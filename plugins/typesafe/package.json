@@ -1,6 +1,6 @@
 {
   "name": "@lettland/bb-plugin-typesafe",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "description": "Typed Choice/Noul/Score decisions from TypeSafe's Jev model for agents — a typesafe_decide tool plus optional opening-request triage.",
   "license": "BSD-2-Clause",
