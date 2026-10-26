@@ -351,7 +351,7 @@ async function withdrawQueuedReview(
 
 /**
  * The deny a plan hold resolves with. SDK 0.5.9 predates the resolution's
- * `message` — a past core delivers it as the agent-facing deny text, and an
+ * `message` — a newer core delivers it as the agent-facing deny text, and an
  * older host's zod strips the unknown key, which is the bare deny of old.
  * Delete this type once the SDK devDependency includes the field.
  */
