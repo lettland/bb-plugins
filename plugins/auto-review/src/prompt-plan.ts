@@ -77,8 +77,9 @@ const NATIVE_PLAN_NEXT_STEPS =
 
 /**
  * The turn that replaces a plan's first presentation. The plan approval is
- * denied right after this is queued, and a bare deny reads to the agent as the
- * user rejecting the plan — so the prompt opens by saying nobody did.
+ * denied right after this is queued, and the deny carries auto-review's own
+ * hold text (`planHoldDenyMessage`) — which opens the same way, so the agent
+ * reads "nobody rejected it" from whichever lands first.
  *
  * `autoApprove` only shapes steps 4 and 5. The gate decides at release time
  * whether the re-presented plan is approved, so a flag toggled mid-review
@@ -280,16 +281,39 @@ export const PRESENT_PLAN_INVALID_PATH_MESSAGE =
   "planFilePath must be a plain file path (letters, digits, '.', '_', '/', '@', '+', '-' only — no shell metacharacters or spaces). Save the plan to such a path and call PresentPlan again.";
 
 /**
+ * The text a plan-approval deny carries: what the agent reads in place of the
+ * bare rejection core used to answer ExitPlanMode with. The steered review
+ * reaches the agent only after its next tool call, so the message names that
+ * one call and says what to do when no steps follow. The parenthetical path
+ * example only appears when the provider reported a plan file.
+ */
+export function planHoldDenyMessage(planFilePath: string | null): string {
+  const readExample = planFilePath === null ? "" : `, for example read ${planFilePath}`;
+  return (
+    `${AUTO_REVIEW_MARKER} This plan was held back for review before it reaches the user. ` +
+    "Nobody rejected it. Do not ask the user what to change, do not start implementing, and " +
+    "do not call ExitPlanMode again until the review steps arrive. They arrive as the next " +
+    `message after your next tool call: make one read-only tool call now${readExample}. ` +
+    "If no steps arrive, end your turn and tell the user the plan is held for review and " +
+    "that they can ask you to present it again."
+  );
+}
+
+/**
  * The answer auto-review gives, in the user's name, to a `user_question` the
- * agent raises as its very next tool call after a plan deny. The deny's own
- * text (core, not auto-review) reads to the agent as a rejection and asks
- * what to change; the queued review only reaches the agent after this
- * question's next tool result, so the wording holds regardless of which the
- * agent reads first.
+ * agent raises as its immediate reaction to a plan deny. Even with the deny
+ * carrying auto-review's own hold text (and, on a host without it, the
+ * provider's bare rejection), the agent may still ask what to change before
+ * the queued review reaches it — and it may pair that question with preamble
+ * text in the same response (see `isImmediateReactionToDeny`). The queued
+ * review only reaches the agent after this question's next tool result, so
+ * the wording holds regardless of which the agent reads first.
  */
 export const PLAN_HOLD_ANSWER =
   `${AUTO_REVIEW_MARKER} Automatic answer: the user did not reject this plan and has not seen it. ` +
   "auto-review held it back for review before it reaches the user. Follow the auto-review " +
   "instructions — they arrive as the next message if you don't have them yet. Do not ask the " +
-  "user what to change. If your question was about something else, ask it again.";
+  "user what to change. If your question was about something else, ask it again. Tell the " +
+  "user in one line that auto-review answered your question, and if you already told them " +
+  "the plan was rejected, correct that.";
 

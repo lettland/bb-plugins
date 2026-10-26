@@ -23,6 +23,7 @@ import {
   warnPlanUnreviewed,
   type PlanApproval,
 } from "./plan.js";
+import { planHoldDenyMessage } from "./prompt-plan.js";
 import { buildPlanReviewPrompt, buildPlanReviewRedoPrompt } from "./prompt.js";
 import { REPORT_REVIEW_TOOL_NAME } from "./report-tool.js";
 import {
@@ -44,13 +45,14 @@ const NATIVE_GATE_TOOLS = ["ExitPlanMode", "EnterPlanMode", "AskUserQuestion", R
  * Hold a plan's first presentation for review. The review turn is queued
  * BEFORE the approval is denied: a thread awaiting an interaction cannot take
  * a prompt, so the turn waits on the approval and core steers it the moment
- * the deny settles. But the deny's own text — core's, not auto-review's —
- * reaches the agent first and reads as the user rejecting the plan; the
- * steered review only reaches it after its next tool result (Claude Code
- * hands a steered message to the model only then). In between, the agent
- * may ask the user what to change — `denyPlan` leaves a short-lived
- * `planDenied` cursor for exactly that, which the `interaction.pending`
- * handler below uses to answer that one question itself.
+ * the deny settles. The deny carries auto-review's own hold text
+ * (`planHoldDenyMessage`), so the agent is not told its plan was rejected
+ * while it waits; the steered review still only reaches it after its next
+ * tool result (Claude Code hands a steered message to the model only then).
+ * In between, the agent may still ask the user what to change — `denyPlan`
+ * leaves a short-lived `planDenied` cursor for exactly that, which the
+ * `interaction.pending` handler below uses to answer that one question
+ * itself.
  */
 export async function gatePlan(
   ctx: ReviewContext,
@@ -293,7 +295,7 @@ async function redoPlanReview(
  * while the review really is still in the queue and has not been there past
  * the stale window: the recorded id is cleared only by `message.dispatched`
  * or `message.cancelled`, so trusting it alone would turn one missed event
- * into a bare deny of every plan the thread presents from then on.
+ * into a deny of every plan the thread presents from then on.
  */
 async function holdOrReleasePlan(
   ctx: ReviewContext,
@@ -348,7 +350,17 @@ async function withdrawQueuedReview(
 }
 
 /**
- * Deny a held plan. If the deny fails the plan is still with the user (or
+ * The deny a plan hold resolves with. SDK 0.5.9 predates the resolution's
+ * `message` — a past core delivers it as the agent-facing deny text, and an
+ * older host's zod strips the unknown key, which is the bare deny of old.
+ * Delete this type once the SDK devDependency includes the field.
+ */
+type PlanDenyResolution = { decision: "deny"; message: string };
+
+/**
+ * Deny a held plan. The deny carries the hold message (`planHoldDenyMessage`),
+ * so the agent waiting on the approval reads why the plan is held instead of a
+ * bare rejection. If the deny fails the plan is still with the user (or
  * they already answered it), so pull the queued review back out — otherwise
  * it would land after an approval and send the agent back to planning in the
  * middle of implementing — and disarm. A review that was delivered straight
@@ -385,7 +397,10 @@ async function denyPlan(
     await bb.sdk.threads.interactions.resolve({
       threadId: thread.id,
       interactionId: approval.interactionId,
-      resolution: { decision: "deny" },
+      resolution: {
+        decision: "deny",
+        message: planHoldDenyMessage(approval.planFilePath),
+      } as PlanDenyResolution,
     });
   } catch (error) {
     bb.log.warn(

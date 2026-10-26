@@ -22,6 +22,7 @@ import type { Decision } from "./decide.js";
 import type { CodeFileScope, PlanScope } from "./prompt-baseline.js";
 import type { PromptFinding } from "./prompt-findings.js";
 import { STEER_INTERRUPTION_NOTE } from "./prompt-shared.js";
+import { planHoldDenyMessage } from "./prompt-plan.js";
 
 describe("renderScope", () => {
   it("keeps allow-listed paths and counts odd ones", () => {
@@ -1249,6 +1250,28 @@ describe("PLAN_HOLD_ANSWER", () => {
     expect(PLAN_HOLD_ANSWER).toMatch(/did not reject this plan and has not seen it/);
     expect(PLAN_HOLD_ANSWER).toMatch(/Do not ask the user what to change/);
     expect(PLAN_HOLD_ANSWER).toMatch(/ask it again/);
+  });
+
+  it("has the agent correct a rejection it already announced, and own the answer", () => {
+    expect(PLAN_HOLD_ANSWER).toMatch(
+      /Tell the user in one line that auto-review answered your question, and if you already told them the plan was rejected, correct that/,
+    );
+  });
+});
+
+describe("planHoldDenyMessage", () => {
+  it("starts with the marker, says nobody rejected the plan, and stays under 4096 characters", () => {
+    for (const message of [planHoldDenyMessage(null), planHoldDenyMessage("/path/plan.md")]) {
+      expect(message.startsWith(AUTO_REVIEW_MARKER)).toBe(true);
+      expect(message).toContain("Nobody rejected it");
+      expect(message.length).toBeLessThanOrEqual(4096);
+    }
+  });
+
+  it("names the plan file to read only when the provider reported one", () => {
+    expect(planHoldDenyMessage("/path/plan.md")).toContain("for example read /path/plan.md");
+    expect(planHoldDenyMessage(null)).not.toContain("for example read");
+    expect(planHoldDenyMessage(null)).toMatch(/make one read-only tool call now\. If no steps arrive/);
   });
 });
 

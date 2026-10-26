@@ -57,10 +57,10 @@ both, so one plan is never reviewed twice.
 
 On Claude Code, when an agent presents a plan for approval (Claude Code's ExitPlanMode),
 auto-review holds back the **first** presentation. It queues a review turn and then denies
-that approval. The deny's own text — the provider's, not auto-review's — reaches the agent
-first and reads as the user rejecting the plan; the queued review only reaches the agent
-after its next tool result (Claude Code hands a steered message to the model only then), so
-for a moment the agent has only the bare deny to go on. The agent reviews the plan file
+that approval. The deny carries auto-review's own hold text, so the agent is not told the
+user rejected the plan; the queued review still only reaches the agent after its next tool
+result (Claude Code hands a steered message to the model only then), so for a moment the
+agent has only that deny text to go on. The agent reviews the plan file
 (devkit's calibrated review in `plan` scope, or a self-review, per the review mode), applies
 every valid finding to the plan, and presents it again. Plan reviews are delta-scoped too: the
 plugin keeps the plan as reviewed (per thread and plan file, in its own storage) and promotes it
@@ -109,19 +109,20 @@ session that never came back): the next call reviews again rather than releasing
 unreviewed. The claude-code family (`claude-code`, `claude-code-<slug>`) never gets `PresentPlan`, and no other provider gets the native
 gate's instructions, so the two review paths can never land on the same plan.
 
-Reading only the bare deny, an agent commonly reacts by asking the user what to change
+Reading only the deny text, an agent commonly reacts by asking the user what to change
 (Claude Code's native `AskUserQuestion`) — a question the user cannot really answer, since
 they never saw the plan. auto-review answers that one question itself, in the user's name,
 with a free-text note explaining the hold (marked `[bb auto-review]`) — reason
 `plan-hold-answered` — so the queued review still reaches the agent on its next tool result
 and the user is never asked to explain a rejection they didn't make. The answer only fires
-when the question is the agent's immediate reaction to the deny: no other `item/started`
-event since the deny — including the agent's own text, since a text-only response ends the
-model's turn and Claude Code injects the steered review into that same turn (core records
-that steer as `provider/unhandled`, not a `userMessage` item, so the agent's own text is the
-only observable sign it already happened) — is reasoning or the question's own native
-`AskUserQuestion` item; after any other item, the agent may already have the review, so its
-question may be a real one. Also required: within two minutes of the deny, the first
+when the question is the agent's immediate reaction to the deny: every `item/started` event
+since the deny is the agent's thinking, its own preamble text (the deny text reads as a
+rejection until the review arrives, so text paired with the question is expected), or the
+question's own native `AskUserQuestion` item; after any other item, the agent may already
+have the review, so its question may be a real one. The delivered review itself
+disqualifies: core records the steered user message as a `provider/unhandled` row with
+`rawType: "sdk/user"`, and once that row is in the log the question is no longer the deny's
+immediate reaction. Also required: within two minutes of the deny, the first
 question since it (one-shot), the turn hasn't ended, auto-review enabled for
 the thread, and every question in it allowing free text (true for Claude Code today;
 otherwise the question is left alone without using up the one-shot). Only the native

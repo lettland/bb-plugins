@@ -147,10 +147,11 @@ export const threadStateSchema = z.object({
   planReviewEntryId: z.string().optional(),
   /**
    * Set right after a plan deny settles, with the timeline cursor at that
-   * moment. A `user_question` the agent raises as its very next tool call
-   * reads as "what should change" — the provider's own deny text, not
-   * anything auto-review wrote — so this one-shot answers it instead of
-   * leaving the user to explain why they rejected a plan they never saw.
+   * moment. A `user_question` the agent raises as its immediate reaction to
+   * the deny reads as "what should change" — even with the deny carrying
+   * auto-review's own hold text, the agent may not wait for the steered
+   * review — so this one-shot answers it instead of leaving the user to
+   * explain why they rejected a plan they never saw.
    */
   planDenied: z.object({ at: z.number(), sinceSeq: z.number().int().nonnegative() }).optional(),
   /**

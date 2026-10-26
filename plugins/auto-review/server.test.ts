@@ -163,6 +163,12 @@ interface ItemStartedEvent {
   };
 }
 
+/** A `provider/unhandled` row: a raw provider event core logged without classifying (a steered user message arrives as one). */
+interface UnhandledEvent {
+  seq: number;
+  data: Record<string, unknown>;
+}
+
 interface TreeFile {
   path: string;
   status?: string;
@@ -311,6 +317,7 @@ function createHost(options: HostOptions = {}) {
   let queuedRows = options.queuedRows ?? [];
   let interrupts: Record<string, InterruptEvent[]> = {};
   let itemEvents: Record<string, ItemStartedEvent[]> = {};
+  let unhandledEvents: Record<string, UnhandledEvent[]> = {};
   let completedEvents: Record<string, ItemStartedEvent[]> = {};
   let turnEnds: Record<string, Array<{ seq: number; turnId?: string }>> = {};
   let turnRequests: Record<string, TurnRequest[]> = {};
@@ -451,6 +458,21 @@ function createHost(options: HostOptions = {}) {
                   createdAt: 1_000,
                   type: "item/started",
                   data: { item: event.item, providerThreadId: "pt-1" },
+                })),
+            );
+          }
+          if (args.types?.includes("provider/unhandled") === true) {
+            rows.push(
+              ...(unhandledEvents[args.threadId] ?? [])
+                .filter((event) => event.seq > after)
+                .map((event) => ({
+                  id: `ev-${args.threadId}-unhandled-${event.seq}`,
+                  scope: { kind: "thread" },
+                  threadId: args.threadId,
+                  seq: event.seq,
+                  createdAt: 1_000,
+                  type: "provider/unhandled",
+                  data: event.data,
                 })),
             );
           }
@@ -794,6 +816,13 @@ function createHost(options: HostOptions = {}) {
         [threadId]: [...(completedEvents[threadId] ?? []), event],
       };
     },
+    /** Record a `provider/unhandled` event on a thread (default: the thread itself). */
+    recordUnhandled: (event: UnhandledEvent, threadId: string = THREAD_ID) => {
+      unhandledEvents = {
+        ...unhandledEvents,
+        [threadId]: [...(unhandledEvents[threadId] ?? []), event],
+      };
+    },
     /** Record a `turn/completed` event: the turn really ended (steering a message in emits none). */
     completeTurn: (seq: number, threadId: string = THREAD_ID) => {
       turnEnds = { ...turnEnds, [threadId]: [...(turnEnds[threadId] ?? []), { seq }] };
@@ -980,6 +1009,31 @@ function emitPlan(host: Host, interaction = planInteraction()) {
     thread: thread(),
     interaction,
   } as never);
+}
+
+/** The `data` of the `provider/unhandled` row core records a delivered steer as, copied from thr_ijhpz5srpe seq 2069 (2026-10-26) with the content string trimmed. */
+function steerData(content: unknown): Record<string, unknown> {
+  return {
+    providerThreadId: "b1189688-7a83-4bcd-9574-b88701cc2a98",
+    providerId: "claude-code-glm",
+    rawType: "sdk/user",
+    rawEvent: {
+      jsonrpc: "2.0",
+      method: "sdk/message",
+      params: {
+        message: {
+          type: "user",
+          message: { role: "user", content },
+          session_id: "b1189688-7a83-4bcd-9574-b88701cc2a98",
+          parent_tool_use_id: null,
+          uuid: "939faa18-eb79-4a6f-8925-c43488aa0b96",
+          timestamp: "2026-10-26T12:12:10.037Z",
+          isReplay: true,
+        },
+        threadId: "thr_ijhpz5srpe",
+      },
+    },
+  };
 }
 
 function userQuestionInteraction(
@@ -3915,7 +3969,7 @@ describe("auto-review plugin", () => {
     expect(text).toContain("/home/u/.claude/plans/p.md");
     expect(text).toContain('devkit_load_skill({ slug: "review-code" })');
     expect(host.resolutions).toEqual([
-      { threadId: THREAD_ID, interactionId: "pint-1", resolution: { decision: "deny" } },
+      { threadId: THREAD_ID, interactionId: "pint-1", resolution: { decision: "deny", message: expect.stringMatching(/^\[bb auto-review\]/) } },
     ]);
     expect(typeof host.metadata.planReviewArmedAt).toBe("number");
     await host.harness.dispose();
@@ -3955,7 +4009,7 @@ describe("auto-review plugin", () => {
     expect(errors).toEqual([]);
     expect(host.sends).toHaveLength(1);
     expect(host.resolutions).toEqual([
-      { threadId: THREAD_ID, interactionId: "pint-1", resolution: { decision: "deny" } },
+      { threadId: THREAD_ID, interactionId: "pint-1", resolution: { decision: "deny", message: expect.stringMatching(/^\[bb auto-review\]/) } },
     ]);
     await host.harness.dispose();
   });
@@ -4128,6 +4182,11 @@ describe("auto-review plugin", () => {
     await plugin(host.bb);
     await emitPlan(host);
     expect(host.metadata.planDenied).toMatchObject({ sinceSeq: 100 });
+    // The deny's reaction may carry preamble text: the agent answers and asks
+    // in one response, before the steered review arrives (thr_ijhpz5srpe
+    // seq 2059-2064, 2026-10-26).
+    host.startItem({ seq: 101, item: { type: "reasoning" } });
+    host.startItem({ seq: 102, item: { type: "agentMessage" } });
     // The steered review is in the agent's hands before the question arrives,
     // just as it is in production (core steers it in on the next tool result).
     await host.harness.behavior.emitThreadEvent("message.dispatched", {
@@ -4241,11 +4300,12 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
-  it("leaves a question alone once agent text closed the turn the steer rides in on", async () => {
+  it("leaves a question alone once the steered review arrived (the sdk/user row), not just the agent's text", async () => {
     const host = createHost({ sendDelivery: "queued" });
     await plugin(host.bb);
     await emitPlan(host);
     host.startItem({ seq: 101, item: { type: "agentMessage" } });
+    host.recordUnhandled({ seq: 102, data: steerData("[bb auto-review] <steered review>") });
 
     const { errors } = await emitQuestion(host);
     expect(errors).toEqual([]);
@@ -4539,7 +4599,9 @@ describe("auto-review plugin", () => {
     const DENY = {
       threadId: THREAD_ID,
       interactionId: "pint-1",
-      resolution: { decision: "deny" },
+      // The deny carries auto-review's hold message; the builder's own tests pin
+      // the wording, so a marker match keeps this readable.
+      resolution: { decision: "deny", message: expect.stringMatching(/^\[bb auto-review\]/) },
     };
 
     async function hostWith(options: HostOptions = {}, autoApprove = true) {
@@ -4995,7 +5057,7 @@ describe("auto-review plugin", () => {
         expect(host.sends).toHaveLength(2);
         expect(host.resolutions).toEqual([
           DENY,
-          { threadId: THREAD_ID, interactionId: "pint-3", resolution: { decision: "deny" } },
+          { threadId: THREAD_ID, interactionId: "pint-3", resolution: { decision: "deny", message: expect.stringMatching(/^\[bb auto-review\]/) } },
         ]);
         expect(warnings(host).some((message) => message.includes("could not re-approve"))).toBe(false);
         await host.harness.dispose();
@@ -5072,7 +5134,7 @@ describe("auto-review plugin", () => {
       const redoDeny = (interactionId: string) => ({
         threadId: THREAD_ID,
         interactionId,
-        resolution: { decision: "deny" },
+        resolution: { decision: "deny", message: expect.stringMatching(/^\[bb auto-review\]/) },
       });
       const approve = (interactionId: string) => ({
         threadId: THREAD_ID,

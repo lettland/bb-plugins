@@ -107,6 +107,34 @@ describe("isImmediateReactionToDeny", () => {
     return { type: "item/started", data: { item } } as never;
   }
 
+  /** The `provider/unhandled` row core records a delivered steer as, copied from thr_ijhpz5srpe seq 2069 (2026-10-26) with the content string trimmed. */
+  function steerRow(content: unknown, rawType = "sdk/user") {
+    return {
+      type: "provider/unhandled",
+      data: {
+        providerThreadId: "b1189688-7a83-4bcd-9574-b88701cc2a98",
+        providerId: "claude-code-glm",
+        rawType,
+        rawEvent: {
+          jsonrpc: "2.0",
+          method: "sdk/message",
+          params: {
+            message: {
+              type: "user",
+              message: { role: "user", content },
+              session_id: "b1189688-7a83-4bcd-9574-b88701cc2a98",
+              parent_tool_use_id: null,
+              uuid: "939faa18-eb79-4a6f-8925-c43488aa0b96",
+              timestamp: "2026-10-26T12:12:10.037Z",
+              isReplay: true,
+            },
+            threadId: "thr_ijhpz5srpe",
+          },
+        },
+      },
+    } as never;
+  }
+
   it("is true with no events, or only reasoning and the question's own native item", () => {
     expect(isImmediateReactionToDeny([])).toBe(true);
     expect(
@@ -123,8 +151,68 @@ describe("isImmediateReactionToDeny", () => {
     );
   });
 
-  it("is false once agent text closed the turn the steer rides in on", () => {
-    expect(isImmediateReactionToDeny([itemStarted({ type: "agentMessage" })])).toBe(false);
+  it("is true when preamble text and the question share one response, before any steer (thr_ijhpz5srpe seq 2059-2064, 2026-10-26)", () => {
+    expect(
+      isImmediateReactionToDeny([
+        itemStarted({ type: "reasoning" }),
+        itemStarted({ type: "agentMessage" }),
+        itemStarted({ type: "toolCall", tool: "AskUserQuestion" }),
+      ]),
+    ).toBe(true);
+  });
+
+  it("is false once the steered review arrived (an sdk/user row), even with only preamble text before it", () => {
+    expect(
+      isImmediateReactionToDeny([
+        itemStarted({ type: "reasoning" }),
+        itemStarted({ type: "agentMessage" }),
+        steerRow("[bb auto-review] <trimmed steered message>"),
+        itemStarted({ type: "toolCall", tool: "AskUserQuestion" }),
+      ]),
+    ).toBe(false);
+  });
+
+  it("does not disqualify on a provider/unhandled row of another rawType", () => {
+    expect(
+      isImmediateReactionToDeny([
+        steerRow("[bb auto-review] <trimmed steered message>", "sdk/system"),
+        itemStarted({ type: "toolCall", tool: "AskUserQuestion" }),
+      ]),
+    ).toBe(true);
+  });
+
+  it("does not disqualify on an sdk/user row whose content is replayed tool results", () => {
+    expect(
+      isImmediateReactionToDeny([
+        steerRow([{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }]),
+        itemStarted({ type: "toolCall", tool: "AskUserQuestion" }),
+      ]),
+    ).toBe(true);
+  });
+
+  it("fails closed on an sdk/user row whose content path is missing", () => {
+    const unreadable = {
+      type: "provider/unhandled",
+      data: {
+        providerId: "claude-code-glm",
+        rawType: "sdk/user",
+        rawEvent: {
+          jsonrpc: "2.0",
+          method: "sdk/message",
+          params: {
+            message: {
+              type: "user",
+              message: { role: "user" },
+              isReplay: true,
+            },
+            threadId: "thr_ijhpz5srpe",
+          },
+        },
+      },
+    } as never;
+    expect(
+      isImmediateReactionToDeny([unreadable, itemStarted({ type: "toolCall", tool: "AskUserQuestion" })]),
+    ).toBe(false);
   });
 
   it("is false for an MCP AskUserQuestion, which cannot take this resolution", () => {

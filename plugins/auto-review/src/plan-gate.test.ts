@@ -31,6 +31,9 @@ const PLAN = "/w/docs/plans/p.md";
 const approval = (planFilePath: string | null = PLAN): PlanApproval =>
   ({ interactionId: "pint-1", plan: "# Plan", planFilePath, canApprove: true }) as PlanApproval;
 
+/** The deny's hold message; matched by its marker so the test stays readable (the builder's own tests pin the wording). */
+const DENY_MESSAGE = expect.stringMatching(/^\[bb auto-review\]/);
+
 function fakeBb(seed: Record<string, unknown> = {}) {
   const warnings: string[] = [];
   const kv = new Map<string, unknown>();
@@ -166,7 +169,7 @@ describe("gatePlan: a new cycle", () => {
     expect(f.metadata().planReviewArmedSeq).toBeUndefined();
     expect(f.metadata().planReviewEntryId).toBe("qm-1");
     expect(f.resolved).toEqual([
-      { threadId: "thr", interactionId: "pint-1", resolution: { decision: "deny" } },
+      { threadId: "thr", interactionId: "pint-1", resolution: { decision: "deny", message: DENY_MESSAGE } },
     ]);
     const fire = [...f.kv.keys()].find((key) => key.startsWith("lastfire:"));
     expect(f.kv.get(fire ?? "")).toMatchObject({ outcome: "fired", reason: "plan-review" });
@@ -240,6 +243,19 @@ describe("gatePlan: the deny", () => {
     await gatePlan(notAnError.ctx, notAnError.thread, approval());
     expect(notAnError.warnings[0]).toContain("kaboom");
   });
+
+  it("takes the failure branch when the user resolved the approval first, so the deny with its message fails (Part A's race)", async () => {
+    const f = fakeBb();
+    f.failResolve(new Error("409: the interaction is already resolved"));
+    await gatePlan(f.ctx, f.thread, approval());
+    expect(f.warnings[0]).toContain("could not hold the plan for review in thr");
+    expect(f.warnings[0]).toContain("already resolved");
+    expect(f.deletedQueued).toEqual(["qm-1"]);
+    expect(f.metadata().planReviewArmedAt).toBeUndefined();
+    expect(f.metadata().planReviewEntryId).toBeUndefined();
+    const fire = [...f.kv.keys()].find((key) => key.startsWith("lastfire:"));
+    expect(f.kv.get(fire ?? "")).toMatchObject({ outcome: "stood-down", reason: "send-failed" });
+  });
 });
 
 describe("gatePlan: a held plan's second presentation", () => {
@@ -302,7 +318,9 @@ describe("onInteractionPending", () => {
       resolution: null,
     };
     await onInteractionPending(f.ctx, { thread: f.thread, interaction } as never);
-    expect(f.resolved).toEqual([expect.objectContaining({ interactionId: "pint-1", resolution: { decision: "deny" } })]);
+    expect(f.resolved).toEqual([
+      expect.objectContaining({ interactionId: "pint-1", resolution: { decision: "deny", message: DENY_MESSAGE } }),
+    ]);
     const other = fakeBb();
     await onInteractionPending(other.ctx, {
       thread: other.thread,

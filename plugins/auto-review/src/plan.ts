@@ -1,4 +1,5 @@
 import type { BbPluginApi, PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
+import { z } from "zod";
 import { devkitRunning } from "./dispatch.js";
 import { EVENT_PAGE_MAX } from "./detect-events.js";
 import type { ReviewMode } from "./prompt.js";
@@ -69,17 +70,24 @@ export function userQuestionOf(interaction: PendingInteraction): PendingUserQues
 }
 
 /**
- * Whether every `item/started` event since a plan deny is harmless: the
- * agent's own thinking, or the native `AskUserQuestion` item the held
+ * Whether every event since a plan deny is harmless: the agent's thinking,
+ * its own preamble text, or the native `AskUserQuestion` item the held
  * question itself raised. Any other item/started is real work done in
  * between, so the question that follows it is not necessarily about the held
- * plan — the deny's reason no longer reaches the agent as "the next thing".
+ * plan.
  *
- * An `agentMessage` item disqualifies: a text-only response ends the model's
- * turn, and Claude Code then injects the steered review into that same turn —
- * core records that steer as `provider/unhandled`, not a `userMessage` item,
- * so the agent's own text is the only observable sign that already happened,
- * and a question after it is not "the very next thing" any more.
+ * An `agentMessage` item no longer disqualifies on its own: the deny text
+ * reads as a rejection until the steered review arrives, so preamble text in
+ * the same response as the question is exactly the reaction this function
+ * exists to wave through (thr_ijhpz5srpe seq 2059-2064, 2026-10-26: text and
+ * question, one response). What does disqualify is a delivered steer — core
+ * records it as a `provider/unhandled` row with `rawType: "sdk/user"`, and
+ * once the steered user message is in the log the review has reached the
+ * agent, so a question after it is not the deny's immediate reaction. An
+ * `sdk/user` row whose content is an array (replayed tool results) is not a
+ * steer; one whose content path is missing or of no known shape fails closed
+ * and counts as a steer. `provider/unhandled` rows of any other rawType are
+ * not user messages at all.
  *
  * `AskUserQuestion` only counts when `item.server` is unset: core classifies
  * the bb-bridge `mcp__bb-bridge__AskUserQuestion` (and any other MCP tool) as
@@ -90,15 +98,51 @@ export function userQuestionOf(interaction: PendingInteraction): PendingUserQues
  */
 export function isImmediateReactionToDeny(events: readonly ThreadEventRow[]): boolean {
   return events.every((event) => {
+    if (event.type === "provider/unhandled") {
+      return !isDeliveredSteer(event.data);
+    }
     if (event.type !== "item/started") {
       return true;
     }
     const { item } = event.data;
     return (
       item.type === "reasoning" ||
+      item.type === "agentMessage" ||
       (item.type === "toolCall" && item.tool === "AskUserQuestion" && item.server === undefined)
     );
   });
+}
+
+/** The `rawType` of a `provider/unhandled` row, read to tell a steered user message from every other unhandled event. */
+const UNHANDLED_RAW_TYPE = z.object({ rawType: z.string() });
+
+/** The path under `data` where a steered user row carries its content (thr_ijhpz5srpe seq 2069, 2026-10-26). */
+const STEER_CONTENT = z.object({
+  rawEvent: z.object({
+    params: z.object({
+      message: z.object({
+        message: z.object({ content: z.union([z.string(), z.array(z.unknown())]) }),
+      }),
+    }),
+  }),
+});
+
+/**
+ * Whether a `provider/unhandled` row is the steered review reaching the agent:
+ * an `sdk/user` row whose content is a string. An `sdk/user` row whose content
+ * path cannot be read counts as a steer too (fail closed); an array is
+ * replayed tool results, and any other rawType is not a user row at all.
+ */
+function isDeliveredSteer(data: unknown): boolean {
+  const kind = UNHANDLED_RAW_TYPE.safeParse(data);
+  if (!kind.success || kind.data.rawType !== "sdk/user") {
+    return false;
+  }
+  const row = STEER_CONTENT.safeParse(data);
+  if (!row.success) {
+    return true;
+  }
+  return typeof row.data.rawEvent.params.message.message.content === "string";
 }
 
 /**
@@ -358,9 +402,9 @@ export type PlanGateAction = "review" | "hold" | "release";
  * the reviewed plan — is released to the user and disarms it, ready for the
  * thread's next plan.
  *
- * "hold" covers a re-presentation that beats the review turn: the deny carries
- * no reason, so the agent may re-present before core dispatches the queued
- * review. Releasing that plan would hand the user an unreviewed plan and land
+ * "hold" covers a re-presentation that beats the review turn: whatever the
+ * deny's message tells it, the agent may re-present before core dispatches
+ * the queued review. Releasing that plan would hand the user an unreviewed plan and land
  * the review in the middle of implementing it, so it is denied again and the
  * still-queued review follows.
  *

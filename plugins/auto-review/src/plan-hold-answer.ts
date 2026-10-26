@@ -6,8 +6,9 @@ import { planDenyFresh, readState, writeState } from "./state.js";
 
 /**
  * Answer, in the user's name, a `user_question` the agent raises as its
- * very next tool call after a plan deny — the deny's own reason reaching it
- * before the queued review does (see `gatePlan`). Absent, there is nothing
+ * very next tool call after a plan deny — the deny's text (auto-review's own
+ * now, a bare rejection on an older host) reaching it before the queued
+ * review does (see `gatePlan`). Absent, there is nothing
  * to do. Present, it is one-shot: removed right away, before any of the
  * checks below, so whether they pass or fail, a later question must not
  * find it still armed.
@@ -37,7 +38,7 @@ export async function answerPlanHoldQuestion(
     events = await bb.sdk.threads.events.list({
       threadId: thread.id,
       afterSeq: String(sinceSeq),
-      types: ["item/started"],
+      types: ["item/started", "provider/unhandled"],
       order: "asc",
       limit: String(EVENT_PAGE_MAX),
     });

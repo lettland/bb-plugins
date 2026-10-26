@@ -136,8 +136,8 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   `claude-code-<slug>` profile providers), whose ExitPlanMode routes to a real
   `interaction.pending` with `subject.kind: "plan"` the native gate can hold, it fires on that event, holds the first presentation back (queues
   a review-plan turn, then denies the approval), and releases the revised plan on its
-  re-presentation. If the agent reacts to the bare deny by asking the user what to
-  change, auto-review auto-answers that one question itself (reason
+  re-presentation. If the agent reacts to the deny (which carries auto-review's own hold
+  text) by asking the user what to change, auto-review auto-answers that one question itself (reason
   `plan-hold-answered`) so the user is never asked to explain a rejection they never made.
   Every other provider's plan approvals never reach that gate, so instead those threads
   get the `PresentPlan` agent tool via `bb.agents.configure`: the agent writes its plan to
