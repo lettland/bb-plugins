@@ -349,7 +349,8 @@ describe("wakatime plugin", () => {
       thread = {
         ...thread,
         status: "active",
-        runtime: { displayStatus: "active", hostReconnectGraceExpiresAt: null },
+        // SDK 0.6.79 removed hostReconnectGraceExpiresAt (get-bb/bb packages/plugin-sdk)
+        runtime: { displayStatus: "active" },
       };
       await host.harness.emitThreadEvent("thread.active", { thread });
       await flush();
