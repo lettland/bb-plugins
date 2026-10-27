@@ -254,16 +254,17 @@ against the actual code/plan; fix every valid one (all tiers); skip false positi
 unrelated to a named feature, or findings outside review scope (reported), with a one-line reason;
 re-verify; run the closure review over the round delta per
 `devkit_load_skill({ reference: "review-delta-scope" })` (a round snapshot taken before applying
-your fixes), through the same three tiers as §3 and
-with its own tree guard — a fresh baseline taken after your fixes and before spawning the closure
+your fixes), through the same three tiers as §3 and with its own tree guard — a fresh baseline
+taken after your fixes and before spawning the closure
 thread, never the §3 baseline, since the orchestrator's own fixes would otherwise read as foreign
 changes. The closure reviewer gets the Security diff profile. The cap depends on the review kind. A
 code review runs at most 3 closure rounds. A plan review runs at most one closure round: findings
 that round leaves open, and any new finding it raises, you verify against the code yourself and
 carry into the presentation as open findings — never another reviewer round. A plan review the
-caller marked light runs no closure reviewer at all: you verify the fixes yourself. One bb child
-thread (titled `review: closure`), else one provider
-subagent, else in this thread; one brief listing each lens's calibration reference and that lens's
+caller marked light skips the closure pass entirely — no closure reviewer, none of the spawn
+mechanics below — and you verify the fixes yourself. When a closure review does run: one bb child
+thread (titled `review: closure`), else one provider subagent, else in this thread; one brief
+listing each lens's calibration reference and that lens's
 stack skills and the `CVE lookup:` block (re-run per `review-cve-lookup`'s closure rule when the
 round delta changes a manifest or lockfile entry, otherwise the same block), with that single
 reviewer loading and reporting each lens's four sections in turn, never merged into one pass. This
