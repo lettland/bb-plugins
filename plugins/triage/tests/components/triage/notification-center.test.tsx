@@ -136,6 +136,9 @@ test("falls back through title, stored title, number, and action", () => {
         action: "Moved to Review",
         body: "Card moved.",
         level: "info",
+        // Pinned timestamps: the default is Date.now()-based per call, so a
+        // clock tick between fixtures flipped the sort order under load.
+        createdAt: 4_000,
       }),
       makeNotification({
         id: "note-gone",
@@ -144,6 +147,7 @@ test("falls back through title, stored title, number, and action", () => {
         action: "Completed",
         body: "",
         level: "success",
+        createdAt: 3_000,
       }),
       makeNotification({
         id: "note-unknown",
@@ -152,6 +156,7 @@ test("falls back through title, stored title, number, and action", () => {
         action: "Completed",
         body: "",
         level: "success",
+        createdAt: 2_000,
       }),
       makeNotification({
         id: "note-global",
@@ -160,6 +165,7 @@ test("falls back through title, stored title, number, and action", () => {
         action: "Board tidied",
         body: "",
         level: "info",
+        createdAt: 1_000,
       }),
     ],
     tasks: [],

@@ -310,6 +310,9 @@ test("running a card dispatches once with a normalized prompt and announces the 
     const [spawnArgs] = harness.inspection.sdk.callsTo("threads.spawn")[0] as [Record<string, any>];
     expect(spawnArgs.title).toBe(`Triage #${task.number}: New task`);
     expect(spawnArgs.visibility).toBe("hidden");
+    // The widened wire values ride through to thread creation untouched.
+    expect(spawnArgs.reasoningLevel).toBe("adaptive");
+    expect(spawnArgs.serviceTier).toBe("priority");
     expect(spawnArgs.input.filter((part: any) => part.visibility !== "agent-only")).toStrictEqual([
       { type: "text", text: "Do the work" },
       { type: "text", text: "Untouched" },
@@ -429,7 +432,7 @@ test("updateTask retargeting records explicit sources field by field", async () 
     expect(await sources()).toMatchObject({ providerId: "explicit" });
     await edit({ model: "next-model" });
     expect(await sources()).toMatchObject({ model: "explicit" });
-    await edit({ reasoningLevel: "high" });
+    await edit({ reasoningLevel: "adaptive" });
     expect(await sources()).toMatchObject({ reasoningLevel: "explicit" });
     const edited = await edit({ providerId: "codex", model: "test-model", reasoningLevel: "none" });
     expect(edited.providerId).toBe("codex");

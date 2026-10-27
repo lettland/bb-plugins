@@ -34,7 +34,7 @@ export function ThreadTriageAction({ threadId, isCompactViewport = false }: { th
   };
   if (!snapshot) return null;
   if (!task) return (
-    <Button variant="ghost" size={isCompactViewport ? "icon" : "sm"} disabled={pending} aria-label="Move session to Triage"
+    <Button variant="ghost" size={isCompactViewport ? "icon" : "sm"} disabled={pending} aria-label="Move to Triage"
       onClick={() => void run(() => rpc.call("importThread", { threadId }), "Session moved to Triage")}>
       <Icon name="ListTodo" className="size-4" aria-hidden="true" />
       {isCompactViewport ? null : "Move to Triage"}

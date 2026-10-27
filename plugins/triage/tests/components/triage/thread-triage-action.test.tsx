@@ -50,7 +50,7 @@ test("imports an untracked session into Triage", async () => {
   await loadStore(makeSnapshot({ tasks: [makeTask({ threadId: "thr-other" })] }));
   render(<ThreadTriageAction threadId="thr-1" />);
 
-  const button = screen.getByRole("button", { name: "Move session to Triage" });
+  const button = screen.getByRole("button", { name: "Move to Triage" });
   fireEvent.click(button);
   await waitFor(() => {
     expect(sdk.rpc.call).toHaveBeenCalledWith("importThread", { threadId: "thr-1" });
@@ -66,7 +66,7 @@ test("drops the label on compact viewports", async () => {
   const { container } = render(
     <ThreadTriageAction threadId="thr-1" isCompactViewport />,
   );
-  const button = screen.getByRole("button", { name: "Move session to Triage" });
+  const button = screen.getByRole("button", { name: "Move to Triage" });
   expect((button as HTMLButtonElement).disabled).toBe(false);
   expect(button.textContent).not.toContain("Move to Triage");
   expect(container.querySelectorAll("svg")).toHaveLength(1);
@@ -79,7 +79,7 @@ test("toasts the error and refreshes when an import fails", async () => {
     importThread: () => Promise.reject(new Error("Thread is gone")),
   });
   render(<ThreadTriageAction threadId="thr-1" />);
-  fireEvent.click(screen.getByRole("button", { name: "Move session to Triage" }));
+  fireEvent.click(screen.getByRole("button", { name: "Move to Triage" }));
   await waitFor(() => expect(toasts.error).toHaveBeenCalledWith("Thread is gone"));
 });
 
@@ -90,7 +90,7 @@ test("stringifies non-error import failures", async () => {
     importThread: () => Promise.reject("plain"),
   });
   render(<ThreadTriageAction threadId="thr-1" />);
-  fireEvent.click(screen.getByRole("button", { name: "Move session to Triage" }));
+  fireEvent.click(screen.getByRole("button", { name: "Move to Triage" }));
   await waitFor(() => expect(toasts.error).toHaveBeenCalledWith("plain"));
 });
 
@@ -102,7 +102,7 @@ test("ignores clicks while an operation is pending", async () => {
     importThread: () => gate.promise,
   });
   render(<ThreadTriageAction threadId="thr-1" />);
-  const button = screen.getByRole("button", { name: "Move session to Triage" }) as HTMLButtonElement;
+  const button = screen.getByRole("button", { name: "Move to Triage" }) as HTMLButtonElement;
 
   fireEvent.click(button);
   await waitFor(() => expect(button.disabled).toBe(true));

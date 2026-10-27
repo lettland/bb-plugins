@@ -172,7 +172,7 @@ export function agentBrand(providerId: string, model: string): AgentBrand {
   for (const [pattern, brand] of MODEL_BRANDS) {
     if (pattern.test(id)) return brand;
   }
-  return PROVIDER_BRANDS[providerId] ?? GENERIC_AGENT;
+  return Object.hasOwn(PROVIDER_BRANDS, providerId) ? PROVIDER_BRANDS[providerId] : GENERIC_AGENT;
 }
 
 export function providerLabel(providerId: string): string {
@@ -195,7 +195,10 @@ const REASONING_LABELS: Record<ReasoningLevel, string> = {
 };
 
 export function formatReasoningLevel(level: string): string {
-  return (REASONING_LABELS as Record<string, string | undefined>)[level] ?? level;
+  // Provider-reported strings reach here verbatim since the SDK widened its
+  // schemas to plain strings; a bare property read would return inherited
+  // Object.prototype members ("constructor" etc.) instead of the raw value.
+  return Object.hasOwn(REASONING_LABELS, level) ? REASONING_LABELS[level as ReasoningLevel] : level;
 }
 
 export function runStateLabel(state: RunState): string {

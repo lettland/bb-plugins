@@ -166,6 +166,13 @@ describe("run and stage presentation", () => {
 });
 
 describe("agent branding", () => {
+  test("prototype keys never masquerade as provider brands", () => {
+    // The provider table is keyed by wire strings; an inherited
+    // Object.prototype member must fall through to the generic brand.
+    expect(agentBrand("constructor", "unmatched-model")).toStrictEqual(agentBrand("any-provider", "unmatched-model"));
+    expect(agentBrand("__proto__", "unmatched-model")).toStrictEqual(agentBrand("any-provider", "unmatched-model"));
+  });
+
   test("model families win over the provider table", () => {
     expect(agentBrand("any-provider", "gpt-5")).toStrictEqual({ icon: "BrandOpenAi", name: "OpenAI" });
     expect(agentBrand("any-provider", "codex-mini")).toStrictEqual({ icon: "BrandOpenAi", name: "OpenAI" });
@@ -210,8 +217,12 @@ describe("labels", () => {
     expect(formatReasoningLevel("none")).toBe("No thinking");
     expect(formatReasoningLevel("xhigh")).toBe("Extra-high thinking");
     expect(formatReasoningLevel("ultra")).toBe("Ultra thinking");
-    // Levels triage does not know fall back to the raw provider string.
+    // Levels triage does not know fall back to the raw provider string —
+    // including inherited Object.prototype keys, which must not defeat the
+    // fallback (the label table is keyed by wire strings).
     expect(formatReasoningLevel("adaptive")).toBe("adaptive");
+    expect(formatReasoningLevel("constructor")).toBe("constructor");
+    expect(formatReasoningLevel("__proto__")).toBe("__proto__");
     expect(runStateLabel("queued")).toBe("Ready");
     expect(runStateLabel("idle")).toBe("Waiting for you");
     expect(runStateLabel("stopped")).toBe("Stopped");

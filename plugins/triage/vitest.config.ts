@@ -12,6 +12,11 @@ export default defineConfig({
     exclude: ["node_modules/**"],
     environment: "node",
     setupFiles: ["./vitest.setup.ts"],
+    // The jsdom UI tests chain waitFor polls inside vitest's default 5s
+    // budget; on a busy shared host they time out while still passing logic
+    // (verified: identical content green at low load, default-budget passes
+    // at high load, all failures timeout-shaped).
+    testTimeout: 30_000,
     coverage: {
       provider: "v8",
       include: ["server.ts", "app.tsx", "lib/**", "hooks/**", "components/**"],
