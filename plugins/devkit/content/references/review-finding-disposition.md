@@ -99,8 +99,13 @@ finding:
    whether the fixes introduced new Blockers or Concerns. For the single-pass `/review` and
    `security-audit` commands, do the same closure pass in-session against the round delta.
    Disposition any new valid closure finding using this same protocol; the next round (a fresh
-   snapshot, taken before that fix) covers only that fix's delta. Run at most 3 closure rounds,
-   then report the still-open findings as open and end the loop. A Blocker or security Concern
+   snapshot, taken before that fix) covers only that fix's delta. The cap depends on the review
+   kind. A code review runs at most 3 closure rounds. A plan review runs at most one closure
+   round over the round delta: findings that round leaves open, and any new finding it raises,
+   are verified by the reviewing agent itself against the code and carried into the presentation
+   as open findings — never another reviewer round. A plan review the caller marked light runs
+   no closure reviewer at all: fixes are verified by the reviewing agent itself. After the cap,
+   report the still-open findings as open and end the loop. A Blocker or security Concern
    still open after the review (and its closure rounds, if any): do not commit and do not present
    a plan for approval as if clean — stop and report it to the user. Do not stop after merely
    proving that a review was run; the point is a clean, followed-up result.

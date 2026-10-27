@@ -524,6 +524,10 @@ describe("review-code content", () => {
     expect(disposition).toContain("Report fixes to pre-existing code separately");
     expect(disposition).toContain("still needs rotation");
     expect(disposition).toContain("Only edits outside the scope the caller handed over, or ones that appear after the review started, are off-limits");
+    expect(disposition).toContain("A code review runs at most 3 closure rounds");
+    expect(disposition).toContain("A plan review runs at most one closure round over the round delta");
+    expect(disposition).toContain("never another reviewer round");
+    expect(disposition).toContain("A plan review the caller marked light runs no closure reviewer at all");
     expect(disposition).not.toContain("you did not write");
     expect(disposition).not.toContain("wrong, out of scope, or already handled");
 
@@ -742,6 +746,8 @@ describe("devkit README", () => {
         "--no-index",
         "baseline <dir>",
         "**3 closure rounds**",
+        "**one closure round**",
+        "runs no closure reviewer at all",
         "{ shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-64",
         "not 64 hex characters",
         "## Promoting",

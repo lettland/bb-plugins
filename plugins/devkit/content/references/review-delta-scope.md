@@ -84,7 +84,11 @@ The review's report states its scope:
 
 ## Closure rounds cap
 
-At most **3 closure rounds** (see `review-finding-disposition` §6). Each round covers only the
+A code review runs at most **3 closure rounds**; a plan review runs at most **one closure round**:
+findings that round leaves open, and any new finding it raises, are verified by the reviewing agent
+itself against the code and carried into the presentation as open findings — never another reviewer
+round. A plan review the caller marked light runs no closure reviewer at all: fixes are verified by
+the reviewing agent itself (see `review-finding-disposition` §6). Each round covers only the
 previous round's fix delta. After the cap, report the still-open findings as open and end the loop.
 
 A Blocker or security Concern still open after the review (and its closure rounds, if any): do not

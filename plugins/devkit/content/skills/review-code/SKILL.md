@@ -230,8 +230,9 @@ a reviewer missing.
 ## 4. Consolidate
 
 Produce one summary: **Blockers / Concerns / Advisories / Verdict**, opening with each reviewer's
-own verdict line so the user can see all five ran; carry the compliance reviewer's `Frameworks
-considered:` line and the security reviewer's `CVE check:` line next to their verdict lines. Dedupe
+own verdict line, naming the reviewer, so the user can see every reviewer that ran; carry the
+compliance reviewer's `Frameworks considered:` line and the security reviewer's `CVE check:` line
+next to their verdict lines. Dedupe
 findings raised by more than one reviewer, keep the highest severity, and attribute each to the
 reviewers that raised it. Do not re-classify a reviewer's severity, and keep each finding's
 `(spec)`/`(code)` tag. Verdict is NEEDS WORK if any blocker, CONCERNS REMAIN if only concerns, else
@@ -252,11 +253,16 @@ Follow `devkit_load_skill({ reference: "review-finding-disposition" })`: validat
 against the actual code/plan; fix every valid one (all tiers); skip false positives, findings
 unrelated to a named feature, or findings outside review scope (reported), with a one-line reason;
 re-verify; run the closure review over the round delta per
-`devkit_load_skill({ reference: "review-delta-scope" })` (a round snapshot taken before applying your
-fixes, at most 3 closure rounds), through the same three tiers as §3 and
+`devkit_load_skill({ reference: "review-delta-scope" })` (a round snapshot taken before applying
+your fixes), through the same three tiers as §3 and
 with its own tree guard — a fresh baseline taken after your fixes and before spawning the closure
 thread, never the §3 baseline, since the orchestrator's own fixes would otherwise read as foreign
-changes. The closure reviewer gets the Security diff profile. One bb child thread, else one provider
+changes. The closure reviewer gets the Security diff profile. The cap depends on the review kind. A
+code review runs at most 3 closure rounds. A plan review runs at most one closure round: findings
+that round leaves open, and any new finding it raises, you verify against the code yourself and
+carry into the presentation as open findings — never another reviewer round. A plan review the
+caller marked light runs no closure reviewer at all: you verify the fixes yourself. One bb child
+thread (titled `review: closure`), else one provider
 subagent, else in this thread; one brief listing each lens's calibration reference and that lens's
 stack skills and the `CVE lookup:` block (re-run per `review-cve-lookup`'s closure rule when the
 round delta changes a manifest or lockfile entry, otherwise the same block), with that single
