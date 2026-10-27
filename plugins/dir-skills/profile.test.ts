@@ -47,6 +47,20 @@ function fakeKv(initial: Record<string, unknown> = {}) {
   };
 }
 
+function throwingKv() {
+  return {
+    get: async () => {
+      throw new Error("kv.get must not be called");
+    },
+    set: async () => {
+      throw new Error("kv.set must not be called");
+    },
+    delete: async () => {
+      throw new Error("kv.delete must not be called");
+    },
+  };
+}
+
 function setup(opts: {
   scopes?: Scope[];
   sources?: ProjectSource[] | undefined;
@@ -55,14 +69,18 @@ function setup(opts: {
 }) {
   const kv = fakeKv(opts.kv);
   const warnings: string[] = [];
+  const debugs: string[] = [];
   const deps: ClaudeProfileDeps = {
     scopes: opts.scopes ?? [work],
-    log: { debug: () => {}, warn: (m: string) => void warnings.push(m) },
+    log: {
+      debug: (m: string) => void debugs.push(m),
+      warn: (m: string) => void warnings.push(m),
+    },
     kv,
     isDir: (p) => (opts.dirs ?? ["/profiles/work"]).includes(p),
     sourcesFor: async () => opts.sources,
   };
-  return { deps, kv, warnings };
+  return { deps, kv, warnings, debugs };
 }
 
 const ctx = { threadId: "thr_1", projectId: "proj_1", hostId: SERVER };
@@ -381,6 +399,93 @@ describe("resolveClaudeEnv", () => {
       dir: null,
       scope: null,
     });
+  });
+
+  // Where learned: @get-bb/plugin-sdk 0.6.79 made threadId/projectId on
+  // ExperimentalPluginProviderEnvContext nullable ("null when bb resolves the
+  // environment for a provider process that serves no thread, such as model
+  // catalog listing", packages/plugin-sdk in get-bb/bb, bundled-types
+  // bb-plugin-sdk.d.ts).
+  it("skips the pin store and uses the default profile when there is no thread and no project", async () => {
+    const { deps, warnings, debugs } = setup({ sources: undefined });
+    deps.kv = throwingKv();
+    const out = await resolveClaudeEnv(deps, {
+      ...ctx,
+      threadId: null,
+      projectId: null,
+    });
+    expect(out).toEqual([]);
+    expect(debugs).toHaveLength(1);
+    expect(debugs[0]).toContain(SERVER);
+    expect(debugs[0]).toMatch(
+      /provider process without a thread, no pin -> default profile/,
+    );
+    expect(warnings).toEqual([]);
+  });
+
+  it("skips the pin store but still resolves by project when there is no thread", async () => {
+    const { deps, debugs } = setup({ sources: [workSource] });
+    deps.kv = throwingKv();
+    const asked: string[] = [];
+    const sourcesFor = deps.sourcesFor;
+    deps.sourcesFor = async (projectId) => {
+      asked.push(projectId);
+      return sourcesFor(projectId);
+    };
+    const out = await resolveClaudeEnv(deps, { ...ctx, threadId: null });
+    expect(asked).toEqual(["proj_1"]);
+    expect(out).toEqual([
+      {
+        name: "CLAUDE_CONFIG_DIR",
+        value: "/profiles/work",
+        reason: 'dir-skills scope "work"',
+      },
+    ]);
+    expect(debugs).toHaveLength(1);
+  });
+
+  it("warns about conflicting scopes even without a thread", async () => {
+    const other = scope("a-other", "/w", "/profiles/other");
+    const { deps, warnings, debugs } = setup({
+      scopes: [work, other],
+      sources: [workSource],
+      dirs: ["/profiles/other", "/profiles/work"],
+    });
+    deps.kv = throwingKv();
+    const out = await resolveClaudeEnv(deps, { ...ctx, threadId: null });
+    expect(out.map((e) => e.value)).toEqual(["/profiles/other"]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(
+      /^project proj_1 provider process without a thread: /,
+    );
+    expect(warnings[0]).toMatch(/different claudeConfigDir/);
+    expect(debugs).toHaveLength(1);
+  });
+
+  it("honours the pin for a real thread even when the project is null", async () => {
+    const pin: ConfigDirPin = { dir: "/profiles/other", scope: "x" };
+    const { deps, kv } = setup({
+      sources: [workSource],
+      dirs: ["/profiles/other", "/profiles/work"],
+      kv: { "claude-config-dir:thr_1": pin },
+    });
+    const out = await resolveClaudeEnv(deps, { ...ctx, projectId: null });
+    expect(out.map((e) => e.value)).toEqual(["/profiles/other"]);
+    expect(kv.store.get("claude-config-dir:thr_1")).toEqual(pin);
+  });
+
+  it("pins null and warns for a null project on a real thread", async () => {
+    const { deps, kv, warnings } = setup({ sources: [workSource] });
+    expect(await resolveClaudeEnv(deps, { ...ctx, projectId: null })).toEqual(
+      [],
+    );
+    expect(kv.store.get("claude-config-dir:thr_1")).toEqual({
+      dir: null,
+      scope: null,
+      reason: "unknown-project",
+    });
+    expect(warnings.join(" ")).toMatch(/project none not resolved/);
+    expect(warnings.join(" ")).toMatch(/bb dir-skills unpin thr_1/);
   });
 });
 

@@ -148,6 +148,21 @@ export async function resolveClaudeEnv(
   ctx: ExperimentalPluginProviderEnvContext,
 ): Promise<ExperimentalPluginProviderEnvEntry[]> {
   const { log, kv } = deps;
+  if (ctx.threadId === null) {
+    // A provider process serving no thread (e.g. a model catalog listing):
+    // resolve from the scopes alone; there is no thread to pin for.
+    const sources =
+      ctx.projectId !== null
+        ? await deps.sourcesFor(ctx.projectId)
+        : undefined;
+    const decision = decidePin(deps.scopes, sources, ctx.hostId, deps.isDir);
+    for (const warning of decision.warnings)
+      log.warn(`project ${ctx.projectId ?? "none"} provider process without a thread: ${warning}`);
+    log.debug(
+      `env thread=null project=${ctx.projectId} host=${ctx.hostId} provider process without a thread, no pin -> ${decision.pin.dir ?? "default profile"}`,
+    );
+    return pinEntries(decision.pin);
+  }
   const key = pinKey(ctx.threadId);
   const pinned = await kv.get<ConfigDirPin>(key);
   if (pinned) {
@@ -162,11 +177,12 @@ export async function resolveClaudeEnv(
     );
     return pinEntries(pinned);
   }
-  const sources = await deps.sourcesFor(ctx.projectId);
+  const sources =
+    ctx.projectId !== null ? await deps.sourcesFor(ctx.projectId) : undefined;
   const decision = decidePin(deps.scopes, sources, ctx.hostId, deps.isDir);
   if (decision.status === "unknown") {
     log.warn(
-      `project ${ctx.projectId} not resolved; thread ${ctx.threadId} starts with default profile for good - run \`bb dir-skills unpin ${ctx.threadId}\` to re-resolve`,
+      `project ${ctx.projectId ?? "none"} not resolved; thread ${ctx.threadId} starts with default profile for good - run \`bb dir-skills unpin ${ctx.threadId}\` to re-resolve`,
     );
   }
   for (const warning of decision.warnings)
