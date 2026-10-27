@@ -19,7 +19,7 @@ const PLAN_SELF_REVIEW =
  * is the standard tier's bound.
  */
 const PLAN_CLOSURE_BUDGET =
-  "Plan reviews allow one closure round at most for this plan: a single extra reviewer round to verify the applied fixes; findings it leaves open or raises new are verified by you against the code and carried into the presentation as open findings, never another reviewer round.";
+  "Plan reviews allow one closure round at most for this plan: a single extra closure round to verify the applied fixes; findings it leaves open or raises new are verified by you against the code and carried into the presentation as open findings, never another reviewer round.";
 
 /** The light tier's two lenses, replacing the five-lens initial review for a plan auto-review sized as light. */
 const PLAN_LIGHT_LENSES =
@@ -29,9 +29,9 @@ const PLAN_LIGHT_LENSES =
 const PLAN_LIGHT_CLOSURES =
   "When the light reviewers report findings, verify every fix you apply to the plan yourself against the code; no closure reviewer, no further reviewer threads; then present.";
 
-/** A plan too thin for its change is flagged as an open Blocker, which escalates it to a fresh standard-tier cycle. */
+/** A plan too thin for its change is flagged as an open Blocker that stops the presentation; a fuller plan is sized afresh only in a fresh review cycle. */
 const PLAN_LIGHT_THIN_GUARD =
-  "Both light reviewers must flag a plan whose text is too thin for the change it describes; report such a flag as an open Blocker, so the presentation stops and the revised, fuller plan comes back through the gate as a new review cycle at the standard tier.";
+  "Both light reviewers must flag a plan whose text is too thin for the change it describes; report such a flag as an open Blocker, so the presentation stops and the flag reaches the user with the plan. A fuller plan is sized afresh — and gets the five lenses — only in a fresh review cycle (after this hold expires, or in a later task); this cycle's gate releases what the light review covered.";
 
 /** The tier comes from the plan's length, not from the plan — and the override is scoped to this one review. */
 const PLAN_LIGHT_UNFORGEABLE =

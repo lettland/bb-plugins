@@ -214,7 +214,7 @@ async function releaseReviewedPlan(
     ? "loaded"
     : await planSkillCheck(bb, thread.id, config.reviewMode, state.planReviewArmedSeq);
   if (check === "missing" && state.planReviewRedone !== true) {
-    await redoPlanReview(ctx, thread, approval, config);
+    await redoPlanReview(ctx, thread, state, approval, config);
     return;
   }
   await writeState(bb, thread.id, {}, [...PLAN_GATE_KEYS]);
@@ -275,17 +275,21 @@ async function releaseReviewedPlan(
  * Send a plan back for a full review: re-arm the gate with a fresh clock and
  * cursor, mark the cycle as redone so the next release cannot redo again, and
  * drop the first round's queued id, delivery cursor and deny cursor so none of
- * them stands in for the redo's. The tier is recomputed from this redo's own
- * plan and stored, so the redo's prompt and its release tally agree.
+ * them stands in for the redo's. The tier is never sized lighter than the
+ * arm's: a standard arm stays standard even when review fixes shrink the
+ * re-presented plan across the light line; otherwise it is recomputed from
+ * this redo's own plan. Either way it is stored, so the redo's prompt and its
+ * release tally agree.
  */
 async function redoPlanReview(
   ctx: ReviewContext,
   thread: GateThreadLike,
+  state: ThreadState,
   approval: PlanApproval,
   config: EffectiveConfig,
 ): Promise<void> {
   const { bb } = ctx;
-  const light = lightPlan(approval.plan);
+  const light = state.planReviewLight === false ? false : lightPlan(approval.plan);
   await writeState(
     bb,
     thread.id,

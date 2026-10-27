@@ -517,9 +517,11 @@ armed; a plan whose file cannot be read is never light) gets the light tier inst
 review runs two bb child threads — `review: senior-dev` (architecture and feasibility) and
 `review: security` (its full charter, CVE check included) — and the fixes are verified by the
 agent itself, with no closure reviewer. Both light reviewers flag a plan too thin for the change
-it describes as an open Blocker, which sends the revised plan back through the gate as a new
-cycle at the standard tier. The presented plan discloses the tier: `reviewed light-tier:
-senior-dev + security, closures self-verified`. Standard plan reviews are allowed one closure
+it describes as an open Blocker, which stops the presentation and reaches the user with the plan.
+A fuller plan gets the five lenses only in a fresh review cycle — after the hold expires, or in
+a later task — when its own length sizes it standard. The presented plan discloses the tier:
+`reviewed light-tier: senior-dev + security, closures self-verified`. Standard plan reviews are
+allowed one closure
 round at most for the plan. Write a fuller plan and it gets the five-lens review. The plugin
 counts the thread's non-plugin bb child threads created since the review was armed and warns
 past the tier's budget (light: 3, standard: 7), carrying the count and tier into the fire

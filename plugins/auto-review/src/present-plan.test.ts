@@ -146,7 +146,7 @@ describe("PresentPlan's light tier", () => {
       await withHost(async (host, metadata, _review, _dropTimeline, setChildren) => {
         await host.harness.callAgentTool("PresentPlan", { planFilePath: short }, CTX);
         expect(metadata.presentPlanLight).toBe(true);
-        // The redo keeps the stored tier, so its prompt reduces to two lenses.
+        // Armed light and still light, the redo's recompute keeps two lenses.
         const redo = await host.harness.callAgentTool("PresentPlan", { planFilePath: short }, CTX);
         expect(redo).toBe(presentPlanRedoMessage("devkit", true));
         expect(metadata.presentPlanLight).toBe(true);
@@ -159,6 +159,25 @@ describe("PresentPlan's light tier", () => {
           planReviewTier: "light",
           planReviewerCount: 4,
         });
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("never sizes a redo lighter than its arm: a shrunk standard plan keeps no light block", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "auto-review-plan-"));
+    try {
+      const plan = join(dir, "plan.md");
+      await writeFile(plan, lines(41));
+      await withHost(async (host, metadata) => {
+        await host.harness.callAgentTool("PresentPlan", { planFilePath: plan }, CTX);
+        expect(metadata.presentPlanLight).toBe(false);
+        await writeFile(plan, lines(20));
+        // The redo re-reads the file, but an armed standard stays standard.
+        const redo = await host.harness.callAgentTool("PresentPlan", { planFilePath: plan }, CTX);
+        expect(redo).toBe(presentPlanRedoMessage("devkit"));
+        expect(metadata.presentPlanLight).toBe(false);
       });
     } finally {
       await rm(dir, { recursive: true, force: true });

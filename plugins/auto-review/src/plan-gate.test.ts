@@ -39,6 +39,7 @@ function fakeBb(seed: Record<string, unknown> = {}) {
   const kv = new Map<string, unknown>();
   let metadata: Record<string, unknown> = { ...seed };
   const resolved: unknown[] = [];
+  const sent: string[] = [];
   const deletedQueued: string[] = [];
   let children: unknown[] = [];
   let sendFails: unknown = undefined;
@@ -51,10 +52,11 @@ function fakeBb(seed: Record<string, unknown> = {}) {
   const bb = {
     sdk: {
       threads: {
-        send: async () => {
+        send: async ({ input }: { input: Array<{ text?: string }> }) => {
           if (sendFails !== undefined) {
             throw sendFails;
           }
+          sent.push(input[0]?.text ?? "");
           return delivery === "queued"
             ? { delivery: "queued", queuedMessage: { id: "qm-1" } }
             : { delivery: "sent" };
@@ -131,6 +133,7 @@ function fakeBb(seed: Record<string, unknown> = {}) {
     warnings,
     kv,
     resolved,
+    sent,
     deletedQueued,
     metadata: () => metadata,
     failSend(next: unknown) {
@@ -470,14 +473,34 @@ describe("gatePlan: the plan review's size tier and round tally", () => {
     expect(lastFire(f)).toMatchObject({ planReviewTier: "light", planReviewerCount: 0 });
   });
 
-  it("recomputes the tier at a redo from the redo's own plan", async () => {
+  it("never sizes a redo lighter than its arm: a shrunk standard plan stays standard", async () => {
     const f = fakeBb();
     (f.ctx as { globals: { reviewMode: string } }).globals.reviewMode = "devkit";
     await gatePlan(f.ctx, f.thread, approvalWithPlan(lines(41)));
     expect(f.metadata().planReviewLight).toBe(false);
     await release(f, lines(20));
     expect(f.metadata().planReviewRedone).toBe(true);
+    // The no-downgrade pin: the redo prompt carries no light block and the stored key stays false.
+    expect(f.metadata().planReviewLight).toBe(false);
+    expect(f.sent[1]).not.toContain("sized this plan as the light tier");
+  });
+
+  it("sizes a redo standard when an armed light plan grows past the line", async () => {
+    const f = fakeBb({ planReviewArmedAt: Date.now(), planReviewArmedSeq: 7, planReviewLight: true });
+    (f.ctx as { globals: { reviewMode: string } }).globals.reviewMode = "devkit";
+    await release(f, lines(41));
+    expect(f.metadata().planReviewRedone).toBe(true);
+    expect(f.metadata().planReviewLight).toBe(false);
+    expect(f.sent[0]).not.toContain("sized this plan as the light tier");
+  });
+
+  it("keeps a redo light when the armed light plan is still light", async () => {
+    const f = fakeBb({ planReviewArmedAt: Date.now(), planReviewArmedSeq: 7, planReviewLight: true });
+    (f.ctx as { globals: { reviewMode: string } }).globals.reviewMode = "devkit";
+    await release(f, lines(20));
+    expect(f.metadata().planReviewRedone).toBe(true);
     expect(f.metadata().planReviewLight).toBe(true);
+    expect(f.sent[0]).toContain("sized this plan as the light tier");
   });
 
   it("re-arms the tally window at the redo: children from before it count nothing at release", async () => {
@@ -488,9 +511,10 @@ describe("gatePlan: the plan review's size tier and round tally", () => {
     f.setChildren(Array.from({ length: 4 }, (_, index) => child(`r${index}`, { createdAt: 0 })));
     await release(f, lines(20));
     // The redo's release legitimately warns of the missing skill load; the
-    // tally itself stays under budget and silent.
+    // tally itself stays under budget and silent. The redo stayed standard,
+    // so the light budget never applies.
     expect(f.warnings.some((message) => message.includes("over the light budget"))).toBe(false);
-    expect(lastFire(f)).toMatchObject({ reason: "plan-review-incomplete", planReviewTier: "light", planReviewerCount: 0 });
+    expect(lastFire(f)).toMatchObject({ reason: "plan-review-incomplete", planReviewTier: "standard", planReviewerCount: 0 });
   });
 
   it("carries the tally into the plan-hold-expired fire record", async () => {

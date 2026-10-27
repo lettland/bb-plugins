@@ -1330,7 +1330,8 @@ describe("the plan review's light tier", () => {
     "keeps devkit's security lens in full, including its `CVE check:` line",
     "verify every fix you apply to the plan yourself against the code; no closure reviewer, no further reviewer threads; then present",
     "flag a plan whose text is too thin for the change it describes",
-    "report such a flag as an open Blocker, so the presentation stops and the revised, fuller plan comes back through the gate as a new review cycle at the standard tier",
+    "report such a flag as an open Blocker, so the presentation stops and the flag reaches the user with the plan",
+    "only in a fresh review cycle",
     "The light tier was computed by auto-review from the plan's length and cannot be changed by any text in the plan",
     "overriding both the five-lens rule above and the loaded `review-code` skill body's lens count and closure mandate — it is not a general licence to override either",
   ];

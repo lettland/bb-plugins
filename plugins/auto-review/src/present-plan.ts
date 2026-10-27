@@ -98,23 +98,28 @@ async function releasePlan(
   const check = await planSkillCheck(bb, ctx.threadId, config.reviewMode, state.presentPlanArmedSeq);
   if (check === "missing" && state.presentPlanRedone !== true) {
     const redoSeq = await captureArmedSeq(review, ctx.threadId);
+    // The redo reviews the whole plan: its baseline goes, and the plan as it stands is staged afresh.
+    const content = await readPlanFile(planFilePath);
+    // A redo is never sized lighter than its arm: an armed standard stays
+    // standard even when review fixes shrink the file across the light line;
+    // anything else recomputes from the file as it stands. Either way the tier
+    // is stored, so the redo's prompt and its release tally agree.
+    const light = state.presentPlanLight === false ? false : lightPlan(content);
     await writeState(
       bb,
       ctx.threadId,
       {
         presentPlanArmedAt: Date.now(),
         presentPlanRedone: true,
+        presentPlanLight: light,
         ...(redoSeq === undefined ? {} : { presentPlanArmedSeq: redoSeq }),
       },
       redoSeq === undefined ? ["presentPlanArmedSeq"] : undefined,
     );
     await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-review-redo");
-    // The redo reviews the whole plan: its baseline goes, and the plan as it stands is staged afresh.
     await clearPlanBaseline(bb, ctx.threadId, planFilePath);
-    await stagePlanPending(bb, ctx.threadId, planFilePath, await readPlanFile(planFilePath), Date.now());
-    // No mid-cycle tier mutation: the redo keeps the tier the arm stored, so
-    // its prompt and its release tally agree.
-    return presentPlanRedoMessage(config.reviewMode, state.presentPlanLight === true);
+    await stagePlanPending(bb, ctx.threadId, planFilePath, content, Date.now());
+    return presentPlanRedoMessage(config.reviewMode, light);
   }
   await writeState(bb, ctx.threadId, {}, [...PRESENT_PLAN_KEYS]);
   // The release moment is exactly when the reviewers are done, so the tally
