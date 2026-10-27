@@ -228,6 +228,35 @@ describe("authoredPaths", () => {
     expect(await authoredPaths(bb, "thr", 100)).toEqual(["a.ts"]);
     expect(calls).toHaveLength(1);
   });
+
+  // SDK 0.6.79 removed timelinePage.hasOlderRows; olderCursor !== null is the has-more signal (get-bb/bb packages/plugin-sdk).
+  it("follows olderCursor across pages under the SDK 0.6.79 page shape", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const bb = {
+      sdk: {
+        threads: {
+          timeline: async (args: Record<string, unknown>) => {
+            calls.push(args);
+            const first = calls.length === 1;
+            return {
+              rows: first ? [row("late.ts", 300)] : [row("mid.ts", 200)],
+              maxSeq: 999,
+              timelinePage: {
+                historySnapshot: "default",
+                olderCursor: first ? { anchorId: "a0", anchorSeq: 250 } : null,
+                olderRowsSourceSeqEnd: first ? 250 : null,
+                returnedSegmentCount: 1,
+              },
+            };
+          },
+        },
+      },
+    } as never;
+    const paths = await authoredPaths(bb, "thr", 100);
+    expect(paths).toEqual(["late.ts", "mid.ts"]);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toMatchObject({ beforeAnchorId: "a0", beforeAnchorSeq: "250" });
+  });
 });
 
 describe("fingerprintsMatch", () => {

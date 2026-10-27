@@ -172,7 +172,7 @@ function readCommandRow(command: string, cwd: string | null, left: Origin | unde
 
 /** Whether a delegation can be read through: it has nested work rows, or its child is a thread whose rows were read. Otherwise nothing shows what the subagent ran. */
 function readsDelegation(row: Extract<WorkRow, { workKind: "delegation" }>, readable: ReadonlySet<string>): boolean {
-  return [...walkRows(row.childRows)].some((nested) => nested.kind === "work") || (row.childRef !== null && readable.has(row.childRef));
+  return [...walkRows(row.childRows ?? [])].some((nested) => nested.kind === "work") || (row.childRef !== null && readable.has(row.childRef));
 }
 
 function readRow(row: WorkRow, left: Origin | undefined, readable: ReadonlySet<string>): RowReading {

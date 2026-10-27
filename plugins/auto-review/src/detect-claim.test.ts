@@ -446,7 +446,7 @@ describe("classifyRows", () => {
   });
 
   describe("delegation rows", () => {
-    const delegation = (childRows: unknown[], over: Record<string, unknown> = {}) => ({
+    const delegation = (childRows: unknown[] | null, over: Record<string, unknown> = {}) => ({
       ...base,
       workKind: "delegation",
       callId: "c1",
@@ -460,6 +460,14 @@ describe("classifyRows", () => {
       const claims = classify(delegation([]));
       expect(claims).toMatchObject({ opaque: "delegation", windows: [{ start: 19_000, end: 22_000 }] });
       expect(classify(delegation([{ kind: "conversation", id: "x" }])).opaque).toBe("delegation");
+    });
+
+    // SDK 0.6.79 made a delegation row's childRows nullable (get-bb/bb
+    // packages/plugin-sdk, bundled-types bb-plugin-sdk.d.ts): null reads as no
+    // nested rows, never as a crash.
+    it("treats null childRows as no nested rows", () => {
+      const claims = classify(delegation(null));
+      expect(claims).toMatchObject({ opaque: "delegation", windows: [{ start: 19_000, end: 22_000 }] });
     });
 
     it("is read through its nested work rows when it has any", () => {

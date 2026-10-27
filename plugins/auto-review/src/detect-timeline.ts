@@ -100,8 +100,8 @@ export async function recentTimelineRows(
           }),
     });
     rows.push(...timeline.rows);
-    const { hasOlderRows, olderCursor } = timeline.timelinePage;
-    if (!hasOlderRows || olderCursor === null || !olderMayMatter(timeline)) {
+    const { olderCursor } = timeline.timelinePage;
+    if (olderCursor === null || !olderMayMatter(timeline)) {
       return { rows, truncated: false };
     }
     before = olderCursor;
