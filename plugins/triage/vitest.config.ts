@@ -15,7 +15,8 @@ export default defineConfig({
     // The jsdom UI tests chain waitFor polls inside vitest's default 5s
     // budget; on a busy shared host they time out while still passing logic
     // (verified: identical content green at low load, default-budget passes
-    // at high load, all failures timeout-shaped).
+    // at high load; failures were mostly timeout-shaped, plus one createdAt
+    // ordering race that pinned fixtures later fixed).
     testTimeout: 30_000,
     coverage: {
       provider: "v8",
