@@ -1,6 +1,7 @@
 import type { BbPluginApi, PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { devkitRunning } from "./dispatch.js";
+import { spawnedDescendantEntries } from "./detect-children.js";
 import { EVENT_PAGE_MAX } from "./detect-events.js";
 import type { ReviewMode } from "./prompt.js";
 import { planHoldExpired, type ThreadState } from "./state.js";
@@ -377,6 +378,85 @@ export function planReleaseReason(
     return "plan-review-incomplete";
   }
   return check === "unknown" ? "plan-review-unverified" : "plan-reviewed";
+}
+
+/** A plan at or under this many lines gets the light two-lens review; a longer one the full five lenses. */
+export const PLAN_LIGHT_MAX_LINES = 40;
+
+/** Reviewer children a light-tier plan review may spawn before the tally warns (two lenses, plus slack for one legitimate per-lens respawn). */
+export const PLAN_REVIEWER_BUDGET_LIGHT = 3;
+
+/** Reviewer children a standard plan review may spawn before the tally warns (five lenses, one closure round, one slack respawn). */
+export const PLAN_REVIEWER_BUDGET_STANDARD = 7;
+
+/**
+ * Whether a plan gets the light tier: a non-null plan whose text, with ONE
+ * trailing newline trimmed, is at most `PLAN_LIGHT_MAX_LINES` lines. Null plan
+ * content (`PresentPlan`'s `readPlanFile` returns null when the file cannot be
+ * read) is never light — the standard tier.
+ */
+export function lightPlan(plan: string | null): boolean {
+  if (plan === null) {
+    return false;
+  }
+  return plan.replace(/\n$/u, "").split("\n").length <= PLAN_LIGHT_MAX_LINES;
+}
+
+/** The plan review's round tally at a fire point: the tier that set the budget and the count that was measured. */
+export interface PlanReviewTally {
+  count: number;
+  tier: "light" | "standard";
+}
+
+/**
+ * The review's reviewer children: the thread's non-plugin bb child descendants
+ * created since the arm. Titles never filter — the tally's threat model is an
+ * agent that ignores instructions, so untitled spawns must be counted too.
+ * The descendant walk already drops plugin-origin helpers; the origin check
+ * here keeps that visible at the count.
+ */
+export function countPlanReviewerChildren<T extends { id: string; createdAt: number; originPluginId: string | null }>(
+  entries: readonly T[],
+  armedAt: number,
+): T[] {
+  return entries.filter((entry) => entry.originPluginId === null && entry.createdAt >= armedAt);
+}
+
+/**
+ * The round tally at a plan review's fire point: counts the reviewer children
+ * since the arm, warns past the tier's budget naming the child ids, and
+ * returns the tally for the fire record. Finished and archived children count —
+ * the release moment is exactly when the reviewers are done — and an unknown
+ * arm time counts nothing: null tells the caller to leave the tally out of the
+ * fire record rather than record a zero that was never measured.
+ */
+export async function planReviewerTally(
+  bb: BbPluginApi,
+  threadId: string,
+  armedAt: number | undefined,
+  light: boolean,
+): Promise<PlanReviewTally | null> {
+  if (armedAt === undefined) {
+    return null;
+  }
+  const tier: PlanReviewTally["tier"] = light ? "light" : "standard";
+  const counted = countPlanReviewerChildren(await spawnedDescendantEntries(bb, threadId), armedAt);
+  const budget = light ? PLAN_REVIEWER_BUDGET_LIGHT : PLAN_REVIEWER_BUDGET_STANDARD;
+  if (counted.length > budget) {
+    bb.log.warn(
+      `auto-review: plan review in ${threadId} spawned ${counted.length} bb child threads since the arm, over the ${tier} budget of ${budget}: ${counted
+        .map((entry) => entry.id)
+        .join(", ")}`,
+    );
+  }
+  return { count: counted.length, tier };
+}
+
+/** The `recordFire` extras that persist the tally into the fire record; empty when the arm time was unknown. */
+export function planReviewTallyExtras(
+  tally: PlanReviewTally | null,
+): { planReviewerCount?: number; planReviewTier?: PlanReviewTally["tier"] } {
+  return tally === null ? {} : { planReviewerCount: tally.count, planReviewTier: tally.tier };
 }
 
 /** The durable record of a plan released without an auto-approve for want of a verified review; `fire` records only the last one. */

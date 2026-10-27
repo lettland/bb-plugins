@@ -67,6 +67,9 @@ export const lastFireSchema = z.object({
   parkedPaths: z.array(z.string()).optional(),
   /** The turn's commits a parked stand-down left unreviewed and unscanned. */
   skippedCommits: z.array(z.string()).optional(),
+  /** How many non-plugin bb child threads a plan review spawned since its arm; with the tier that set the budget. */
+  planReviewerCount: z.number().int().nonnegative().optional(),
+  planReviewTier: z.enum(["light", "standard"]).optional(),
 });
 export type LastFire = z.infer<typeof lastFireSchema>;
 

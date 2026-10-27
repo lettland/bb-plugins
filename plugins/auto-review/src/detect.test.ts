@@ -18,6 +18,7 @@ import {
   type AvailableWorkspace,
 } from "./detect.js";
 import { detachedBy, isHistoryWritingGit, mayMoveRemoteRef } from "./detect-shell.js";
+import { spawnedDescendantEntries } from "./detect-children.js";
 import { commitScanHead, committedSinceHead } from "./dispatch.js";
 import { buildReviewPrompt, renderScope } from "./prompt.js";
 import type { ThreadState } from "./state.js";
@@ -2534,7 +2535,6 @@ describe("runningChildIds", () => {
     } as never;
     return { bb, listCalls };
   }
-
   it("counts running children transitively, including a running grandchild under an idle child", async () => {
     const entries: ChildEntry[] = [
       { id: "active-child", parentThreadId: "self", status: "active" },
@@ -2597,5 +2597,62 @@ describe("runningChildIds", () => {
       },
     } as never;
     expect(await runningChildIds(bb, "self")).toEqual(["child-1"]);
+  });
+});
+
+describe("spawnedDescendantEntries", () => {
+  function fakeBb(entries: Array<Record<string, unknown>>) {
+    const bb = {
+      sdk: {
+        threads: {
+          list: async (args: { parentThreadId?: string }) =>
+            entries.filter((entry) => entry.parentThreadId === args.parentThreadId),
+        },
+      },
+    } as never;
+    return { bb };
+  }
+
+  it("returns the raw rows of finished and archived descendants, with the fields the tally reads", async () => {
+    const entries = [
+      {
+        id: "done",
+        title: "review: senior-dev",
+        createdAt: 5_000,
+        parentThreadId: "self",
+        originPluginId: null,
+        status: "idle",
+        archivedAt: 6_000,
+        deletedAt: null,
+      },
+      {
+        id: "grandchild",
+        title: null,
+        createdAt: 5_500,
+        parentThreadId: "done",
+        originPluginId: null,
+        status: "active",
+        archivedAt: null,
+        deletedAt: null,
+      },
+      {
+        id: "helper",
+        title: "advisor",
+        createdAt: 5_200,
+        parentThreadId: "self",
+        originPluginId: "advisor",
+        status: "active",
+        archivedAt: null,
+        deletedAt: null,
+      },
+    ];
+    const { bb } = fakeBb(entries);
+    const rows = await spawnedDescendantEntries(bb, "self");
+    // The plugin-origin helper stays out; the finished and archived rows stay in.
+    expect(rows.map((row) => row.id).sort()).toEqual(["done", "grandchild"]);
+    expect(rows.map((row) => row.createdAt).sort((a, b) => a - b)).toEqual([5_000, 5_500]);
+    expect(rows.every((row) => row.originPluginId === null)).toBe(true);
+    expect(rows.some((row) => row.title === null)).toBe(true);
+    expect(rows.some((row) => row.title === "review: senior-dev")).toBe(true);
   });
 });

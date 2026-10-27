@@ -17,7 +17,7 @@ export function devkitReview(scope: string): string {
  * reviewer, as the skill says, and is left to it.
  */
 export const DEVKIT_REVIEW_RULES =
-  "With devkit's review: load it now, in this thread, before any review work, even if you ran it earlier in this session, and never run the review from memory. Its initial review runs five lenses (senior-dev, senior-qa, security, end-user, compliance) as five separate reviewers, never combined into one worker, each started as a bb child thread (`bb thread spawn`, titled `review: <lens>`). Fall back only in the skill's own tier order, and only per lens after a real failure or when child threads are not available here.";
+  "With devkit's review: load it now, in this thread, before any review work, even if you ran it earlier in this session, and never run the review from memory. Its initial review runs five lenses (senior-dev, senior-qa, security, end-user, compliance) as five separate reviewers, never combined into one worker, each started as a bb child thread (`bb thread spawn`, titled `review: <lens>`). Fall back only in the skill's own tier order, and only per lens after a real failure or when child threads are not available here. A plan prompt that names the light tier's two lenses overrides this five-lens rule for that one plan; code reviews always keep it.";
 
 /** Replaces review-code's blocking wait for bb child-thread reviewers so bb's result delivery cannot cut it off; a reviewer that hangs without finishing, failing or blocking sends no wake-up, so the review then waits until the user or another wake-up turn arrives (REVIEW_CONTINUATION_CAP_MS bounds how long it holds sibling commits and, at the next idle past it, ends the hold). */
 const END_TURN_WHILE_REVIEWERS_RUN =

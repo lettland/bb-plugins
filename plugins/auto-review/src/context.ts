@@ -62,6 +62,8 @@ export async function recordFire(
     ...(extra.parkedCommits === undefined ? {} : { parkedCommits: extra.parkedCommits }),
     ...(extra.parkedPaths === undefined ? {} : { parkedPaths: extra.parkedPaths }),
     ...(extra.skippedCommits === undefined ? {} : { skippedCommits: extra.skippedCommits }),
+    ...(extra.planReviewerCount === undefined ? {} : { planReviewerCount: extra.planReviewerCount }),
+    ...(extra.planReviewTier === undefined ? {} : { planReviewTier: extra.planReviewTier }),
   };
   await writeLastFire(bb, projectId, threadId, fire);
 }

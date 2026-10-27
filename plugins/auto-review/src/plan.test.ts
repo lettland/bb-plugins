@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  countPlanReviewerChildren,
   EVENT_PAGE_MAX,
   isImmediateReactionToDeny,
+  lightPlan,
   PLAN_EVIDENCE_PAGE_CAP,
   planApprovalOf,
   planGateAction,
+  planReviewerTally,
+  planReviewTallyExtras,
   planSkillCheck,
+  PLAN_LIGHT_MAX_LINES,
+  PLAN_REVIEWER_BUDGET_LIGHT,
+  PLAN_REVIEWER_BUDGET_STANDARD,
   reviewRanSince,
   reviewReachedAgent,
   reviewSkillLoaded,
@@ -593,5 +600,147 @@ describe("plan evidence reads that fail or lie", () => {
   it("skips rows of another type that a page returns unasked, and still finds the load", async () => {
     const mixed = eventsBb([{ seq: 101, type: "turn/completed" }, itemRow(102, AGENT_LOAD)], { ignoreTypes: true });
     expect(await reviewSkillLoaded(mixed.bb, "t", 100)).toBe("loaded");
+  });
+});
+
+describe("lightPlan", () => {
+  const lines = (count: number) => Array.from({ length: count }, (_, index) => `line ${index}`).join("\n");
+
+  it("is true at and under the 40-line threshold, false past it", () => {
+    expect(PLAN_LIGHT_MAX_LINES).toBe(40);
+    expect(lightPlan(lines(39))).toBe(true);
+    expect(lightPlan(lines(40))).toBe(true);
+    expect(lightPlan(lines(41))).toBe(false);
+  });
+
+  it("trims ONE trailing newline, so a 40-line plan plus its final newline stays light", () => {
+    expect(lightPlan(`${lines(40)}\n`)).toBe(true);
+    expect(lightPlan(`${lines(41)}\n`)).toBe(false);
+    // A second trailing newline is a (blank) line of its own, not trimmed.
+    expect(lightPlan(`${lines(40)}\n\n`)).toBe(false);
+  });
+
+  it("reads an empty plan as its one line, and a null plan as standard", () => {
+    expect(lightPlan("")).toBe(true);
+    expect(lightPlan(null)).toBe(false);
+  });
+});
+
+/** A `threads.list` row with only the fields the tally reads; `title` stays null to prove titles never filter. */
+function childEntry(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    title: null,
+    createdAt: 1_000,
+    originPluginId: null,
+    parentThreadId: "thr",
+    status: "idle",
+    archivedAt: 1,
+    deletedAt: null,
+    ...overrides,
+  };
+}
+
+describe("countPlanReviewerChildren", () => {
+  const armedAt = 1_000;
+
+  it("counts finished, archived and running children created since the arm, null-titled included", () => {
+    const counted = countPlanReviewerChildren(
+      [
+        childEntry("done", { status: "idle", archivedAt: 2_000 }),
+        childEntry("archived", { status: "active", archivedAt: 2_000 }),
+        childEntry("running", { status: "active", archivedAt: null }),
+        childEntry("untitled", { title: null }),
+      ],
+      armedAt,
+    );
+    expect(counted.map((entry) => entry.id).sort()).toEqual(["archived", "done", "running", "untitled"]);
+  });
+
+  it("excludes children created before the arm and plugin-origin helpers, whatever their age", () => {
+    const counted = countPlanReviewerChildren(
+      [
+        childEntry("pre-arm", { createdAt: armedAt - 1 }),
+        childEntry("helper", { originPluginId: "advisor", createdAt: armedAt + 5 }),
+        childEntry("grandchild-helper", { originPluginId: "advisor", createdAt: 5_000 }),
+      ],
+      armedAt,
+    );
+    expect(counted).toEqual([]);
+  });
+
+  it("counts a child created exactly at the arm", () => {
+    expect(
+      countPlanReviewerChildren([childEntry("at-arm", { createdAt: armedAt })], armedAt).map((entry) => entry.id),
+    ).toEqual(["at-arm"]);
+  });
+});
+
+/** A `bb` whose thread list serves fixed rows and whose log records warnings. */
+function tallyBb(entries: ReturnType<typeof childEntry>[]) {
+  const warnings: string[] = [];
+  const bb = {
+    log: { warn: (message: string) => warnings.push(message) },
+    sdk: {
+      threads: {
+        list: async () => entries,
+      },
+    },
+  };
+  return { bb: bb as never, warnings };
+}
+
+describe("planReviewerTally", () => {
+  const entry = (id: string, createdAt = 1_500) => childEntry(id, { createdAt });
+
+  it("stays silent at the budget and warns past it, naming the count, tier and child ids", async () => {
+    const seven = Array.from({ length: PLAN_REVIEWER_BUDGET_STANDARD }, (_, index) => entry(`r${index}`));
+    const standard = tallyBb(seven);
+    expect(await planReviewerTally(standard.bb, "thr", 1_000, false)).toEqual({ count: 7, tier: "standard" });
+    expect(standard.warnings).toEqual([]);
+    const eight = tallyBb([...seven, entry("r7")]);
+    expect(await planReviewerTally(eight.bb, "thr", 1_000, false)).toEqual({ count: 8, tier: "standard" });
+    expect(eight.warnings[0]).toContain("spawned 8 bb child threads since the arm, over the standard budget of 7");
+    expect(eight.warnings[0]).toContain("r0, r1, r2, r3, r4, r5, r6, r7");
+  });
+
+  it("warns past the light budget of 3, not at it", async () => {
+    const three = Array.from({ length: PLAN_REVIEWER_BUDGET_LIGHT }, (_, index) => entry(`l${index}`));
+    const light = tallyBb(three);
+    expect(await planReviewerTally(light.bb, "thr", 1_000, true)).toEqual({ count: 3, tier: "light" });
+    expect(light.warnings).toEqual([]);
+    const four = tallyBb([...three, entry("l3")]);
+    expect(await planReviewerTally(four.bb, "thr", 1_000, true)).toEqual({ count: 4, tier: "light" });
+    expect(four.warnings[0]).toContain("spawned 4 bb child threads since the arm, over the light budget of 3");
+  });
+
+  it("lets six standard children pass (five lenses plus a legitimate per-lens respawn)", async () => {
+    const six = Array.from({ length: 6 }, (_, index) => entry(`r${index}`));
+    const standard = tallyBb(six);
+    expect(await planReviewerTally(standard.bb, "thr", 1_000, false)).toEqual({ count: 6, tier: "standard" });
+    expect(standard.warnings).toEqual([]);
+  });
+
+  it("lets plugin-origin helpers pile past the threshold unseen, and counts nothing for them", async () => {
+    const helpers = Array.from({ length: 10 }, (_, index) => childEntry(`h${index}`, { originPluginId: "advisor" }));
+    const light = tallyBb(helpers);
+    expect(await planReviewerTally(light.bb, "thr", 1_000, true)).toEqual({ count: 0, tier: "light" });
+    expect(light.warnings).toEqual([]);
+  });
+
+  it("is null without an arm time, reading nothing", async () => {
+    const unread = tallyBb([entry("r0")]);
+    expect(await planReviewerTally(unread.bb, "thr", undefined, false)).toBeNull();
+    expect(unread.warnings).toEqual([]);
+  });
+});
+
+describe("planReviewTallyExtras", () => {
+  it("carries the tally into the fire record, or nothing when it could not be measured", () => {
+    expect(planReviewTallyExtras({ count: 4, tier: "light" })).toEqual({
+      planReviewerCount: 4,
+      planReviewTier: "light",
+    });
+    expect(planReviewTallyExtras(null)).toEqual({});
   });
 });

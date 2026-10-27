@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createFakePluginHost,
@@ -12,10 +15,11 @@ const CTX = { threadId: THREAD_ID, projectId: "project-1" };
 const PLAN = "/w/docs/plans/p.md";
 
 async function withHost(
-  body: (host: ReturnType<typeof createFakePluginHost>, metadata: Record<string, unknown>, review: Awaited<ReturnType<typeof createReviewContext>>, dropTimeline: () => void) => Promise<void>,
+  body: (host: ReturnType<typeof createFakePluginHost>, metadata: Record<string, unknown>, review: Awaited<ReturnType<typeof createReviewContext>>, dropTimeline: () => void, setChildren: (next: unknown[]) => void) => Promise<void>,
 ) {
   const metadata: Record<string, unknown> = {};
   let timelineDown = false;
+  let children: unknown[] = [];
   const sdk = {
     threads: {
       getPluginMetadata: async () => ({ ...metadata }),
@@ -34,6 +38,7 @@ async function withHost(
       },
       events: { list: async () => [] },
       queuedMessages: { list: async () => [] },
+      list: async () => children,
     },
   } as unknown as CreateFakePluginHostOptions["sdk"];
   const host = createFakePluginHost({ pluginId: "auto-review", sdk, agentSkillIds: ["auto-review"] });
@@ -43,6 +48,8 @@ async function withHost(
     registerPlanTools(review);
     await body(host, metadata, review, () => {
       timelineDown = true;
+    }, (next) => {
+      children = next;
     });
   } finally {
     await host.harness.dispose();
@@ -87,5 +94,135 @@ describe("PresentPlan without a readable cursor", () => {
       expect(metadata.presentPlanArmedPath).toBeUndefined();
       expect(metadata.presentPlanRedone).toBeUndefined();
     });
+  });
+});
+
+describe("PresentPlan's light tier", () => {
+  const lines = (count: number) => Array.from({ length: count }, (_, index) => `line ${index}`).join("\n");
+  /** A reviewer child that already finished, created after any arm in these tests. */
+  const child = (id: string) => ({
+    id,
+    title: "review: security",
+    createdAt: Date.now(),
+    parentThreadId: THREAD_ID,
+    originPluginId: null,
+    status: "idle",
+    archivedAt: 1,
+    deletedAt: null,
+  });
+  const lastFire = (host: ReturnType<typeof createFakePluginHost>) =>
+    host.bb.storage.kv.get(`lastfire:${CTX.projectId}:${THREAD_ID}`) as Promise<Record<string, unknown> | null>;
+
+  it("arms with the tier from the plan file, and a null plan is never light", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "auto-review-plan-"));
+    try {
+      const short = join(dir, "short.md");
+      await writeFile(short, lines(40));
+      await withHost(async (host, metadata) => {
+        await host.harness.callAgentTool("PresentPlan", { planFilePath: short }, CTX);
+        expect(metadata.presentPlanLight).toBe(true);
+      });
+      const long = join(dir, "long.md");
+      await writeFile(long, lines(41));
+      await withHost(async (host, metadata) => {
+        await host.harness.callAgentTool("PresentPlan", { planFilePath: long }, CTX);
+        expect(metadata.presentPlanLight).toBe(false);
+      });
+      await withHost(async (host, metadata) => {
+        // PLAN does not exist, so `readPlanFile` returns null: standard tier.
+        await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX);
+        expect(metadata.presentPlanLight).toBe(false);
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the armed tier across a redo, and records the tally at the release fire point", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "auto-review-plan-"));
+    try {
+      const short = join(dir, "short.md");
+      await writeFile(short, lines(40));
+      await withHost(async (host, metadata, _review, _dropTimeline, setChildren) => {
+        await host.harness.callAgentTool("PresentPlan", { planFilePath: short }, CTX);
+        expect(metadata.presentPlanLight).toBe(true);
+        // The redo keeps the stored tier, so its prompt reduces to two lenses.
+        const redo = await host.harness.callAgentTool("PresentPlan", { planFilePath: short }, CTX);
+        expect(redo).toBe(presentPlanRedoMessage("devkit", true));
+        expect(metadata.presentPlanLight).toBe(true);
+        setChildren([child("r0"), child("r1"), child("r2"), child("r3")]);
+        const released = await host.harness.callAgentTool("PresentPlan", { planFilePath: short }, CTX);
+        expect(released).toContain("released without a complete calibrated review");
+        expect(await lastFire(host)).toMatchObject({
+          outcome: "stood-down",
+          reason: "plan-review-incomplete",
+          planReviewTier: "light",
+          planReviewerCount: 4,
+        });
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("warns past the light budget at release: four children over the budget of three", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "auto-review-plan-"));
+    try {
+      const short = join(dir, "short.md");
+      await writeFile(short, lines(40));
+      await withHost(async (host, metadata, _review, _dropTimeline, setChildren) => {
+        // Skip the redo by arming with the flag already set, so the second call releases.
+        Object.assign(metadata, {
+          presentPlanArmedAt: Date.now(),
+          presentPlanArmedPath: short,
+          presentPlanArmedSeq: 77,
+          presentPlanLight: true,
+          presentPlanRedone: true,
+        });
+        setChildren([child("r0"), child("r1"), child("r2"), child("r3")]);
+        await host.harness.callAgentTool("PresentPlan", { planFilePath: short }, CTX);
+        expect(await lastFire(host)).toMatchObject({
+          outcome: "stood-down",
+          reason: "plan-review-incomplete",
+          planReviewTier: "light",
+          planReviewerCount: 4,
+        });
+        expect(metadata.presentPlanLight).toBeUndefined();
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not count plugin-origin helpers past the threshold", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "auto-review-plan-"));
+    try {
+      const short = join(dir, "short.md");
+      await writeFile(short, lines(40));
+      await withHost(async (host, metadata, _review, _dropTimeline, setChildren) => {
+        // Skip the redo by arming with the flag already set, so the second call releases.
+        Object.assign(metadata, {
+          presentPlanArmedAt: Date.now(),
+          presentPlanArmedPath: short,
+          presentPlanArmedSeq: 77,
+          presentPlanLight: true,
+          presentPlanRedone: true,
+        });
+        setChildren(
+          Array.from({ length: 8 }, (_, index) => ({
+            ...child(`h${index}`),
+            originPluginId: "advisor",
+          })),
+        );
+        await host.harness.callAgentTool("PresentPlan", { planFilePath: short }, CTX);
+        expect(await lastFire(host)).toMatchObject({
+          reason: "plan-review-incomplete",
+          planReviewTier: "light",
+          planReviewerCount: 0,
+        });
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

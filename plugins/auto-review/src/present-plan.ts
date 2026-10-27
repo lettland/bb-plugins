@@ -12,7 +12,15 @@ import { effectiveConfig, readProjectConfig } from "./config.js";
 import { recordFire, type EffectiveConfig, type ReviewContext } from "./context.js";
 import { tryCaptureSinceSeq } from "./detect.js";
 import { isNativePlanGateProvider } from "./gate.js";
-import { planReleaseReason, planSkillCheck, reviewRanSince, warnPlanUnreviewed } from "./plan.js";
+import {
+  lightPlan,
+  planReleaseReason,
+  planReviewerTally,
+  planReviewTallyExtras,
+  planSkillCheck,
+  reviewRanSince,
+  warnPlanUnreviewed,
+} from "./plan.js";
 import {
   buildPresentPlanReviewPrompt,
   PLAN_FIRST_INSTRUCTIONS,
@@ -104,9 +112,16 @@ async function releasePlan(
     // The redo reviews the whole plan: its baseline goes, and the plan as it stands is staged afresh.
     await clearPlanBaseline(bb, ctx.threadId, planFilePath);
     await stagePlanPending(bb, ctx.threadId, planFilePath, await readPlanFile(planFilePath), Date.now());
-    return presentPlanRedoMessage(config.reviewMode);
+    // No mid-cycle tier mutation: the redo keeps the tier the arm stored, so
+    // its prompt and its release tally agree.
+    return presentPlanRedoMessage(config.reviewMode, state.presentPlanLight === true);
   }
   await writeState(bb, ctx.threadId, {}, [...PRESENT_PLAN_KEYS]);
+  // The release moment is exactly when the reviewers are done, so the tally
+  // counts them here, from the tier the arm stored.
+  const tallyExtras = planReviewTallyExtras(
+    await planReviewerTally(bb, ctx.threadId, state.presentPlanArmedAt, state.presentPlanLight === true),
+  );
   // The baseline accepts a review that spans turns: child-thread reviewers end
   // the turn and bb wakes the agent later. Auto-approve still needs the
   // same-turn proof.
@@ -121,7 +136,7 @@ async function releasePlan(
   await settlePlanBaseline(bb, ctx.threadId, planFilePath, reviewWorked);
   if (reviewRan && config.autoApprovePlans) {
     await clearPlanBaseline(bb, ctx.threadId, planFilePath);
-    await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-approved");
+    await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-approved", tallyExtras);
     bb.log.info(
       `auto-review: auto-approved the reviewed plan ${basename(planFilePath)} in thread ${ctx.threadId}`,
     );
@@ -130,7 +145,7 @@ async function releasePlan(
   if (check !== "loaded") {
     warnPlanUnreviewed(bb, ctx.threadId, basename(planFilePath), check);
   }
-  await recordFire(review, ctx.projectId, ctx.threadId, "stood-down", planReleaseReason(check));
+  await recordFire(review, ctx.projectId, ctx.threadId, "stood-down", planReleaseReason(check), tallyExtras);
   return check === "missing" ? PRESENT_PLAN_INCOMPLETE_MESSAGE : PRESENT_PLAN_REVIEWED_MESSAGE;
 }
 
@@ -159,22 +174,28 @@ async function presentPlan(
       return releasePlan(review, ctx, state, config, planFilePath);
     }
     const armedSeq = await captureArmedSeq(review, ctx.threadId);
+    // The tier comes from the file as armed; release reads the stored key,
+    // never the re-read file, whose review fixes routinely shrink it across
+    // the light boundary.
+    const content = await readPlanFile(planFilePath);
+    const light = lightPlan(content);
     await writeState(
       bb,
       ctx.threadId,
       {
         presentPlanArmedAt: now,
         presentPlanArmedPath: planFilePath,
+        presentPlanLight: light,
         ...(armedSeq === undefined ? {} : { presentPlanArmedSeq: armedSeq }),
       },
       // A redo flag left by an expired arm must not skip this plan's redo.
       armedSeq === undefined ? ["presentPlanRedone", "presentPlanArmedSeq"] : ["presentPlanRedone"],
     );
     await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-review");
-    const content = await readPlanFile(planFilePath);
     const prompt = buildPresentPlanReviewPrompt({
       reviewMode: config.reviewMode,
       planFilePath,
+      light,
       baseline: await planScope(bb, ctx.threadId, planFilePath, content, now),
     });
     await stagePlanPending(bb, ctx.threadId, planFilePath, content, now);

@@ -79,6 +79,11 @@ describe("threadStateSchema", () => {
     };
     expect(threadStateSchema.parse({ phase: "idle", lastIdle }).lastIdle).toEqual(lastIdle);
   });
+
+  it("round-trips the plan review's light-tier keys for both gates", () => {
+    const state = { phase: "idle" as const, planReviewLight: true, presentPlanLight: false };
+    expect(threadStateSchema.parse(state)).toEqual(state);
+  });
 });
 
 describe("isStale", () => {
@@ -204,6 +209,7 @@ describe("PLAN_GATE_KEYS", () => {
       "planReviewDeliveredSeq",
       "planReviewArmedSeq",
       "planReviewRedone",
+      "planReviewLight",
     ]);
   });
 });
@@ -215,6 +221,7 @@ describe("PRESENT_PLAN_KEYS", () => {
       "presentPlanArmedPath",
       "presentPlanArmedSeq",
       "presentPlanRedone",
+      "presentPlanLight",
     ]);
   });
 });

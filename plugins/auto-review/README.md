@@ -512,6 +512,19 @@ subagents, or sequentially in the same thread); `self` mode and the no-devkit ca
 still review in the same thread. A full calibrated review costs about six sessions on the
 provider (five lenses plus closure).
 
+A plan of at most 40 lines (computed by the plugin from the plan's length when the review is
+armed; a plan whose file cannot be read is never light) gets the light tier instead: the initial
+review runs two bb child threads — `review: senior-dev` (architecture and feasibility) and
+`review: security` (its full charter, CVE check included) — and the fixes are verified by the
+agent itself, with no closure reviewer. Both light reviewers flag a plan too thin for the change
+it describes as an open Blocker, which sends the revised plan back through the gate as a new
+cycle at the standard tier. The presented plan discloses the tier: `reviewed light-tier:
+senior-dev + security, closures self-verified`. Standard plan reviews are allowed one closure
+round at most for the plan. Write a fuller plan and it gets the five-lens review. The plugin
+counts the thread's non-plugin bb child threads created since the review was armed and warns
+past the tier's budget (light: 3, standard: 7), carrying the count and tier into the fire
+record — including when the hold expires instead of releasing.
+
 Per-project overrides are stored in the plugin's own storage. bb's settings page for this
 plugin (Tools → Auto review) also has a Plan auto-approve section that lists every project with its own switch for approving reviewed
 plans automatically; it writes the same storage as `bb auto-review auto-approve`.

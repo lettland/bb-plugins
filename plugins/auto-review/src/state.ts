@@ -170,6 +170,14 @@ export const threadStateSchema = z.object({
   planReviewArmedSeq: z.number().int().nonnegative().optional(),
   /** Set once the plan was sent back for a full review after `review-code` was never loaded; a second miss releases it. */
   planReviewRedone: z.literal(true).optional(),
+  /**
+   * The plan review's size tier, computed by `lightPlan` from the plan's text
+   * when the gate armed (and recomputed by a redo from its own plan). Release
+   * and hold expiry read it for the round tally and never recompute it from
+   * the re-presented plan: review fixes routinely shrink a plan across the
+   * 40-line boundary, which would flip the reviewer budget in both directions.
+   */
+  planReviewLight: z.boolean().optional(),
   /** The last plan the gate left with the user, for `gatePlan`'s same-turn re-presentation check. */
   planReleased: z
     .object({ interactionId: z.string(), planHash: z.string(), releasedSeq: z.number().int().nonnegative() })
@@ -191,6 +199,8 @@ export const threadStateSchema = z.object({
   presentPlanArmedSeq: z.number().int().nonnegative().optional(),
   /** `planReviewRedone` for `PresentPlan`: the one redo this arm has used. */
   presentPlanRedone: z.literal(true).optional(),
+  /** `planReviewLight` for the `PresentPlan` arm: computed from the plan file at arm time, read back at release. */
+  presentPlanLight: z.boolean().optional(),
   /**
    * The interaction ids of the plan approvals auto-review resolved itself
    * (auto-approved, or re-approved on an earlier approval), most recent last,
@@ -294,6 +304,7 @@ export const PLAN_GATE_KEYS: readonly string[] = [
   "planReviewDeliveredSeq",
   "planReviewArmedSeq",
   "planReviewRedone",
+  "planReviewLight",
 ];
 
 /** `PresentPlan`'s own keys, cleared by `bb auto-review reset` alongside `PLAN_GATE_KEYS`. */
@@ -302,6 +313,7 @@ export const PRESENT_PLAN_KEYS: readonly string[] = [
   "presentPlanArmedPath",
   "presentPlanArmedSeq",
   "presentPlanRedone",
+  "presentPlanLight",
 ];
 
 /** How long a `user_question` can still count as the agent's reaction to a plan deny. */

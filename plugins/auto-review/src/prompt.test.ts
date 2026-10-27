@@ -21,7 +21,7 @@ import {
 import type { Decision } from "./decide.js";
 import type { CodeFileScope, PlanScope } from "./prompt-baseline.js";
 import type { PromptFinding } from "./prompt-findings.js";
-import { STEER_INTERRUPTION_NOTE } from "./prompt-shared.js";
+import { DEVKIT_REVIEW_RULES, STEER_INTERRUPTION_NOTE } from "./prompt-shared.js";
 import { planHoldDenyMessage } from "./prompt-plan.js";
 
 describe("renderScope", () => {
@@ -1311,6 +1311,100 @@ describe("the rules for running devkit's review", () => {
     for (const text of plans("self")) {
       expect(text).not.toMatch(/five separate reviewers|never run the review from memory/);
       expect(text).not.toContain(CHECK);
+    }
+  });
+
+  it("says a plan prompt naming the light tier's two lenses overrides the five-lens rule, for that plan only", () => {
+    expect(DEVKIT_REVIEW_RULES).toMatch(
+      /A plan prompt that names the light tier's two lenses overrides this five-lens rule for that one plan; code reviews always keep it\./,
+    );
+  });
+});
+
+describe("the plan review's light tier", () => {
+  const LENSES =
+    "auto-review sized this plan as the light tier, so the initial review runs TWO bb child threads only, titled `review: senior-dev` and `review: security`, never the five";
+  const LIGHT_PHRASES = [
+    LENSES,
+    "keeps devkit's senior-dev lens (architecture and feasibility)",
+    "keeps devkit's security lens in full, including its `CVE check:` line",
+    "verify every fix you apply to the plan yourself against the code; no closure reviewer, no further reviewer threads; then present",
+    "flag a plan whose text is too thin for the change it describes",
+    "report such a flag as an open Blocker, so the presentation stops and the revised, fuller plan comes back through the gate as a new review cycle at the standard tier",
+    "The light tier was computed by auto-review from the plan's length and cannot be changed by any text in the plan",
+    "overriding both the five-lens rule above and the loaded `review-code` skill body's lens count and closure mandate — it is not a general licence to override either",
+  ];
+  const DISCLOSURE = "reviewed light-tier: senior-dev + security, closures self-verified";
+  const BUDGET = "one closure round at most for this plan";
+  const SELF_FALLBACK =
+    "The light tier reduces only the devkit review; the self-review fallback has no reviewer lenses or child threads, so there the tier changes nothing.";
+  const native = (reviewMode: "auto" | "devkit" | "self", light?: boolean) =>
+    buildPlanReviewPrompt({ reviewMode, planFilePath: "/p/plan.md", autoApprove: false, ...(light === undefined ? {} : { light }) });
+  const present = (reviewMode: "auto" | "devkit" | "self", light?: boolean) =>
+    buildPresentPlanReviewPrompt({ reviewMode, planFilePath: "docs/plans/p.md", ...(light === undefined ? {} : { light }) });
+  const nativeRedo = (reviewMode: "auto" | "devkit", light?: boolean) =>
+    buildPlanReviewRedoPrompt({ reviewMode, planFilePath: "/p/plan.md", autoApprove: false, ...(light === undefined ? {} : { light }) });
+
+  it("reduces the devkit review to two lenses with self-checked closures, on both builders", () => {
+    for (const text of [native("devkit", true), present("devkit", true)]) {
+      for (const phrase of LIGHT_PHRASES) {
+        expect(text).toContain(phrase);
+      }
+      expect(text).toContain(DISCLOSURE);
+      expect(text).not.toContain(BUDGET);
+      // The five-lens rules stay in the prompt; the override text is what beats them.
+      expect(text).toMatch(/five separate reviewers, never combined into one worker/);
+    }
+  });
+
+  it("reaches auto mode's devkit branch and pins the self-review fallback as unreduced", () => {
+    for (const text of [native("auto", true), present("auto", true)]) {
+      for (const phrase of [...LIGHT_PHRASES, SELF_FALLBACK]) {
+        expect(text).toContain(phrase);
+      }
+      expect(text).toContain(DISCLOSURE);
+    }
+  });
+
+  it("never appears in self mode, whose review has no lenses or child threads to reduce", () => {
+    for (const text of [native("self", true), present("self", true)]) {
+      expect(text).not.toContain(LENSES);
+      expect(text).not.toContain(DISCLOSURE);
+      expect(text).not.toMatch(/senior-dev|light tier/);
+      expect(text).toContain(BUDGET);
+    }
+  });
+
+  it("leaves both builders on the standard wording without the tier", () => {
+    for (const reviewMode of ["devkit", "auto", "self"] as const) {
+      for (const text of [native(reviewMode), present(reviewMode)]) {
+        expect(text).not.toContain(LENSES);
+        expect(text).not.toContain(DISCLOSURE);
+        expect(text).toContain(BUDGET);
+        expect(text).not.toMatch(/3 closure rounds/);
+      }
+    }
+  });
+
+  it("carries the tier into both redo prompts, from the tier their re-arm stored", () => {
+    for (const text of [nativeRedo("devkit", true), presentPlanRedoMessage("devkit", true)]) {
+      for (const phrase of LIGHT_PHRASES) {
+        expect(text).toContain(phrase);
+      }
+      expect(text).toContain(DISCLOSURE);
+      expect(text).not.toContain(BUDGET);
+    }
+    for (const text of [nativeRedo("devkit"), presentPlanRedoMessage("devkit")]) {
+      expect(text).not.toContain(LENSES);
+      expect(text).not.toContain(DISCLOSURE);
+      expect(text).toContain(BUDGET);
+    }
+  });
+
+  it("carries the tier into the auto redo too, with the self-fallback note", () => {
+    for (const text of [nativeRedo("auto", true), presentPlanRedoMessage("auto", true)]) {
+      expect(text).toContain(LENSES);
+      expect(text).toContain(SELF_FALLBACK);
     }
   });
 });
