@@ -412,7 +412,8 @@ function createHost(options: HostOptions = {}) {
             (authoring.includes(args.threadId) ? authoredRows : []),
           maxSeq,
           timelinePage: {
-            hasOlderRows: false,
+            historySnapshot: "default",
+            returnedSegmentCount: 1,
             olderCursor: null,
             olderRowsSourceSeqEnd: null,
           },

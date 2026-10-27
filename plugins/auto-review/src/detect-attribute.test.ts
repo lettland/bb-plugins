@@ -105,7 +105,7 @@ async function attribute(options: Options = {}) {
           return {
             rows: pages[at]?.rows ?? [],
             maxSeq: 0,
-            timelinePage: { hasOlderRows: older, olderCursor: older ? { anchorId: String(at + 1), anchorSeq: at + 1 } : null },
+            timelinePage: { historySnapshot: "default", olderCursor: older ? { anchorId: String(at + 1), anchorSeq: at + 1 } : null, returnedSegmentCount: 1 },
           };
         },
       },

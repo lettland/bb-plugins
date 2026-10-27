@@ -106,7 +106,8 @@ function fakeBb(
             rows: pages[at]?.rows ?? [],
             maxSeq: 0,
             timelinePage: {
-              hasOlderRows: older,
+              historySnapshot: "default",
+              returnedSegmentCount: 1,
               olderCursor: older ? { anchorId: String(at + 1), anchorSeq: at + 1 } : null,
             },
           };

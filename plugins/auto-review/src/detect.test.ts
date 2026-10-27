@@ -196,7 +196,8 @@ describe("authoredPaths", () => {
               rows: page.rows,
               maxSeq: 999,
               timelinePage: {
-                hasOlderRows: hasOlder,
+                historySnapshot: "default",
+                returnedSegmentCount: 1,
                 olderCursor: hasOlder ? { anchorId: `a${index}`, anchorSeq: page.olderEnd } : null,
                 olderRowsSourceSeqEnd: page.olderEnd,
               },
@@ -326,7 +327,7 @@ describe("treeChangedPaths and siblingAuthoredPaths", () => {
             return {
               rows: timelines[threadId] ?? [],
               maxSeq: 0,
-              timelinePage: { hasOlderRows: false, olderCursor: null },
+              timelinePage: { historySnapshot: "default", olderCursor: null, returnedSegmentCount: 0 },
             };
           },
         },
@@ -480,7 +481,7 @@ describe("workspace capture edge cases", () => {
               return {
                 rows: [],
                 maxSeq: 0,
-                timelinePage: { hasOlderRows: false, olderCursor: null },
+                timelinePage: { historySnapshot: "default", olderCursor: null, returnedSegmentCount: 0 },
               };
             }
             return env.timeline(args);
@@ -964,7 +965,7 @@ describe("workspace capture edge cases", () => {
         timeline: async () => ({
           rows: [change("from.ts", 2_000, "to.ts")],
           maxSeq: 0,
-          timelinePage: { hasOlderRows: false, olderCursor: null },
+          timelinePage: { historySnapshot: "default", olderCursor: null, returnedSegmentCount: 0 },
         }),
       });
       const paths = await siblingAuthoredPaths(
@@ -990,7 +991,8 @@ describe("workspace capture edge cases", () => {
             rows: page?.rows ?? [],
             maxSeq: 0,
             timelinePage: {
-              hasOlderRows: page?.cursor !== null,
+              historySnapshot: "default",
+              returnedSegmentCount: 1,
               olderCursor: page?.cursor ?? null,
             },
           };
@@ -1016,7 +1018,8 @@ describe("workspace capture edge cases", () => {
             rows: first ? [{ kind: "turn" }] : [change("later.ts", 2_000)],
             maxSeq: 0,
             timelinePage: {
-              hasOlderRows: first,
+              historySnapshot: "default",
+              returnedSegmentCount: 1,
               olderCursor: first ? { anchorId: "a0", anchorSeq: 5 } : null,
             },
           };
@@ -1054,7 +1057,7 @@ describe("workspace capture edge cases", () => {
         change: { path, movePath: null },
       })),
       maxSeq: 0,
-      timelinePage: { hasOlderRows: false, olderCursor: null },
+      timelinePage: { historySnapshot: "default", olderCursor: null, returnedSegmentCount: 0 },
     });
 
     it("uses the timeline alone when the turn-start tree is missing", async () => {
@@ -1107,7 +1110,7 @@ describe("workspace capture edge cases", () => {
                   },
                 ],
                 maxSeq: 0,
-                timelinePage: { hasOlderRows: false, olderCursor: null },
+                timelinePage: { historySnapshot: "default", olderCursor: null, returnedSegmentCount: 0 },
               }
             : ownRows(["own.ts"]),
         diffFiles: async () => ({
@@ -1226,7 +1229,7 @@ describe("workspace capture edge cases", () => {
     const page = (rows: unknown[]) => ({
       rows,
       maxSeq: 0,
-      timelinePage: { hasOlderRows: false, olderCursor: null },
+      timelinePage: { historySnapshot: "default", olderCursor: null, returnedSegmentCount: 0 },
     });
 
     /** What `status` answers for `origin/<base>`: the commits still ahead of it, with HEAD where the checkout is. */
@@ -1789,7 +1792,8 @@ describe("workspace capture edge cases", () => {
               rows: [],
               maxSeq: 0,
               timelinePage: {
-                hasOlderRows: true,
+                historySnapshot: "default",
+                returnedSegmentCount: 1,
                 olderCursor: { anchorId: "a", anchorSeq: 9 },
                 olderRowsSourceSeqEnd: 9,
               },
@@ -1834,7 +1838,8 @@ describe("workspace capture edge cases", () => {
             rows: [command("ls", { createdAt: 9_000, startedAt: 9_000, completedAt: 9_200 })],
             maxSeq: 0,
             timelinePage: {
-              hasOlderRows: true,
+              historySnapshot: "default",
+              returnedSegmentCount: 1,
               olderCursor: { anchorId: "a", anchorSeq: 9 },
               olderRowsSourceSeqEnd: 3,
             },
@@ -2221,7 +2226,8 @@ describe("workspace capture edge cases", () => {
                   rows: [],
                   maxSeq: 0,
                   timelinePage: {
-                    hasOlderRows: true,
+                    historySnapshot: "default",
+                    returnedSegmentCount: 1,
                     olderCursor: { anchorId: "a", anchorSeq: 50 },
                     olderRowsSourceSeqEnd: 100,
                   },

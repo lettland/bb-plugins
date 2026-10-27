@@ -186,7 +186,7 @@ export async function resolveClaudeEnv(
     );
   }
   for (const warning of decision.warnings)
-    log.warn(`project ${ctx.projectId} thread ${ctx.threadId}: ${warning}`);
+    log.warn(`project ${ctx.projectId ?? "none"} thread ${ctx.threadId}: ${warning}`);
   await kv.set(key, decision.pin);
   log.debug(
     `env thread=${ctx.threadId} project=${ctx.projectId} host=${ctx.hostId} -> ${decision.pin.dir ?? "default profile"}`,

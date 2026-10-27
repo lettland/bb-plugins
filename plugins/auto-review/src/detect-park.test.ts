@@ -147,9 +147,9 @@ async function released(options: Options = {}) {
           }
           reads.set(threadId, (reads.get(threadId) ?? 0) + 1);
           if (options.lateRows !== undefined && threadId === (options.lateRows.threadId ?? "self") && (reads.get(threadId) ?? 0) > options.lateRows.reads) {
-            return { rows: [...rows, ...options.lateRows.rows], maxSeq: 0, timelinePage: { hasOlderRows: false, olderCursor: null } };
+            return { rows: [...rows, ...options.lateRows.rows], maxSeq: 0, timelinePage: { historySnapshot: "default", olderCursor: null, returnedSegmentCount: 0 } };
           }
-          return { rows, maxSeq: 0, timelinePage: { hasOlderRows: false, olderCursor: null } };
+          return { rows, maxSeq: 0, timelinePage: { historySnapshot: "default", olderCursor: null, returnedSegmentCount: 0 } };
         },
       },
     },
