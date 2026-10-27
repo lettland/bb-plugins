@@ -15,14 +15,13 @@ import { BoardToolbar, type TaskFilter } from "@/components/triage/board-toolbar
 import { TaskComposerDialog } from "@/components/triage/task-composer-dialog";
 import { TriageHeaderActions } from "@/components/triage/header-actions";
 import { ThreadTriageAction } from "@/components/triage/thread-triage-action";
-import { SidebarThreadList } from "@/components/triage/sidebar-thread-list";
 import { TaskCard } from "@/components/triage/task-card";
 import {
   isTaskRunning,
   supportsTaskRead,
   stageTone,
 } from "@/lib/triage-format";
-import { claimTriageRefresh, usePendingOpenTaskDetail } from "@/lib/triage-mounts";
+import { claimTriageRefresh } from "@/lib/triage-mounts";
 import { patchTaskRead, patchTaskStage, useOpenTaskRequests, useTriage } from "@/lib/triage-store";
 import type { NotificationLevel, Task } from "@/lib/triage-types";
 import "./app.css";
@@ -89,7 +88,7 @@ function TriageBoard() {
 
   useRealtime("triage", (payload) => {
     showNotification((payload as RealtimePayload).notification);
-    // The sidebar list hears the same signal; only one of them needs to fetch.
+    // The thread action hears the same signal; only one of them needs to fetch.
     if (claimTriageRefresh(payload)) void refresh();
   });
 
@@ -107,10 +106,9 @@ function TriageBoard() {
     [navigate, refresh, rpc, snapshot],
   );
 
-  useOpenTaskRequests(openTask);
   // Notification rows ask to open a card by number. Existing threads win;
   // cards without one fall back to the shared editor.
-  usePendingOpenTaskDetail(setEditingNumber);
+  useOpenTaskRequests(openTask);
 
   /** Cards inside the current project and machine scope, before the lens. */
   const scopedTasks = useMemo(() => {
@@ -339,13 +337,5 @@ export default definePluginApp((app) => {
     path: "triage",
     component: TriageBoard,
     headerContent: TriageHeaderActions,
-  });
-
-  app.slots.experimental_threadList({
-    id: "triage-sidebar",
-    title: "Triage above threads",
-    description:
-      "BB's thread list with your Triage cards above it, once the plugin's sidebar setting is on.",
-    component: SidebarThreadList,
   });
 });

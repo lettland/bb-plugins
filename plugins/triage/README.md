@@ -97,10 +97,6 @@ bb triage stages
   all existing linked sessions and future task sessions in the regular session
   list. It defaults to **off**. Changing it applies to all linked sessions;
   individual show/hide actions override it until the next setting change.
-- **Triage settings → Show Triage in sidebar** controls the separate, default-off card section.
-  When BB uses the **Triage above threads** sidebar layout, it also provides a
-  **Move current session to Triage** control. With another sidebar plugin,
-  use the session header action.
 
 Imported sessions receive their assigned Triage agent tool and instructions on
 subsequent agent configuration. Importing does not interrupt a running turn.

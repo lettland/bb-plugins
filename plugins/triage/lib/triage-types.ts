@@ -11,6 +11,7 @@ export interface Stage {
   systemRole: StageRole | null;
 }
 
+/** Levels triage has display labels for; SDK providers may report others. */
 export type ReasoningLevel =
   | "none"
   | "low"
@@ -45,7 +46,7 @@ export interface Task {
   branchName: string;
   providerId: string;
   model: string;
-  reasoningLevel: ReasoningLevel;
+  reasoningLevel: string;
   request: NewThreadRequest | null;
   scheduledAt: number | null;
   threadId: string | null;
@@ -93,8 +94,8 @@ export interface AgentModelOption {
   model: string;
   displayName: string;
   description: string;
-  supportedReasoningEfforts: ReasoningLevel[];
-  defaultReasoningEffort: ReasoningLevel;
+  supportedReasoningEfforts: string[];
+  defaultReasoningEffort: string;
 }
 
 export interface AgentOptions {

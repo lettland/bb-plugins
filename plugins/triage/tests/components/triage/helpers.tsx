@@ -139,8 +139,6 @@ export function deferred<T>(): {
 /** Mutable knobs the SDK app mock reads, reset between tests. */
 export const sdk = {
   rpc: createFakeRpc(),
-  settingsValues: undefined as Record<string, string | number | boolean> | undefined,
-  settingsLoading: false,
   connection: "connected" as PluginRealtimeConnectionState,
   navigate: {
     toThread: vi.fn(),
@@ -151,15 +149,6 @@ export const sdk = {
     openUrl: vi.fn(() => false),
     experimental_openFilePreview: vi.fn(() => false),
     experimental_openFileExternally: vi.fn(() => false),
-  },
-  sidebarThreads: {
-    open: vi.fn(),
-    openNewThread: vi.fn(),
-    setPinned: vi.fn(async () => {}),
-    setRead: vi.fn(async () => {}),
-    rename: vi.fn(async () => {}),
-    archive: vi.fn(),
-    requestDelete: vi.fn(),
   },
   realtimeHandlers: [] as Array<(payload: unknown) => void>,
   composerProps: [] as Array<Record<string, unknown>>,
@@ -183,12 +172,9 @@ export function resetToasts(): void {
 
 export function resetSdk(): void {
   sdk.rpc = createFakeRpc();
-  sdk.settingsValues = undefined;
-  sdk.settingsLoading = false;
   sdk.connection = "connected";
   resetToasts();
   for (const fn of Object.values(sdk.navigate)) fn.mockClear();
-  for (const fn of Object.values(sdk.sidebarThreads)) fn.mockClear();
   sdk.realtimeHandlers = [];
   sdk.composerProps = [];
   sdk.composerRequest = null;
@@ -258,10 +244,8 @@ export function buildRequest(
 export function createSdkAppMock(): Record<string, unknown> {
   return {
     useRpc: () => sdk.rpc,
-    useSettings: () => ({ values: sdk.settingsValues, isLoading: sdk.settingsLoading }),
     useRealtimeConnectionState: () => sdk.connection,
     useBbNavigate: () => sdk.navigate,
-    experimental_useSidebarThreadActions: () => sdk.sidebarThreads,
     useRealtime: (_channel: string, handler: (payload: unknown) => void) => {
       sdk.realtimeHandlers.push(handler);
     },

@@ -9,7 +9,6 @@ import {
   deferred,
   makeStage,
   resetSdk,
-  sdk,
   toasts,
 } from "./helpers";
 
@@ -27,7 +26,6 @@ afterEach(cleanup);
 
 beforeEach(() => {
   resetSdk();
-  sdk.settingsValues = { showInSidebar: true };
 });
 
 function stages() {
@@ -156,41 +154,6 @@ test("toasts a failed create", async () => {
   fireEvent.change(screen.getByLabelText("New stage name"), { target: { value: "Extra" } });
   fireEvent.click(screen.getByRole("button", { name: /Add stage/ }));
   await waitFor(() => expect(toasts.error).toHaveBeenCalledWith("Too many stages"));
-});
-
-// sidebar tests.
-test("toggles the sidebar setting through the rpc", async () => {
-  const { rpc, onChanged } = await openDialog();
-  const checkbox = screen.getByLabelText("Show Triage in sidebar") as HTMLInputElement;
-  expect(checkbox.checked).toBe(true);
-  fireEvent.click(checkbox);
-
-  await waitFor(() => {
-    expect(rpc.call).toHaveBeenCalledWith("setShowInSidebar", { visible: false });
-  });
-  await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
-  // The checked state follows the host's settings, which the mock keeps put.
-  expect(checkbox.checked).toBe(true);
-});
-
-test("disables the switch while saving and without settings", async () => {
-  const gate = deferred<unknown>();
-  const { rpc } = await openDialog();
-  rpc.call.mockImplementationOnce(() => gate.promise);
-  const checkbox = screen.getByLabelText("Show Triage in sidebar") as HTMLInputElement;
-  fireEvent.click(checkbox);
-  expect(checkbox.disabled).toBe(true);
-
-  gate.resolve({});
-  await waitFor(() => expect(checkbox.disabled).toBe(false));
-});
-
-test("disables the switch while settings are unavailable", async () => {
-  sdk.settingsValues = undefined;
-  await openDialog();
-  const checkbox = screen.getByLabelText("Show Triage in sidebar") as HTMLInputElement;
-  expect(checkbox.checked).toBe(false);
-  expect(checkbox.disabled).toBe(true);
 });
 
 // remove tests.

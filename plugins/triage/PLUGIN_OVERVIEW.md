@@ -9,7 +9,7 @@ Each card opens its linked conversation.
 - Organize cards into stages you can rename and reorder.
 - Filter running tasks, unread updates, and settled work.
 - See recent activity and tasks that need your attention.
-- Optionally show cards and linked sessions in the sidebar.
+- Optionally show linked sessions in the sidebar.
 
 Assigned agents report progress and completion through `triage_move_task`.
 Use `bb triage list`, `bb triage show`, and `bb triage move` from the CLI.

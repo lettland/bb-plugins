@@ -1,43 +1,8 @@
 /**
- * Coordination between Triage's mount points. The board, the title-bar header
- * and the sidebar list are separate React roots in the host shell, so what one
- * needs to tell another travels through module state.
+ * Coordination between Triage's mount points. The board and the thread header
+ * action are separate React roots in the host shell, so what one needs to tell
+ * another travels through module state.
  */
-import { useEffect, useRef } from "react";
-
-/**
- * A card the sidebar asked the board to show in its detail dialog. Opening the
- * board is a route change, so the board mounts a beat after the click — the
- * request waits here until it does, and goes straight through when the board is
- * already up.
- */
-let pendingDetail: number | null = null;
-const detailListeners = new Set<(taskNumber: number) => void>();
-
-export function requestOpenTaskDetail(taskNumber: number): void {
-  if (detailListeners.size === 0) {
-    pendingDetail = taskNumber;
-    return;
-  }
-  for (const listener of detailListeners) listener(taskNumber);
-}
-
-export function usePendingOpenTaskDetail(handler: (taskNumber: number) => void): void {
-  const ref = useRef(handler);
-  ref.current = handler;
-  useEffect(() => {
-    const listener = (taskNumber: number) => ref.current(taskNumber);
-    detailListeners.add(listener);
-    if (pendingDetail !== null) {
-      const taskNumber = pendingDetail;
-      pendingDetail = null;
-      listener(taskNumber);
-    }
-    return () => {
-      detailListeners.delete(listener);
-    };
-  }, []);
-}
 
 /**
  * Every mounted surface hears the same `triage` signal on its own subscription.

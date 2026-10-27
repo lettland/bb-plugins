@@ -8,8 +8,13 @@ function request(overrides: Record<string, unknown> = {}) {
     projectId: "project-1",
     providerId: "codex",
     model: "test-model",
-    reasoningLevel: "none",
+    // SDK 0.6.79 widened reasoning levels to any provider-reported string, so
+    // the fixture uses a level outside triage's known eight on purpose.
+    reasoningLevel: "adaptive",
     permissionMode: "auto",
+    // SDK 0.6.79 widened service tiers to any provider-reported string, so the
+    // fixture uses one outside the old default/fast pair on purpose.
+    serviceTier: "priority",
     executionInputSources: {},
     environment: { type: "reuse", environmentId: "environment-1" },
     input: [{ type: "text", text: "Do work" }],
@@ -271,10 +276,6 @@ test("a no-op sidebar setting change writes nothing", async () => {
     await rpc("runTask", { number: task.number });
     harness.inspection.sdk.stub("threads.update", async () => { throw new Error("must not be called"); });
     await harness.behavior.setSettings({ showThreadsInSidebar: false });
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(harness.inspection.sdk.callsTo("threads.update").length).toBe(0);
-    // Flipping the other setting still fires onChange but leaves sessions alone.
-    await rpc("setShowInSidebar", { visible: true });
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(harness.inspection.sdk.callsTo("threads.update").length).toBe(0);
   } finally { await harness.lifecycle.dispose(); }
@@ -676,7 +677,9 @@ test("agent options skip unavailable providers and survive catalogue failures", 
       return {
         models: [{
           id: "m1", model: "test-model", displayName: "Test Model", description: "A model",
-          supportedReasoningEfforts: [{ reasoningEffort: "none" }, { reasoningEffort: "high" }],
+          // SDK 0.6.79 widened reasoning efforts to any provider-reported string;
+          // "adaptive" pins that unknown efforts pass through untouched.
+          supportedReasoningEfforts: [{ reasoningEffort: "none" }, { reasoningEffort: "adaptive" }],
           defaultReasoningEffort: "medium",
         }],
       };
@@ -689,7 +692,7 @@ test("agent options skip unavailable providers and survive catalogue failures", 
     ]);
     expect(options.models).toStrictEqual([{
       id: "codex:m1", providerId: "codex", model: "test-model", displayName: "Test Model", description: "A model",
-      supportedReasoningEfforts: ["none", "high"], defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["none", "adaptive"], defaultReasoningEffort: "medium",
     }]);
     expect(harness.logEntries.some((entry: any) =>
       entry.level === "warn" && entry.message.includes("broken"))).toBe(true);

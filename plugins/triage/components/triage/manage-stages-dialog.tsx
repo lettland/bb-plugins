@@ -1,5 +1,4 @@
 import * as React from "react";
-import { useSettings } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 
 import {
@@ -37,10 +36,7 @@ export interface ManageStagesDialogProps {
 
 /** Triage settings: the columns themselves, their order, and their names. */
 function ManageStagesDialog({ stages, rpc, onChanged }: ManageStagesDialogProps) {
-  const { values } = useSettings();
-  const [savingSidebar, setSavingSidebar] = React.useState(false);
   const [drag, setDrag] = React.useState<{ id: string; startY: number; offset: number; index: number; target: number; step: number } | null>(null);
-  const sidebarName = React.useId();
   const [reordering, setReordering] = React.useState(false);
   const reorder = async (id: string, targetId: string) => {
     if (id === targetId || reordering) return;
@@ -204,23 +200,6 @@ function ManageStagesDialog({ stages, rpc, onChanged }: ManageStagesDialogProps)
             Add stage
           </Button>
         </form>
-        <div className="triage-sidebar-setting">
-          <label htmlFor={sidebarName}>Show Triage in sidebar</label>
-          <input
-            id={sidebarName}
-            className="triage-sidebar-switch"
-            type="checkbox"
-            role="switch"
-            checked={values?.showInSidebar === true}
-            disabled={!values || savingSidebar}
-            onChange={(event) => {
-              const visible = event.currentTarget.checked;
-              setSavingSidebar(true);
-              void handle(() => rpc.call("setShowInSidebar", { visible }))
-                .finally(() => setSavingSidebar(false));
-            }}
-          />
-        </div>
       </DialogContent>
     </Dialog>
   );

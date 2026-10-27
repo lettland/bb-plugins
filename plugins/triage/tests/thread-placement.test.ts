@@ -113,7 +113,7 @@ test("new Triage sessions respect the default-off setting and opt-in", async () 
 });
 
 
-test("snapshot reports actual sidebar visibility and settings persist", async () => {
+test("snapshot reports actual sidebar visibility", async () => {
   const { harness, thread, importThread } = await setup();
   try {
     harness.inspection.sdk.stub("projects.list", async () => []);
@@ -128,11 +128,6 @@ test("snapshot reports actual sidebar visibility and settings persist", async ()
     expect(await visible()).toBe(true);
     thread.visibility = "hidden";
     expect(await visible()).toBe(false);
-    await harness.behavior.callRpc("setShowInSidebar", { visible: true });
-    await harness.lifecycle.reload(async (bb) => {
-      const settings = bb.settings.define({ showInSidebar: { type: "boolean", label: "Show Triage in sidebar", default: false } });
-      expect((await settings.get()).showInSidebar).toBe(true);
-    });
   } finally { await harness.lifecycle.dispose(); }
 });
 

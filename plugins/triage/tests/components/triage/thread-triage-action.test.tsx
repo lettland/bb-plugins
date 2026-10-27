@@ -61,13 +61,6 @@ test("imports an untracked session into Triage", async () => {
   });
 });
 
-test("words the import button for the sidebar", async () => {
-  await loadStore(makeSnapshot({ tasks: [] }));
-  render(<ThreadTriageAction threadId="thr-1" sidebar />);
-  const button = screen.getByRole("button", { name: "Move session to Triage" });
-  expect(button.textContent).toContain("Move current session to Triage");
-});
-
 test("drops the label on compact viewports", async () => {
   await loadStore(makeSnapshot({ tasks: [] }));
   const { container } = render(

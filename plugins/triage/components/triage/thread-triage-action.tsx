@@ -8,7 +8,7 @@ import { Icon } from "@/components/ui/icon";
 import { useTriage } from "@/lib/triage-store";
 import { claimTriageRefresh } from "@/lib/triage-mounts";
 
-export function ThreadTriageAction({ threadId, sidebar = false, isCompactViewport = false }: { threadId: string; sidebar?: boolean; isCompactViewport?: boolean }) {
+export function ThreadTriageAction({ threadId, isCompactViewport = false }: { threadId: string; isCompactViewport?: boolean }) {
   const { snapshot, rpc, refresh } = useTriage();
   const navigate = useBbNavigate();
   const [renaming, setRenaming] = useState(false);
@@ -37,7 +37,7 @@ export function ThreadTriageAction({ threadId, sidebar = false, isCompactViewpor
     <Button variant="ghost" size={isCompactViewport ? "icon" : "sm"} disabled={pending} aria-label="Move session to Triage"
       onClick={() => void run(() => rpc.call("importThread", { threadId }), "Session moved to Triage")}>
       <Icon name="ListTodo" className="size-4" aria-hidden="true" />
-      {isCompactViewport ? null : sidebar ? "Move current session to Triage" : "Move to Triage"}
+      {isCompactViewport ? null : "Move to Triage"}
     </Button>
   );
   return (

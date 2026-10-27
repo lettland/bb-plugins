@@ -210,6 +210,8 @@ describe("labels", () => {
     expect(formatReasoningLevel("none")).toBe("No thinking");
     expect(formatReasoningLevel("xhigh")).toBe("Extra-high thinking");
     expect(formatReasoningLevel("ultra")).toBe("Ultra thinking");
+    // Levels triage does not know fall back to the raw provider string.
+    expect(formatReasoningLevel("adaptive")).toBe("adaptive");
     expect(runStateLabel("queued")).toBe("Ready");
     expect(runStateLabel("idle")).toBe("Waiting for you");
     expect(runStateLabel("stopped")).toBe("Stopped");

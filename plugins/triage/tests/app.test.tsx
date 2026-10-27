@@ -131,12 +131,13 @@ afterEach(() => {
 });
 
 describe("registration", () => {
-  test("the plugin registers the board, the sidebar list, and the thread action", () => {
+  test("the plugin registers the board and the thread action", () => {
     expect(app.navPanels.map((panel: any) => panel.id)).toStrictEqual(["triage-board"]);
     expect(boardSlot.path).toBe("triage");
     expect((boardSlot as any).headerContent).toBeTypeOf("function");
     expect(app.threadHeaderActions.map((action: any) => action.id)).toStrictEqual(["triage-thread-action"]);
-    expect(app.threadLists.map((list: any) => list.id)).toStrictEqual(["triage-sidebar"]);
+    // The sidebar list retirement left no thread-list registration behind.
+    expect(app.threadLists).toStrictEqual([]);
   });
 });
 
@@ -215,15 +216,6 @@ describe("opening cards", () => {
     });
     await waitFor(() => expect(view.inspection.navigateCalls).toContainEqual({ method: "toThread", threadId: "thr-idle" }));
     expect(view.inspection.rpcCalls.filter((call) => call.method === "setTaskRead")).toHaveLength(1);
-  });
-
-  test("a detail request sent before the board mounts opens its editor", async () => {
-    await act(async () => {
-      const mounts = await import("../lib/triage-mounts.ts");
-      mounts.requestOpenTaskDetail(3);
-    });
-    renderBoard();
-    expect(await screen.findByText("Edit Triage #3")).toBeTruthy();
   });
 });
 

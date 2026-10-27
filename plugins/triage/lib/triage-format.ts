@@ -194,8 +194,8 @@ const REASONING_LABELS: Record<ReasoningLevel, string> = {
   ultra: "Ultra thinking",
 };
 
-export function formatReasoningLevel(level: ReasoningLevel): string {
-  return REASONING_LABELS[level];
+export function formatReasoningLevel(level: string): string {
+  return (REASONING_LABELS as Record<string, string | undefined>)[level] ?? level;
 }
 
 export function runStateLabel(state: RunState): string {

@@ -8,26 +8,18 @@ const stageSchema = z.object({
   systemRole: z.enum(["intake", "active", "attention", "done"]).nullable(),
 });
 
-const reasoningLevelSchema = z.enum([
-  "none",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "ultracode",
-  "max",
-  "ultra",
-]);
-
 const executionSourceSchema = z.enum(["explicit", "client-preference"]);
 export const newThreadRequestSchema = z
   .object({
     projectId: z.string().min(1),
     providerId: z.string().min(1),
     model: z.string().min(1),
-    reasoningLevel: reasoningLevelSchema,
+    // SDK providers can report reasoning levels and service tiers beyond the
+    // known values, so the wire accepts any string; only display labels stay
+    // closed (triage-format).
+    reasoningLevel: z.string(),
     permissionMode: z.enum(["accept-edits", "auto", "full"]),
-    serviceTier: z.enum(["default", "fast"]).optional(),
+    serviceTier: z.string().optional(),
     executionInputSources: z
       .object({
         providerId: executionSourceSchema.optional(),
@@ -55,7 +47,7 @@ const taskSchema = z.object({
   branchName: z.string(),
   providerId: z.string(),
   model: z.string(),
-  reasoningLevel: reasoningLevelSchema,
+  reasoningLevel: z.string(),
   request: newThreadRequestSchema.nullable(),
   scheduledAt: z.number().int().nullable(),
   threadId: z.string().nullable(),
@@ -113,8 +105,8 @@ const agentOptionsSchema = z.object({
       model: z.string(),
       displayName: z.string(),
       description: z.string(),
-      supportedReasoningEfforts: z.array(reasoningLevelSchema),
-      defaultReasoningEffort: reasoningLevelSchema,
+      supportedReasoningEfforts: z.array(z.string()),
+      defaultReasoningEffort: z.string(),
     }),
   ),
 });
@@ -134,10 +126,6 @@ export const rpcContract = defineRpcContract({
   importThread: {
     input: z.object({ threadId: z.string().min(1) }).strict(),
     output: taskSchema,
-  },
-  setShowInSidebar: {
-    input: z.object({ visible: z.boolean() }).strict(),
-    output: z.object({ ok: z.literal(true) }),
   },
   setThreadSidebar: {
     input: z.object({ number: z.number().int().positive(), visible: z.boolean() }).strict(),
@@ -181,7 +169,7 @@ export const rpcContract = defineRpcContract({
         /** Agent retargeting; accepted only before a thread exists. */
         providerId: z.string().min(1).optional(),
         model: z.string().min(1).optional(),
-        reasoningLevel: reasoningLevelSchema.optional(),
+        reasoningLevel: z.string().optional(),
         /** Full composer state; accepted only before a thread exists. */
         request: newThreadRequestSchema.optional(),
       })
@@ -465,13 +453,6 @@ export default async function plugin(bb: BbPluginApi) {
       type: "boolean",
       label: "Show Triage sessions in the sidebar",
       description: "Show linked sessions in the regular sidebar list. Changing this applies to all existing Triage sessions; individual sessions can also be shown or hidden from their Triage menu.",
-      default: false,
-    },
-    showInSidebar: {
-      type: "boolean",
-      label: "Show Triage in the sidebar",
-      description:
-        "List your Triage cards above the threads in BB's sidebar, ordered by what needs you first.",
       default: false,
     },
   });
@@ -825,8 +806,8 @@ export default async function plugin(bb: BbPluginApi) {
       model: string;
       displayName: string;
       description: string;
-      supportedReasoningEfforts: (typeof reasoningLevelSchema)["options"][number][];
-      defaultReasoningEffort: (typeof reasoningLevelSchema)["options"][number];
+      supportedReasoningEfforts: string[];
+      defaultReasoningEffort: string;
     }[] = [];
     for (const provider of providers) {
       if (!provider.available) continue;
@@ -910,10 +891,6 @@ export default async function plugin(bb: BbPluginApi) {
       publish();
       await setSidebarVisibility(threadId, false);
       return toTask(task);
-    },
-    async setShowInSidebar({ visible }) {
-      await settings.experimental_set({ showInSidebar: visible });
-      return { ok: true as const };
     },
     async setThreadSidebar({ number, visible }) {
       const task = getTaskRow(number);
