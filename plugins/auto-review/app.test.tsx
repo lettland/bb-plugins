@@ -13,7 +13,8 @@ import type { AutoReviewRpcContract, ProjectSetting, ThreadReview } from "./src/
 
 // The test rpc harness wraps every handler throw in a PluginRpcCallError, an
 // Error subclass, so a rejection that is not an Error can only reach the app
-// by intercepting useRpc itself.
+// by intercepting useRpc itself. Quirk learned under @get-bb/plugin-sdk
+// 0.6.79 (dist/testing/app.js).
 const rpcStringRejection = vi.hoisted(() => ({ current: null as string | null }));
 vi.mock("@get-bb/plugin-sdk/app", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@get-bb/plugin-sdk/app")>();

@@ -175,6 +175,8 @@ describe("StatusPanel", () => {
   it("shows a rejection that arrives unwrapped as its string form", async () => {
     // The rpc layer wraps handler failures into Errors, so the one path that
     // delivers a raw string is a contract input schema whose validate rejects.
+    // Quirk learned under @get-bb/plugin-sdk 0.6.79 (dist/testing/app.js,
+    // parseRpcValue).
     const rejectingInput = {
       "~standard": { version: 1, validate: () => Promise.reject("boom-not-an-error") },
     } as unknown as typeof wakatimeRpcContract.status.input;

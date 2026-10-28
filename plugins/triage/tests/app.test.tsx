@@ -91,7 +91,8 @@ function deferred<T>() {
 // The test runtime wraps every rpc rejection in an Error before the board sees
 // it, so the board's String(error) toast arm is unreachable through handlers.
 // A probe rides along in the slot tree to capture the rpc client, and a test
-// then points one method at a raw non-Error rejection.
+// then points one method at a raw non-Error rejection. Quirk learned under
+// @get-bb/plugin-sdk 0.6.79 (dist/testing).
 type RawRpcClient = { call: (method: string, input: unknown) => Promise<unknown> };
 let rawRpcClient: RawRpcClient | null = null;
 
