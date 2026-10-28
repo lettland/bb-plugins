@@ -7,18 +7,22 @@ files derived from it, and the upstream license text verbatim.
 
 ---
 
-## BB component registry and Plugin SDK types (MIT)
+## BB component registry components (MIT)
 
 - Upstream: <https://github.com/get-bb/bb>.
 - Provenance: copied 2026-10-28 from `plugins/triage/components/ui/` in this
   collection, which itself derived them from the registry items' `content`
   under `packages/plugin-registry/r/*.json` at tag `desktop-v0.36.0` (see
   triage's `THIRD_PARTY_NOTICES.md` for that derivation).
-- Derived provider-queue files (modified): `components/ui/badge.tsx` and
-  `components/ui/button.tsx` (kept variants and sizes trimmed to what this
-  panel uses; `asChild` removed), `components/ui/icon.tsx` (icon map trimmed
-  to the glyphs this panel draws), `lib/utils.ts` (kept `cn` only).
-- Derived provider-queue files (unmodified): `components/ui/card.tsx`,
+- Derived provider-queue files (modified): `components/ui/badge.tsx` (one
+  comment line added; no other change), `components/ui/button.tsx` (one
+  comment line added; `asChild` and the Slot import removed; every variant
+  and size kept),
+  `components/ui/card.tsx` (`CardDescription` and `CardFooter` dropped;
+  exports trimmed to `Card`, `CardHeader`, `CardTitle`, `CardContent`),
+  `components/ui/icon.tsx` (icon map trimmed to the glyphs this panel draws),
+  `lib/utils.ts` (kept `cn` only).
+- Derived provider-queue files (unmodified):
   `components/ui/coarse-pointer-sizing.ts`, `components/ui/input.tsx`,
   `components/ui/motion.ts`, `components.json`.
 - Copyright: the upstream `LICENSE` at tag `desktop-v0.36.0` reads

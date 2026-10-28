@@ -121,7 +121,9 @@ function limitRow(slot: ReturnType<typeof renderPanel>, name: string) {
   if (row === null) throw new Error(`no limits row for ${name}`);
   return {
     input,
-    saveButton: within(row).getByRole("button", { name: /^Save/ }),
+    saveButton: within(row).getByRole("button", {
+      name: `Save limit for ${name.replace(/^Limit for /, "")}`,
+    }),
   };
 }
 

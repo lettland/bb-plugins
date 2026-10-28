@@ -7,7 +7,7 @@ import { CONTROL_HOVER_TRANSITION } from "./motion.js";
 const buttonVariants = cva(
   `inline-flex cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ${CONTROL_HOVER_TRANSITION} focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0`,
   {
-    // Mirrors triage's component; unused variants stay so shadcn regeneration against components.json diffs clean.
+    // Mirrors triage's component; unused variants kept for parity with it.
     variants: {
       variant: {
         default: "bg-foreground text-background hover:bg-foreground/90",
