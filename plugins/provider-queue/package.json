@@ -1,6 +1,6 @@
 {
   "name": "@lettland/bb-plugin-provider-queue",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "description": "Start a queued thread only when its provider has a free slot.",
   "license": "MIT",
