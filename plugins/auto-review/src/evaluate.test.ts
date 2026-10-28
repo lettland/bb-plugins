@@ -268,6 +268,22 @@ describe("evaluate", () => {
     expect(dispatch.dispatchReview).toHaveBeenCalledTimes(1);
   });
 
+  it("a live native hold keeps suppressing past a leftover expired PresentPlan arm", async () => {
+    // Regression origin: the advisor review of 202a708 — a stale PresentPlan
+    // arm that leaked into the native gate's expiry lifted the hold while the
+    // native window was still open.
+    const { ctx, kvWrites, thread } = fakeBb({
+      turnStart: { sinceSeq: 1 },
+      planReviewArmedAt: Date.now() - 1_000,
+      presentPlanArmedAt: Date.now() - REVIEW_CONTINUATION_CAP_MS - 5 * 60_000,
+    });
+    lookups.fetchWorkspace.mockResolvedValueOnce(workspace);
+    await evaluate(ctx, thread("env"));
+    expect(dispatch.dispatchReview).not.toHaveBeenCalled();
+    const fire = kvWrites.find(([key]) => key === "lastfire:p:thr");
+    expect(fire?.[1]).toMatchObject({ outcome: "deferred", reason: "plan-in-review" });
+  });
+
   it("thr_4dg2yfp8d7: the plan-in-review carry anchors its snapshot without a user-turn boundary", async () => {
     // The composed end-to-end exclusion (the user's uncommitted mid-hold edits
     // staying out of the post-approval dispatch) is covered by manual replay:

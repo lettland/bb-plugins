@@ -15,10 +15,10 @@ import { removeDeferral } from "./deferrals.js";
 import { isBusyStatus, planGateServes } from "./gate.js";
 import { recordUnfinishedReview } from "./review-outcome.js";
 import {
+  activePlanHold,
   LATCH_KEYS,
   PLAN_GATE_KEYS,
   PRESENT_PLAN_KEYS,
-  planHoldWindow,
   readState,
   withThreadLock,
   writeState,
@@ -308,7 +308,7 @@ export function registerAutoReviewCli(
         const lastFire = await readLastFire(bb, projectId, threadId);
         const review = await reviewStatusView(bb, threadId, state.phase);
         const lastParkedAt = lastParkedAtOf(state);
-        const planHold = planHoldWindow(state);
+        const planHold = activePlanHold(state, Date.now());
         const payload = {
           threadId,
           projectId,

@@ -213,6 +213,45 @@ describe("planHoldExpired", () => {
       ),
     ).toBe(false);
   });
+
+  it("is false on a PresentPlan arm alone, fresh or expired: the native arm unset keeps it false", () => {
+    const now = REVIEW_CONTINUATION_CAP_MS * 10;
+    expect(
+      planHoldExpired({ phase: "idle", presentPlanArmedAt: now - 1_000 }, now),
+    ).toBe(false);
+    expect(
+      planHoldExpired(
+        { phase: "idle", presentPlanArmedAt: now - REVIEW_CONTINUATION_CAP_MS - 1 },
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it("follows the native arm alone when both arms are set", () => {
+    const now = STALE_WINDOW_MS * 10;
+    // A leftover expired PresentPlan arm cannot expire a live native arm...
+    expect(
+      planHoldExpired(
+        {
+          phase: "idle",
+          planReviewArmedAt: now - 1_000,
+          presentPlanArmedAt: now - REVIEW_CONTINUATION_CAP_MS - 1,
+        },
+        now,
+      ),
+    ).toBe(false);
+    // ...and a live one cannot keep a native arm past its window from expiring.
+    expect(
+      planHoldExpired(
+        {
+          phase: "idle",
+          planReviewArmedAt: now - STALE_WINDOW_MS - 1,
+          presentPlanArmedAt: now - 1_000,
+        },
+        now,
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("PLAN_GATE_KEYS", () => {

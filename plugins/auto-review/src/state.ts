@@ -335,19 +335,16 @@ function elapsedBeyond(
 }
 
 /**
- * The active plan hold, whatever gate armed it: the arm timestamp and the
- * window it is up against. The native gate bounds a review still queued (or
- * one whose delivery was never seen) by the stale window and a delivered one
- * by the continuation cap; a `PresentPlan` arm always gets the cap, since its
- * review rides the first call's tool result. `planHoldExpired` and the `status`
- * arm-age line read this, so the two cannot disagree about when a hold ends.
+ * The native plan gate's hold window, and nothing else: its arm timestamp and
+ * the window that arm is up against, or null while the gate is not armed. The
+ * native gate bounds a review still queued (or one whose delivery was never
+ * seen) by the stale window and a delivered one by the continuation cap.
+ * `planHoldExpired` reads this, so the gate's expiry follows its own arm
+ * alone; `activePlanHold` layers the `PresentPlan` arm on top for `status`.
  */
 export function planHoldWindow(
   state: ThreadState,
 ): { armedAt: number; windowMs: number } | null {
-  if (state.presentPlanArmedAt !== undefined) {
-    return { armedAt: state.presentPlanArmedAt, windowMs: REVIEW_CONTINUATION_CAP_MS };
-  }
   if (state.planReviewArmedAt === undefined) {
     return null;
   }
@@ -426,4 +423,17 @@ export function presentPlanArmed(
     state.presentPlanArmedPath === planFilePath &&
     presentPlanHoldActive(state, now)
   );
+}
+
+/** The hold governing suppression right now; the status line reads it so the two cannot disagree. */
+export function activePlanHold(
+  state: ThreadState,
+  now: number,
+): { armedAt: number; windowMs: number } | null {
+  const { presentPlanArmedAt } = state;
+  if (presentPlanArmedAt !== undefined && presentPlanHoldActive(state, now)) {
+    return { armedAt: presentPlanArmedAt, windowMs: REVIEW_CONTINUATION_CAP_MS };
+  }
+  const native = planHoldWindow(state);
+  return native !== null && !planHoldExpired(state, now) ? native : null;
 }
