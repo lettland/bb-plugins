@@ -148,6 +148,10 @@ function harness(options: Options = {}) {
           if (state.eventsGate !== null) await state.eventsGate;
           if (state.eventsError === "string") throw "events down";
           if (state.eventsError) throw new Error("events down");
+          // The bb server rejects a limit above 100 with HTTP 400 "Thread event limit cannot
+          // exceed 100" (cap since bb commit c3fcea1446); mirroring it guards the cap in
+          // every paging test, not only the dedicated one.
+          if (Number(args.limit) > 100) throw new Error("Thread event limit cannot exceed 100");
           if (args.order === "desc") {
             if (state.seedFailures > 0) {
               state.seedFailures--;
