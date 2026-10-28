@@ -9,6 +9,7 @@ Each card opens its linked conversation.
 - Organize cards into stages you can rename and reorder.
 - Filter running tasks, unread updates, and settled work.
 - See recent activity and tasks that need your attention.
+- See every session on the board automatically, not just tasks you create.
 - Optionally show linked sessions in the sidebar.
 
 Assigned agents report progress and completion through `triage_move_task`.

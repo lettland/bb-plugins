@@ -135,22 +135,17 @@ test("snapshot reads the linked environment's branch, detached state, and cache"
       return environmentBranches[args.environmentId];
     });
     const linked = new Map<string, any>();
-    const serveImported = async (args: { threadId: string }) => {
-      const found = linked.get(args.threadId);
-      if (!found) throw new Error("Thread vanished");
-      return found;
-    };
-    harness.inspection.sdk.stub("threads.get", serveImported);
+    harness.inspection.sdk.stub("threads.get", async (args: { threadId: string }) => linked.get(args.threadId));
     for (const [index, environmentId] of ["env-feature", "env-detached", "env-plain", "env-feature", "env-feature"].entries()) {
       const item = makeThreadResponse({ id: `session-${index}`, projectId: "project-1", environmentId });
       linked.set(item.id, item);
       await rpc("importThread", { threadId: item.id });
     }
-    // One card's session can no longer be served; the card stays on the board.
-    harness.inspection.sdk.stub("threads.get", async (args: { threadId: string }) => {
-      if (args.threadId === "session-4") throw new Error("Thread vanished");
-      return serveImported(args);
-    });
+    // One card's session can no longer be served: threads.list silently drops
+    // unknown ids (SDK bundled-types ThreadListArgs doc), and the card stays on
+    // the board.
+    harness.inspection.sdk.stub("threads.list", async (args: { threadIds: string[]; archived?: boolean }) =>
+      args.archived ? [] : args.threadIds.filter((id) => id !== "session-4").map((id) => linked.get(id)));
     const snapshot = await rpc("snapshot");
     expect(snapshot.tasks.length).toBe(5);
     const branchByNumber = new Map(snapshot.tasks.map((task: any) => [task.number, task.branchName]));

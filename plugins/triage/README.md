@@ -2,7 +2,7 @@
 
 Keep agent tasks, progress, and work that needs your attention in one board.
 Run tasks now or schedule them for later, organize them into configurable stages,
-and turn existing BB sessions into cards. Open each card's linked conversation
+and see every session on the board automatically. Open each card's linked conversation
 to follow the work.
 
 Based on [MayankBansal12/bb-plugin-triage](https://github.com/MayankBansal12/bb-plugin-triage);
@@ -87,6 +87,15 @@ bb triage stages
 
 ## Sessions and the sidebar
 
+Every session appears on the board automatically as a view-only card — including
+sessions bb hides from the sidebar, such as plugin-spawned workers. Mirror cards
+never notify, never change sidebar visibility, and are removed when their
+session is deleted. Turn this off in Settings → Triage ("Automatically card
+every session"); existing mirror cards then stay until deleted individually.
+The first run numbers every session, so card numbers jump by the count of
+existing sessions; sessions that are idle or failed start settled and live under
+the Settled view.
+
 - Open a session and choose **Move to Triage** in its header. Triage creates a
   card for the existing conversation and hides it from the regular session list.
   Repeating the action reuses the same card; it never starts another agent.
@@ -111,6 +120,8 @@ subsequent agent configuration. Importing does not interrupt a running turn.
 - Search the project picker by name. Selecting a project selects its configured
   default machine when available; select **All machines** to widen the view.
   The personal project is labeled **Personal**.
+- The board mirrors all sessions; use the project, machine, and task filters
+  (Running / Settled) to focus it.
 
 ## Compatibility and verification
 

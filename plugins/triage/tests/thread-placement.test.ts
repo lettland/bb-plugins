@@ -10,6 +10,10 @@ async function setup(options: { failUpdate?: boolean; archived?: boolean } = {})
     sdk: {
       threads: {
         get: async () => thread,
+        // The snapshot reads carded sessions through batched list calls; the
+        // backfill's unfiltered pass finds nothing so it never mirrors the fixture.
+        list: async (args: { threadIds?: readonly string[]; archived?: boolean } = {}) =>
+          args.threadIds && !args.archived ? [thread] : [],
         defaultExecutionOptions: async () => null,
         update: async (args) => {
           if (failUpdate) { failUpdate = false; throw new Error("Host disconnected"); }

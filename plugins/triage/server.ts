@@ -237,6 +237,44 @@ export const rpcContract = defineRpcContract({
   },
 });
 
+type CardOrigin = "manual" | "mirror";
+
+type ThreadListArgs = Parameters<BbPluginApi["sdk"]["threads"]["list"]>[0];
+type ThreadListItem = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["list"]>>[number];
+// The fields a card needs; threads.get, threads.list and thread events all carry them.
+type CardThread = Pick<
+  ThreadListItem,
+  "id" | "projectId" | "environmentId" | "providerId" | "status" | "title" | "titleFallback" | "archivedAt" | "deletedAt"
+>;
+
+/** Per-pass lookup caches: each value is the pending promise, so concurrent cards share one call. */
+interface LookupCaches {
+  projects: Map<string, Promise<string>>;
+  environments: Map<string, Promise<string | null>>;
+  hosts: Map<string, Promise<string>>;
+}
+
+const newLookupCaches = (): LookupCaches => ({
+  projects: new Map(),
+  environments: new Map(),
+  hosts: new Map(),
+});
+
+const memoize = <T>(cache: Map<string, Promise<T>> | undefined, key: string, load: () => Promise<T>) => {
+  if (!cache) return load();
+  let pending = cache.get(key);
+  if (!pending) {
+    pending = load();
+    cache.set(key, pending);
+  }
+  return pending;
+};
+
+// threads.list takes at most 200 thread ids per call and 200 rows per page.
+const THREAD_LIST_BATCH = 200;
+// One shared trailing timer coalesces the bursts that thread events produce.
+const PUBLISH_DEBOUNCE_MS = 250;
+
 interface StageRow {
   id: string;
   name: string;
@@ -274,6 +312,7 @@ interface TaskRow {
   created_at: number;
   updated_at: number;
   settled_at: number | null;
+  origin: CardOrigin;
 }
 
 interface NotificationRow {
@@ -352,6 +391,13 @@ const migrations = [
   // Settled is orthogonal to workflow stage: archive a resolved card without losing its column.
   `ALTER TABLE triage_tasks ADD COLUMN settled_at INTEGER`,
   `ALTER TABLE triage_tasks ADD COLUMN read_at INTEGER`,
+  // Mirror cards are a view of a session; manual cards are a commitment to it.
+  `ALTER TABLE triage_tasks ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'`,
+  // Deleting a mirror card opts that session out of mirroring; see shouldMirror.
+  `CREATE TABLE IF NOT EXISTS triage_mirror_tombstones (
+    thread_id TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL
+  )`,
 ];
 
 function toStage(row: StageRow) {
@@ -455,12 +501,25 @@ export default async function plugin(bb: BbPluginApi) {
       description: "Show linked sessions in the regular sidebar list. Changing this applies to all existing Triage sessions; individual sessions can also be shown or hidden from their Triage menu.",
       default: false,
     },
+    autoCardThreads: {
+      type: "boolean",
+      label: "Automatically card every session",
+      description: "Mirror every session onto the board as a view-only card. Turning it off stops new mirroring; existing mirrored cards stay until deleted.",
+      default: true,
+    },
   });
 
-  let showThreadsInSidebar = (await settings.get()).showThreadsInSidebar;
+  const initialSettings = await settings.get();
+  let showThreadsInSidebar = initialSettings.showThreadsInSidebar;
+  let autoCardThreads = initialSettings.autoCardThreads;
   const pendingVisibility = new Map<string, { visible: boolean }>();
   let disposed = false;
-  bb.onDispose(() => { disposed = true; pendingVisibility.clear(); });
+  let publishTimer: ReturnType<typeof setTimeout> | undefined;
+  bb.onDispose(() => {
+    disposed = true;
+    pendingVisibility.clear();
+    clearTimeout(publishTimer);
+  });
   let sidebarWrites: Promise<unknown> = Promise.resolve();
   const applySidebarVisibility = (threadId: string, change: { visible: boolean }) => {
     const operation = sidebarWrites.then(async () => {
@@ -489,8 +548,12 @@ export default async function plugin(bb: BbPluginApi) {
   };
   settings.onChange((next, prev) => {
     showThreadsInSidebar = next.showThreadsInSidebar;
+    autoCardThreads = next.autoCardThreads;
+    // Turning mirroring off is not destructive; turning it on catches up.
+    if (next.autoCardThreads && !prev.autoCardThreads) void runBackfill();
     if (next.showThreadsInSidebar === prev.showThreadsInSidebar) return;
-    const rows = db.prepare("SELECT thread_id FROM triage_tasks WHERE thread_id IS NOT NULL").all() as { thread_id: string }[];
+    // Mirror cards are a view and never take sidebar writes.
+    const rows = db.prepare("SELECT thread_id FROM triage_tasks WHERE thread_id IS NOT NULL AND origin = 'manual'").all() as { thread_id: string }[];
     for (const row of rows) pendingVisibility.set(row.thread_id, { visible: showThreadsInSidebar });
     void syncSidebarVisibility();
   });
@@ -558,6 +621,15 @@ export default async function plugin(bb: BbPluginApi) {
       at: Date.now(),
       ...(notification ? { notification } : {}),
     });
+  };
+
+  /** Trailing-debounced publish for thread events; RPC handlers publish directly. */
+  const publishSoon = () => {
+    clearTimeout(publishTimer);
+    publishTimer = setTimeout(() => {
+      publishTimer = undefined;
+      publish();
+    }, PUBLISH_DEBOUNCE_MS);
   };
 
   const notify = (input: {
@@ -631,25 +703,83 @@ export default async function plugin(bb: BbPluginApi) {
     return toTask(getTaskRow(number));
   };
 
-  const resolveMachine = async (environment: Record<string, unknown>) => {
+  const resolveMachine = async (environment: Record<string, unknown>, caches?: LookupCaches) => {
     let machineId = typeof environment.hostId === "string" ? environment.hostId : null;
     if (!machineId && environment.type === "reuse" && typeof environment.environmentId === "string") {
-      try {
-        const resolved = await bb.sdk.environments.get({
-          environmentId: environment.environmentId,
-        });
-        machineId = resolved.hostId;
-      } catch {
-        machineId = null;
-      }
+      const environmentId = environment.environmentId;
+      machineId = await memoize(caches?.environments, environmentId, async () => {
+        try {
+          return (await bb.sdk.environments.get({ environmentId })).hostId;
+        } catch {
+          return null;
+        }
+      });
     }
     if (!machineId) return { machineId: null, machineName: "Project default" };
-    try {
-      const host = await bb.sdk.hosts.get({ hostId: machineId });
-      return { machineId, machineName: host.name };
-    } catch {
-      return { machineId, machineName: machineId };
-    }
+    const hostId = machineId;
+    const machineName = await memoize(caches?.hosts, hostId, async () => {
+      try {
+        return (await bb.sdk.hosts.get({ hostId })).name;
+      } catch {
+        return hostId;
+      }
+    });
+    return { machineId, machineName };
+  };
+
+  /**
+   * Create the card for a session unless it already has one. The unique
+   * thread_id plus the synchronous transaction makes retries and concurrent
+   * callers (import, mirror, backfill) converge on one card and one number.
+   * Returns undefined for deleted or archived sessions that have no card.
+   */
+  const ensureCardForThread = async (
+    thread: CardThread,
+    origin: CardOrigin,
+    caches?: LookupCaches,
+    options: { model?: string; event?: string; settleIfDormant?: boolean } = {},
+  ) => {
+    const existing = getTaskByThread(thread.id);
+    if (existing) return existing;
+    if (thread.deletedAt !== null || thread.archivedAt !== null) return undefined;
+    // A project that cannot be read still gets a card, named by its id.
+    const projectName = await memoize(caches?.projects, thread.projectId, async () => {
+      try {
+        return (await bb.sdk.projects.get({ projectId: thread.projectId })).name;
+      } catch {
+        return thread.projectId;
+      }
+    });
+    const machine = await resolveMachine({ type: "reuse", environmentId: thread.environmentId }, caches);
+    return db.transaction(() => {
+      const duplicate = getTaskByThread(thread.id);
+      if (duplicate) return duplicate;
+      const { value: number } = db.prepare(
+        "SELECT value FROM triage_meta WHERE key = 'next_task_number'",
+      ).get() as { value: number };
+      const now = Date.now();
+      const active = thread.status === "active" || thread.status === "starting";
+      const stage = getSystemStage(active ? "active" : "intake");
+      // Dormant history (idle or failed sessions) starts settled; live ones stay on the board.
+      const settledAt = options.settleIfDormant && (thread.status === "idle" || thread.status === "error") ? now : null;
+      db.prepare(`INSERT INTO triage_tasks (
+        id, number, title, description, stage_id, project_id, project_name,
+        machine_id, machine_name, provider_id, model, request_json,
+        thread_id, run_state, origin, settled_at, created_at, updated_at
+      ) VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 'null', ?, ?, ?, ?, ?, ?)`).run(
+        crypto.randomUUID(), number,
+        (thread.title || thread.titleFallback || "Untitled session").slice(0, 160),
+        stage.id, thread.projectId, projectName, machine.machineId, machine.machineName,
+        thread.providerId, options.model ?? "Default model", thread.id,
+        active ? "working" : thread.status === "error" ? "failed" : "idle",
+        origin, settledAt, now, now,
+      );
+      db.prepare("UPDATE triage_meta SET value = value + 1 WHERE key = 'next_task_number'").run();
+      const created = getTaskRow(number);
+      if (origin === "mirror") addEvent(created.id, "bb", options.event ?? "mirrored");
+      else addEvent(created.id, "user", "moved session to triage");
+      return created;
+    })();
   };
 
   const stageInstructions = () => {
@@ -704,9 +834,18 @@ export default async function plugin(bb: BbPluginApi) {
       } as SpawnArgs;
       const thread = await bb.sdk.threads.spawn(spawnArgs);
       const activeStage = getSystemStage("active");
-      db.prepare(
-        "UPDATE triage_tasks SET thread_id = ?, stage_id = ?, run_state = 'starting', attention_reason = NULL, updated_at = ? WHERE id = ?",
-      ).run(thread.id, activeStage.id, Date.now(), current.id);
+      db.transaction(() => {
+        // The spawn can announce its thread before this link lands, so a mirror
+        // card may already hold the id. The composer card is the commitment and
+        // adopts the thread; the mirror card goes away with its history.
+        db.prepare(
+          "DELETE FROM triage_events WHERE task_id IN (SELECT id FROM triage_tasks WHERE thread_id = ? AND origin = 'mirror')",
+        ).run(thread.id);
+        db.prepare("DELETE FROM triage_tasks WHERE thread_id = ? AND origin = 'mirror'").run(thread.id);
+        db.prepare(
+          "UPDATE triage_tasks SET thread_id = ?, stage_id = ?, run_state = 'starting', attention_reason = NULL, updated_at = ? WHERE id = ?",
+        ).run(thread.id, activeStage.id, Date.now(), current.id);
+      })();
       addEvent(current.id, "scheduler", "agent dispatched");
       notify({
         taskNumber: number,
@@ -766,10 +905,41 @@ export default async function plugin(bb: BbPluginApi) {
       }
     ).count;
     const environments = new Map<string, ReturnType<typeof bb.sdk.environments.get>>();
-    const tasks = await Promise.all(listTasks().map(async (task) => {
-      const thread = task.threadId
-        ? await bb.sdk.threads.get({ threadId: task.threadId }).catch(() => null)
-        : null;
+    const cards = listTasks();
+    // Sessions come from batched threads.list calls, not one threads.get per
+    // card (SDK bundled-types ThreadListArgs doc, bb-plugin-sdk.d.ts:18210-18232):
+    //  - at most 200 ids per call, so ids go out in chunks;
+    //  - unknown and deleted ids are silently dropped, so a gone session just
+    //    has no entry (its card keeps the saved workspace description);
+    //  - includeHidden is required or hidden sessions (plugin-spawned workers,
+    //    Triage's own sessions) vanish from the answer;
+    //  - archived is a selector, not an include flag: archived:true returns
+    //    only the archived half, so each chunk needs a companion call or the
+    //    settled cards of archived sessions lose their visibility and branch.
+    // Each call has its own catch so one bad batch degrades only that batch.
+    // The fake host throws synchronously for unstubbed sdk calls (learned from
+    // @get-bb/plugin-sdk dist/testing host), so the helper wraps the call in
+    // try/catch instead of relying on .catch at the call site.
+    const listBatch = async (args: ThreadListArgs) => {
+      try {
+        return await bb.sdk.threads.list(args);
+      } catch {
+        return [] as ThreadListItem[];
+      }
+    };
+    const threadIds = cards.flatMap((card) => (card.threadId ? [card.threadId] : []));
+    const batches: Promise<ThreadListItem[]>[] = [];
+    for (let start = 0; start < threadIds.length; start += THREAD_LIST_BATCH) {
+      const chunk = threadIds.slice(start, start + THREAD_LIST_BATCH);
+      batches.push(listBatch({ threadIds: chunk, includeHidden: true, limit: THREAD_LIST_BATCH }));
+      batches.push(listBatch({ threadIds: chunk, archived: true, includeHidden: true, limit: THREAD_LIST_BATCH }));
+    }
+    const threadsById = new Map<string, ThreadListItem>();
+    for (const batch of await Promise.all(batches)) {
+      for (const listed of batch) threadsById.set(listed.id, listed);
+    }
+    const tasks = await Promise.all(cards.map(async (task) => {
+      const thread = task.threadId ? threadsById.get(task.threadId) ?? null : null;
       const requestEnvironment = task.request?.environment;
       const environmentId = thread?.environmentId ??
         (requestEnvironment?.type === "reuse" && typeof requestEnvironment.environmentId === "string"
@@ -842,6 +1012,78 @@ export default async function plugin(bb: BbPluginApi) {
     };
   };
 
+  /** Sessions the knob still wants mirrored; checked before every page and every card. */
+  const mirroringWanted = () => autoCardThreads && !disposed;
+  let backfilling = false;
+  /**
+   * Give every existing session a mirror card. Pages are collected first, then
+   * carded oldest-first so card numbers follow session age. Failures are
+   * logged, never thrown: a failed page aborts the pass, a failed session is
+   * skipped.
+   */
+  const runBackfill = async () => {
+    if (backfilling) return;
+    backfilling = true;
+    try {
+      const caches = newLookupCaches();
+      const collected = new Map<string, ThreadListItem>();
+      let offset = 0;
+      while (mirroringWanted()) {
+        let page: ThreadListItem[];
+        try {
+          // Quirks from the SDK bundled-types ThreadListArgs doc
+          // (bb-plugin-sdk.d.ts:18210-18232): includeHidden is required or hidden
+          // sessions (plugin-spawned workers) are left out; archived:false
+          // selects the unarchived half. The host may also cap a page below the
+          // requested limit, so a short page does not end the pass.
+          page = await bb.sdk.threads.list({ archived: false, includeHidden: true, limit: THREAD_LIST_BATCH, offset });
+        } catch (error) {
+          bb.log.warn(`Triage could not list sessions to card: ${errorMessage(error)}`);
+          return;
+        }
+        // An empty page, or one that repeats rows already seen, ends the pass.
+        const fresh = page.filter((listed) => !collected.has(listed.id));
+        if (fresh.length === 0) break;
+        for (const listed of fresh) collected.set(listed.id, listed);
+        offset += page.length;
+      }
+      // threads.list has no sort parameter, so page order says nothing about
+      // age: sort by createdAt here (SDK bundled-types ThreadListArgs lists no
+      // ordering option).
+      const oldestFirst = [...collected.values()].sort(
+        (left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+      );
+      // Sessions whose mirror card was deleted by hand stay off the board.
+      const optedOut = new Set(
+        (db.prepare("SELECT thread_id FROM triage_mirror_tombstones").all() as { thread_id: string }[])
+          .map((row) => row.thread_id),
+      );
+      for (const listed of oldestFirst) {
+        if (!mirroringWanted()) break;
+        if (optedOut.has(listed.id)) continue;
+        try {
+          await ensureCardForThread(listed, "mirror", caches, { event: "backfilled", settleIfDormant: true });
+        } catch (error) {
+          bb.log.warn(`Triage could not card session ${listed.id}: ${errorMessage(error)}`);
+        }
+      }
+      publish();
+    } finally {
+      backfilling = false;
+    }
+  };
+
+  /**
+   * Events for sessions the board should mirror: the knob is on, Triage did not
+   * spawn them, and nobody deleted their mirror card. A deleted mirror card is
+   * an opt-out from mirroring that session (deleteTask writes the tombstone);
+   * thread.deleted needs none, because the session is gone and cannot be listed
+   * again.
+   */
+  const shouldMirror = (thread: { id: string; originPluginId: string | null }) =>
+    autoCardThreads && thread.originPluginId !== bb.pluginId &&
+    db.prepare("SELECT 1 FROM triage_mirror_tombstones WHERE thread_id = ?").get(thread.id) === undefined;
+
   bb.rpc.register(rpcContract, {
     snapshot: () => snapshot(),
     agentOptions: () => agentOptions(),
@@ -850,42 +1092,27 @@ export default async function plugin(bb: BbPluginApi) {
       if (thread.deletedAt !== null || thread.archivedAt !== null) {
         throw new Error("Open an unarchived session before moving it to Triage");
       }
+      // A manual move always wins over an old opt-out from mirroring.
+      db.prepare("DELETE FROM triage_mirror_tombstones WHERE thread_id = ?").run(threadId);
       const existing = getTaskByThread(threadId);
       if (existing) {
+        // A deliberate move turns a mirror card into a manual one: the user now
+        // commits to the session, so it reopens and gets agent tooling.
+        if (existing.origin === "mirror") {
+          db.prepare(
+            "UPDATE triage_tasks SET origin = 'manual', settled_at = NULL, updated_at = ? WHERE id = ?",
+          ).run(Date.now(), existing.id);
+          addEvent(existing.id, "user", "moved session to triage");
+        }
         await setSidebarVisibility(threadId, false);
         publish();
-        return toTask(existing);
+        return toTask(getTaskRow(existing.number));
       }
-      const project = await bb.sdk.projects.get({ projectId: thread.projectId });
       const execution = await bb.sdk.threads.defaultExecutionOptions({ threadId });
-      const machine = await resolveMachine({ type: "reuse", environmentId: thread.environmentId });
-      // The unique thread_id plus this synchronous transaction makes retries and
-      // concurrent imports converge on one card and one ticket number.
-      const task = db.transaction(() => {
-        const duplicate = getTaskByThread(threadId);
-        if (duplicate) return duplicate;
-        const { value: number } = db.prepare(
-          "SELECT value FROM triage_meta WHERE key = 'next_task_number'",
-        ).get() as { value: number };
-        const now = Date.now();
-        const active = thread.status === "active" || thread.status === "starting";
-        const stage = getSystemStage(active ? "active" : "intake");
-        db.prepare(`INSERT INTO triage_tasks (
-          id, number, title, description, stage_id, project_id, project_name,
-          machine_id, machine_name, provider_id, model, request_json,
-          thread_id, run_state, created_at, updated_at
-        ) VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 'null', ?, ?, ?, ?)`).run(
-          crypto.randomUUID(), number,
-          (thread.title || thread.titleFallback || "Untitled session").slice(0, 160),
-          stage.id, thread.projectId, project.name, machine.machineId, machine.machineName,
-          thread.providerId, execution?.model ?? "Default model", threadId,
-          active ? "working" : thread.status === "error" ? "failed" : "idle", now, now,
-        );
-        db.prepare("UPDATE triage_meta SET value = value + 1 WHERE key = 'next_task_number'").run();
-        const created = getTaskRow(number);
-        addEvent(created.id, "user", "moved session to triage");
-        return created;
-      })();
+      // The thread was checked above, so the card cannot come back undefined.
+      const task = (await ensureCardForThread(thread, "manual", undefined, {
+        model: execution?.model ?? "Default model",
+      }))!;
       // Persist the card before hiding its session so a failed host update
       // leaves the conversation accessible; retry uses the existing card.
       publish();
@@ -919,8 +1146,8 @@ export default async function plugin(bb: BbPluginApi) {
         `INSERT INTO triage_tasks (
           id, number, title, description, stage_id, project_id, project_name,
           machine_id, machine_name, provider_id, model, request_json,
-          scheduled_at, thread_id, run_state, attention_reason, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?)`,
+          scheduled_at, thread_id, run_state, attention_reason, origin, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, 'manual', ?, ?)`,
       ).run(
         id,
         nextNumber,
@@ -1101,6 +1328,10 @@ export default async function plugin(bb: BbPluginApi) {
       const task = getTaskRow(number);
       if (task.thread_id) pendingVisibility.delete(task.thread_id);
       db.transaction(() => {
+        if (task.origin === "mirror" && task.thread_id) {
+          db.prepare("INSERT OR REPLACE INTO triage_mirror_tombstones (thread_id, created_at) VALUES (?, ?)")
+            .run(task.thread_id, Date.now());
+        }
         // Keep deletion correct even if a host has SQLite foreign keys disabled.
         db.prepare("DELETE FROM triage_events WHERE task_id = ?").run(task.id);
         db.prepare("DELETE FROM triage_tasks WHERE id = ?").run(task.id);
@@ -1238,7 +1469,8 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.configure((context) => {
     const task = getTaskByThread(context.thread.id);
-    if (!task) return { tools: [], skills: [] };
+    // Mirror cards are a view: no agent tooling, as if the session had no card.
+    if (!task || task.origin !== "manual") return { tools: [], skills: [] };
     return {
       tools: ["triage_move_task"],
       skills: [],
@@ -1249,10 +1481,41 @@ export default async function plugin(bb: BbPluginApi) {
     };
   });
 
-  bb.events.on("thread.active", ({ thread }) => {
+  bb.events.on("thread.created", ({ thread }) => {
+    if (!shouldMirror(thread)) return;
+    // Not awaited: the lookups must not hold up the host's event dispatch.
+    void (async () => {
+      try {
+        await ensureCardForThread(thread, "mirror");
+        publishSoon();
+      } catch (error) {
+        bb.log.warn(`Triage could not card session ${thread.id}: ${errorMessage(error)}`);
+      }
+    })();
+  });
+
+  bb.events.on("thread.active", async ({ thread }) => {
     const task = getTaskByThread(thread.id);
     if (!task) return;
     const active = getSystemStage("active");
+    if (task.origin === "mirror") {
+      db.prepare(
+        "UPDATE triage_tasks SET stage_id = ?, run_state = 'working', attention_reason = NULL, settled_at = NULL, title = ?, provider_id = ?, updated_at = ? WHERE id = ?",
+      ).run(
+        active.id,
+        (thread.title || thread.titleFallback || task.title).slice(0, 160),
+        thread.providerId,
+        Date.now(),
+        task.id,
+      );
+      publishSoon();
+      // Environments move between hosts; refresh the machine after the write above.
+      const machine = await resolveMachine({ type: "reuse", environmentId: thread.environmentId });
+      db.prepare("UPDATE triage_tasks SET machine_id = ?, machine_name = ? WHERE id = ?")
+        .run(machine.machineId, machine.machineName, task.id);
+      publishSoon();
+      return;
+    }
     db.prepare(
       "UPDATE triage_tasks SET stage_id = ?, run_state = 'working', attention_reason = NULL, settled_at = NULL, updated_at = ? WHERE id = ?",
     ).run(active.id, Date.now(), task.id);
@@ -1263,8 +1526,16 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.idle", ({ thread }) => {
     const task = getTaskByThread(thread.id);
     if (!task) return;
+    const mirrored = task.origin === "mirror";
+    const republish = mirrored ? publishSoon : publish;
     if (task.run_state === "stopped" || getStageRow(task.stage_id).system_role === "done") {
-      publish();
+      republish();
+      return;
+    }
+    if (mirrored) {
+      // A view stays quiet: no read marker change, no notification, no history row.
+      db.prepare("UPDATE triage_tasks SET run_state = 'idle', updated_at = ? WHERE id = ?").run(Date.now(), task.id);
+      republish();
       return;
     }
     db.prepare("UPDATE triage_tasks SET run_state = 'idle', read_at = NULL, updated_at = ? WHERE id = ?").run(
@@ -1293,6 +1564,11 @@ export default async function plugin(bb: BbPluginApi) {
     db.prepare(
       "UPDATE triage_tasks SET stage_id = ?, run_state = 'failed', attention_reason = ?, updated_at = ? WHERE id = ?",
     ).run(attention.id, reason, Date.now(), task.id);
+    if (task.origin === "mirror") {
+      // Silent: the reason stays on the card, nobody is notified about a view.
+      publishSoon();
+      return;
+    }
     addEvent(task.id, "bb", "agent failed", reason);
     notify({
       taskNumber: task.number,
@@ -1303,10 +1579,39 @@ export default async function plugin(bb: BbPluginApi) {
     });
   });
 
+  bb.events.on("thread.archived", ({ thread }) => {
+    const task = getTaskByThread(thread.id);
+    if (task?.origin === "mirror") {
+      db.prepare(
+        "UPDATE triage_tasks SET settled_at = ?, run_state = CASE WHEN run_state = 'working' THEN 'idle' ELSE run_state END, updated_at = ? WHERE id = ?",
+      ).run(Date.now(), Date.now(), task.id);
+      publishSoon();
+    }
+  });
+
+  bb.events.on("thread.unarchived", async ({ thread }) => {
+    const task = getTaskByThread(thread.id) ??
+      (shouldMirror(thread) ? await ensureCardForThread(thread, "mirror") : undefined);
+    // A manual card keeps whatever state the user gave it.
+    if (task?.origin === "mirror") {
+      db.prepare("UPDATE triage_tasks SET settled_at = NULL, updated_at = ? WHERE id = ?").run(Date.now(), task.id);
+      publishSoon();
+    }
+  });
+
   bb.events.on("thread.deleted", ({ thread }) => {
     pendingVisibility.delete(thread.id);
     const task = getTaskByThread(thread.id);
     if (!task) return;
+    if (task.origin === "mirror") {
+      // Mirror metadata goes away with its session; no orphan cards.
+      db.transaction(() => {
+        db.prepare("DELETE FROM triage_events WHERE task_id = ?").run(task.id);
+        db.prepare("DELETE FROM triage_tasks WHERE id = ?").run(task.id);
+      })();
+      publish();
+      return;
+    }
     db.prepare(
       "UPDATE triage_tasks SET thread_id = NULL, run_state = 'stopped', attention_reason = 'The linked BB thread was deleted.', updated_at = ? WHERE id = ?",
     ).run(Date.now(), task.id);
@@ -1415,6 +1720,10 @@ export default async function plugin(bb: BbPluginApi) {
       }
     },
   });
+
+  // Start after the factory returns so every handler is registered first.
+  // Not awaited: the pass pages through every session.
+  if (autoCardThreads) void Promise.resolve().then(runBackfill);
 
   bb.log.info("Triage loaded");
 }
