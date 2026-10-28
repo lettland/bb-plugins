@@ -119,7 +119,11 @@ function LimitRow(props: {
         onChange={(event) => setLimitDraft(event.target.value)}
         className="w-20"
       />
-      <Button type="button" onClick={submitLimit}>
+      <Button
+        type="button"
+        onClick={submitLimit}
+        aria-label={`Save limit for ${label}`}
+      >
         Save
       </Button>
     </div>
@@ -144,28 +148,33 @@ function QueueList(props: {
             {row.threadId}
           </span>
           <span className="ml-auto flex items-center gap-0.5">
-            {index !== 0 && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                aria-label={`Move ${row.title} (${row.threadId}) up`}
-                onClick={() => move(row.threadId, "up")}
-              >
-                <Icon name="ChevronUp" aria-hidden />
-              </Button>
-            )}
-            {index !== queue.length - 1 && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                aria-label={`Move ${row.title} (${row.threadId}) down`}
-                onClick={() => move(row.threadId, "down")}
-              >
-                <Icon name="ChevronDown" aria-hidden />
-              </Button>
-            )}
+            {(
+              [
+                {
+                  direction: "up",
+                  icon: "ChevronUp",
+                  hidden: index === 0,
+                },
+                {
+                  direction: "down",
+                  icon: "ChevronDown",
+                  hidden: index === queue.length - 1,
+                },
+              ] as const
+            )
+              .filter((step) => !step.hidden)
+              .map((step) => (
+                <Button
+                  key={step.direction}
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label={`Move ${row.title} (${row.threadId}) ${step.direction}`}
+                  onClick={() => move(row.threadId, step.direction)}
+                >
+                  <Icon name={step.icon} aria-hidden />
+                </Button>
+              ))}
             <Button
               type="button"
               variant="ghost"
