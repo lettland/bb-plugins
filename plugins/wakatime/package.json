@@ -1,6 +1,6 @@
 {
   "name": "@lettland/bb-plugin-wakatime",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "type": "module",
   "description": "Send WakaTime heartbeats for your activity in bb and for agent run time, tagged with the bb project, thread, and branch.",
   "license": "BSD-2-Clause",
