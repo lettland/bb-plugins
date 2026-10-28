@@ -167,6 +167,21 @@ describe("useTriage and refreshTriage", () => {
     await waitFor(() => expect((screen.getByTestId("store") as HTMLElement).dataset.error).toBe(""));
   });
 
+  // The runtime rpc wraps every rejection in an Error, so the store's
+  // String(error) arm needs the hand-built rpc, which passes rejections
+  // through untouched.
+  test("a non-Error snapshot rejection lands as readable text", async () => {
+    await refreshTriage(snapshotRpc());
+    renderStoreProbe({ snapshot: () => SNAPSHOT });
+    await waitFor(() => expect((screen.getByTestId("store") as HTMLElement).dataset.error).toBe(""));
+    const failing = fakeRpc({ snapshot: () => { throw "boom-not-an-error"; } });
+    await act(async () => {
+      await refreshTriage(failing as unknown as TriageRpc);
+    });
+    expect((screen.getByTestId("store") as HTMLElement).dataset.error).toBe("boom-not-an-error");
+    await refreshTriage(snapshotRpc());
+  });
+
   test("a realtime race during a fetch refetches once after it lands", async () => {
     let release: () => void = () => {};
     let fetches = 0;

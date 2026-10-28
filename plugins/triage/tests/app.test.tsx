@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { useRpc } from "@get-bb/plugin-sdk/app";
 import { installTestPluginRuntime, loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
+import type { ReactElement } from "react";
 import { toast } from "sonner";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -84,6 +86,46 @@ function deferred<T>() {
   const wasEntered = new Promise<void>((resolve) => { entered = resolve; });
   const promise = new Promise<T>((resolve) => { release = resolve; });
   return { promise, release, wasEntered, entered };
+}
+
+// The test runtime wraps every rpc rejection in an Error before the board sees
+// it, so the board's String(error) toast arm is unreachable through handlers.
+// A probe rides along in the slot tree to capture the rpc client, and a test
+// then points one method at a raw non-Error rejection.
+type RawRpcClient = { call: (method: string, input: unknown) => Promise<unknown> };
+let rawRpcClient: RawRpcClient | null = null;
+
+function CaptureRpcClient() {
+  rawRpcClient = useRpc() as unknown as RawRpcClient;
+  return null;
+}
+
+const Board = (boardSlot as unknown as { component: () => ReactElement }).component;
+
+function BoardWithCapturedRpc() {
+  return (
+    <>
+      <CaptureRpcClient />
+      <Board />
+    </>
+  );
+}
+
+function renderBoardWithCapturedRpc(handlers: Record<string, Handler> = {}) {
+  rawRpcClient = null;
+  const view = renderSlot(
+    { component: BoardWithCapturedRpc } as never,
+    {} as never,
+    { rpc: { snapshot: cloneSnapshot, ...handlers } as never, context: { projectId: "p-route" } },
+  );
+  if (rawRpcClient === null) throw new Error("rpc client was not captured");
+  return view;
+}
+
+/** Routes one method to a raw non-Error rejection; everything else passes through. */
+function rejectRaw(rpc: RawRpcClient, method: string, rejection: unknown): void {
+  const passthrough = rpc.call.bind(rpc);
+  rpc.call = (called, input) => called === method ? Promise.reject(rejection) : passthrough(called, input);
 }
 
 function columnOf(stageName: string): HTMLElement {
@@ -504,6 +546,26 @@ describe("card actions", () => {
     fireEvent.dragStart(cardElement("Queued card"), { dataTransfer: dragTransfer() });
     fireEvent.drop(columnOf("In Progress"), { dataTransfer: dragTransfer() });
     await waitFor(() => expect(errorSpy).toHaveBeenCalledWith("plain string move refusal"));
+  });
+
+  test("a raw non-Error rejection still produces a readable toast after an action", async () => {
+    const errorSpy = vi.spyOn(toast, "error").mockReturnValue("t");
+    renderBoardWithCapturedRpc({ runTask: () => ({ ok: true }) });
+    await screen.findByText("Queued card");
+    rejectRaw(rawRpcClient!, "runTask", "boom-not-an-error");
+    await openCardMenu(3);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Run now" }));
+    await waitFor(() => expect(errorSpy).toHaveBeenCalledWith("boom-not-an-error"));
+  });
+
+  test("a raw non-Error rejection still produces a readable toast after a move", async () => {
+    const errorSpy = vi.spyOn(toast, "error").mockReturnValue("t");
+    renderBoardWithCapturedRpc({ moveTask: () => ({ ok: true }) });
+    await screen.findByText("Queued card");
+    rejectRaw(rawRpcClient!, "moveTask", "boom-not-an-error");
+    fireEvent.dragStart(cardElement("Queued card"), { dataTransfer: dragTransfer() });
+    fireEvent.drop(columnOf("In Progress"), { dataTransfer: dragTransfer() });
+    await waitFor(() => expect(errorSpy).toHaveBeenCalledWith("boom-not-an-error"));
   });
 });
 

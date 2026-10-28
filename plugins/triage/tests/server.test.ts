@@ -281,6 +281,28 @@ test("a no-op sidebar setting change writes nothing", async () => {
   } finally { await harness.lifecycle.dispose(); }
 });
 
+test("a settings change that leaves the sidebar preference alone writes nothing", async () => {
+  let harness: any = (await setup()).harness;
+  try {
+    const task = await harness.behavior.callRpc("createTask", createTaskInput()) as { number: number };
+    await harness.behavior.callRpc("runTask", { number: task.number });
+    // The fake host filters same-value writes before listeners run, so a
+    // no-op for the sidebar preference can only reach the plugin as a change
+    // to another key. The linked session guarantees a broken guard would
+    // attempt a sidebar write.
+    harness = (await harness.lifecycle.reload(async (bb: any) => {
+      bb.settings.define({
+        unrelatedSetting: { type: "boolean", label: "A setting owned by another plugin", default: false },
+      });
+      await plugin(bb);
+    })).harness;
+    harness.inspection.sdk.stub("threads.update", async () => { throw new Error("must not be called"); });
+    await harness.behavior.setSettings({ unrelatedSetting: true });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(harness.inspection.sdk.callsTo("threads.update").length).toBe(0);
+  } finally { await harness.lifecycle.dispose(); }
+});
+
 test("setThreadSidebar refuses cards that have no session yet", async () => {
   const { harness, createTask } = await setup();
   try {
