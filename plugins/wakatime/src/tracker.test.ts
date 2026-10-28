@@ -1410,7 +1410,7 @@ describe("file delivery", () => {
       for (const call of asc(h)) {
         expect(typeof call.afterSeq).toBe("string");
         expect(call.types).toEqual(["item/completed"]);
-        expect(call.limit).toBe("200");
+        expect(call.limit).toBe("100");
         expect(call.signal).toBe("AbortSignal");
       }
       expect(asc(h)[0]!.afterSeq).toBe("2");
@@ -1436,8 +1436,25 @@ describe("file delivery", () => {
       h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
       await drain(() => h.tracker.stateSize().files.buffered === 450);
       await drain();
-      expect(asc(h).map((call) => call.afterSeq)).toEqual(["0", "0", "200", "400"]);
+      expect(asc(h).map((call) => call.afterSeq)).toEqual(["0", "0", "100", "200", "300", "400"]);
       expect(h.tracker.stateSize().files.buffered).toBe(450);
+    });
+
+    it("never requests an events.list page above the server's 100-row cap", async () => {
+      // Learned from the live bb 0.47.1 server on 2026-10-29: `events.list` rejects a `limit`
+      // above 100 with HTTP 400 "Thread event limit cannot exceed 100"; the cap has been in the
+      // bb server since commit c3fcea1446 (Sep 08 2026).
+      const h = harness({ threads: [thread("thr_1")] });
+      await start(h);
+      for (let i = 0; i < 250; i++) edit(h, `f${i}.ts`);
+      h.tracker.onEvents({ thread: h.threads.get("thr_1")! });
+      await drain(() => h.tracker.stateSize().files.buffered === 250);
+      await drain();
+      expect(h.tracker.stateSize().files.buffered).toBe(250);
+      expect(asc(h).map((call) => call.afterSeq)).toEqual(["0", "0", "100", "200"]);
+      for (const call of asc(h)) expect(call.limit).toBe("100");
+      // Nothing anywhere asks for more than the cap, seed call included.
+      for (const call of h.eventCalls) expect(Number(call.limit)).toBeLessThanOrEqual(100);
     });
 
     it("makes no CLI call when it pulls", async () => {

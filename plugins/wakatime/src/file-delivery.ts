@@ -11,8 +11,14 @@ import type { WakatimeStatus } from "./rpc-contract.js";
 /** A read of the same path within this window of the previous one is not sent again. */
 export const READ_THROTTLE_MS = 120_000;
 export const BUFFER_CAP = 2000;
-/** Specs per `wakatime-cli` call, and rows per `events.list` page. */
+/** Specs per `wakatime-cli` call, which takes up to 200 files. */
 export const CHUNK_SIZE = 200;
+/**
+ * Rows per `events.list` page. The bb server rejects a `limit` above 100 with
+ * HTTP 400 "Thread event limit cannot exceed 100" (cap since bb commit
+ * c3fcea1446, Sep 2026; verified live against bb 0.47.1 on 2026-10-29).
+ */
+export const EVENTS_PAGE_SIZE = 100;
 export const EVENTS_TIMEOUT_MS = 30_000;
 
 export interface FileSdk {
@@ -248,7 +254,7 @@ export class FileDelivery {
         afterSeq: String(state.lastSeq),
         order: "asc",
         types: ["item/completed"],
-        limit: String(CHUNK_SIZE),
+        limit: String(EVENTS_PAGE_SIZE),
         signal: AbortSignal.timeout(EVENTS_TIMEOUT_MS),
       });
       if (!this.alive(state) || state.lastSeq === null || rows.length === 0) return;
@@ -267,7 +273,7 @@ export class FileDelivery {
       this.drops.outOfScope += scan.outOfScope;
       this.enqueue(state, scan.specs);
       state.lastSeq = rows[rows.length - 1]!.seq;
-      if (rows.length < CHUNK_SIZE) return;
+      if (rows.length < EVENTS_PAGE_SIZE) return;
     }
   }
 
