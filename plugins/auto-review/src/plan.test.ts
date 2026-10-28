@@ -358,6 +358,19 @@ describe("planGateAction", () => {
     ).toBe("review");
   });
 
+  it("still releases right at the edge of the continuation cap", () => {
+    expect(
+      planGateAction(
+        {
+          phase: "idle",
+          planReviewArmedAt: NOW - REVIEW_CONTINUATION_CAP_MS,
+          planReviewDeliveredSeq: 100,
+        },
+        NOW,
+      ),
+    ).toBe("release");
+  });
+
   it("still releases right at the edge of the stale window", () => {
     expect(
       planGateAction({ phase: "idle", planReviewArmedAt: NOW - STALE_WINDOW_MS }, NOW),

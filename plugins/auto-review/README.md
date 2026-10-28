@@ -468,6 +468,13 @@ It ships enabled (opt-out).
   turn changed), the review is carried into that turn. It fires once a turn that changes something
   ends with nothing of yours queued, covering every turn since; if your message only asks a
   question, the work stays carried (`no-new-work`).
+- No code review fires while a plan review holds the thread (`deferred` reason `plan-in-review`,
+  shown by `bb auto-review status`). The thread's own changes made meanwhile are carried: they are
+  reviewed with the next turn that changes something, once the gate releases or expires — unless
+  they are committed and pushed past the merge base in the meantime (the existing `already-pushed`
+  carve-out). Working-tree changes the thread did not author are never swept into its reviews; a
+  commit someone else made mid-hold may still be claimed as the turn's own by the review prompt's
+  attribution check, which the agent answers there.
 - Commits only a complete, working change. The review turn gets the full list of files the
   turn authored, checks that nothing the staged change depends on is left out, and runs the
   project's typecheck/build and tests. If the work is unfinished, broken, or could only be
@@ -537,7 +544,7 @@ All commands accept `--json`.
 
 | Command | What it does |
 |---|---|
-| `bb auto-review status` | Effective state (including `planGate`, whether this thread's plan review is served here by the native ExitPlanMode gate), last-fire outcome (naming the commits a `stale-park` or `already-pushed` stand-down skipped, as `lastFire.skippedCommits`), a `last parked` line for a turn parked behind another review (`lastParkedAt` in `--json`), and the last review's reported outcome with open/re-raised finding counts (`reviewResult`, plus `omittedFromPrompt`: open findings the next review's prompt cannot list) for the current thread |
+| `bb auto-review status` | Effective state (including `planGate`, whether this thread's plan review is served here by the native ExitPlanMode gate), last-fire outcome (naming the commits a `stale-park` or `already-pushed` stand-down skipped, as `lastFire.skippedCommits`), a `last parked` line for a turn parked behind another review (`lastParkedAt` in `--json`), a `plan hold` line with the age of an armed plan review against its window while one holds the thread (`planHoldArmedAt` and `planHoldWindowMs` in `--json`; no line when no gate holds), and the last review's reported outcome with open/re-raised finding counts (`reviewResult`, plus `omittedFromPrompt`: open findings the next review's prompt cannot list) for the current thread |
 | `bb auto-review show` | Global defaults, project override and resolved settings for the current project |
 | `bb auto-review enable [--global \| --project <id>]` | Turn it on; bare `enable` is global |
 | `bb auto-review disable [--global \| --project <id>]` | Turn it off, same scoping |

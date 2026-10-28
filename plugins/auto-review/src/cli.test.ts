@@ -6,7 +6,7 @@ import {
 } from "@get-bb/plugin-sdk/testing";
 import { registerAutoReviewCli } from "./cli.js";
 import { MAX_PROMPT_FINDINGS } from "./findings-schema.js";
-import { withThreadLock } from "./state.js";
+import { withThreadLock, REVIEW_CONTINUATION_CAP_MS, STALE_WINDOW_MS } from "./state.js";
 import {
   defineAutoReviewSettings,
   lastFireSchema,
@@ -807,6 +807,8 @@ describe("auto-review cli: status", () => {
           deferredSince: null,
           lastParkedAt: null,
           heldBy: null,
+          planHoldArmedAt: null,
+          planHoldWindowMs: null,
           lastFire: null,
           reviewResult: { status: "none", at: null, summary: null },
           openFindings: 0,
@@ -1014,6 +1016,65 @@ describe("auto-review cli: status", () => {
 
       Object.assign(host.metadataFor(THREAD_ID), { lastIdle: { sinceSeq: 5, startedAt }, turnStart: { sinceSeq: 1, startedAt: 1, tree: parkTree } });
       expect((await host.run(["status", THREAD_ID])).stdout).not.toContain("last parked");
+    });
+  });
+
+  it("shows the arm age of a native plan hold still queued, against the stale window", async () => {
+    await withHost(
+      {
+        threads: {
+          [THREAD_ID]: { projectId: PROJECT_ID, providerId: "claude-code", environmentId: "env-1" },
+        },
+      },
+      async (host) => {
+        const armedAt = Date.now() - 12 * 60_000 - 5_000;
+        Object.assign(host.metadataFor(THREAD_ID), { planReviewArmedAt: armedAt, planReviewEntryId: "qm-1" });
+        const text = await host.run(["status", THREAD_ID]);
+        expect(text.stdout).toContain("plan hold: armed 12 min ago, window 30 min\n");
+        const payload = await host.run(["status", THREAD_ID, "--json"]);
+        expect(parse(payload.stdout)).toMatchObject({
+          planHoldArmedAt: armedAt,
+          planHoldWindowMs: STALE_WINDOW_MS,
+        });
+      },
+    );
+  });
+
+  it("shows a delivered native plan hold against the continuation cap", async () => {
+    await withHost(
+      {
+        threads: {
+          [THREAD_ID]: { projectId: PROJECT_ID, providerId: "claude-code", environmentId: "env-1" },
+        },
+      },
+      async (host) => {
+        const armedAt = Date.now() - 90 * 60_000 - 5_000;
+        Object.assign(host.metadataFor(THREAD_ID), { planReviewArmedAt: armedAt, planReviewDeliveredSeq: 100 });
+        const text = await host.run(["status", THREAD_ID]);
+        expect(text.stdout).toContain("plan hold: armed 90 min ago, window 120 min\n");
+        const payload = await host.run(["status", THREAD_ID, "--json"]);
+        expect(parse(payload.stdout)).toMatchObject({
+          planHoldArmedAt: armedAt,
+          planHoldWindowMs: REVIEW_CONTINUATION_CAP_MS,
+        });
+      },
+    );
+  });
+
+  it("shows a PresentPlan arm against the continuation cap, whatever path it armed for", async () => {
+    await withHost({}, async (host) => {
+      const armedAt = Date.now() - 30 * 60_000 - 5_000;
+      Object.assign(host.metadataFor(THREAD_ID), {
+        presentPlanArmedAt: armedAt,
+        presentPlanArmedPath: "docs/plans/p.md",
+      });
+      const text = await host.run(["status", THREAD_ID]);
+      expect(text.stdout).toContain("plan hold: armed 30 min ago, window 120 min\n");
+      const payload = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(payload.stdout)).toMatchObject({
+        planHoldArmedAt: armedAt,
+        planHoldWindowMs: REVIEW_CONTINUATION_CAP_MS,
+      });
     });
   });
 

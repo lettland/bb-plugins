@@ -335,6 +335,9 @@ All commands accept `--json`.
   and time, and `reviewResult`: the last review's outcome and its time, or `pending` (with no
   time) while a review is in flight; the open and re-raised finding counts; `omittedFromPrompt`,
   how many open findings do not fit the next review's prompt; and the last incident).
+  While a plan review holds the thread, the output gains a `plan hold` line with the age of
+  the arm against its window (`planHoldArmedAt` and `planHoldWindowMs` in `--json`; both null
+  when no gate holds).
   `planGate` is true only for a top-level, visible, environment-bound claude-code-family thread
   with auto-review enabled — the one case where auto-review's own native
   plan gate (see *Plan review* above) owns this thread's plan review instead of another
@@ -569,6 +572,16 @@ thread, so the turn's review and commit are never dropped by it.
   A scheduled or failed row, or one an agent or plugin queued, does not count.
   A turn's cursor is only replaced once an idle has decided that turn, so this holds even
   when the next turn's start reaches the plugin before the finished turn's idle.
+- `plan-in-review` — a plan review holds the thread (the native gate's arm, or a
+  `PresentPlan` arm, within its window), so no code review fires while it does. Paired with
+  outcome `deferred`, and like `user-queued` it is carry, not a park: the thread's own
+  changes made during the hold are reviewed with the next turn that changes something, once
+  the gate releases or expires — not at the hold's release. Working-tree changes the thread
+  did not author are never swept into its reviews; a commit someone else made mid-hold may
+  still be claimed as the turn's own by the review prompt's attribution check, which the
+  agent answers there. Despite the near-identical name, this is a different outcome from the
+  `plan-review` reason (also in `FIRE_REASONS` and `lastFire`), which records the plan
+  review's own dispatch. `bb auto-review reset` ends the hold and discards the carried work.
 - `disabled` — disabled globally or for this project.
 - `plan-approved` — a plan that completed the review cycle was approved automatically
   (project opted in with `auto-approve on`). Paired with outcome `fired`.
@@ -588,7 +601,9 @@ thread, so the turn's review and commit are never dropped by it.
 
 Outcomes are `fired`, `deferred` (parked, runs at its release unless a question of the user's
 turns it into carried work) and `stood-down` (this turn's review will not run; `already-reviewed`
-and `no-new-work` keep the carried cursor, so the work waits for a later turn).
+and `no-new-work` keep the carried cursor, so the work waits for a later turn). The one
+`deferred` that is carry, not park, is `plan-in-review`: its carried work runs with the next
+turn that changes something, not at the hold's release.
 
 (A thread that is not a top-level user coding thread is filtered out before evaluation and
 records no last-fire entry.)

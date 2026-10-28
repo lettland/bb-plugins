@@ -335,6 +335,32 @@ function elapsedBeyond(
 }
 
 /**
+ * The active plan hold, whatever gate armed it: the arm timestamp and the
+ * window it is up against. The native gate bounds a review still queued (or
+ * one whose delivery was never seen) by the stale window and a delivered one
+ * by the continuation cap; a `PresentPlan` arm always gets the cap, since its
+ * review rides the first call's tool result. `planHoldExpired` and the `status`
+ * arm-age line read this, so the two cannot disagree about when a hold ends.
+ */
+export function planHoldWindow(
+  state: ThreadState,
+): { armedAt: number; windowMs: number } | null {
+  if (state.presentPlanArmedAt !== undefined) {
+    return { armedAt: state.presentPlanArmedAt, windowMs: REVIEW_CONTINUATION_CAP_MS };
+  }
+  if (state.planReviewArmedAt === undefined) {
+    return null;
+  }
+  const delivered =
+    state.planReviewEntryId === undefined &&
+    state.planReviewDeliveredSeq !== undefined;
+  return {
+    armedAt: state.planReviewArmedAt,
+    windowMs: delivered ? REVIEW_CONTINUATION_CAP_MS : STALE_WINDOW_MS,
+  };
+}
+
+/**
  * True once a plan review has been armed for longer than its window. A review
  * still queued that long is not going to be dispatched, and holding the
  * thread's plans behind it any longer would only keep denying them. A review
@@ -344,14 +370,8 @@ function elapsedBeyond(
  * record — with no delivery cursor there is nothing saying the review left.
  */
 export function planHoldExpired(state: ThreadState, now: number): boolean {
-  const delivered =
-    state.planReviewEntryId === undefined &&
-    state.planReviewDeliveredSeq !== undefined;
-  return elapsedBeyond(
-    state.planReviewArmedAt,
-    now,
-    delivered ? REVIEW_CONTINUATION_CAP_MS : STALE_WINDOW_MS,
-  );
+  const hold = planHoldWindow(state);
+  return hold !== null && elapsedBeyond(hold.armedAt, now, hold.windowMs);
 }
 
 /**
@@ -378,6 +398,19 @@ export function isStale(state: ThreadState, now: number): boolean {
 }
 
 /**
+ * True while a `PresentPlan` arm is still within its window, whatever the
+ * path. The suppression caller in `evaluate` uses it path-free on purpose: an
+ * arm for any plan path holds the thread. `presentPlanArmed` narrows it to the
+ * armed path for the release test, so a cap change moves both.
+ */
+export function presentPlanHoldActive(state: ThreadState, now: number): boolean {
+  return (
+    state.presentPlanArmedAt !== undefined &&
+    !elapsedBeyond(state.presentPlanArmedAt, now, REVIEW_CONTINUATION_CAP_MS)
+  );
+}
+
+/**
  * True while a `PresentPlan` arm is still within its window AND for the exact
  * plan path this call presents — a call for a different path is a different
  * plan to review, not a release of whatever was armed before. The review is
@@ -390,8 +423,7 @@ export function presentPlanArmed(
   now: number,
 ): boolean {
   return (
-    state.presentPlanArmedAt !== undefined &&
     state.presentPlanArmedPath === planFilePath &&
-    !elapsedBeyond(state.presentPlanArmedAt, now, REVIEW_CONTINUATION_CAP_MS)
+    presentPlanHoldActive(state, now)
   );
 }

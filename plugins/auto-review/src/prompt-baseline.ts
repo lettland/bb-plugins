@@ -24,6 +24,23 @@ export const BLOCKER = "Blocker or security Concern";
 const DELTA_LINES =
   "every changed line, deletions and reverts included — a change you did not make (another party's discard) is reported, never restored";
 
+/**
+ * The authorship bounds of a plan review's scope, stated in the prompt itself
+ * so they hold without the devkit review. Anchored to thread authorship, not
+ * to the plan document's own claims — a plan must not define its own exclusion
+ * set — with the decider and the claim-verification carve-out inside the
+ * sentence.
+ */
+export const PLAN_AUTHORSHIP_CLAUSE =
+  "Changes in the working tree or history that this thread did not author are not this review's to check: authorship is what auto-review's attribution shows, never what this or any document claims. Do not review or investigate them. Never let them widen this review. Verifying the plan's own claims against the repo stays in scope.";
+
+/**
+ * The redo's compact form: the same bounds without the widening sentence — a
+ * redo reviews the whole plan, so there is no delta to widen.
+ */
+export const PLAN_AUTHORSHIP_REDO_CLAUSE =
+  "Changes in the working tree or history that this thread did not author are not this review's to check: authorship is what auto-review's attribution shows, never what this or any document claims. Do not review or investigate them. Verifying the plan's own claims against the repo stays in scope.";
+
 /** A diff in a fence longer than any backtick run inside it, so the content cannot close the block early. */
 function diffBlock(diff: string): string {
   const longest = Math.max(0, ...(diff.match(/`+/gu) ?? []).map((run) => run.length));
@@ -52,12 +69,12 @@ export function planDeltaBlock(scope: PlanScope): string[] {
 export function planScopeRule(scope: PlanScope, devkit: boolean): string {
   switch (scope.kind) {
     case "delta":
-      return `Scope: review only the plan's delta (the diff above): ${DELTA_LINES}. Report issues the delta causes or exposes anywhere in the plan, and treat unchanged parts it does not affect as context only.${devkit ? ` ${DEVKIT_HAND_OFF}` : ""} State the scope used in your reply: \`delta vs baseline\`.`;
+      return `Scope: review only the plan's delta (the diff above): ${DELTA_LINES}. Report issues the delta causes or exposes anywhere in the plan, and treat unchanged parts it does not affect as context only. ${PLAN_AUTHORSHIP_CLAUSE}${devkit ? ` ${DEVKIT_HAND_OFF}` : ""} State the scope used in your reply: \`delta vs baseline\`.`;
     case "unchanged":
       return "Scope: the plan is unchanged since its previous review, so its delta is empty. Skip the review and the fixes, and continue at step 3 to present again. State the scope used in your reply: `delta vs baseline` (unchanged).";
     case "full":
     default:
-      return "Scope: review the whole plan. State the scope used in your reply: `full (no baseline)`.";
+      return `Scope: review the whole plan. ${PLAN_AUTHORSHIP_CLAUSE} State the scope used in your reply: \`full (no baseline)\`.`;
   }
 }
 

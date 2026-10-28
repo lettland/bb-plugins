@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { GateThreadLike, ReviewContext } from "./context.js";
-import { evaluate } from "./evaluate.js";
+import { evaluate, handleIdle } from "./evaluate.js";
+import { REVIEW_CONTINUATION_CAP_MS, STALE_WINDOW_MS } from "./state.js";
 
 const lookups = vi.hoisted(() => ({
   fetchWorkspace: vi.fn(),
@@ -39,6 +40,25 @@ vi.mock("./dispatch.js", async (original) => ({
   ...(await original<typeof import("./dispatch.js")>()),
   dispatchReview: dispatch.dispatchReview,
 }));
+const lastIdle = vi.hoisted(() => ({ refreshLastIdle: vi.fn() }));
+vi.mock("./last-idle.js", async (original) => ({
+  ...(await original<typeof import("./last-idle.js")>()),
+  refreshLastIdle: lastIdle.refreshLastIdle,
+}));
+const continuation = vi.hoisted(() => ({
+  noteUserTurn: vi.fn(),
+  reviewContinuationPending: vi.fn(),
+}));
+vi.mock("./review-continuation.js", async (original) => ({
+  ...(await original<typeof import("./review-continuation.js")>()),
+  ...continuation,
+}));
+const outcome = vi.hoisted(() => ({ recordUnfinishedReview: vi.fn(), userStoppedReview: vi.fn() }));
+vi.mock("./review-outcome.js", async (original) => ({
+  ...(await original<typeof import("./review-outcome.js")>()),
+  recordUnfinishedReview: outcome.recordUnfinishedReview,
+  userStoppedReview: outcome.userStoppedReview,
+}));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -51,6 +71,11 @@ beforeEach(() => {
   deferral.providerReviewInFlight.mockResolvedValue(false);
   lookups.stoppedByUser.mockResolvedValue(false);
   lookups.runningChildIds.mockResolvedValue([]);
+  continuation.noteUserTurn.mockImplementation(
+    async (_ctx: unknown, _thread: unknown, state: unknown) => state,
+  );
+  continuation.reviewContinuationPending.mockResolvedValue(false);
+  outcome.userStoppedReview.mockResolvedValue(false);
 });
 
 const workspace = {
@@ -153,5 +178,124 @@ describe("evaluate", () => {
     expect(warnings[0]).toContain("kaboom");
     const fire = kvWrites.find(([key]) => key === "lastfire:p:thr");
     expect(fire?.[1]).toMatchObject({ outcome: "stood-down", reason: "no-authorship" });
+  });
+
+  // Regression origin thr_4dg2yfp8d7: the user's own uncommitted work sat in a
+  // shared checkout while a planning thread held it, and auto-review dispatched
+  // a code review over it mid-plan.
+  it("thr_4dg2yfp8d7: an armed native plan gate carries the idle's changes instead of dispatching a code review", async () => {
+    const { ctx, kvWrites, thread } = fakeBb({
+      turnStart: { sinceSeq: 1 },
+      planReviewArmedAt: Date.now() - 1_000,
+      planReviewLight: false,
+    });
+    lookups.fetchWorkspace.mockResolvedValueOnce(workspace);
+    await evaluate(ctx, thread("env"));
+    expect(dispatch.dispatchReview).not.toHaveBeenCalled();
+    const fire = kvWrites.find(([key]) => key === "lastfire:p:thr");
+    expect(fire?.[1]).toMatchObject({
+      outcome: "deferred",
+      reason: "plan-in-review",
+      planReviewerCount: 0,
+      planReviewTier: "standard",
+    });
+  });
+
+  it("thr_4dg2yfp8d7: an active PresentPlan arm holds too, whatever path it armed for", async () => {
+    const { ctx, kvWrites, thread } = fakeBb({
+      turnStart: { sinceSeq: 1 },
+      presentPlanArmedAt: Date.now() - 1_000,
+      presentPlanArmedPath: "docs/plans/some-other-plan.md",
+      presentPlanLight: true,
+    });
+    lookups.fetchWorkspace.mockResolvedValueOnce(workspace);
+    await evaluate(ctx, thread("env"));
+    expect(dispatch.dispatchReview).not.toHaveBeenCalled();
+    const fire = kvWrites.find(([key]) => key === "lastfire:p:thr");
+    expect(fire?.[1]).toMatchObject({
+      outcome: "deferred",
+      reason: "plan-in-review",
+      planReviewerCount: 0,
+      planReviewTier: "light",
+    });
+  });
+
+  it("the hold outranks already-reviewed in the fire ledger", async () => {
+    const { ctx, kvWrites, thread } = fakeBb({
+      turnStart: { sinceSeq: 1 },
+      planReviewArmedAt: Date.now() - 1_000,
+      lastCodeReviewSeq: 10,
+    });
+    lookups.fetchWorkspace.mockResolvedValueOnce(workspace);
+    lookups.firstUserTurnSince.mockResolvedValueOnce(null);
+    await evaluate(ctx, thread("env"));
+    const fire = kvWrites.find(([key]) => key === "lastfire:p:thr");
+    expect(fire?.[1]).toMatchObject({ outcome: "deferred", reason: "plan-in-review" });
+  });
+
+  it("a queued native hold past the stale window no longer suppresses the review", async () => {
+    const { ctx, thread } = fakeBb({
+      turnStart: { sinceSeq: 1 },
+      planReviewArmedAt: Date.now() - STALE_WINDOW_MS - 5 * 60_000,
+      planReviewEntryId: "qm-1",
+    });
+    lookups.fetchWorkspace.mockResolvedValueOnce(workspace);
+    lookups.turnChangedPaths.mockResolvedValueOnce(turn);
+    await evaluate(ctx, thread("env"));
+    expect(dispatch.dispatchReview).toHaveBeenCalledTimes(1);
+  });
+
+  it("a delivered native hold past the continuation cap no longer suppresses the review", async () => {
+    const { ctx, thread } = fakeBb({
+      turnStart: { sinceSeq: 1 },
+      planReviewArmedAt: Date.now() - REVIEW_CONTINUATION_CAP_MS - 5 * 60_000,
+      planReviewDeliveredSeq: 100,
+    });
+    lookups.fetchWorkspace.mockResolvedValueOnce(workspace);
+    lookups.turnChangedPaths.mockResolvedValueOnce(turn);
+    await evaluate(ctx, thread("env"));
+    expect(dispatch.dispatchReview).toHaveBeenCalledTimes(1);
+  });
+
+  it("a PresentPlan arm past the cap no longer suppresses the review", async () => {
+    const { ctx, thread } = fakeBb({
+      turnStart: { sinceSeq: 1 },
+      presentPlanArmedAt: Date.now() - REVIEW_CONTINUATION_CAP_MS - 5 * 60_000,
+    });
+    lookups.fetchWorkspace.mockResolvedValueOnce(workspace);
+    lookups.turnChangedPaths.mockResolvedValueOnce(turn);
+    await evaluate(ctx, thread("env"));
+    expect(dispatch.dispatchReview).toHaveBeenCalledTimes(1);
+  });
+
+  it("thr_4dg2yfp8d7: the plan-in-review carry anchors its snapshot without a user-turn boundary", async () => {
+    // The composed end-to-end exclusion (the user's uncommitted mid-hold edits
+    // staying out of the post-approval dispatch) is covered by manual replay:
+    // the detect mock hides it here.
+    const { ctx, thread } = fakeBb({
+      turnStart: { sinceSeq: 1 },
+      planReviewArmedAt: Date.now() - 1_000,
+    });
+    const thr = thread("env");
+    lookups.fetchWorkspace.mockResolvedValueOnce(workspace);
+    await evaluate(ctx, thr);
+    expect(lastIdle.refreshLastIdle).toHaveBeenCalledWith(ctx.bb, thr, {});
+  });
+});
+
+describe("handleIdle", () => {
+  it("a review in flight when the plan arms finishes: the continuation stays untouched", async () => {
+    const { ctx, metadata, kvWrites, thread } = fakeBb({
+      phase: "awaiting-review",
+      turnStart: { sinceSeq: 1 },
+      reviewDeliveredAt: Date.now() - 1_000,
+      planReviewArmedAt: Date.now() - 1_000,
+    });
+    continuation.reviewContinuationPending.mockResolvedValueOnce(true);
+    await handleIdle(ctx, thread("env"));
+    expect(metadata.phase).toBe("awaiting-review");
+    expect(outcome.recordUnfinishedReview).not.toHaveBeenCalled();
+    expect(kvWrites.find(([key]) => key === "lastfire:p:thr")).toBeUndefined();
+    expect(dispatch.dispatchReview).not.toHaveBeenCalled();
   });
 });

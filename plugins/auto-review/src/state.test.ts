@@ -8,6 +8,7 @@ import {
   planDenyFresh,
   planHoldExpired,
   presentPlanArmed,
+  presentPlanHoldActive,
   PRESENT_PLAN_KEYS,
   readState,
   resetToIdlePatch,
@@ -198,6 +199,20 @@ describe("planHoldExpired", () => {
       ),
     ).toBe(true);
   });
+
+  it("keeps a delivered arm at exactly the cap: elapsedBeyond is strict", () => {
+    const now = REVIEW_CONTINUATION_CAP_MS * 10;
+    expect(
+      planHoldExpired(
+        {
+          phase: "idle",
+          planReviewArmedAt: now - REVIEW_CONTINUATION_CAP_MS,
+          planReviewDeliveredSeq: 100,
+        },
+        now,
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("PLAN_GATE_KEYS", () => {
@@ -275,6 +290,52 @@ describe("presentPlanArmed", () => {
         now,
       ),
     ).toBe(false);
+  });
+});
+
+describe("presentPlanHoldActive", () => {
+  const now = REVIEW_CONTINUATION_CAP_MS * 10;
+
+  it("is false when PresentPlan never armed", () => {
+    expect(presentPlanHoldActive({ phase: "idle" }, now)).toBe(false);
+  });
+
+  it("ignores the armed path: the suppression caller uses it path-free on purpose, an arm for any plan path holds the thread", () => {
+    expect(
+      presentPlanHoldActive(
+        { phase: "idle", presentPlanArmedAt: now - 1_000, presentPlanArmedPath: "a.md" },
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      presentPlanHoldActive({ phase: "idle", presentPlanArmedAt: now - 1_000 }, now),
+    ).toBe(true);
+  });
+
+  it("persists at exactly the cap and expires past it (elapsedBeyond is strict)", () => {
+    expect(
+      presentPlanHoldActive(
+        { phase: "idle", presentPlanArmedAt: now - REVIEW_CONTINUATION_CAP_MS },
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      presentPlanHoldActive(
+        { phase: "idle", presentPlanArmedAt: now - REVIEW_CONTINUATION_CAP_MS - 1 },
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it("presentPlanArmed delegates its window here, so a cap change moves both", () => {
+    const armed = {
+      phase: "idle" as const,
+      presentPlanArmedAt: now - REVIEW_CONTINUATION_CAP_MS,
+      presentPlanArmedPath: "a.md",
+    };
+    expect(presentPlanArmed(armed, "a.md", now)).toBe(presentPlanHoldActive(armed, now));
+    const expired = { ...armed, presentPlanArmedAt: now - REVIEW_CONTINUATION_CAP_MS - 1 };
+    expect(presentPlanArmed(expired, "a.md", now)).toBe(presentPlanHoldActive(expired, now));
   });
 });
 

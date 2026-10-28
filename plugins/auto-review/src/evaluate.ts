@@ -1,8 +1,9 @@
-import { effectiveConfig, readProjectConfig } from "./config.js";
+import { effectiveConfig, readProjectConfig, type FireReason } from "./config.js";
 import {
   queuedRowExists,
   recordFire,
   type EffectiveConfig,
+  type FireExtra,
   type GateThreadLike,
   type ReviewContext,
 } from "./context.js";
@@ -28,6 +29,7 @@ import { dispatchReview } from "./dispatch.js";
 import { selfIsWorktree } from "./gate.js";
 import { lastIdleFloor, refreshIdleSnapshot, refreshLastIdle } from "./last-idle.js";
 import { noNewWork, parkBaseline, parkRelease } from "./no-new-work.js";
+import { planReviewerTally, planReviewTallyExtras } from "./plan.js";
 import {
   noteUserTurn,
   reviewContinuationPending,
@@ -41,6 +43,8 @@ import { removeReview } from "./reviews.js";
 import {
   isStale,
   LATCH_KEYS,
+  planHoldExpired,
+  presentPlanHoldActive,
   readState,
   resetToIdlePatch,
   REVIEW_IN_FLIGHT_PHASES,
@@ -64,6 +68,8 @@ async function carryOver(
   thread: GateThreadLike,
   state: ThreadState,
   busy: boolean,
+  reason: FireReason = "user-queued",
+  extra?: FireExtra,
 ): Promise<void> {
   await keepCursor(ctx, thread, state);
   await refreshLastIdle(
@@ -71,7 +77,7 @@ async function carryOver(
     thread,
     busy ? { userTurnAfter: lastIdleFloor(state) } : {},
   );
-  await recordFire(ctx, thread.projectId, thread.id, "deferred", "user-queued");
+  await recordFire(ctx, thread.projectId, thread.id, "deferred", reason, extra);
 }
 
 /**
@@ -282,6 +288,32 @@ export async function evaluate(
 
   const workspace = await branchWorkspace(ctx, thread, state, environmentId);
   if (workspace === null) {
+    return;
+  }
+  // While a plan review holds the thread, no code review dispatches and the
+  // idle's own changes are carried instead. Both arm sites serialize on the
+  // same `withThreadLock` as every caller of `evaluate`, so an arm cannot land
+  // between this check and the dispatch — no mid-check re-check is needed,
+  // unlike `userTurnQueued`'s below. The native gate's predicate is the
+  // explicit window, never `planGateAction(state, ...) !== "review"`: that
+  // function's `"hold"` branch never expires, so a stale queued hold would
+  // suppress code review forever.
+  const nativeHold =
+    state.planReviewArmedAt !== undefined && !planHoldExpired(state, Date.now());
+  const presentHold = presentPlanHoldActive(state, Date.now());
+  if (nativeHold || presentHold) {
+    // `busy=false` is the anchor the exclusion of foreign uncommitted changes
+    // rides on: refactoring it to `busy=true` would drop the idle snapshot
+    // during a hold — reimplementing the rejected release-time catch-up.
+    const tallyExtras = planReviewTallyExtras(
+      await planReviewerTally(
+        bb,
+        thread.id,
+        nativeHold ? state.planReviewArmedAt : state.presentPlanArmedAt,
+        (nativeHold ? state.planReviewLight : state.presentPlanLight) === true,
+      ),
+    );
+    await carryOver(ctx, thread, state, false, "plan-in-review", tallyExtras);
     return;
   }
   if (await alreadyReviewed(ctx, thread, state, workspace)) {

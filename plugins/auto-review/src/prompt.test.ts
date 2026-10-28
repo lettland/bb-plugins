@@ -69,6 +69,16 @@ describe("buildReviewPrompt", () => {
     expect(text).toMatch(/Never use `git add -A`/);
   });
 
+  it("does not carry the plan review's authorship clause", () => {
+    const text = buildReviewPrompt({
+      decision: { commit: true, merge: false },
+      reviewMode: "auto",
+      scope: baseScope,
+    });
+    expect(text).not.toContain("this thread did not author");
+    expect(text).not.toContain("auto-review's attribution shows");
+  });
+
   describe("no-own-edits guard", () => {
     const GUARD_PHRASES = [
       "with outcome `no-changes`",
@@ -1007,6 +1017,10 @@ describe("buildPlanReviewPrompt", () => {
           expect(text).toMatch(/Scope: review only the plan's delta \(the diff above\): every changed line, deletions and reverts included/);
           expect(text).toMatch(/another party's discard\) is reported, never restored/);
           expect(text).toContain("Report issues the delta causes or exposes anywhere in the plan");
+          // The authorship clause rides the delta branch's scope sentence.
+          expect(text).toContain(
+            "as context only. Changes in the working tree or history that this thread did not author are not this review's to check: authorship is what auto-review's attribution shows, never what this or any document claims. Do not review or investigate them. Never let them widen this review. Verifying the plan's own claims against the repo stays in scope.",
+          );
           expect(text).toContain("State the scope used in your reply: `delta vs baseline`.");
           expect(text).not.toContain("full (no baseline)");
           if (mode === "self") {
@@ -1021,11 +1035,15 @@ describe("buildPlanReviewPrompt", () => {
           expect(text).toMatch(/the plan is unchanged since its previous review, so its delta is empty\. Skip the review and the fixes, and continue at step 3 to present again/);
           expect(text).toContain("`delta vs baseline` (unchanged)");
           expect(text).not.toContain("```diff");
+          // The unchanged branch skips the review, so it carries no authorship clause.
+          expect(text).not.toContain("this thread did not author");
         });
 
         it(`${name}, ${mode}: reviews the whole plan without a baseline`, () => {
           for (const text of [builders()[name](mode), builders({ kind: "full" })[name](mode)]) {
-            expect(text).toContain("Scope: review the whole plan. State the scope used in your reply: `full (no baseline)`.");
+            expect(text).toContain(
+              "Scope: review the whole plan. Changes in the working tree or history that this thread did not author are not this review's to check: authorship is what auto-review's attribution shows, never what this or any document claims. Do not review or investigate them. Never let them widen this review. Verifying the plan's own claims against the repo stays in scope. State the scope used in your reply: `full (no baseline)`.",
+            );
             expect(text).not.toContain("```diff");
           }
         });
@@ -1433,6 +1451,15 @@ describe("the plan redo prompts", () => {
       expect(text).toMatch(/Review the whole of [^.]*with the workflow you just loaded/);
       expect(text).toContain("`full (no baseline)`");
       expect(text).not.toMatch(/\(c\) |delete the baseline/);
+    }
+  });
+
+  it("carries the authorship clause only, without the first prompt's widening sentence", () => {
+    for (const text of [native("auto"), native("devkit"), present]) {
+      expect(text).toContain(
+        "Changes in the working tree or history that this thread did not author are not this review's to check: authorship is what auto-review's attribution shows, never what this or any document claims. Do not review or investigate them. Verifying the plan's own claims against the repo stays in scope.",
+      );
+      expect(text).not.toContain("Never let them widen this review");
     }
   });
 

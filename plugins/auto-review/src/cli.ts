@@ -18,6 +18,7 @@ import {
   LATCH_KEYS,
   PLAN_GATE_KEYS,
   PRESENT_PLAN_KEYS,
+  planHoldWindow,
   readState,
   withThreadLock,
   writeState,
@@ -84,6 +85,14 @@ function lastFireLine(lastFire: LastFire | null): string {
   ].filter(Boolean);
   const parked = parts.length === 0 ? "" : `, ${parts.join(" and ")} made while this turn waited`;
   return `${lastFire.outcome} (${lastFire.reason}) at ${new Date(lastFire.at).toISOString()}${unclaimed}${parked}${skippedText(lastFire)}`;
+}
+
+/** The arm-age line for an active plan hold: the age of the arm against its window. */
+function planHoldLine(planHold: { armedAt: number; windowMs: number } | null): string {
+  if (planHold === null) {
+    return "";
+  }
+  return `plan hold: armed ${Math.floor((Date.now() - planHold.armedAt) / 60_000)} min ago, window ${Math.floor(planHold.windowMs / 60_000)} min\n`;
 }
 
 /** What releases a deferred turn, for `status`. */
@@ -299,6 +308,7 @@ export function registerAutoReviewCli(
         const lastFire = await readLastFire(bb, projectId, threadId);
         const review = await reviewStatusView(bb, threadId, state.phase);
         const lastParkedAt = lastParkedAtOf(state);
+        const planHold = planHoldWindow(state);
         const payload = {
           threadId,
           projectId,
@@ -311,6 +321,8 @@ export function registerAutoReviewCli(
           deferredSince: state.deferredSince ?? null,
           lastParkedAt,
           heldBy: state.heldBy ?? null,
+          planHoldArmedAt: planHold?.armedAt ?? null,
+          planHoldWindowMs: planHold?.windowMs ?? null,
           lastFire,
           ...review.fields,
         };
@@ -338,6 +350,7 @@ export function registerAutoReviewCli(
             `phase: ${state.phase}\n` +
             deferredText +
             lastParkedText +
+            planHoldLine(planHold) +
             `lastFire: ${lastFireText}\n` +
             review.text,
         };

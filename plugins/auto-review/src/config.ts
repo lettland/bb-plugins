@@ -26,6 +26,7 @@ export const FIRE_REASONS = [
   "not-a-branch",
   "status-unavailable",
   "plan-review",
+  "plan-in-review",
   "plan-reviewed",
   "plan-hold-expired",
   "plan-hold-answered",

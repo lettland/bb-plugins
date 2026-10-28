@@ -1,5 +1,5 @@
 import {
-  APPLY_PLAN_FINDINGS, PLAN_OPEN_GATE, PLAN_OPEN_IF, planDeltaBlock, planScopeRule, type PlanScope,
+  APPLY_PLAN_FINDINGS, PLAN_AUTHORSHIP_REDO_CLAUSE, PLAN_OPEN_GATE, PLAN_OPEN_IF, planDeltaBlock, planScopeRule, type PlanScope,
 } from "./prompt-baseline.js";
 import {
   AUTO_REVIEW_MARKER, DEVKIT_REVIEW_RULES, STEER_INTERRUPTION_NOTE, devkitReview, type ReviewMode,
@@ -224,7 +224,7 @@ function planRedoStep(mode: ReviewMode, target: string, light: boolean): string 
       : `If the devkit_load_skill tool is not available to you, skip (a) and do ${PLAN_SELF_REVIEW} of the whole plan instead of the devkit review in (b).`;
   const lightBlock = light ? ` ${planLightOverride(mode)}` : "";
   const budget = light ? "" : ` ${PLAN_CLOSURE_BUDGET}`;
-  return `Do these in order. (a) Call \`devkit_load_skill({ slug: "review-code" })\` again, in this thread, now: auto-review looks for a load after this message, so an earlier one does not count. (b) Review the whole of ${target} with the workflow you just loaded, scope \`plan <that plan file>\`; it has no baseline now, so this review covers the whole plan, not only what the last review's edits changed. State the scope used as \`full (no baseline)\`. ${DEVKIT_REVIEW_RULES}${lightBlock} ${unavailable}${budget}`;
+  return `Do these in order. (a) Call \`devkit_load_skill({ slug: "review-code" })\` again, in this thread, now: auto-review looks for a load after this message, so an earlier one does not count. (b) Review the whole of ${target} with the workflow you just loaded, scope \`plan <that plan file>\`; it has no baseline now, so this review covers the whole plan, not only what the last review's edits changed. State the scope used as \`full (no baseline)\`. ${PLAN_AUTHORSHIP_REDO_CLAUSE} ${DEVKIT_REVIEW_RULES}${lightBlock} ${unavailable}${budget}`;
 }
 
 /**
