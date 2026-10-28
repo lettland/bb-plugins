@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { installTestPluginRuntime, loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { wakatimeRpcContract } from "./src/rpc-contract.js";
 import type { WakatimeRpcContract, WakatimeStatus } from "./src/rpc-contract.js";
 
 const BASE: WakatimeStatus = {
@@ -33,8 +34,15 @@ afterEach(() => {
 
 type Handler = () => WakatimeStatus | Promise<WakatimeStatus>;
 
-function render(handler: Handler) {
-  return renderSlot<object, WakatimeRpcContract>(statusSection, {}, { rpc: { heartbeat: () => ({ sent: false }), status: handler } });
+function render(handler: Handler, rpcContract?: WakatimeRpcContract) {
+  return renderSlot<object, WakatimeRpcContract>(
+    statusSection,
+    {},
+    {
+      rpc: { heartbeat: () => ({ sent: false }), status: handler },
+      ...(rpcContract === undefined ? {} : { experimental_rpcContract: rpcContract }),
+    },
+  );
 }
 
 describe("StatusPanel", () => {
@@ -162,6 +170,20 @@ describe("StatusPanel", () => {
     });
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(screen.getByRole("alert").textContent).toContain("Could not load status: wakatime is down");
+  });
+
+  it("shows a rejection that arrives unwrapped as its string form", async () => {
+    // The rpc layer wraps handler failures into Errors, so the one path that
+    // delivers a raw string is a contract input schema whose validate rejects.
+    const rejectingInput = {
+      "~standard": { version: 1, validate: () => Promise.reject("boom-not-an-error") },
+    } as unknown as typeof wakatimeRpcContract.status.input;
+    render(() => BASE, {
+      ...wakatimeRpcContract,
+      status: { ...wakatimeRpcContract.status, input: rejectingInput },
+    });
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("Could not load status: boom-not-an-error");
   });
 
   it("discards a status answer that a newer load already superseded", async () => {
