@@ -11,6 +11,22 @@ import type {
 } from "@get-bb/plugin-sdk";
 import type { AutoReviewRpcContract, ProjectSetting, ThreadReview } from "./src/rpc-contract.js";
 
+// The test rpc harness wraps every handler throw in a PluginRpcCallError, an
+// Error subclass, so a rejection that is not an Error can only reach the app
+// by intercepting useRpc itself.
+const rpcStringRejection = vi.hoisted(() => ({ current: null as string | null }));
+vi.mock("@get-bb/plugin-sdk/app", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@get-bb/plugin-sdk/app")>();
+  return {
+    ...actual,
+    useRpc: () => {
+      if (rpcStringRejection.current === null) return actual.useRpc();
+      const message = rpcStringRejection.current;
+      return { call: () => Promise.reject(message) };
+    },
+  };
+});
+
 let approveSection: PluginSettingsSectionRegistration;
 let badgeSlot: PluginThreadHeaderActionRegistration;
 
@@ -25,6 +41,7 @@ beforeAll(async () => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  rpcStringRejection.current = null;
 });
 
 function project(overrides: Partial<ProjectSetting> = {}): ProjectSetting {
@@ -276,6 +293,14 @@ describe("Plan auto-approve section", () => {
     });
     fireEvent.click(await screen.findByLabelText("Project one"));
     expect((await screen.findByRole("alert")).textContent).toBe("rejected");
+  });
+
+  it("words a first-load rejection that is not an Error as-is", async () => {
+    rpcStringRejection.current = "boom-not-an-error";
+    renderSection();
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Could not load projects: boom-not-an-error",
+    );
   });
 
   it("clears a row error once a reload succeeds", async () => {
