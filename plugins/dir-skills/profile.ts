@@ -157,7 +157,7 @@ export async function resolveClaudeEnv(
         : undefined;
     const decision = decidePin(deps.scopes, sources, ctx.hostId, deps.isDir);
     for (const warning of decision.warnings)
-      log.warn(`project ${ctx.projectId ?? "none"} provider process without a thread: ${warning}`);
+      log.warn(`project ${ctx.projectId} provider process without a thread: ${warning}`);
     log.debug(
       `env thread=null project=${ctx.projectId} host=${ctx.hostId} provider process without a thread, no pin -> ${decision.pin.dir ?? "default profile"}`,
     );
@@ -186,7 +186,7 @@ export async function resolveClaudeEnv(
     );
   }
   for (const warning of decision.warnings)
-    log.warn(`project ${ctx.projectId ?? "none"} thread ${ctx.threadId}: ${warning}`);
+    log.warn(`project ${ctx.projectId} thread ${ctx.threadId}: ${warning}`);
   await kv.set(key, decision.pin);
   log.debug(
     `env thread=${ctx.threadId} project=${ctx.projectId} host=${ctx.hostId} -> ${decision.pin.dir ?? "default profile"}`,
