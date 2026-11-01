@@ -721,10 +721,15 @@ describe("review-code content", () => {
   });
 
   it("builds the reviewer brief's Request block rules in §2, exclusions and marks included", () => {
+    expect(normalized.indexOf("## 2.")).toBeGreaterThan(-1);
+    expect(normalized.indexOf("## 3.")).toBeGreaterThan(-1);
     const section2 = normalized.slice(normalized.indexOf("## 2."), normalized.indexOf("## 3."));
     expect(section2).toContain("Request:");
     expect(section2).toContain("<redacted: type>");
     expect(section2).toContain("third-party context");
+    expect(section2).toContain("in its own fenced block labeled `third-party context`");
+    expect(section2).toContain("with a backtick fence longer than any backtick run inside it");
+    expect(section2).toContain("capped at about 40 lines of its own");
     expect(section2).toContain("issue not read");
     for (const excluded of [
       "[bb system]",
@@ -744,18 +749,22 @@ describe("review-code content", () => {
   });
 
   it("keeps the closure brief free of a Request block and ends §5 with the recomputed Done verdict", () => {
+    expect(normalized.indexOf("## 5.")).toBeGreaterThan(-1);
     const section5 = normalized.slice(normalized.indexOf("## 5."));
     expect(section5).toContain("The closure brief carries no `Request:` block");
     expect(section5).toContain("restate the final `Done:` line");
   });
 
   it("adds scope verification, the Done verdict and backwards compatibility to §4", () => {
+    expect(normalized.indexOf("## 4.")).toBeGreaterThan(-1);
+    expect(normalized.indexOf("## 5.")).toBeGreaterThan(-1);
     const section4 = normalized.slice(normalized.indexOf("## 4."), normalized.indexOf("## 5."));
     for (const phrase of [
       "Scope verification",
       "due by the end of this scope",
       "Done: Partially",
       "Any qualification on whether the request is met means",
+      "Write the line plain, not bold",
       "Backwards compatibility:",
       "Fix-path coverage",
     ]) {
@@ -870,6 +879,12 @@ describe("devkit README", () => {
     const text = await readFile(readmePath, "utf8");
     expect(text).not.toContain("declared out of scope: Advisory");
     expect(text).toContain("capped at conditional Concerns");
+  });
+
+  it("documents the Done line's `n/a (no request)` value", async () => {
+    const readmePath = path.join(import.meta.dirname, "..", "README.md");
+    const text = await readFile(readmePath, "utf8");
+    expect(text).toContain("`n/a (no request)`");
   });
 
   it("loads the shipped review-delta-scope reference", async () => {

@@ -28,7 +28,8 @@ than 400 files is reviewed but never auto-committed or merged, because that list
 long to hand over as a reliable commit boundary. The local merge is skipped unless the final
 `Done:` line of the turn's devkit review starts with `Done: Yes` or `Done: n/a`, and the work is
 still committed. When that happens, read what the reply says remains, then finish it or merge the
-branch yourself.
+branch yourself. With a devkit older than this check, whose review has no `Done:` step, the check
+does not apply and the reply says devkit needs an update.
 
 When it commits, the injected turn then judges — from the thread's own plan — whether the
 work is actually finished, and continues any genuinely-remaining planned work (reviewing and

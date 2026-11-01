@@ -289,6 +289,7 @@ describe("buildReviewPrompt", () => {
       );
       expect(text).toContain("treat it as not done");
       expect(text).toContain("this check does not apply to it");
+      expect(text).toContain("that is an older devkit, so this check does not apply");
     }
     const self = buildReviewPrompt({
       decision: { commit: true, merge: true },
@@ -304,6 +305,7 @@ describe("buildReviewPrompt", () => {
     expect(noMerge).not.toMatch(/8\. Merge the current branch/u);
     expect(noMerge).not.toContain("treat it as not done");
     expect(noMerge).not.toContain("this check does not apply to it");
+    expect(noMerge).not.toContain("that is an older devkit, so this check does not apply");
   });
 
   it("guards the primary-checkout merge against clobbering foreign uncommitted work", () => {

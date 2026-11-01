@@ -411,7 +411,9 @@ It ships enabled (opt-out).
   `main` is never a merge target, and the primary checkout is never committed to there. The local
   merge is skipped unless the final `Done:` line of the turn's devkit review starts with
   `Done: Yes` or `Done: n/a`, and the work is still committed. When that happens, read what the
-  reply says remains, then finish it or merge the branch yourself.
+  reply says remains, then finish it or merge the branch yourself. With a devkit older than this
+  check, whose review has no `Done:` step, the check does not apply and the reply says devkit needs
+  an update.
 - Holds the turn while any child it spawned, in any turn, is still running (directly or
   transitively): bb wakes it with a new turn each time one ends, but only the turn after
   the last one ends reviews its work — an earlier wake-up with another child still running

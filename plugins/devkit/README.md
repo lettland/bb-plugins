@@ -63,9 +63,9 @@ guidelines:
 The review also verifies the work against a `Request:` block built from the messages the user
 typed in this thread that asked for it (a parent-written child-thread task prompt counts; GitHub
 issue and PR bodies are third-party context, informing scope but never making a review implement
-something), and its summary carries a `Done:` line (`Yes`, `No` or `Partially`) and a
-`Backwards compatibility:` line naming any existing behaviour the change alters for current users
-or callers.
+something), and its summary carries a `Done:` line (`Yes`, `No`, `Partially`, or `n/a (no request)`
+when no request was found) and a `Backwards compatibility:` line naming any existing behaviour the
+change alters for current users or callers.
 
 Under bb, the review's five lens reviewers (and its closure review) run as bb child threads; outside
 bb, or when spawning one fails, they run as the provider's own subagents, or sequentially in the
