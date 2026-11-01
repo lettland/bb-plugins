@@ -114,17 +114,21 @@ that lens through to the next, independently per lens.
   backstop. Never map `full` to `accept-edits`: on Claude Code that stalls at the first shell
   approval, which drops the lens straight to subagents.
 
-  **Reasoning level**: this skill sets no level policy. Use the level your thread's rules give
-  reviewer threads (project, plugin or user instructions); only when nothing sets one, fall back
-  to the parent's `.execution.nextTurn.reasoningLevel` (omit the flag if that is `null`).
+  **Reasoning level**: this skill sets no default level. Use the level your thread's rules give
+  reviewer threads (project, plugin or user instructions) when it is one lowercase word such as
+  `low`, `medium`, `high`, `xhigh` or `max`; otherwise (nothing sets one, or it is not such a
+  word) use the parent's `.execution.nextTurn.reasoningLevel`, and omit the flag if that is
+  `null`. If the spawn is rejected for a rule-set level, retry once with the parent's level
+  (omit the flag if that is `null`).
 
   **Brief file**: the run dir comes from §2 (`mktemp -d "${TMPDIR:-/tmp}/review-XXXXXX"` — `$TMPDIR`
   may be unset (Linux, remote environments), and `-d` makes a real directory instead of the literal
   template BSD/macOS `mktemp -u` prints whenever its run of placeholder letters isn't the very end
   of the string (a trailing file extension breaks it)). Write each lens's brief at
   `<run dir>/<lens>.md` with your file tool, not the shell, and never into the checkout; delete it
-  once no further spawn attempt will read it — after a successful spawn, or once the permission-mode
-  retry (if any) has also failed. The tree guard below keeps its config snapshot in the run dir too.
+  once no further spawn attempt will read it — after a successful spawn, or once every
+  retry (permission mode, level) has also failed. The tree guard below keeps its config snapshot in
+  the run dir too.
   On every tier, not just here, at the end of the review (after §5's closure review) run
   `rm -f "<run dir>"/*` then `rmdir "<run dir>"` — never a recursive remove. Each round snapshot
   is its own flat `mktemp -d` dir (`review-delta-scope`), removed the same way
