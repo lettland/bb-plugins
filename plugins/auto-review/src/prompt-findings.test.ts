@@ -59,6 +59,11 @@ describe("reportReviewStep", () => {
     const overflow = reportReviewStep({ commit: true, merge: true } as never, true);
     expect(overflow).not.toContain("`committed` (the work is committed)");
   });
+
+  it("tells the reviewer to start the summary with the devkit review's final Done line", () => {
+    const step = reportReviewStep({ commit: true, merge: false } as never, false);
+    expect(step).toContain("(when devkit's review ran, start it with that review's final `Done:` line)");
+  });
 });
 
 describe("priorFindingsSection: a finding without a reason", () => {

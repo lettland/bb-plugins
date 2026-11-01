@@ -43,10 +43,12 @@ If you notice project-wide issues while reviewing, mention them as a brief note 
 - **Over-engineering:** Is the plan more complex than the problem requires?
 - **Dependencies and sequencing:** Are there implicit ordering constraints the plan ignores?
 - **Technical debt:** Does this create or reduce technical debt?
+- **Backwards compatibility:** does the planned change alter existing behaviour for current users or callers?
 
 ### When reviewing an IMPLEMENTATION:
 
-- **Spec conformance:** Does the code actually do what the provided plan/requirements said it would? Flag gaps between the stated intent and the implementation. _(Only when a requirements doc was provided.)_
+- **Spec conformance:** Does the code actually do what the provided plan/requirements said it would? Flag gaps between the stated intent and the implementation. _(Only when the brief's `Request:` block is not `none` or a requirements doc was provided. A missing `Request:` item is at most a Concern, as the block says.)_
+- **Backwards compatibility:** does the change alter existing behaviour for current users or callers (CLI flags, config keys, output shape, defaults, wire format)? A new optional input and its new errors are not a break.
 - **Code quality:** Is the code readable, maintainable, and idiomatic?
 - **Patterns:** Does it follow established codebase patterns, or introduce new ones without justification?
 - **Performance:** Obvious issues like N+1 queries, unnecessary allocations, missing indexes?
@@ -73,7 +75,7 @@ If you notice project-wide issues while reviewing, mention them as a brief note 
 
 ## Output Format
 
-Prefix every finding's title with exactly one literal tag, `(spec)` or `(code)` — never echo the placeholder. **`(spec)`** = the work fails a requirement, brief, or goal it is meant to satisfy (a requirements doc, or the brief a plan under review states), **or violates a documented project convention surfaced in `Project context`**. **`(code)`** = a defect or risk independent of that intent; this is the default — tag every finding `(code)` when no requirement or brief was given. The tag is informational and never changes the severity tier.
+Prefix every finding's title with exactly one literal tag, `(spec)` or `(code)` — never echo the placeholder. **`(spec)`** = the work fails a requirement, brief, or goal it is meant to satisfy (the brief's `Request:` block, a requirements doc, or the brief a plan under review states), **or violates a documented project convention surfaced in `Project context`**. **`(code)`** = a defect or risk independent of that intent; this is the default — tag every finding `(code)` when no requirement or brief was given. The tag is informational and never changes the severity tier.
 
 ```
 [Senior Developer] Review

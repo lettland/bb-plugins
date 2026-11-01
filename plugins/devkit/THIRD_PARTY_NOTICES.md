@@ -10,6 +10,14 @@ devkit also draws on the idea of [caveman](https://github.com/JuliusBrussee/cave
 (`content/skills/concise-output/SKILL.md`), but copies no text from it, so no
 license text is reproduced for it here.
 
+devkit's review request/scope check, done verdict, verify scenarios, test-value check and
+flaky-test triage draw on the ideas of
+[testomatio/skills](https://github.com/testomatio/skills) (commit
+e1cf03227adfcb553c94ea5ee08c0eebc397e875, fetched 2026-11-01) in
+`content/skills/review-code/SKILL.md`, the five `content/references/reviewer-*.md` files,
+`content/references/review-finding-disposition.md` and `content/skills/testing-strategy/SKILL.md`,
+but copy no text from it, so no license text is reproduced for it here.
+
 ---
 
 ## Anthropic pr-review-toolkit (Apache-2.0)

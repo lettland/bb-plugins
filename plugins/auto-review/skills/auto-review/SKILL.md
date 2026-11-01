@@ -25,7 +25,10 @@ change, rather than one large commit. Each commit is checked to carry what it de
 but only the full set is built and tested. If one of those commits fails, the earlier ones
 stay, the rest is left uncommitted, and the branch is not merged. A turn that changed more
 than 400 files is reviewed but never auto-committed or merged, because that list is too
-long to hand over as a reliable commit boundary.
+long to hand over as a reliable commit boundary. The local merge is skipped unless the final
+`Done:` line of the turn's devkit review starts with `Done: Yes` or `Done: n/a`, and the work is
+still committed. When that happens, read what the reply says remains, then finish it or merge the
+branch yourself.
 
 When it commits, the injected turn then judges — from the thread's own plan — whether the
 work is actually finished, and continues any genuinely-remaining planned work (reviewing and

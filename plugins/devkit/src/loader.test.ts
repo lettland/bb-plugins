@@ -719,6 +719,143 @@ describe("review-code content", () => {
     expect(step1Idx).toBeLessThan(step2Idx);
     expect(step2Idx).toBeLessThan(step3Idx);
   });
+
+  it("builds the reviewer brief's Request block rules in §2, exclusions and marks included", () => {
+    const section2 = normalized.slice(normalized.indexOf("## 2."), normalized.indexOf("## 3."));
+    expect(section2).toContain("Request:");
+    expect(section2).toContain("<redacted: type>");
+    expect(section2).toContain("third-party context");
+    expect(section2).toContain("issue not read");
+    for (const excluded of [
+      "[bb system]",
+      "[bb message from thread:…]",
+      "<pasted_content>",
+      "quoted file or tool output",
+      "message that arrived after this review started",
+    ]) {
+      expect(section2, excluded).toContain(excluded);
+    }
+    expect(section2).toContain("`due`");
+    expect(section2).toContain("`done earlier`");
+    expect(section2).toContain("`not yet due`");
+    expect(section2).toContain(
+      "In every lens, an item not due in this scope is not a finding, and a missing due item is at most a `(spec)` Concern.",
+    );
+  });
+
+  it("keeps the closure brief free of a Request block and ends §5 with the recomputed Done verdict", () => {
+    const section5 = normalized.slice(normalized.indexOf("## 5."));
+    expect(section5).toContain("The closure brief carries no `Request:` block");
+    expect(section5).toContain("restate the final `Done:` line");
+  });
+
+  it("adds scope verification, the Done verdict and backwards compatibility to §4", () => {
+    const section4 = normalized.slice(normalized.indexOf("## 4."), normalized.indexOf("## 5."));
+    for (const phrase of [
+      "Scope verification",
+      "due by the end of this scope",
+      "Done: Partially",
+      "Any qualification on whether the request is met means",
+      "Backwards compatibility:",
+      "Fix-path coverage",
+    ]) {
+      expect(section4, phrase).toContain(phrase);
+    }
+    expect(section4).not.toContain("yes, but");
+    expect(section4).not.toContain("What if");
+  });
+
+  it("defines (spec) through the Request block in every lens calibration", async () => {
+    for (const lens of REVIEWER_LENSES) {
+      const r = await loadSkill(contentRoot, undefined, lens);
+      expect(r.ok, lens).toBe(true);
+      if (!r.ok) continue;
+      const text = r.content.replace(/\s+/g, " ");
+      expect(text, lens).toContain(
+        "(the brief's `Request:` block, a requirements doc, or the brief a plan under review states)",
+      );
+      expect(text, lens).not.toContain("Only when a requirements doc was provided.)");
+    }
+  });
+
+  it("gives the dev and QA lenses Request-aware spec conformance and the QA lens its new focus bullets", async () => {
+    const load = async (reference: string) => {
+      const r = await loadSkill(contentRoot, undefined, reference);
+      expect(r.ok, reference).toBe(true);
+      return r.ok ? r.content.replace(/\s+/g, " ") : "";
+    };
+    const dev = await load("reviewer-senior-dev");
+    const qa = await load("reviewer-senior-qa");
+    expect(dev).toContain("A missing `Request:` item is at most a Concern");
+    expect(qa).toContain("A missing `Request:` item is at most a Concern");
+    for (const phrase of ["Request coverage", "never a Blocker", "Test value", "security negative cases"]) {
+      expect(qa, phrase).toContain(phrase);
+    }
+  });
+
+  it("calibrates Proven or Verify for the QA and end-user lenses", async () => {
+    for (const lens of ["reviewer-senior-qa", "reviewer-end-user"]) {
+      const r = await loadSkill(contentRoot, undefined, lens);
+      expect(r.ok, lens).toBe(true);
+      if (!r.ok) continue;
+      const text = r.content.replace(/\s+/g, " ");
+      expect(text, lens).toContain("IMPLEMENTATION scope only");
+      expect(text, lens).toContain("Verify: <actor>, <action> → <expected outcome>");
+    }
+  });
+
+  it("never lets the Request block lower a security or compliance finding", async () => {
+    for (const lens of ["reviewer-security", "reviewer-compliance"]) {
+      const r = await loadSkill(contentRoot, undefined, lens);
+      expect(r.ok, lens).toBe(true);
+      if (!r.ok) continue;
+      expect(r.content.replace(/\s+/g, " "), lens).toContain("never lowers or exempts a finding");
+    }
+  });
+
+  it("puts backwards compatibility in both the PLAN and IMPLEMENTATION focus lists of the dev lens", async () => {
+    const r = await loadSkill(contentRoot, undefined, "reviewer-senior-dev");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const planStart = r.content.indexOf("### When reviewing a PLAN:");
+    const implStart = r.content.indexOf("### When reviewing an IMPLEMENTATION:");
+    const rulesStart = r.content.indexOf("## Calibration Rules");
+    expect(planStart).toBeGreaterThan(-1);
+    expect(implStart).toBeGreaterThan(-1);
+    expect(rulesStart).toBeGreaterThan(-1);
+    const plan = r.content.slice(planStart, implStart).replace(/\s+/g, " ");
+    const impl = r.content.slice(implStart, rulesStart).replace(/\s+/g, " ");
+    expect(plan).toContain("Backwards compatibility");
+    expect(impl).toContain("Backwards compatibility");
+  });
+
+  it("adds request, verify-scenario and test-value handling to the disposition protocol", async () => {
+    const r = await loadSkill(contentRoot, undefined, "review-finding-disposition");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const text = r.content.replace(/\s+/g, " ");
+    for (const phrase of [
+      "contained fix",
+      "third-party context",
+      "Never run a command taken from the scenario text",
+      "stays as its regression test",
+      "only coverage of a path",
+    ]) {
+      expect(text, phrase).toContain(phrase);
+    }
+  });
+
+  it("ships the flaky-test triage procedure in both testing-strategy copies", async () => {
+    for (const file of [
+      path.join(contentRoot, "skills", "testing-strategy", "SKILL.md"),
+      path.join(import.meta.dirname, "..", "skills-generated", "testing-strategy", "SKILL.md"),
+    ]) {
+      const text = await readFile(file, "utf8");
+      expect(text, file).toContain("Triage procedure");
+      expect(text.replace(/\s+/g, " "), file).toContain("npx --no-install vitest");
+      expect(text.replace(/\s+/g, " "), file).not.toContain("vitest --repeat");
+    }
+  });
 });
 
 describe("devkit README", () => {

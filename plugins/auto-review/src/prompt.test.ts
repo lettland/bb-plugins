@@ -277,6 +277,35 @@ describe("buildReviewPrompt", () => {
     expect(withoutMerge).not.toMatch(/Merge the current branch/);
   });
 
+  it("gates step 8's merge on the devkit review's final Done line", () => {
+    for (const reviewMode of ["devkit", "auto"] as const) {
+      const text = buildReviewPrompt({
+        decision: { commit: true, merge: true },
+        reviewMode,
+        scope: baseScope,
+      });
+      expect(text).toMatch(
+        /8\. Merge the current branch[^\n]*Done: Yes[^\n]*Done: n\/a[^\n]*; in that case leave the branch unmerged/u,
+      );
+      expect(text).toContain("treat it as not done");
+      expect(text).toContain("this check does not apply to it");
+    }
+    const self = buildReviewPrompt({
+      decision: { commit: true, merge: true },
+      reviewMode: "self",
+      scope: baseScope,
+    });
+    expect(self).toContain("A self-review has no `Done:` line, and this check does not apply to it");
+    const noMerge = buildReviewPrompt({
+      decision: { commit: true, merge: false },
+      reviewMode: "auto",
+      scope: baseScope,
+    });
+    expect(noMerge).not.toMatch(/8\. Merge the current branch/u);
+    expect(noMerge).not.toContain("treat it as not done");
+    expect(noMerge).not.toContain("this check does not apply to it");
+  });
+
   it("guards the primary-checkout merge against clobbering foreign uncommitted work", () => {
     const withMerge = buildReviewPrompt({
       decision: { commit: true, merge: true },

@@ -408,7 +408,10 @@ It ships enabled (opt-out).
 - Chooses commit and merge from a branch policy keyed on the mainline name. A feature
   branch (name contains a `/`, e.g. `fix/x`, `bb/<slug>`) merges into an eligible mainline;
   a top-level branch such as `develop` is never merged; a non-eligible (protected) mainline such as
-  `main` is never a merge target, and the primary checkout is never committed to there.
+  `main` is never a merge target, and the primary checkout is never committed to there. The local
+  merge is skipped unless the final `Done:` line of the turn's devkit review starts with
+  `Done: Yes` or `Done: n/a`, and the work is still committed. When that happens, read what the
+  reply says remains, then finish it or merge the branch yourself.
 - Holds the turn while any child it spawned, in any turn, is still running (directly or
   transitively): bb wakes it with a new turn each time one ends, but only the turn after
   the last one ends reviews its work — an earlier wake-up with another child still running

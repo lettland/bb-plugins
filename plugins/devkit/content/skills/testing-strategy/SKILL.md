@@ -113,6 +113,19 @@ CI retries hide flakes. Retry max once _with telemetry_; track flake rate.
 
 A flake is either a bug in the test or a bug in the system, and the second case ships.
 
+**Triage procedure:**
+
+1. Reproduce in a loop before changing anything:
+   `for i in $(seq 20); do npx --no-install vitest run <file> || { echo "failed on run $i"; break; }; done`
+   (add `--sequence.shuffle` for ordering; read the output, since the loop's exit status does
+   not tell you), `go test -count=50 -race -shuffle=on ./pkg/...`, or `pytest --count=50` /
+   `pytest -p randomly` only when pytest-repeat / pytest-randomly is already a dev dependency.
+   Never install a package just to reproduce.
+2. Name the cause from the table below before editing.
+3. Change an assertion only to match the spec, never to make it pass.
+4. Stable means the reproduce loop passes in full, then the whole suite passes twice in a row.
+5. After three failed fixes, stop and report what you tried (see `debugging`).
+
 | Cause                   | Symptom                               | Fix                                                                   |
 | ----------------------- | ------------------------------------- | --------------------------------------------------------------------- |
 | **Time**                | Fails near midnight / DST / leap day  | Inject + freeze clock; test "+1 hour" not "23:30"                     |
