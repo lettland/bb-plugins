@@ -114,6 +114,10 @@ that lens through to the next, independently per lens.
   backstop. Never map `full` to `accept-edits`: on Claude Code that stalls at the first shell
   approval, which drops the lens straight to subagents.
 
+  **Reasoning level**: this skill sets no level policy. Use the level your thread's rules give
+  reviewer threads (project, plugin or user instructions); only when nothing sets one, fall back
+  to the parent's `.execution.nextTurn.reasoningLevel` (omit the flag if that is `null`).
+
   **Brief file**: the run dir comes from §2 (`mktemp -d "${TMPDIR:-/tmp}/review-XXXXXX"` — `$TMPDIR`
   may be unset (Linux, remote environments), and `-d` makes a real directory instead of the literal
   template BSD/macOS `mktemp -u` prints whenever its run of placeholder letters isn't the very end
@@ -130,7 +134,7 @@ that lens through to the next, independently per lens.
   ```sh
   bb thread spawn --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" \
     --project <projectId> --environment "$BB_ENVIRONMENT_ID" --provider <providerId> \
-    --model <model> --reasoning-level <reasoningLevel> --permission-mode <mode> \
+    --model <model> --reasoning-level <level> --permission-mode <mode> \
     --title "review: <reviewer>" --json --prompt-file <brief-file>
   ```
 
