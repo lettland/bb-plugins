@@ -154,6 +154,7 @@ describe("parseRules", () => {
   });
 
   it.each([
+    ['{"vars": {"a": "x"}, "rules": [{"instructions": "{{toString}}"}]}', "unknown variable {{toString}}"],
     ['{"vars": {"a": "x"}, "rules": [{"instructions": "{{nope}}"}]}', "unknown variable {{nope}}"],
     ['{"vars": {"1bad": "x"}, "rules": []}', "at vars.1bad"],
     ['{"vars": {"a": 5}, "rules": []}', "expected string, received number"],

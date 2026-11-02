@@ -46,9 +46,8 @@ function expand(instructions: string, vars: Record<string, string>): string {
   return instructions.replace(
     /\{\{([A-Za-z][A-Za-z0-9_-]*)\}\}/g,
     (ref, name: string) => {
-      const value = vars[name];
-      if (value === undefined) throw new Error(`unknown variable ${ref}`);
-      return value;
+      if (!Object.hasOwn(vars, name)) throw new Error(`unknown variable ${ref}`);
+      return vars[name];
     },
   );
 }
