@@ -150,6 +150,8 @@ export default async function plugin(bb: BbPluginApi) {
   async function triage(ctx: MessageDispatchHookContext): Promise<void> {
     if (!config.triage || skipped(ctx.project.name)) return;
     if (ctx.initiator !== "user") return;
+    // bb plugin turns carry the user's initiator too (see the note in plugins/auto-review/src/detect-events.ts), so skip their "[bb " marker.
+    if (typeof ctx.input.text === "string" && ctx.input.text.trimStart().startsWith("[bb ")) return;
     if (ctx.attempt !== "start-turn") return;
     if (ctx.parentThreadId !== null) return;
     if (ctx.queuedMessages.length !== 0) return;

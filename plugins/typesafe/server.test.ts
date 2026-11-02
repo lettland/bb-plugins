@@ -502,6 +502,40 @@ describe("message.dispatch triage hook", () => {
     await host.harness.dispose();
   });
 
+  it.each(["[bb auto-review]", "[bb system]"] as const)(
+    "keeps the stored verdict for a %s message and re-sizes the next real request",
+    async (marker) => {
+      const host = createHost({ apiKey: TEST_KEY });
+      await plugin(host.bb);
+      fetchMock.mockResolvedValueOnce(okResponse(triageResponse("non_trivial")));
+      await hookOf(host)(
+        makeMessageDispatchHookContext({ input: { text: "Refactor the export pipeline." } }),
+      );
+      fetchMock.mockClear();
+      const decision = await hookOf(host)(
+        makeMessageDispatchHookContext({
+          input: { text: `   ${marker} Sizes the latest turn: non_trivial, no plan needed.` },
+        }),
+      );
+      expect(decision).toEqual({ action: "proceed" });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(await host.harness.behavior.callRpc("changeSize", { threadId: "thread-1" })).toEqual({
+        verdict: "non_trivial",
+        messageSeq: 7,
+      });
+      fetchMock.mockResolvedValueOnce(okResponse(triageResponse("trivial")));
+      await hookOf(host)(
+        makeMessageDispatchHookContext({ input: { text: "A follow-up request." } }),
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(await host.harness.behavior.callRpc("changeSize", { threadId: "thread-1" })).toEqual({
+        verdict: "trivial",
+        messageSeq: 7,
+      });
+      await host.harness.dispose();
+    },
+  );
+
   it("re-sizes every new user request and keeps the latest verdict with its seq", async () => {
     let seq = 0;
     const host = createHost({ apiKey: TEST_KEY }, async () => ({ rows: [], maxSeq: (seq += 5) }));
