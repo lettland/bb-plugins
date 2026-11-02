@@ -51,6 +51,99 @@ bb plugin install git:https://github.com/lettland/bb-plugins.git --plugin auto-r
 bb plugin install git:https://github.com/lettland/bb-plugins.git --subdirectory plugins/auto-review
 ```
 
+## Switch from the built-in tasks, thread-list and github
+
+`tasks-fork`, `thread-list-fork` and `github-fork` are copies of bb's built-in
+`tasks`, `thread-list` and `github`. bb keys plugin state by plugin id, so a
+copy starts empty. `scripts/migrate-builtin-copies.mjs` copies the id-keyed
+state to the new ids:
+
+| Old id | New id |
+|---|---|
+| `tasks` | `tasks-fork` |
+| `thread-list` | `thread-list-fork` |
+| `github` | `github-fork` |
+
+What the script does, with bb stopped:
+
+- Refuses to run (exit 1, nothing written) when `lsof` shows a process with
+  `<data-dir>/bb.db` or `bb.db-wal` open, when `bb.db` is missing, when
+  `plugin_kv` or `plugin_settings` already has rows for a new id, or when a
+  new `data.db` already exists.
+- Backs up `bb.db` with `sqlite3 ".backup"` to
+  `bb.db.pre-fork-copies-<UTC timestamp>` (mode 600) and prints its path.
+- Copies each `<data-dir>/plugins/<old id>/data.db` to
+  `<data-dir>/plugins/<new id>/data.db` with `sqlite3 ".backup"` (mode 600), so
+  content that is still in the WAL file is included. An old id without a
+  `data.db` is skipped and reported. `tasks` normally has none.
+- In one transaction, copies every `plugin_kv` and `plugin_settings` row of an
+  old id to the new id. This includes the github `extraRepos` and
+  `defaultProject` settings, the github `sync-cursor` and `link:*` keys, the
+  thread-list `preference:*` keys and the thread-list
+  `migration:ui-preferences:v1` flag.
+- Rewrites the host action key `thread-list/move` to `thread-list-fork/move` in
+  the copied `preference:rowActions` row. It parses the JSON array and changes
+  only that entry.
+- Sets the `sidebar.threadListProvider` UI preference to
+  `thread-list-fork/thread-list` when it is exactly `thread-list/thread-list`.
+  Any other value, including `__automatic__`, stays as it is.
+- Prints the row counts of every old and new id per table (and per table of
+  each copied `data.db`), and exits 1 when a count differs.
+- Leaves the old directories and rows in place, and prints the commands to
+  delete them.
+
+The script does not copy these tables, because the copy does not need them:
+`plugins` and `plugin_artifacts` (the install creates them),
+`plugin_state_snapshots` (rollback data for the old plugin's artifacts),
+`plugin_schedules` (none of the three plugins registers a schedule),
+`thread_tabs` (open-tab state per thread; a stored GitHub PR tab names the old
+id and is dropped, so reopen it), `thread_plugin_metadata`, `app_theme` (no
+plugin id) and the `origin_plugin_id` columns on threads (history).
+
+Switch-over order:
+
+1. Stop bb.
+2. Run the script. `--data-dir` defaults to `~/.bb`; pass `~/.bb-dev` or the
+   data directory of another instance.
+
+   ```sh
+   node scripts/migrate-builtin-copies.mjs --data-dir ~/.bb
+   ```
+
+3. Start bb.
+4. Install the three copies:
+
+   ```sh
+   bb plugin install tasks-fork@lettland-plugins
+   bb plugin install thread-list-fork@lettland-plugins
+   bb plugin install github-fork@lettland-plugins
+   ```
+
+5. Disable the built-ins: `bb plugin disable tasks`, `bb plugin disable
+   thread-list` and `bb plugin disable github`.
+6. Select the copied thread list:
+   `bb settings ui set sidebar.threadListProvider thread-list-fork/thread-list`.
+   The script already did this when the old thread list was selected
+   explicitly; run it when the value was `__automatic__`.
+7. Verify: the thread-list sort and grouping, the github `extraRepos` setting
+   and panel, archive and undo of a thread, and that `bb thread-list --help`
+   and `bb tasks --help` each resolve to one plugin. Then delete the old directories and rows with the
+   commands the script printed.
+
+Browser `localStorage` values do not migrate:
+
+- `bb.thread-list.preferences.v1` is the browser mirror of the thread-list
+  preferences. The copy reads `bb.thread-list-fork.preferences.v1` and rebuilds
+  it from the server on first load. The old key stays orphaned.
+- `bb.plugin-surface-provider*` is a cache of the surface provider. It
+  rewrites itself.
+
+The tasks keys `bb-tasks:view-preferences`, `bb-tasks:project-focus` and
+`bb-tasks:last-dispatch-preset` keep their names in the copy, so they carry
+over in the same browser profile.
+
+Test the script with `node --test scripts/migrate-builtin-copies.test.mjs`.
+
 ## Local development
 
 Each plugin builds standalone with the `bb` CLI (shipped in the public `bb-app`
