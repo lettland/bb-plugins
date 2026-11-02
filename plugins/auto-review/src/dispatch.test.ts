@@ -9,6 +9,147 @@ const state = {
   turnStart: { sinceSeq: 0, startedAt: 1_000, tree: { headSha: "0123abcd", files: {}, commits: [] } },
 } as unknown as ThreadState;
 
+type MetadataCall = { set?: Record<string, unknown>; remove?: string[] };
+
+/** A resolved plan-approval lifecycle row for the dispatch-time plan window. */
+const lifecycle = (seq: number, decision = "allow_once") => ({
+  seq,
+  type: "system/interaction/lifecycle",
+  scope: { kind: "turn", turnId: "turn-1" },
+  data: {
+    interaction: {
+      id: "pint-1",
+      status: "resolved",
+      statusReason: null,
+      payload: {
+        kind: "approval",
+        availableDecisions: ["allow_once", "deny"],
+        reason: null,
+        subject: { kind: "plan", itemId: "i", plan: "# Plan", planFilePath: null },
+      },
+      resolution: { decision },
+    },
+  },
+});
+
+/**
+ * Drives one `dispatchReview` over thread `thr_1` against a fake host. The sdk
+ * stubs nest by path; an unset rpc, event log, or workspace stays unstubbed,
+ * so sizing and the baseline fail closed the way production sees a missing
+ * plugin. `body` receives the metadata writes and the text of every sent turn.
+ */
+async function withDispatch(
+  options: {
+    reviewMode: ReviewMode;
+    plugins: unknown[] | "throws";
+    pluginsThrowAs?: unknown;
+    timelineThrows?: boolean;
+    sendThrows?: unknown;
+    /** Extra sdk stubs, such as `environments`, for a test that drives the workspace reads. */
+    environments?: Record<string, unknown>;
+    /** The `changeSize` rpc verdict, or "throws" for a failing rpc; unset leaves it unstubbed, so sizing fails closed. */
+    callRpc?: unknown | "throws";
+    /** The `system/interaction/lifecycle` rows the plan window may read, or "throws"; unset leaves the log empty. */
+    events?: Array<Record<string, unknown>> | "throws";
+    /** The cursor the previous code review captured before its send: the reviewed window's start. */
+    lastCodeReviewSeq?: number;
+    /** The turn's files in scope. Default: one file, `a.ts`. */
+    scope?: string[];
+  },
+  body: (
+    calls: MetadataCall[],
+    bb: Awaited<ReturnType<typeof createFakePluginHost>>["bb"],
+    sent: string[],
+  ) => Promise<void>,
+) {
+  const calls: MetadataCall[] = [];
+  const sent: string[] = [];
+  const sdk = {
+    plugins: {
+      list: async () => {
+        if (options.pluginsThrowAs !== undefined) {
+          throw options.pluginsThrowAs;
+        }
+        if (options.plugins === "throws") {
+          throw new Error("plugin list unavailable");
+        }
+        return { plugins: options.plugins };
+      },
+      callRpc: async (args: { method: string }) => {
+        if (options.callRpc === undefined) {
+          throw new Error(`no ${args.method} rpc stub`);
+        }
+        if (options.callRpc === "throws") {
+          throw new Error("change-size rpc down");
+        }
+        return options.callRpc;
+      },
+    },
+    threads: {
+      timeline: async () => {
+        if (options.timelineThrows === true) {
+          throw new Error("timeline down");
+        }
+        return { rows: [], maxSeq: 500 };
+      },
+      updatePluginMetadata: async (args: MetadataCall) => {
+        calls.push(args);
+        return {};
+      },
+      send: async (args: { input: Array<{ text: string }> }) => {
+        sent.push(args.input[0].text);
+        if (options.sendThrows !== undefined) {
+          throw options.sendThrows;
+        }
+        return { delivery: "queued", queuedMessage: { id: "qm-1" } };
+      },
+      events: {
+        list: async (args: { afterSeq?: string; types?: string[]; limit?: string }) => {
+          if (options.events === "throws") {
+            throw new Error("events down");
+          }
+          return (options.events ?? [])
+            .filter(
+              (row) =>
+                Number(row.seq) > Number(args.afterSeq ?? 0) && args.types?.includes(String(row.type)) !== false,
+            )
+            .slice(0, Number(args.limit));
+        },
+      },
+    },
+    // An undefined value is fine: the fake sdk ignores an override that is no object.
+    environments: options.environments,
+  } as unknown as CreateFakePluginHostOptions["sdk"];
+  const host = createFakePluginHost({ pluginId: "auto-review", sdk, agentSkillIds: ["auto-review"] });
+  try {
+    await dispatchReview(await createReviewContext(host.bb), {
+      thread: {
+        parentThreadId: null,
+        originPluginId: null,
+        visibility: "public",
+        environmentId: null,
+        providerId: "prov-1",
+        archivedAt: null,
+        id: "thr_1",
+        projectId: "project-1",
+      },
+      state: {
+        ...(options.lastCodeReviewSeq === undefined ? {} : { lastCodeReviewSeq: options.lastCodeReviewSeq }),
+      } as ThreadState,
+      environmentId: "env-1",
+      config: { reviewMode: options.reviewMode } as EffectiveConfig,
+      decision: { commit: true, merge: false },
+      base: "main",
+      isWorktree: false,
+      scope: options.scope ?? ["a.ts"],
+      turn: { paths: ["a.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [], parkedCommits: [], parkedPaths: [] },
+    });
+    await body(calls, host.bb, sent);
+  } finally {
+    await host.harness.dispose();
+  }
+}
+
 describe("committedSinceHead", () => {
   it("gives the turn-start head when the turn made commits", () => {
     const turn = { paths: ["a.ts"], commits: ["c1"], committedPaths: ["a.ts"], foreignCommits: [], upstreamCommits: [], parkedCommits: [], parkedPaths: [] };
@@ -191,83 +332,7 @@ describe("devkitRunning", () => {
 });
 
 describe("the review-code latch in sendReview", () => {
-  const THREAD_ID = "thr_1";
-  type MetadataCall = { set?: Record<string, unknown>; remove?: string[] };
   const devkit = { enabled: true, status: "running", cliCommand: { name: "devkit" } };
-
-  async function withDispatch(
-    options: {
-      reviewMode: ReviewMode;
-      plugins: unknown[] | "throws";
-      pluginsThrowAs?: unknown;
-      timelineThrows?: boolean;
-      sendThrows?: unknown;
-      /** Extra sdk stubs, such as `environments`, for a test that drives the workspace reads. */
-      environments?: Record<string, unknown>;
-    },
-    body: (calls: MetadataCall[], bb: Awaited<ReturnType<typeof createFakePluginHost>>["bb"]) => Promise<void>,
-  ) {
-    const calls: MetadataCall[] = [];
-    const sdk = {
-      plugins: {
-        list: async () => {
-          if (options.pluginsThrowAs !== undefined) {
-            throw options.pluginsThrowAs;
-          }
-          if (options.plugins === "throws") {
-            throw new Error("plugin list unavailable");
-          }
-          return { plugins: options.plugins };
-        },
-      },
-      threads: {
-        timeline: async () => {
-          if (options.timelineThrows === true) {
-            throw new Error("timeline down");
-          }
-          return { rows: [], maxSeq: 500 };
-        },
-        updatePluginMetadata: async (args: MetadataCall) => {
-          calls.push(args);
-          return {};
-        },
-        send: async () => {
-          if (options.sendThrows !== undefined) {
-            throw options.sendThrows;
-          }
-          return { delivery: "queued", queuedMessage: { id: "qm-1" } };
-        },
-      },
-      // An undefined value is fine: the fake sdk ignores an override that is no object.
-      environments: options.environments,
-    } as unknown as CreateFakePluginHostOptions["sdk"];
-    const host = createFakePluginHost({ pluginId: "auto-review", sdk, agentSkillIds: ["auto-review"] });
-    try {
-      await dispatchReview(await createReviewContext(host.bb), {
-        thread: {
-          parentThreadId: null,
-          originPluginId: null,
-          visibility: "public",
-          environmentId: null,
-          providerId: "prov-1",
-          archivedAt: null,
-          id: THREAD_ID,
-          projectId: "project-1",
-        },
-        state: {} as ThreadState,
-        environmentId: "env-1",
-        config: { reviewMode: options.reviewMode } as EffectiveConfig,
-        decision: { commit: true, merge: false },
-        base: "main",
-        isWorktree: false,
-        scope: ["a.ts"],
-        turn: { paths: ["a.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [], parkedCommits: [], parkedPaths: [] },
-      });
-      await body(calls, host.bb);
-    } finally {
-      await host.harness.dispose();
-    }
-  }
 
   it("latches reviewSkillRequired in devkit mode, with the cursor in the same write", async () => {
     await withDispatch({ reviewMode: "devkit", plugins: [] }, async (calls) => {
@@ -344,78 +409,7 @@ describe("the review-code latch in sendReview", () => {
 
 describe("dispatchReview when the reads or the send fail", () => {
   const THREAD_ID = "thr_1";
-  type MetadataCall = { set?: Record<string, unknown>; remove?: string[] };
   const devkit = { enabled: true, status: "running", cliCommand: { name: "devkit" } };
-
-  async function withDispatch(
-    options: {
-      reviewMode: ReviewMode;
-      plugins: unknown[] | "throws";
-      pluginsThrowAs?: unknown;
-      timelineThrows?: boolean;
-      sendThrows?: unknown;
-    },
-    body: (calls: MetadataCall[], bb: Awaited<ReturnType<typeof createFakePluginHost>>["bb"]) => Promise<void>,
-  ) {
-    const calls: MetadataCall[] = [];
-    const sdk = {
-      plugins: {
-        list: async () => {
-          if (options.pluginsThrowAs !== undefined) {
-            throw options.pluginsThrowAs;
-          }
-          if (options.plugins === "throws") {
-            throw new Error("plugin list unavailable");
-          }
-          return { plugins: options.plugins };
-        },
-      },
-      threads: {
-        timeline: async () => {
-          if (options.timelineThrows === true) {
-            throw new Error("timeline down");
-          }
-          return { rows: [], maxSeq: 500 };
-        },
-        updatePluginMetadata: async (args: MetadataCall) => {
-          calls.push(args);
-          return {};
-        },
-        send: async () => {
-          if (options.sendThrows !== undefined) {
-            throw options.sendThrows;
-          }
-          return { delivery: "queued", queuedMessage: { id: "qm-1" } };
-        },
-      },
-    } as unknown as CreateFakePluginHostOptions["sdk"];
-    const host = createFakePluginHost({ pluginId: "auto-review", sdk, agentSkillIds: ["auto-review"] });
-    try {
-      await dispatchReview(await createReviewContext(host.bb), {
-        thread: {
-          parentThreadId: null,
-          originPluginId: null,
-          visibility: "public",
-          environmentId: null,
-          providerId: "prov-1",
-          archivedAt: null,
-          id: THREAD_ID,
-          projectId: "project-1",
-        },
-        state: {} as ThreadState,
-        environmentId: "env-1",
-        config: { reviewMode: options.reviewMode } as EffectiveConfig,
-        decision: { commit: true, merge: false },
-        base: "main",
-        isWorktree: false,
-        scope: ["a.ts"],
-        turn: { paths: ["a.ts"], commits: [], committedPaths: [], foreignCommits: [], upstreamCommits: [], parkedCommits: [], parkedPaths: [] },
-      });
-      await body(calls, host.bb);
-    } finally {
-      await host.harness.dispose();
-    }
-  }
 
   it("dispatches without a cursor when the timeline cannot be read", async () => {
     await withDispatch({ reviewMode: "devkit", plugins: [], timelineThrows: true }, async (calls) => {
@@ -444,6 +438,211 @@ describe("dispatchReview when the reads or the send fail", () => {
       expect(store.lastReport).toMatchObject({ outcome: "unavailable" });
       expect(store.incidents).toEqual([expect.objectContaining({ kind: "send-failed", detail: "kaboom" })]);
     });
+  });
+});
+
+describe("dispatchReview sizes the change before it dispatches", () => {
+  const BLOCKER_LINE = "report Blocker: implemented without an approved plan; do not merge";
+  const selfStep = "Review the changes with a focused self-review";
+  const lensesStep = "if the devkit_load_skill tool is available";
+  const workspaceOf = (files: Array<Record<string, unknown>>) => ({
+    status: async () => ({
+      outcome: "available",
+      workspace: { checkout: { kind: "branch", headSha: "0123abcd" }, workingTree: { files } },
+    }),
+  });
+  const inFloor = workspaceOf([{ path: "a.ts", status: "M", insertions: 3, deletions: 2 }]);
+  const overFloor = workspaceOf([{ path: "a.ts", status: "M", insertions: 30, deletions: 30 }]);
+  const nullStats = workspaceOf([{ path: "a.ts", status: "M", insertions: null, deletions: null }]);
+
+  it("self-reviews a fresh trivial verdict whose one file is within the floor, without the blocker", async () => {
+    await withDispatch(
+      { reviewMode: "auto", plugins: [], environments: inFloor, callRpc: { verdict: "trivial", messageSeq: 10 } },
+      async (_calls, _bb, sent) => {
+        expect(sent[0]).toContain(selfStep);
+        expect(sent[0]).not.toContain(lensesStep);
+        expect(sent[0]).not.toContain(BLOCKER_LINE);
+      },
+    );
+  });
+
+  it("keeps the lenses step and no blocker for a lost verdict within the floor", async () => {
+    await withDispatch(
+      { reviewMode: "auto", plugins: [], environments: inFloor, callRpc: { verdict: null, messageSeq: null }, events: [] },
+      async (_calls, _bb, sent) => {
+        expect(sent[0]).toContain(lensesStep);
+        expect(sent[0]).not.toContain(selfStep);
+        expect(sent[0]).not.toContain(BLOCKER_LINE);
+      },
+    );
+  });
+
+  it("reports the blocker for a lost verdict over the floor, walking from the window start", async () => {
+    await withDispatch(
+      { reviewMode: "auto", plugins: [], environments: overFloor, callRpc: { verdict: null, messageSeq: null }, events: [] },
+      async (_calls, _bb, sent) => {
+        expect(sent[0]).toContain(lensesStep);
+        expect(sent[0]).not.toContain(selfStep);
+        expect(sent[0]).toContain(BLOCKER_LINE);
+      },
+    );
+  });
+
+  it("keeps the blocker when the lifecycle read fails while the blocker's condition holds", async () => {
+    // A read failure must not waive the blocker; the warning is asserted on
+    // reviewSize itself in change-size.test.ts.
+    await withDispatch(
+      { reviewMode: "auto", plugins: [], environments: overFloor, callRpc: { verdict: null, messageSeq: null }, events: "throws" },
+      async (_calls, _bb, sent) => {
+        expect(sent[0]).toContain(lensesStep);
+        expect(sent[0]).toContain(BLOCKER_LINE);
+      },
+    );
+  });
+
+  it("gives a stale non_trivial verdict within the floor the lenses step and no blocker", async () => {
+    // The verdict sized an earlier request, whose work the last review covered.
+    await withDispatch(
+      {
+        reviewMode: "auto",
+        plugins: [],
+        environments: inFloor,
+        callRpc: { verdict: "non_trivial", messageSeq: 10 },
+        lastCodeReviewSeq: 20,
+        events: [],
+      },
+      async (_calls, _bb, sent) => {
+        expect(sent[0]).toContain(lensesStep);
+        expect(sent[0]).not.toContain(selfStep);
+        expect(sent[0]).not.toContain(BLOCKER_LINE);
+      },
+    );
+  });
+
+  it("gives a stale trivial verdict within the floor the lenses step too, with no blocker", async () => {
+    await withDispatch(
+      {
+        reviewMode: "auto",
+        plugins: [],
+        environments: inFloor,
+        callRpc: { verdict: "trivial", messageSeq: 10 },
+        lastCodeReviewSeq: 20,
+      },
+      async (_calls, _bb, sent) => {
+        expect(sent[0]).toContain(lensesStep);
+        expect(sent[0]).not.toContain(selfStep);
+        expect(sent[0]).not.toContain(BLOCKER_LINE);
+      },
+    );
+  });
+
+  it("reports the blocker for a stale trivial verdict over the floor when no plan was approved since the window start", async () => {
+    await withDispatch(
+      {
+        reviewMode: "auto",
+        plugins: [],
+        environments: overFloor,
+        callRpc: { verdict: "trivial", messageSeq: 10 },
+        lastCodeReviewSeq: 20,
+        events: [],
+      },
+      async (_calls, _bb, sent) => {
+        expect(sent[0]).toContain(lensesStep);
+        expect(sent[0]).not.toContain(selfStep);
+        expect(sent[0]).toContain(BLOCKER_LINE);
+      },
+    );
+  });
+
+  it("reports the blocker for a fresh trivial verdict over the line floor", async () => {
+    await withDispatch(
+      { reviewMode: "auto", plugins: [], environments: overFloor, callRpc: { verdict: "trivial", messageSeq: 10 }, events: [] },
+      async (_calls, _bb, sent) => {
+        expect(sent[0]).toContain(lensesStep);
+        expect(sent[0]).not.toContain(selfStep);
+        expect(sent[0]).toContain(BLOCKER_LINE);
+      },
+    );
+  });
+
+  it("fails the floor on two files in scope and reports the blocker", async () => {
+    await withDispatch(
+      {
+        reviewMode: "auto",
+        plugins: [],
+        environments: inFloor,
+        callRpc: { verdict: "trivial", messageSeq: 10 },
+        events: [],
+        scope: ["a.ts", "b.ts"],
+      },
+      async (_calls, _bb, sent) => {
+        expect(sent[0]).toContain(lensesStep);
+        expect(sent[0]).toContain(BLOCKER_LINE);
+      },
+    );
+  });
+
+  it("fails the floor on null line stats and reports the blocker", async () => {
+    await withDispatch(
+      { reviewMode: "auto", plugins: [], environments: nullStats, callRpc: { verdict: "trivial", messageSeq: 10 }, events: [] },
+      async (_calls, _bb, sent) => {
+        expect(sent[0]).toContain(lensesStep);
+        expect(sent[0]).toContain(BLOCKER_LINE);
+      },
+    );
+  });
+
+  it("drops the blocker when a plan was approved after the fresh verdict, auto-approved or not", async () => {
+    await withDispatch(
+      {
+        reviewMode: "auto",
+        plugins: [],
+        environments: inFloor,
+        callRpc: { verdict: "non_trivial", messageSeq: 10 },
+        events: [lifecycle(12, "allow_for_session")],
+      },
+      async (_calls, _bb, sent) => {
+        expect(sent[0]).toContain(lensesStep);
+        expect(sent[0]).not.toContain(BLOCKER_LINE);
+      },
+    );
+  });
+
+  it("reports the blocker when the only approval predates the verdict, an older plan for a follow-up request", async () => {
+    await withDispatch(
+      {
+        reviewMode: "auto",
+        plugins: [],
+        environments: inFloor,
+        callRpc: { verdict: "non_trivial", messageSeq: 10 },
+        events: [lifecycle(8)],
+      },
+      async (_calls, _bb, sent) => {
+        expect(sent[0]).toContain(lensesStep);
+        expect(sent[0]).toContain(BLOCKER_LINE);
+      },
+    );
+  });
+
+  it("dispatches the lenses review with the blocker when the sizing rpc fails", async () => {
+    await withDispatch(
+      { reviewMode: "auto", plugins: [], environments: overFloor, callRpc: "throws", events: [] },
+      async (_calls, _bb, sent) => {
+        expect(sent[0]).toContain(lensesStep);
+        expect(sent[0]).toContain(BLOCKER_LINE);
+      },
+    );
+  });
+
+  it("keeps the self step under an explicit self mode while the plan blocker still applies", async () => {
+    await withDispatch(
+      { reviewMode: "self", plugins: [], environments: overFloor, callRpc: { verdict: "non_trivial", messageSeq: 10 }, events: [] },
+      async (_calls, _bb, sent) => {
+        expect(sent[0]).toContain(selfStep);
+        expect(sent[0]).not.toContain(lensesStep);
+        expect(sent[0]).toContain(BLOCKER_LINE);
+      },
+    );
   });
 });
 

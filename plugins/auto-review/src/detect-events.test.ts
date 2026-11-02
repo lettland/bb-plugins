@@ -2,6 +2,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { describe, expect, it } from "vitest";
 import { AUTO_REVIEW_MARKER, CODE_REVIEW_OPENING } from "./prompt.js";
 import {
+  approvedPlanSince,
   endedTurn,
   EVENT_PAGE_MAX,
   firstUserTurnSince,
@@ -273,6 +274,36 @@ describe("endedTurn", () => {
       completed(5, "turn-1"),
     ]);
     expect(await endedTurn(bb, "thr", 0)).toEqual({ users: false, completedSeq: 5, approvedPlans: [], reviewTurn: false });
+  });
+});
+
+describe("approvedPlanSince", () => {
+  it("finds a plan approved at or after the window's start, across turns", async () => {
+    const { bb } = logOf([
+      request(3, "creq-1", "user"),
+      accepted(4, "turn-1", "creq-1"),
+      completed(5, "turn-1"),
+      lifecycle(20, "turn-1", "pending", null),
+      lifecycle(21, "turn-2", "resolved"),
+    ]);
+    expect(await approvedPlanSince(bb, "thr", 10)).toEqual({ id: "pint-1", seq: 21, requestedSeq: undefined });
+  });
+
+  it("does not find an approval that predates the window", async () => {
+    const { bb } = logOf([lifecycle(8, "turn-1", "resolved")]);
+    expect(await approvedPlanSince(bb, "thr", 10)).toBeNull();
+  });
+
+  it("counts neither a deny nor a non-plan approval", async () => {
+    const { bb } = logOf([
+      lifecycle(6, "turn-1", "resolved", { decision: "deny" }),
+      lifecycle(7, "turn-1", "resolved", { decision: "allow_once" }, { kind: "command", itemId: "i" }),
+    ]);
+    expect(await approvedPlanSince(bb, "thr", 0)).toBeNull();
+  });
+
+  it("finds nothing on a thread with no lifecycle events", async () => {
+    expect(await approvedPlanSince(logOf([]).bb, "thr", 0)).toBeNull();
   });
 });
 

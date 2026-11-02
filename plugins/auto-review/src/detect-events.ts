@@ -178,6 +178,24 @@ function approvedPlanOf(
 }
 
 /**
+ * A plan approved at or after `sinceSeq` in this thread, across turns — the
+ * window a change sized non-trivial needs a plan in — or null when none is.
+ * User and auto-approve resolutions both count (see `approvedPlanOf`); the
+ * request time is not read here, so `requestedSeq` stays undefined.
+ */
+export async function approvedPlanSince(
+  bb: BbPluginApi,
+  threadId: string,
+  sinceSeq: number,
+): Promise<ApprovedPlan | null> {
+  for await (const event of eventsSince(bb, threadId, sinceSeq, "system/interaction/lifecycle")) {
+    const approval = approvedPlanOf(event, undefined);
+    if (approval !== null) return approval;
+  }
+  return null;
+}
+
+/**
  * A plan approval a turn resolved, with the seq of the lifecycle event that
  * resolved it and the seq of the interaction's earliest `pending` event in
  * the window — when the approval was requested, which is not when it

@@ -1,5 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { prepareCodeBaseline } from "./baseline-store.js";
+import { reviewSize } from "./change-size.js";
 import {
   recordFire,
   type EffectiveConfig,
@@ -10,7 +11,12 @@ import {
 import { decide } from "./decide.js";
 import { deferTurn, providerReviewInFlight } from "./deferral.js";
 import { removeDeferral } from "./deferrals.js";
-import { fetchWorkspace, tryCaptureSinceSeq, type TurnScope } from "./detect.js";
+import {
+  fetchWorkspace,
+  tryCaptureSinceSeq,
+  type AvailableWorkspace,
+  type TurnScope,
+} from "./detect.js";
 import { parkedFire } from "./detect-park.js";
 import { readFindings, recordUnreported } from "./findings-store.js";
 import { openFindingsForPrompt } from "./findings.js";
@@ -132,15 +138,15 @@ async function codeReviewCursor(bb: BbPluginApi, threadId: string): Promise<{ la
  * what the files in scope read, whatever its commit policy, so a later review
  * covers only what changed since. A review whose files have no baseline yet
  * gets the full one; every failure here means a full review, never a failed
- * dispatch.
+ * dispatch. The workspace is the one `reviewSize` read at dispatch time.
  */
 async function codeBaselineFor(
   bb: BbPluginApi,
   threadId: string,
   environmentId: string,
   rendered: ReturnType<typeof renderScope>,
+  workspace: AvailableWorkspace | null,
 ) {
-  const workspace = await fetchWorkspace(bb, environmentId).catch(() => null);
   return prepareCodeBaseline(bb, {
     threadId,
     environmentId,
@@ -224,6 +230,10 @@ export async function dispatchReview(
     scopePaths: scope,
     ...(unclaimedCount === undefined ? {} : { unclaimedCount }),
   };
+  // Sizing and its workspace read stay out of the provider lock, so neither
+  // serialises other dispatches; the same workspace feeds the baseline.
+  const workspace = await fetchWorkspace(ctx.bb, environmentId).catch(() => null);
+  const changeSize = await reviewSize(ctx.bb, thread.id, scope, workspace, state.lastCodeReviewSeq ?? 0);
   const deferred = await withProviderLock(thread.providerId, async () => {
     if (await providerReviewInFlight(ctx, thread.providerId, thread.id)) {
       await deferTurn(ctx, thread, state, environmentId, {
@@ -245,7 +255,8 @@ export async function dispatchReview(
       decision,
       reviewMode: config.reviewMode,
       scope: rendered,
-      codeBaseline: await codeBaselineFor(ctx.bb, thread.id, environmentId, rendered),
+      codeBaseline: await codeBaselineFor(ctx.bb, thread.id, environmentId, rendered, workspace),
+      changeSize,
       committedSince: committedSinceHead(turn, state),
       commitScanFrom: commitScanHead(turn, state),
       foreignCommits: turn.foreignCommits.map(({ sha }) => sha),

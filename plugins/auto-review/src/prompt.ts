@@ -90,6 +90,11 @@ export interface BuildPromptInput {
    * commit-path prompt with none stays without the baseline paragraph.
    */
   codeBaseline?: readonly CodeFileScope[];
+  /**
+   * The size gate from `reviewSize`; undefined leaves the prompt exactly as
+   * before sizing (only tests build it undefined).
+   */
+  changeSize?: { trivial: boolean; blocker: boolean };
 }
 
 /** Whether the review leaves its changes uncommitted: the branch policy says so, or the scope is too long to commit. */
@@ -170,10 +175,11 @@ function aislopScanStep(committedSince: string | null): string {
   return ` Then run \`${command}\`, ${description}. Run it even when the current branch is the root branch itself — the scan still covers this turn's work there — so never skip it because the branch and its root are the same. If bb reports the command unknown or its plugin disabled, the aislop plugin went away meanwhile, so skip this. A non-zero exit code from the scan only means it found issues, not that the step failed. But if it prints an error instead of a report (for example that no root branch was found), the scan did not run: say so in your final reply rather than treating it as findings. Treat its findings as advice, not orders: act on findings in the files attributed to your turn above, lines that predate this turn included, with the same named-feature exception as above and never on uncommitted edits that were already in the checkout when the turn started, or on edits or commits the user or another thread made meanwhile, and fix one only when it is a real problem and the fix does not go against this project's own rules (CLAUDE.md / AGENTS.md, lint and formatter config, or the conventions the surrounding code follows). Leave false positives and rule conflicts as they are, and list each finding you skipped with a one-line reason in your final reply.`;
 }
 
-function reviewStep(mode: ReviewMode, committedSince: string | null, aislopScan: boolean): string {
+function reviewStep(mode: ReviewMode, committedSince: string | null, aislopScan: boolean, sizeTrivial: boolean): string {
   const target = reviewTarget(committedSince);
   const scan = aislopScan ? aislopScanStep(committedSince) : "";
-  switch (mode) {
+  // An explicit `devkit` or `self` mode wins over sizing; only `auto` defers to it.
+  switch (sizeTrivial && mode === "auto" ? "self" : mode) {
     case "devkit":
       return `Review the changes with devkit's calibrated review: ${target.devkit}. ${DEVKIT_REVIEW_RULES} ${OWN_WORK_ONLY}${scan} If the devkit_load_skill tool is not available, STOP and report that the devkit review workflow is missing; do not fall back to a self-review.`;
     case "self":
@@ -211,6 +217,14 @@ function allowedSha(sha: string | null | undefined): string | null {
   return sha !== null && sha !== undefined && COMMIT_SHA_ALLOW.test(sha) ? sha : null;
 }
 
+/**
+ * Added when the change was sized non-trivial and no plan for it was approved
+ * in the window: the plan rule is enforced by the review even when the
+ * self-review fallback runs.
+ */
+const MISSING_PLAN_BLOCKER =
+  "This change was sized non-trivial, and no plan for it was approved in this thread — by the user, or automatically by auto-review — at or after the message that asked for the work. Whatever else step 1 finds, record one open blocker-severity finding for it in the ReportReview call and in your final reply: report Blocker: implemented without an approved plan; do not merge.";
+
 /** The list of files attributed to the turn, with a note for any that cannot be listed. */
 function scopeSection(scope: ScopeRendering): string[] {
   const block =
@@ -237,7 +251,7 @@ function scopeSection(scope: ScopeRendering): string[] {
 }
 
 export function buildReviewPrompt(input: BuildPromptInput): string {
-  const { decision, reviewMode, scope } = input;
+  const { decision, reviewMode, scope, changeSize } = input;
   const committedSince = allowedSha(input.committedSince);
   const scanSince = allowedSha(input.commitScanFrom ?? input.committedSince);
   const commits = turnCommitText({
@@ -274,7 +288,10 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
     lines.push(codeBaselineParagraph(reviewMode, input.codeBaseline ?? [], committedSince), "");
   }
   lines.push(reviewerMessageRules(decision, scope), "");
-  lines.push(`1. ${reviewStep(reviewMode, committedSince, input.aislopScan ?? false)}`);
+  if (changeSize !== undefined && changeSize.blocker) {
+    lines.push(MISSING_PLAN_BLOCKER, "");
+  }
+  lines.push(`1. ${reviewStep(reviewMode, committedSince, input.aislopScan ?? false, changeSize?.trivial === true)}`);
   lines.push(
     `2. Apply the fixes the review reports. If it asks for a re-run, re-run only over the changes since its previous pass (devkit's closure rule); a self-review is one pass.`,
   );

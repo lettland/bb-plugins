@@ -23,6 +23,7 @@ import type { CodeFileScope, PlanScope } from "./prompt-baseline.js";
 import type { PromptFinding } from "./prompt-findings.js";
 import { DEVKIT_REVIEW_RULES, STEER_INTERRUPTION_NOTE } from "./prompt-shared.js";
 import { planHoldDenyMessage } from "./prompt-plan.js";
+import { TRIVIAL_CHANGE } from "./size-definition.js";
 
 describe("renderScope", () => {
   it("keeps allow-listed paths and counts odd ones", () => {
@@ -943,6 +944,69 @@ describe("buildReviewPrompt", () => {
   });
 });
 
+describe("the size gate in the review prompt", () => {
+  const scope = renderScope(["src/a.ts"]);
+  const build = (
+    changeSize?: { trivial: boolean; blocker: boolean },
+    reviewMode: "auto" | "devkit" | "self" = "auto",
+  ) => buildReviewPrompt({ decision: { commit: true, merge: false }, reviewMode, scope, changeSize });
+  const BLOCKER_LINE = "report Blocker: implemented without an approved plan; do not merge";
+
+  it("gives a trivial change the focused self-review step instead of the reviewer lenses", () => {
+    const text = build({ trivial: true, blocker: false });
+    expect(text).toContain("Review the changes with a focused self-review of the diff you produced this turn");
+    expect(text).not.toContain("if the devkit_load_skill tool is available");
+    expect(text).not.toContain(DEVKIT_REVIEW_RULES);
+    expect(text).not.toContain(BLOCKER_LINE);
+  });
+
+  it("keeps the lenses step for a non-trivial or lost verdict, blocker or not", () => {
+    expect(build({ trivial: false, blocker: false })).toContain("if the devkit_load_skill tool is available");
+    expect(build({ trivial: false, blocker: false })).not.toContain(BLOCKER_LINE);
+    expect(build({ trivial: false, blocker: true })).toContain("if the devkit_load_skill tool is available");
+    expect(build()).toContain("if the devkit_load_skill tool is available");
+    expect(build()).not.toContain(BLOCKER_LINE);
+  });
+
+  it("an explicit self mode wins over a trivial size", () => {
+    const text = build({ trivial: true, blocker: false }, "self");
+    expect(text).toContain("Review the changes with a focused self-review of the diff you produced this turn");
+    expect(text).not.toContain("if the devkit_load_skill tool is available");
+    expect(text).not.toContain(BLOCKER_LINE);
+  });
+
+  it("an explicit devkit mode wins over a trivial size", () => {
+    const text = build({ trivial: true, blocker: false }, "devkit");
+    expect(text).toContain('devkit_load_skill({ slug: "review-code" })');
+    expect(text).toMatch(/do not fall back to a self-review/);
+    expect(text).not.toContain("if the devkit_load_skill tool is available");
+    expect(text).not.toContain(BLOCKER_LINE);
+  });
+
+  it("adds the missing-plan blocker paragraph when the gate says blocker", () => {
+    const text = build({ trivial: false, blocker: true });
+    expect(text).toContain(BLOCKER_LINE);
+    expect(text).toContain("sized non-trivial");
+    // Between the reviewer-message rules and step 1.
+    expect(text.indexOf(BLOCKER_LINE)).toBeGreaterThan(text.indexOf("If the user asks you to stop the review"));
+    expect(text.indexOf(BLOCKER_LINE)).toBeLessThan(text.indexOf("\n1. "));
+  });
+
+  it("a trivial change never carries the blocker even when the gate reports one", () => {
+    // `reviewSize` cannot produce this shape; the builder honours its fields
+    // independently, so the impossible combo stays pinned.
+    const text = build({ trivial: true, blocker: true });
+    expect(text).toContain("Review the changes with a focused self-review of the diff you produced this turn");
+    expect(text).toContain(BLOCKER_LINE);
+  });
+
+  it("the plan rule holds under an explicit self mode: self step and the blocker together", () => {
+    const text = build({ trivial: false, blocker: true }, "self");
+    expect(text).toContain("Review the changes with a focused self-review of the diff you produced this turn");
+    expect(text).toContain(BLOCKER_LINE);
+  });
+});
+
 describe("buildPlanReviewPrompt", () => {
   it("explains the hold so the agent does not read it as a rejection", () => {
     const text = buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p/plan.md", autoApprove: false });
@@ -1152,12 +1216,16 @@ describe("PLAN_FIRST_INSTRUCTIONS", () => {
     expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/cannot enter plan mode on its own, end your turn with the plan/);
   });
 
-  it("exempts small fixes, approved plans, and auto-review's own turns", () => {
-    expect(PLAN_FIRST_INSTRUCTIONS).toMatch(/small, contained fixes/);
+  it("exempts approved plans and auto-review's own turns, and sends the rest to change_size", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS).not.toMatch(/small, contained fixes/);
     expect(PLAN_FIRST_INSTRUCTIONS).toMatch(
       /already approved in this thread \(by the user, or automatically by auto-review\)/,
     );
     expect(PLAN_FIRST_INSTRUCTIONS).toContain(`${AUTO_REVIEW_MARKER} turns`);
+    expect(PLAN_FIRST_INSTRUCTIONS).toContain(TRIVIAL_CHANGE);
+    expect(PLAN_FIRST_INSTRUCTIONS).toContain(
+      "Before any edit or implementation spawn, call `change_size`; if it says non_trivial or nothing, present a plan first.",
+    );
   });
 
   it("fits the host's 4096-character instruction limit", () => {
@@ -1210,12 +1278,16 @@ describe("PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN", () => {
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN.split(carveOut)).toHaveLength(4);
   });
 
-  it("exempts small fixes, approved plans, and auto-review's own turns", () => {
-    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(/small, contained fixes/);
+  it("exempts approved plans and auto-review's own turns, and sends the rest to change_size", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).not.toMatch(/small, contained fixes/);
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toMatch(
       /already approved in this thread \(by the user, or automatically by auto-review\)/,
     );
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toContain(`${AUTO_REVIEW_MARKER} turns`);
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toContain(TRIVIAL_CHANGE);
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).toContain(
+      "Before any edit or implementation spawn, call `change_size`; if it says non_trivial or nothing, present a plan first.",
+    );
   });
 
   it("fits the host's 4096-character instruction limit", () => {

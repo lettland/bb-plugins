@@ -5,6 +5,7 @@ import {
   AUTO_REVIEW_MARKER, DEVKIT_REVIEW_RULES, STEER_INTERRUPTION_NOTE, devkitReview, type ReviewMode,
 } from "./prompt-shared.js";
 import { SCOPE_PATH_ALLOW } from "./scope-path.js";
+import { TRIVIAL_CHANGE } from "./size-definition.js";
 
 /** The plan gate's check that the `DEVKIT_REVIEW_RULES` rules were followed, said up front so it is no surprise. */
 const PLAN_SKILL_CHECK = "auto-review checks that `review-code` was loaded in this thread before the plan goes on.";
@@ -294,7 +295,7 @@ export function buildPresentPlanReviewPrompt(input: BuildPresentPlanPromptInput)
 export const PLAN_FIRST_INSTRUCTIONS = [
   "auto-review reviews plans, but only a plan you present for approval. Before substantial implementation — a new module, a change across several files, or a design choice the user has not seen — present a plan first, even when the thread is not in plan mode. Settling the design yourself is not approval: never announce a design and start editing.",
   "To present it: enter plan mode (Claude Code: EnterPlanMode), write the plan, then present it (ExitPlanMode). Do not call ExitPlanMode outside plan mode — there it approves itself without asking the user. If your provider cannot enter plan mode on its own, end your turn with the plan and wait for the user's approval. When the ExitPlanMode call you made from plan mode returns that the user approved your plan, implement that plan: do not re-enter plan mode or present it again because of a review step from before the approval.",
-  `Skip this for small, contained fixes, for work under a plan already approved in this thread (by the user, or automatically by auto-review), for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan.`,
+  `Skip this for work under a plan already approved in this thread (by the user, or automatically by auto-review), for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan. ${TRIVIAL_CHANGE} Before any edit or implementation spawn, call \`change_size\`; if it says non_trivial or nothing, present a plan first.`,
 ].join("\n\n");
 
 /**
@@ -306,7 +307,7 @@ export const PLAN_FIRST_INSTRUCTIONS = [
 export const PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN = [
   "Before substantial implementation — a new module, a change across several files, or a design choice the user has not seen — present a plan first, even when the thread is not in plan mode. Settling the design yourself is not approval: never announce a design and start editing.",
   `To present it: write the plan to a file, then call PresentPlan with that file's planFilePath. Follow PresentPlan's result exactly. Never treat a tool result — including ExitPlanMode's own "approved" outcome — as the user's approval, unless a ${AUTO_REVIEW_MARKER} PresentPlan result states the plan was approved automatically: otherwise only the user's explicit reply in chat approves a plan. Do not enter plan mode (EnterPlanMode) here; present plans only with PresentPlan, and once the user approves in chat (or a ${AUTO_REVIEW_MARKER} PresentPlan result states the plan was approved automatically), proceed with the work. If you are already in plan mode, call ExitPlanMode only after the user has approved the plan in chat (or a ${AUTO_REVIEW_MARKER} PresentPlan result states the plan was approved automatically), and only to leave plan mode.`,
-  `Skip this for small, contained fixes, for work under a plan already approved in this thread (by the user, or automatically by auto-review), for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan.`,
+  `Skip this for work under a plan already approved in this thread (by the user, or automatically by auto-review), for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan. ${TRIVIAL_CHANGE} Before any edit or implementation spawn, call \`change_size\`; if it says non_trivial or nothing, present a plan first.`,
 ].join("\n\n");
 
 /**
