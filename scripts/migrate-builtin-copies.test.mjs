@@ -297,6 +297,43 @@ test("copies a plugin database that has un-checkpointed WAL content, and sets mo
   }
 });
 
+function makeTasksDatabase(dataDir, tasksColumns) {
+  const dir = path.join(dataDir, "plugins", "tasks");
+  mkdirSync(dir, { recursive: true });
+  const db = new DatabaseSync(path.join(dir, "data.db"));
+  db.exec(`CREATE TABLE tasks (id TEXT PRIMARY KEY${tasksColumns}); INSERT INTO tasks (id) VALUES ('a')`);
+  db.close();
+}
+
+test("refuses a tasks database without archived_at, and writes nothing", async () => {
+  const dataDir = makeDataDir("tasks-upstream");
+  makeTasksDatabase(dataDir, "");
+  const before = snapshot(dataDir);
+  await assert.rejects(
+    migrate({ dataDir, checkRunning: none, log: silent }),
+    (error) =>
+      error instanceof MigrationRefusal &&
+      /upstream's built-in tasks plugin/u.test(error.message) &&
+      /migration numbering differs from tasks-fork/u.test(error.message) &&
+      /Nothing was copied/u.test(error.message),
+  );
+  assert.deepEqual(snapshot(dataDir), before);
+  assert.deepEqual(backups(dataDir), []);
+  assert.equal(existsSync(path.join(dataDir, "plugins", "tasks-fork")), false);
+});
+
+test("proceeds for a tasks database with archived_at", async () => {
+  const dataDir = makeDataDir("tasks-fork-numbering");
+  makeTasksDatabase(dataDir, ", archived_at TEXT, closed_at TEXT");
+  await migrate({ dataDir, checkRunning: none, log: silent });
+  const copy = new DatabaseSync(path.join(dataDir, "plugins", "tasks-fork", "data.db"), { readOnly: true });
+  try {
+    assert.equal(copy.prepare("SELECT count(*) AS n FROM tasks").get().n, 1);
+  } finally {
+    copy.close();
+  }
+});
+
 test("backup holds the pre-migration state", async () => {
   const dataDir = makeDataDir("backup-content");
   const before = snapshot(dataDir);

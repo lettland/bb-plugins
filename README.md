@@ -87,6 +87,9 @@ What the script does, with bb stopped:
 - Sets the `sidebar.threadListProvider` UI preference to
   `thread-list-fork/thread-list` when it is exactly `thread-list/thread-list`.
   Any other value, including `__automatic__`, stays as it is.
+- Refuses to run, copying nothing, when `<data-dir>/plugins/tasks/data.db` has
+  no `archived_at` column in its `tasks` table: upstream's built-in tasks
+  plugin created it, and its migration numbering differs from tasks-fork.
 - Prints the row counts of every old and new id per table (and per table of
   each copied `data.db`), and exits 1 when a count differs.
 - Leaves the old directories and rows in place, and prints the commands to

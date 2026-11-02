@@ -233,6 +233,17 @@ export async function migrate({
     if (await pathExists(destination)) {
       throw new MigrationRefusal(`${destination} already exists`);
     }
+    if (from === "tasks") {
+      const [column] = await sqliteQuery(
+        source,
+        "SELECT count(*) AS n FROM pragma_table_info('tasks') WHERE name = 'archived_at'",
+      );
+      if (column.n === 0) {
+        throw new MigrationRefusal(
+          `${source} was created by upstream's built-in tasks plugin: its tasks table has no archived_at column, and its migration numbering differs from tasks-fork. Nothing was copied`,
+        );
+      }
+    }
     pluginDatabases.push({ from, to, source, destination });
   }
 
