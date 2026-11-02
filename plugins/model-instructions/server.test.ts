@@ -117,7 +117,7 @@ describe("resolveInstructions", () => {
 describe("parseRules", () => {
   it.each([
     ["not json", "not valid JSON"],
-    ["{}", "expected array"],
+    ["{}", "expected record, received undefined"],
     ['[{"instructions": "  "}]', "instructions"],
     ['[{"instructions": "x", "threads": "root"}]', "threads"],
     ['[{"instructions": "x", "modle": "y"}]', "modle"],
@@ -134,6 +134,56 @@ describe("parseRules", () => {
     expect(() => parseRules(json)).toThrow(message);
   });
 
+  it("expands {{name}} in form B instructions", () => {
+    const rules = parseRules(
+      JSON.stringify({
+        vars: { implSmall: "--provider glm --reasoning medium", implHeavy: "--reasoning high" },
+        rules: [
+          {
+            threads: "top-level",
+            instructions: "Small: {{implSmall}}. Heavy {{implHeavy}}. Small again: {{implSmall}}.",
+          },
+          { threads: "child", instructions: ["Line {{implSmall}}", "{{implHeavy}}"] },
+        ],
+      }),
+    );
+    expect(rules[0].instructions).toBe(
+      "Small: --provider glm --reasoning medium. Heavy --reasoning high. Small again: --provider glm --reasoning medium.",
+    );
+    expect(rules[1].instructions).toBe("Line --provider glm --reasoning medium\n--reasoning high");
+  });
+
+  it.each([
+    ['{"vars": {"a": "x"}, "rules": [{"instructions": "{{nope}}"}]}', "unknown variable {{nope}}"],
+    ['{"vars": {"1bad": "x"}, "rules": []}', "at vars.1bad"],
+    ['{"vars": {"a": 5}, "rules": []}', "expected string, received number"],
+    ['{"vars": {"a": "  "}, "rules": []}', "Too small"],
+    ['{"rules": []}', "at vars"],
+    ['{"vars": {}}', "at rules"],
+    ['{"vars": {}, "rules": [], "extra": 1}', "Unrecognized key"],
+  ])("rejects form B %s", (json, message) => {
+    expect(() => parseRules(json)).toThrow(message);
+  });
+
+  it("keeps {{ spaced }} text unchanged in form B", () => {
+    const [rule] = parseRules(
+      JSON.stringify({ vars: { a: "x" }, rules: [{ instructions: "keep {{ a }} and a lone { brace" }] }),
+    );
+    expect(rule.instructions).toBe("keep {{ a }} and a lone { brace");
+  });
+
+  it("inserts a var value containing {{other}} literally, without expanding it", () => {
+    const [rule] = parseRules(
+      JSON.stringify({ vars: { a: "{{b}} tail", b: "expanded" }, rules: [{ instructions: "{{a}}" }] }),
+    );
+    expect(rule.instructions).toBe("{{b}} tail");
+  });
+
+  it("leaves form A text with {{name}} unchanged", () => {
+    const [rule] = parseRules(JSON.stringify([{ instructions: "{{name}} stays" }]));
+    expect(rule.instructions).toBe("{{name}} stays");
+  });
+
   it("wraps a non-Error JSON.parse failure", () => {
     const parse = vi.spyOn(JSON, "parse").mockImplementation(() => {
       throw "boom";
@@ -148,6 +198,16 @@ describe("parseRules", () => {
   it("backs the setting's write validation", () => {
     expect(rulesSettingSchema.safeParse("[]").success).toBe(true);
     expect(rulesSettingSchema.safeParse("[{}]").success).toBe(false);
+    expect(
+      rulesSettingSchema.safeParse(
+        JSON.stringify({ vars: { a: "x" }, rules: [{ instructions: "use {{a}}" }] }),
+      ).success,
+    ).toBe(true);
+    expect(
+      rulesSettingSchema.safeParse(
+        JSON.stringify({ vars: { a: "x" }, rules: [{ instructions: "use {{b}}" }] }),
+      ).success,
+    ).toBe(false);
   });
 });
 
@@ -217,6 +277,20 @@ describe("plugin", () => {
     await plugin(host.bb);
     expect((await resolve(host, "claude-opus-5-5", null, "opshub-web")).instructions).toBe("Active projects.");
     expect((await resolve(host, "claude-opus-5-5", null, "opshub-legacy")).instructions).toBeNull();
+    await host.harness.dispose();
+  });
+
+  it("resolves form B settings with expanded instructions", async () => {
+    const host = createHost({
+      rules: JSON.stringify({
+        vars: { spawn: "bb thread spawn --parent-self" },
+        rules: [{ threads: "top-level", instructions: "Delegate with {{spawn}} and wait." }],
+      }),
+    });
+    await plugin(host.bb);
+    expect((await resolve(host, "claude-opus-5-5")).instructions).toBe(
+      "Delegate with bb thread spawn --parent-self and wait.",
+    );
     await host.harness.dispose();
   });
 });

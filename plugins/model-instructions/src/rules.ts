@@ -25,6 +25,13 @@ const ruleSchema = z
 
 const rulesSchema = z.array(ruleSchema);
 
+const varsSchema = z.record(
+  z.string().regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
+  z.string().trim().min(1),
+);
+
+const objectSchema = z.object({ vars: varsSchema, rules: rulesSchema }).strict();
+
 export type Rule = z.infer<typeof ruleSchema>;
 
 interface Target {
@@ -32,6 +39,18 @@ interface Target {
   model: string;
   project: string;
   parentThreadId: string | null;
+}
+
+/** One pass, so a var value's own {{...}} text stays literal. */
+function expand(instructions: string, vars: Record<string, string>): string {
+  return instructions.replace(
+    /\{\{([A-Za-z][A-Za-z0-9_-]*)\}\}/g,
+    (ref, name: string) => {
+      const value = vars[name];
+      if (value === undefined) throw new Error(`unknown variable ${ref}`);
+      return value;
+    },
+  );
 }
 
 export function parseRules(json: string): Rule[] {
@@ -43,9 +62,17 @@ export function parseRules(json: string): Rule[] {
       `not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  const parsed = rulesSchema.safeParse(raw);
+  if (Array.isArray(raw)) {
+    const parsed = rulesSchema.safeParse(raw);
+    if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
+    return parsed.data;
+  }
+  const parsed = objectSchema.safeParse(raw);
   if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
-  return parsed.data;
+  return parsed.data.rules.map((rule) => ({
+    ...rule,
+    instructions: expand(rule.instructions, parsed.data.vars),
+  }));
 }
 
 /** Validates the setting on write so a broken value never gets stored. */

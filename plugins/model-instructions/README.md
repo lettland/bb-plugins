@@ -28,6 +28,37 @@ bb plugin config model-instructions set rules "$(cat rules.json)"
 An invalid value is rejected on write. `bb provider models <provider>` lists
 model ids; `bb project list --include-personal` lists project names.
 
+## Variables
+
+The setting can also be a JSON object that names reusable values, so the same
+flags need not repeat in every rule:
+
+```json
+{
+  "vars": {
+    "implSmall": "--provider claude-code-glm --model 'glm-5.3-flash[1m]' --reasoning-level medium",
+    "implHeavy": "--provider claude-code-glm --model 'glm-5.3[1m]' --reasoning-level high"
+  },
+  "rules": [
+    {
+      "threads": "top-level",
+      "instructions": "Small change: spawn `bb thread spawn --parent-self {{implSmall}} --prompt-file <brief>`. Heavy change: use {{implHeavy}}."
+    }
+  ]
+}
+```
+
+- Substitution happens only in the object form, and only inside `instructions`
+  (after an array of lines is joined). `{{name}}` is replaced by the var value;
+  var names are letters, digits, `_`, `-`, starting with a letter.
+- A `{{name}}` with no matching var is rejected on save, naming the var. Var
+  names must match that shape and values must be non-empty strings.
+- Values are literal: `{{...}}` inside a value is not expanded again.
+- Text that does not match `{{name}}` exactly (for example `{{ x }}` with
+  spaces, or a single `{`) stays as written.
+- The plain array form keeps working unchanged: its text is never substituted,
+  so an existing `{{name}}` there stays as written.
+
 ## Example: Opus supervises, Sonnet implements
 
 ```json
@@ -72,6 +103,7 @@ Combine with `project` to narrow to a set first, e.g. `"project": ["opshub-*", "
 - The combined instructions for one thread are truncated to 4096 characters.
 - Side chats never receive plugin instructions.
 - After saving rules that use `skipProjects` (in any form) or an array `project`, an older plugin version rejects the whole setting and applies no rules.
+- After saving the object form (`vars` + `rules`), an older plugin version rejects the whole setting and applies no rules.
 - A `threads: child` rule also reaches devkit `review-code`'s lens and closure-review threads,
   since those are ordinary bb child threads. That skill's review-only brief asks the reviewer to
   ignore whatever this plugin injects into them — a prompt-level ask, not an enforced one (see
