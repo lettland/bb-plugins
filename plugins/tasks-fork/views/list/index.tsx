@@ -1,0 +1,577 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  TASK_ARCHIVE_BATCH_MAX,
+  type Label,
+  type Project,
+  type Task,
+} from "../../shared/contract.js";
+import { errorMessage } from "../../shared/errors.js";
+import { useProjects, useTasksRpc } from "../../shell/data.js";
+import { useTasksNavigation } from "../../shell/routes.js";
+import { NewTaskDialog } from "../manage/new-task-dialog.js";
+import { DetailToasts, useDetailToasts } from "../detail/toast.js";
+import { EmptyState } from "../../components/empty-state.js";
+import { Button } from "@/components/ui/button";
+import { DelayedLoading } from "@/components/ui/delayed-loading";
+import { Icon } from "@/components/ui/icon";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  matchesFilters,
+  modeStatusOptions,
+  statusFilterForMode,
+  useLabels,
+  useListTaskEdit,
+  useListTasks,
+  useTaskListMeta,
+  type TaskEdit,
+} from "./data.js";
+import {
+  EMPTY_FILTERS,
+  hasActiveFilters,
+  ListFilterBar,
+  type ListFilterState,
+} from "./filter-bar.js";
+import {
+  listPreferenceScope,
+  loadListPreference,
+  storeListPreference,
+  type ListPreference,
+} from "./list-preference.js";
+import { sortTasks } from "../../shared/sort.js";
+import type { TaskSort } from "../../shared/pagination.js";
+import { StatusIcon } from "./icons.js";
+import {
+  listScrollScopeKey,
+  useListScrollRestoration,
+} from "./scroll-restoration.js";
+import {
+  groupTasksByStatus,
+  labelFilterOptions,
+  selectedLabelIds,
+  STATUS_LABELS,
+} from "./lib.js";
+import { TaskRow } from "./row.js";
+import { useListRowWindows } from "./row-window.js";
+
+const NO_LABELS: readonly Label[] = [];
+
+interface ListViewProps {
+  projectId: string | null;
+  mode: "focus" | "recent" | "archive" | "active";
+}
+
+function LoadingRows() {
+  return (
+    <DelayedLoading>
+      <div className="px-3.5 pt-3">
+        <Skeleton className="mb-3 h-4 w-28" />
+        {Array.from({ length: 7 }, (_, index) => (
+          <div
+            key={index}
+            className="flex h-[34px] items-center gap-2 border-b border-border-hairline"
+          >
+            <Skeleton className="size-3.5 rounded-full" />
+            <Skeleton className="h-3 w-12" />
+            <Skeleton className="size-3.5 rounded-full" />
+            <Skeleton className="h-3 w-3/5" />
+          </div>
+        ))}
+      </div>
+    </DelayedLoading>
+  );
+}
+
+function buildFocusLayout(
+  projects: readonly Project[],
+  tasks: readonly Task[],
+  sort: TaskSort,
+) {
+  const sections: {
+    project: Project;
+    tasks: Task[];
+    groups: ReturnType<typeof groupTasksByStatus>;
+    rangeStart: number;
+  }[] = [];
+  const windowGroups: ReturnType<typeof groupTasksByStatus> = [];
+  const projectStarts = new Set<number>();
+  for (const project of projects) {
+    const projectTasks = sortTasks(
+      tasks.filter((task) => task.projectId === project.id),
+      sort,
+    );
+    if (projectTasks.length === 0) continue;
+    const groups = groupTasksByStatus(projectTasks);
+    sections.push({
+      project,
+      tasks: projectTasks,
+      groups,
+      rangeStart: windowGroups.length,
+    });
+    projectStarts.add(windowGroups.length);
+    windowGroups.push(...groups);
+  }
+  return { sections, windowGroups, projectStarts };
+}
+
+export function ListView({ projectId, mode }: ListViewProps) {
+  const navigation = useTasksNavigation();
+  const openTask = useCallback(
+    (taskKey: string) => navigation.go({ kind: "task", taskKey }),
+    [navigation],
+  );
+  const rpc = useTasksRpc();
+  const activeOnly = mode === "active";
+  const projects = useProjects();
+  const { toasts, push, dismiss } = useDetailToasts();
+  const preferenceScope = listPreferenceScope(projectId, activeOnly, mode);
+  const [preference, setPreference] = useState<ListPreference>(() =>
+    loadListPreference(preferenceScope),
+  );
+  useEffect(() => {
+    setPreference(loadListPreference(preferenceScope));
+  }, [preferenceScope]);
+  const storedFilters = preference.filters;
+  const filters = useMemo(
+    (): ListFilterState => ({
+      ...storedFilters,
+      statuses: statusFilterForMode(mode, storedFilters.statuses),
+    }),
+    [storedFilters, mode],
+  );
+  const sort = preference.sort;
+  const setFilters = (next: ListFilterState) => {
+    setPreference((current) => {
+      const updated: ListPreference = { filters: next, sort: current.sort };
+      storeListPreference(preferenceScope, updated);
+      return updated;
+    });
+  };
+  const setSort = (next: TaskSort) => {
+    setPreference((current) => {
+      const updated: ListPreference = { filters: current.filters, sort: next };
+      storeListPreference(preferenceScope, updated);
+      return updated;
+    });
+  };
+  const [newTaskOpen, setNewTaskOpen] = useState(false);
+
+  const labelProjectIds = useMemo(
+    () =>
+      projectId !== null
+        ? [projectId]
+        : (projects.data ?? []).map((project) => project.id),
+    [projectId, projects.data],
+  );
+  const labels = useLabels(labelProjectIds);
+  const labelOptions = useMemo(
+    () => labelFilterOptions(labels.data ?? []),
+    [labels.data],
+  );
+  const labelIds = useMemo((): readonly string[] | null => {
+    if (filters.labelNames.length === 0) return null;
+    if (labels.data === undefined) return null;
+    return selectedLabelIds(labelOptions, filters.labelNames);
+  }, [filters.labelNames, labelOptions, labels.data]);
+
+  const tasksQuery = useListTasks(projectId, mode, {
+    statuses: filters.statuses,
+    priorities: filters.priorities,
+    labelIds,
+  });
+  const meta = useTaskListMeta(projectId);
+  const taskEdit = useListTaskEdit(tasksQuery.reads);
+  const { mutate: mutateTask } = taskEdit;
+  const refreshTasks = tasksQuery.refresh;
+  const editTask = useCallback(
+    (task: Task, patch: TaskEdit) => {
+      mutateTask({ taskId: task.id, ...patch }).then(
+        (result) => {
+          if (result.ok) return;
+          push(result.error.message);
+          refreshTasks();
+        },
+        (error: unknown) => push(errorMessage(error)),
+      );
+    },
+    [mutateTask, push, refreshTasks],
+  );
+  const pendingTaskIds = useMemo(
+    () => new Set(taskEdit.pendingInputs.map((input) => input.taskId)),
+    [taskEdit.pendingInputs],
+  );
+
+  const labelsById = useMemo(
+    () => new Map((labels.data ?? []).map((label) => [label.id, label])),
+    [labels.data],
+  );
+  const labelsByProject = useMemo(() => {
+    const map = new Map<string, Label[]>();
+    for (const label of labels.data ?? []) {
+      const bucket = map.get(label.projectId);
+      if (bucket) bucket.push(label);
+      else map.set(label.projectId, [label]);
+    }
+    return map;
+  }, [labels.data]);
+  const moveToProject = useCallback(
+    (task: Task, targetProjectId: string) => {
+      rpc
+        .call("moveTaskToProject", {
+          taskId: task.id,
+          projectId: targetProjectId,
+        })
+        .then(
+          (result) => {
+            if (!result.ok) push(result.error.message);
+          },
+          (error: unknown) => push(errorMessage(error)),
+        );
+    },
+    [rpc, push],
+  );
+  const projectsById = useMemo(
+    () =>
+      new Map((projects.data ?? []).map((project) => [project.id, project])),
+    [projects.data],
+  );
+
+  const displayTasks = useMemo(() => {
+    if (tasksQuery.data === undefined) return undefined;
+    return tasksQuery.data.filter((task) =>
+      matchesFilters(
+        task,
+        filters.statuses,
+        filters.priorities,
+        labelIds ?? [],
+      ),
+    );
+  }, [tasksQuery.data, filters.statuses, filters.priorities, labelIds]);
+  const groups = useMemo(
+    () => groupTasksByStatus(sortTasks(displayTasks ?? [], sort)),
+    [displayTasks, sort],
+  );
+  const focusLayout = useMemo(
+    () =>
+      projectId === null && mode === "focus" && displayTasks !== undefined
+        ? buildFocusLayout(projects.data ?? [], displayTasks, sort)
+        : null,
+    [projectId, mode, displayTasks, sort, projects.data],
+  );
+  const windowGroups = focusLayout?.windowGroups ?? groups;
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => setSelected(new Set()), [projectId, mode]);
+  const selectable =
+    projectId !== null && (mode === "recent" || mode === "archive");
+  const selectableIds = useMemo(() => {
+    const statuses = modeStatusOptions(mode);
+    return new Set(
+      (displayTasks ?? [])
+        .filter((task) => statuses.includes(task.status))
+        .map((task) => task.id),
+    );
+  }, [displayTasks, mode]);
+  const visibleSelected = useMemo(
+    () => [...selected].filter((taskId) => selectableIds.has(taskId)),
+    [selected, selectableIds],
+  );
+  useEffect(() => {
+    if (displayTasks === undefined) return;
+    setSelected((current) => {
+      const kept = [...current].filter((taskId) => selectableIds.has(taskId));
+      return kept.length === current.size ? current : new Set(kept);
+    });
+  }, [displayTasks, selectableIds]);
+  const [archivePending, setArchivePending] = useState(false);
+  const archiveInFlight = useRef(false);
+  const mutateSelection = async () => {
+    if (projectId === null || visibleSelected.length === 0) return;
+    if (archiveInFlight.current) return;
+    archiveInFlight.current = true;
+    setArchivePending(true);
+    try {
+      const input = { projectId, taskIds: visibleSelected, authorName: "You" };
+      if (mode === "archive") await rpc.call("restoreTasks", input);
+      else await rpc.call("archiveTasks", input);
+      setSelected(new Set());
+    } catch (error) {
+      push(
+        error instanceof Error ? error.message : "Task archive action failed",
+      );
+    } finally {
+      archiveInFlight.current = false;
+      setArchivePending(false);
+    }
+  };
+  const setTaskSelected = (taskId: string, checked: boolean) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (!checked) {
+        next.delete(taskId);
+        return next;
+      }
+      if (next.size >= TASK_ARCHIVE_BATCH_MAX) {
+        push(`Select at most ${TASK_ARCHIVE_BATCH_MAX} tasks at a time`);
+        return current;
+      }
+      next.add(taskId);
+      return next;
+    });
+  };
+
+  const showProject = projectId === null;
+  const filtered = hasActiveFilters(filters);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const scopeKey = listScrollScopeKey({
+    projectId,
+    mode,
+    filters,
+    sort,
+  });
+  const settledScope = useRef(scopeKey);
+  const scopeChanged = settledScope.current !== scopeKey;
+  useEffect(() => {
+    if (!tasksQuery.isLoading) settledScope.current = scopeKey;
+  }, [scopeKey, tasksQuery.isLoading, tasksQuery.data]);
+  const routeScope = `${projectId ?? "-"}/${mode}`;
+  const [settledRouteScope, setSettledRouteScope] = useState(routeScope);
+  const routeScopeChanged = settledRouteScope !== routeScope;
+  const previousRouteScope = useRef(routeScope);
+  useEffect(() => {
+    const routeScopeJustChanged = previousRouteScope.current !== routeScope;
+    previousRouteScope.current = routeScope;
+    if (!routeScopeJustChanged && !tasksQuery.isLoading) {
+      setSettledRouteScope(routeScope);
+    }
+  }, [routeScope, tasksQuery.isLoading, tasksQuery.data]);
+  useListScrollRestoration(scrollRef, scopeKey, {
+    contentReady: tasksQuery.data !== undefined && tasksQuery.data.length > 0,
+    loading: tasksQuery.isLoading || scopeChanged,
+    revision: tasksQuery.data?.length ?? 0,
+  });
+
+  const { viewport, ranges } = useListRowWindows(
+    scrollRef,
+    windowGroups.map((group) => group.tasks.length),
+    focusLayout?.projectStarts ?? null,
+    windowGroups,
+  );
+
+  let body: React.ReactNode;
+  if (
+    routeScopeChanged ||
+    tasksQuery.data === undefined ||
+    displayTasks === undefined
+  ) {
+    body =
+      !routeScopeChanged && tasksQuery.error !== null ? (
+        <EmptyState
+          icon="AlertCircle"
+          title="Couldn't load tasks"
+          description={tasksQuery.error}
+        />
+      ) : (
+        <LoadingRows />
+      );
+  } else if (displayTasks.length === 0) {
+    if (filtered) {
+      body = (
+        <EmptyState
+          icon="Search"
+          title="No tasks match these filters"
+          action={
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setFilters(EMPTY_FILTERS)}
+            >
+              Clear filters
+            </Button>
+          }
+        />
+      );
+    } else if (activeOnly) {
+      body = (
+        <EmptyState
+          icon="Zap"
+          title="No agents working right now"
+          description="Dispatch a task to an agent preset and it will show up here while it runs."
+        />
+      );
+    } else if (mode === "recent") {
+      body = (
+        <EmptyState
+          icon="TimeSchedule"
+          title="No recently closed tasks"
+          description="Done and Canceled tasks stay here for seven days before they are archived."
+        />
+      );
+    } else if (mode === "archive") {
+      body = (
+        <EmptyState
+          icon="Archive"
+          title="Archive is empty"
+          description="Archived tasks remain recoverable with their history and terminal status intact."
+        />
+      );
+    } else {
+      body = (
+        <EmptyState
+          icon="ListTodo"
+          title="No actionable tasks"
+          description="Create a task, or use Recently closed to review finished work."
+          action={
+            <Button size="sm" onClick={() => setNewTaskOpen(true)}>
+              <Icon name="Plus" className="size-3.5" />
+              New task
+            </Button>
+          }
+        />
+      );
+    }
+  } else {
+    const renderStatusGroups = (
+      taskGroups: typeof groups,
+      rangeStart: number,
+    ) =>
+      taskGroups.map((group, groupIndex) => {
+        const [start, end] = ranges[rangeStart + groupIndex] ?? [
+          0,
+          group.tasks.length,
+        ];
+        const hiddenAbove = start * viewport.rowHeight;
+        const hiddenBelow = (group.tasks.length - end) * viewport.rowHeight;
+        return (
+          <section key={group.status}>
+            <div
+              data-status-group-header={group.status}
+              className="sticky top-0 z-20 isolate flex items-center gap-2 border-b border-border-hairline bg-background px-3.5 pb-1.5 pt-2.5 text-sm font-semibold"
+            >
+              <StatusIcon status={group.status} />
+              {STATUS_LABELS[group.status]}
+              <span className="text-xs font-normal tabular-nums text-subtle-foreground">
+                {group.tasks.length}
+              </span>
+            </div>
+            {hiddenAbove > 0 ? (
+              <div aria-hidden style={{ height: hiddenAbove }} />
+            ) : null}
+            {group.tasks.slice(start, end).map((task) => (
+              <TaskRow
+                key={task.id}
+                task={task}
+                meta={meta.data?.get(task.id)}
+                project={projectsById.get(task.projectId)}
+                showProject={showProject}
+                labelsById={labelsById}
+                projectLabels={labelsByProject.get(task.projectId) ?? NO_LABELS}
+                projects={projects.data ?? []}
+                onMoveToProject={moveToProject}
+                onEdit={editTask}
+                onOpen={openTask}
+                pending={pendingTaskIds.has(task.id)}
+                selectable={selectable}
+                selected={selected.has(task.id)}
+                selectionDisabled={
+                  !selected.has(task.id) &&
+                  visibleSelected.length >= TASK_ARCHIVE_BATCH_MAX
+                }
+                onSelectedChange={(checked) =>
+                  setTaskSelected(task.id, checked)
+                }
+              />
+            ))}
+            {hiddenBelow > 0 ? (
+              <div aria-hidden style={{ height: hiddenBelow }} />
+            ) : null}
+          </section>
+        );
+      });
+    if (focusLayout !== null) {
+      body = focusLayout.sections.map(
+        ({ project, tasks, groups: projectGroups, rangeStart }) => {
+          return (
+            <section
+              key={project.id}
+              data-project-group
+              className="mb-3 border-b border-border"
+            >
+              <button
+                type="button"
+                data-project-group-header
+                onClick={() =>
+                  navigation.go({
+                    kind: "project",
+                    projectId: project.id,
+                    view: null,
+                  })
+                }
+                className="sticky top-0 z-30 flex w-full items-center gap-2 bg-sidebar px-3.5 py-2 text-left text-sm font-semibold hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+              >
+                <span
+                  aria-hidden
+                  className="size-3 rounded-sm"
+                  style={{ backgroundColor: project.color }}
+                />
+                <span className="flex-1">{project.name}</span>
+                <span className="text-xs font-normal tabular-nums text-muted-foreground">
+                  {tasks.length} active
+                </span>
+                <Icon name="ChevronRight" className="size-3.5" />
+              </button>
+              {renderStatusGroups(projectGroups, rangeStart)}
+            </section>
+          );
+        },
+      );
+    } else {
+      body = renderStatusGroups(groups, 0);
+    }
+  }
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <ListFilterBar
+        filters={filters}
+        onChange={setFilters}
+        sort={sort}
+        onSortChange={setSort}
+        labelOptions={labelOptions}
+        statusOptions={modeStatusOptions(mode)}
+        taskCount={displayTasks?.length}
+      />
+      {selectable ? (
+        <div className="flex items-center justify-between border-b border-border-hairline px-3.5 py-2 text-xs">
+          <span className="text-muted-foreground" aria-live="polite">
+            {visibleSelected.length} selected
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={visibleSelected.length === 0 || archivePending}
+            aria-busy={archivePending}
+            onClick={() => void mutateSelection()}
+          >
+            <Icon
+              name={mode === "archive" ? "RotateCcw" : "Archive"}
+              className="size-3.5"
+            />
+            {mode === "archive" ? "Restore" : "Archive completed"}
+          </Button>
+        </div>
+      ) : null}
+      <div
+        ref={scrollRef}
+        className="min-h-0 flex-1 overflow-y-auto @container"
+      >
+        {body}
+      </div>
+      <NewTaskDialog
+        open={newTaskOpen}
+        onOpenChange={setNewTaskOpen}
+        projectId={projectId}
+      />
+      <DetailToasts toasts={toasts} onDismiss={dismiss} />
+    </div>
+  );
+}
