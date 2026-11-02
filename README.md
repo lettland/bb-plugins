@@ -16,10 +16,13 @@ The root [`.bb/plugins.json`](.bb/plugins.json) collection manifest indexes them
 | [Auto review](plugins/auto-review) | `auto-review` |
 | [devkit](plugins/devkit) | `devkit` |
 | [Directory skills](plugins/dir-skills) | `dir-skills` |
+| [GitHub (fork)](plugins/github-fork) | `github-fork` |
 | [Model instructions](plugins/model-instructions) | `model-instructions` |
 | [Project queue](plugins/project-queue) | `project-queue` |
 | [Provider queue](plugins/provider-queue) | `provider-queue` |
 | [Shared Runtime](plugins/shared-runtime) | `shared-runtime` |
+| [Tasks (fork)](plugins/tasks-fork) | `tasks-fork` |
+| [Thread list (fork)](plugins/thread-list-fork) | `thread-list-fork` |
 | [Triage](plugins/triage) | `triage` |
 | [TypeSafe decisions](plugins/typesafe) | `typesafe` |
 | [WakaTime](plugins/wakatime) | `wakatime` |
@@ -147,7 +150,18 @@ becomes installable only after its first `<id>/vX.Y.Z` release tag exists
 BSD-2-Clause ([`LICENSE`](LICENSE)). devkit includes third-party content
 under Apache-2.0 and MIT
 ([`plugins/devkit/THIRD_PARTY_NOTICES.md`](plugins/devkit/THIRD_PARTY_NOTICES.md)),
-and triage, project-queue and provider-queue are MIT
+and triage, project-queue, provider-queue, tasks-fork, thread-list-fork and
+github-fork are MIT
 ([`plugins/triage/LICENSE`](plugins/triage/LICENSE),
 [`plugins/project-queue/LICENSE`](plugins/project-queue/LICENSE),
-[`plugins/provider-queue/LICENSE`](plugins/provider-queue/LICENSE)).
+[`plugins/provider-queue/LICENSE`](plugins/provider-queue/LICENSE),
+[`plugins/tasks-fork/LICENSE`](plugins/tasks-fork/LICENSE),
+[`plugins/thread-list-fork/LICENSE`](plugins/thread-list-fork/LICENSE),
+[`plugins/github-fork/LICENSE`](plugins/github-fork/LICENSE)).
+tasks-fork, thread-list-fork and github-fork are copies of bb's built-in
+plugins and keep bb's MIT license and copyright notice; each has a
+`THIRD_PARTY_NOTICES.md` recording the upstream, the copy base and the vendored
+registry files
+([`plugins/tasks-fork/THIRD_PARTY_NOTICES.md`](plugins/tasks-fork/THIRD_PARTY_NOTICES.md),
+[`plugins/thread-list-fork/THIRD_PARTY_NOTICES.md`](plugins/thread-list-fork/THIRD_PARTY_NOTICES.md),
+[`plugins/github-fork/THIRD_PARTY_NOTICES.md`](plugins/github-fork/THIRD_PARTY_NOTICES.md)).

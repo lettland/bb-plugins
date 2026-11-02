@@ -101,6 +101,25 @@
       }
     },
     {
+      "id": "github-fork",
+      "displayName": "GitHub",
+      "description": "Browse GitHub issues and pull requests in BB, then send them to agents.",
+      "icon": "Github",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/github-fork",
+          "range": "0.x",
+          "tagPrefix": "github-fork/"
+        }
+      }
+    },
+    {
       "id": "model-instructions",
       "displayName": "Model instructions",
       "description": "Custom instructions per provider, model, and project, optionally only for top-level or only for child threads — e.g. Opus plans and supervises, Sonnet worker threads implement.",
@@ -173,6 +192,44 @@
           "subdir": "plugins/shared-runtime",
           "range": "0.x",
           "tagPrefix": "shared-runtime/"
+        }
+      }
+    },
+    {
+      "id": "tasks-fork",
+      "displayName": "Tasks",
+      "description": "Plan and track work in BB, delegate tasks to agents, and keep task context connected to worker threads.",
+      "icon": "ListTodo",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/tasks-fork",
+          "range": "0.x",
+          "tagPrefix": "tasks-fork/"
+        }
+      }
+    },
+    {
+      "id": "thread-list-fork",
+      "displayName": "Thread list",
+      "description": "bb's sidebar thread list: pinned threads, custom sections, projects, machines, and nested threads.",
+      "icon": "ListView",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/thread-list-fork",
+          "range": "0.x",
+          "tagPrefix": "thread-list-fork/"
         }
       }
     },

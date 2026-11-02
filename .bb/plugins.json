@@ -8,10 +8,13 @@
     { "name": "auto-review", "source": "./plugins/auto-review" },
     { "name": "devkit", "source": "./plugins/devkit" },
     { "name": "dir-skills", "source": "./plugins/dir-skills" },
+    { "name": "github-fork", "source": "./plugins/github-fork" },
     { "name": "model-instructions", "source": "./plugins/model-instructions" },
     { "name": "project-queue", "source": "./plugins/project-queue" },
     { "name": "provider-queue", "source": "./plugins/provider-queue" },
     { "name": "shared-runtime", "source": "./plugins/shared-runtime" },
+    { "name": "tasks-fork", "source": "./plugins/tasks-fork" },
+    { "name": "thread-list-fork", "source": "./plugins/thread-list-fork" },
     { "name": "triage", "source": "./plugins/triage" },
     { "name": "typesafe", "source": "./plugins/typesafe" },
     { "name": "wakatime", "source": "./plugins/wakatime" }
