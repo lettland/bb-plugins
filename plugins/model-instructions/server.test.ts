@@ -154,14 +154,25 @@ describe("parseRules", () => {
   });
 
   it.each([
-    ['{"vars": {"a": "x"}, "rules": [{"instructions": "{{toString}}"}]}', "unknown variable {{toString}}"],
-    ['{"vars": {"a": "x"}, "rules": [{"instructions": "{{nope}}"}]}', "unknown variable {{nope}}"],
+    ['{"vars": {"a": "x"}, "rules": [{"instructions": "{{toString}}"}]}', "rules[0]: unknown variable {{toString}}"],
+    ['{"vars": {"a": "x"}, "rules": [{"instructions": "{{nope}}"}]}', "rules[0]: unknown variable {{nope}}"],
+    ['{"vars": {}, "rules": [{"instructions": "ok"}, {"instructions": "{{nope}}"}]}', "rules[1]: unknown variable {{nope}}"],
+    ['{"vars": {}, "rules": [{"instructions": "{{constructor}}"}]}', "rules[0]: unknown variable {{constructor}}"],
     ['{"vars": {"1bad": "x"}, "rules": []}', "at vars.1bad"],
     ['{"vars": {"a": 5}, "rules": []}', "expected string, received number"],
-    ['{"vars": {"a": "  "}, "rules": []}', "Too small"],
+    ['{"vars": {"a": "   "}, "rules": []}', "expected a non-blank string"],
+    ['{"vars": {"a": ""}, "rules": []}', "expected a non-blank string"],
+    // Upstream quirk (zod 4 z.record drops an own __proto__ key silently), learned in the
+    // vars review of 2026-11-02 (bb thread thr_g2hmqghsn6); guards the loud rejection in parseRules.
+    ['{"vars": {"__proto__": "x"}, "rules": []}', 'invalid variable name "__proto__" at vars'],
+    ['{"vars": {"__proto__": "x", "a": "y"}, "rules": [{"instructions": "{{a}}"}]}', 'invalid variable name "__proto__" at vars'],
+    ['{"vars": null, "rules": []}', "at vars"],
     ['{"rules": []}', "at vars"],
     ['{"vars": {}}', "at rules"],
     ['{"vars": {}, "rules": [], "extra": 1}', "Unrecognized key"],
+    ["5", 'expected an array of rules or { "vars": {...}, "rules": [...] }'],
+    ["null", 'expected an array of rules or { "vars": {...}, "rules": [...] }'],
+    ['"x"', 'expected an array of rules or { "vars": {...}, "rules": [...] }'],
   ])("rejects form B %s", (json, message) => {
     expect(() => parseRules(json)).toThrow(message);
   });
@@ -178,6 +189,37 @@ describe("parseRules", () => {
       JSON.stringify({ vars: { a: "{{b}} tail", b: "expanded" }, rules: [{ instructions: "{{a}}" }] }),
     );
     expect(rule.instructions).toBe("{{b}} tail");
+  });
+
+  it("inserts a var value containing $& and $1 exactly as written", () => {
+    const [rule] = parseRules(
+      JSON.stringify({ vars: { a: "$& $1" }, rules: [{ instructions: "[{{a}}]" }] }),
+    );
+    expect(rule.instructions).toBe("[$& $1]");
+  });
+
+  it("substitutes a var named constructor when declared", () => {
+    const [rule] = parseRules(
+      JSON.stringify({ vars: { constructor: "ctor" }, rules: [{ instructions: "{{constructor}}" }] }),
+    );
+    expect(rule.instructions).toBe("ctor");
+  });
+
+  it("expands var names containing _ and -", () => {
+    const [rule] = parseRules(
+      JSON.stringify({
+        vars: { impl_small: "small", "impl-heavy": "heavy" },
+        rules: [{ instructions: "{{impl_small}} {{impl-heavy}}" }],
+      }),
+    );
+    expect(rule.instructions).toBe("small heavy");
+  });
+
+  it("keeps a var value's spaces in the expanded text", () => {
+    const [rule] = parseRules(
+      JSON.stringify({ vars: { a: " pad " }, rules: [{ instructions: "[{{a}}]" }] }),
+    );
+    expect(rule.instructions).toBe("[ pad ]");
   });
 
   it("leaves form A text with {{name}} unchanged", () => {

@@ -25,9 +25,15 @@ const ruleSchema = z
 
 const rulesSchema = z.array(ruleSchema);
 
+const VAR_NAME_BODY = "[A-Za-z][A-Za-z0-9_-]*";
+const VAR_NAME_REGEXP = new RegExp(`^${VAR_NAME_BODY}$`);
+const VAR_REF_REGEXP = new RegExp(`\\{\\{(${VAR_NAME_BODY})\\}\\}`, "g");
+
 const varsSchema = z.record(
-  z.string().regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
-  z.string().trim().min(1),
+  z.string().regex(VAR_NAME_REGEXP),
+  z.string().refine((value) => value.trim().length > 0, {
+    error: "expected a non-blank string",
+  }),
 );
 
 const objectSchema = z.object({ vars: varsSchema, rules: rulesSchema }).strict();
@@ -42,11 +48,16 @@ interface Target {
 }
 
 /** One pass, so a var value's own {{...}} text stays literal. */
-function expand(instructions: string, vars: Record<string, string>): string {
+function expand(
+  instructions: string,
+  vars: Record<string, string>,
+  ruleIndex: number,
+): string {
   return instructions.replace(
-    /\{\{([A-Za-z][A-Za-z0-9_-]*)\}\}/g,
+    VAR_REF_REGEXP,
     (ref, name: string) => {
-      if (!Object.hasOwn(vars, name)) throw new Error(`unknown variable ${ref}`);
+      if (!Object.hasOwn(vars, name))
+        throw new Error(`rules[${ruleIndex}]: unknown variable ${ref}`);
       return vars[name];
     },
   );
@@ -66,11 +77,23 @@ export function parseRules(json: string): Rule[] {
     if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
     return parsed.data;
   }
+  if (typeof raw !== "object" || raw === null)
+    throw new Error(
+      'expected an array of rules or { "vars": {...}, "rules": [...] }',
+    );
+  // zod's record drops a __proto__ key silently, so reject it loudly first.
+  const { vars } = raw as { vars?: unknown };
+  if (
+    typeof vars === "object" &&
+    vars !== null &&
+    Object.hasOwn(vars, "__proto__")
+  )
+    throw new Error('invalid variable name "__proto__" at vars');
   const parsed = objectSchema.safeParse(raw);
   if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
-  return parsed.data.rules.map((rule) => ({
+  return parsed.data.rules.map((rule, ruleIndex) => ({
     ...rule,
-    instructions: expand(rule.instructions, parsed.data.vars),
+    instructions: expand(rule.instructions, parsed.data.vars, ruleIndex),
   }));
 }
 

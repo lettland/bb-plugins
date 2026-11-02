@@ -63,11 +63,20 @@ flags need not repeat in every rule:
 ```
 
 - Substitution happens only in the object form, and only inside `instructions`
-  (after an array of lines is joined). `{{name}}` is replaced by the var value;
-  var names are letters, digits, `_`, `-`, starting with a letter.
-- A `{{name}}` with no matching var is rejected on save, naming the var. Var
-  names must match that shape and values must be non-empty strings.
-- Values are literal: `{{...}}` inside a value is not expanded again.
+  (after an array of lines is joined). `{{name}}` is replaced by the var value.
+- In the object form, both `vars` and `rules` are required, and no other
+  top-level keys are allowed.
+- Var names are letters, digits, `_`, `-`, starting with a letter. Any other
+  name, including `__proto__`, is rejected on save.
+- Values are inserted exactly as written (no trimming) and must not be blank.
+  `{{...}}` inside a value is not expanded again.
+- A `{{name}}` with no matching var is rejected on save; the error names the
+  rule index and the var.
+- To keep a literal `{{name}}` in object-form text, define the var as itself,
+  for example `"name": "{{name}}"`.
+- The 4096-character truncation (see Constraints) applies to the expanded text; nothing rejects an over-long result on save.
+- Var values become part of the instructions sent to the model provider. Do
+  not put secrets or personal data in them.
 - Text that does not match `{{name}}` exactly (for example `{{ x }}` with
   spaces, or a single `{`) stays as written.
 - The plain array form keeps working unchanged: its text is never substituted,
