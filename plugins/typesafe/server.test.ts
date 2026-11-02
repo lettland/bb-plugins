@@ -9,7 +9,8 @@ import type { FakeAgentToolRecord, FakePluginHost } from "@get-bb/plugin-sdk/tes
 import plugin from "./server.js";
 import { parseSkipProjects, skipProjectsSettingSchema } from "./server.js";
 import { TOOL_INSTRUCTIONS, decideParamsSchema } from "./src/tool.js";
-import { TriageStore, TRIAGE_STORE_CAP, buildTriageEntry } from "./src/triage.js";
+import { TriageStore, TRIAGE_STORE_CAP, buildTriageEntry, type TriageKind } from "./src/triage.js";
+import { CHANGE_SIZE_QUESTION, TRIVIAL_CHANGE } from "./src/size.js";
 
 // Assembled from fragments so no secret-shaped literal appears in source.
 const TEST_KEY = ["test", "key"].join("-");
@@ -22,15 +23,15 @@ function okResponse(body: unknown): Response {
   return { ok: true, status: 200, json: async () => body } as unknown as Response;
 }
 
-function triageResponse() {
+function triageResponse(choice: TriageKind = "non_trivial") {
   return {
     model: "jev-1.14.0",
     answers: {
       kind: {
         type: "choice",
-        choice: "heavy_change",
+        choice,
         confidence: 0.83,
-        probabilities: { question: 0.05, small_change: 0.2, heavy_change: 0.75 },
+        probabilities: { question: 0.05, trivial: 0.2, non_trivial: 0.75 },
       },
       needs_plan: { type: "noul", noul: 0.9 },
     },
@@ -38,13 +39,22 @@ function triageResponse() {
   };
 }
 
-function createHost(settings: Record<string, string | boolean> = {}): FakePluginHost {
-  return createFakePluginHost({ pluginId: "typesafe", settings });
+function createHost(
+  settings: Record<string, string | boolean> = {},
+  timeline: () => Promise<{ rows: unknown[]; maxSeq: number }> = async () => ({ rows: [], maxSeq: 7 }),
+): FakePluginHost {
+  return createFakePluginHost({ pluginId: "typesafe", settings, sdk: { threads: { timeline } } });
 }
 
 function decideTool(host: FakePluginHost): FakeAgentToolRecord {
   const tool = host.harness.registrations.agentTools.find((entry) => entry.name === "typesafe_decide");
   if (tool === undefined) throw new Error("typesafe_decide is not registered");
+  return tool;
+}
+
+function changeSizeTool(host: FakePluginHost): FakeAgentToolRecord {
+  const tool = host.harness.registrations.agentTools.find((entry) => entry.name === "change_size");
+  if (tool === undefined) throw new Error("change_size is not registered");
   return tool;
 }
 
@@ -400,11 +410,11 @@ describe("typesafe_decide tool", () => {
 });
 
 describe("agent configuration", () => {
-  it("selects typesafe_decide and no skills by default", async () => {
+  it("selects both tools and no skills by default", async () => {
     const host = createHost();
     await plugin(host.bb);
     const resolved = await host.harness.resolveAgentConfiguration(makePluginAgentConfigurationContext());
-    expect(resolved.tools.map((tool) => tool.name)).toEqual(["typesafe_decide"]);
+    expect(resolved.tools.map((tool) => tool.name)).toEqual(["typesafe_decide", "change_size"]);
     expect(resolved.skills).toEqual([]);
     await host.harness.dispose();
   });
@@ -429,7 +439,7 @@ describe("agent configuration", () => {
     const kept = await host.harness.resolveAgentConfiguration(
       makePluginAgentConfigurationContext({ project: { name: "kept-project" } }),
     );
-    expect(kept.tools.map((tool) => tool.name)).toEqual(["typesafe_decide"]);
+    expect(kept.tools.map((tool) => tool.name)).toEqual(["typesafe_decide", "change_size"]);
     await host.harness.dispose();
   });
 
@@ -492,20 +502,31 @@ describe("message.dispatch triage hook", () => {
     await host.harness.dispose();
   });
 
-  it("proceeds without fetching when the thread already has an entry", async () => {
-    const host = createHost({ apiKey: TEST_KEY });
+  it("re-sizes every new user request and keeps the latest verdict with its seq", async () => {
+    let seq = 0;
+    const host = createHost({ apiKey: TEST_KEY }, async () => ({ rows: [], maxSeq: (seq += 5) }));
     await plugin(host.bb);
-    fetchMock.mockResolvedValue(okResponse(triageResponse()));
+    fetchMock.mockResolvedValueOnce(okResponse(triageResponse("non_trivial")));
+    fetchMock.mockResolvedValueOnce(okResponse(triageResponse("trivial")));
     const first = await hookOf(host)(
       makeMessageDispatchHookContext({ input: { text: "Refactor the export pipeline." } }),
     );
     expect(first).toEqual({ action: "proceed" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const second = await hookOf(host)(
-      makeMessageDispatchHookContext({ input: { text: "A follow-up message." } }),
+      makeMessageDispatchHookContext({ input: { text: "A follow-up request." } }),
     );
     expect(second).toEqual({ action: "proceed" });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      host.harness.registrations.instructionProvider?.({ threadId: "thread-1", projectId: "p" }),
+    ).toBe(
+      "TypeSafe triage of this thread's latest request (advisory): trivial (p=0.20, conf 0.83); plan first p=0.90. Later decisions: call typesafe_decide.",
+    );
+    expect(await host.harness.behavior.callRpc("changeSize", { threadId: "thread-1" })).toEqual({
+      verdict: "trivial",
+      messageSeq: 10,
+    });
     await host.harness.dispose();
   });
 
@@ -520,14 +541,19 @@ describe("message.dispatch triage hook", () => {
     await host.harness.dispose();
   });
 
-  it("proceeds without fetching for a non-pending thread with an empty store", async () => {
+  it("sizes a user request on a non-pending thread as well", async () => {
     const host = createHost({ apiKey: TEST_KEY });
     await plugin(host.bb);
+    fetchMock.mockResolvedValue(okResponse(triageResponse()));
     const decision = await hookOf(host)(
       makeMessageDispatchHookContext({ thread: { status: "active" } }),
     );
     expect(decision).toEqual({ action: "proceed" });
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(await host.harness.behavior.callRpc("changeSize", { threadId: "thread-1" })).toEqual({
+      verdict: "non_trivial",
+      messageSeq: 7,
+    });
     await host.harness.dispose();
   });
 
@@ -564,7 +590,7 @@ describe("message.dispatch triage hook", () => {
       projectId: "project-1",
     });
     expect(line).toBe(
-      "TypeSafe triage of this thread's opening request (advisory): heavy_change (p=0.75, conf 0.83); plan first p=0.90. Later decisions: call typesafe_decide.",
+      "TypeSafe triage of this thread's latest request (advisory): non_trivial (p=0.75, conf 0.83); plan first p=0.90. Later decisions: call typesafe_decide.",
     );
     expect(
       host.harness.registrations.instructionProvider?.({ threadId: "thread-unknown", projectId: "p" }),
@@ -654,6 +680,28 @@ describe("message.dispatch triage hook", () => {
     await host.harness.dispose();
   });
 
+  it("proceeds with a warning and keeps the previous verdict when the timeline read fails", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    fetchMock.mockResolvedValue(okResponse(triageResponse()));
+    await hookOf(host)(
+      makeMessageDispatchHookContext({ input: { text: "Refactor the export pipeline." } }),
+    );
+    host.harness.sdk.stub("threads.timeline", () => Promise.reject(new Error("timeline down")));
+    const decision = await hookOf(host)(
+      makeMessageDispatchHookContext({ input: { text: "A follow-up request." } }),
+    );
+    expect(decision).toEqual({ action: "proceed" });
+    expect(
+      host.harness.logEntries.some((entry) => entry.message.includes("triage skipped: timeline down")),
+    ).toBe(true);
+    expect(await host.harness.behavior.callRpc("changeSize", { threadId: "thread-1" })).toEqual({
+      verdict: "non_trivial",
+      messageSeq: 7,
+    });
+    await host.harness.dispose();
+  });
+
   it("proceeds and stores nothing when the answers cannot build an entry", async () => {
     const host = createHost({ apiKey: TEST_KEY });
     await plugin(host.bb);
@@ -674,59 +722,155 @@ describe("message.dispatch triage hook", () => {
   });
 });
 
+describe("change size definition", () => {
+  it("pins the trivial-change definition text shared with auto-review", () => {
+    expect(TRIVIAL_CHANGE).toBe(
+      "Trivial: one file, a few lines, the exact change already settled, and no design choice the user has not seen. Anything else that changes code or config is non-trivial.",
+    );
+  });
+
+  it("is what triage sends as the kind question", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    fetchMock.mockResolvedValue(okResponse(triageResponse()));
+    await hookOf(host)(makeMessageDispatchHookContext());
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+    expect(body.questions.kind).toEqual(CHANGE_SIZE_QUESTION);
+    expect(Object.keys(body.questions.kind.criteria)).toEqual(["question", "trivial", "non_trivial"]);
+    await host.harness.dispose();
+  });
+});
+
+describe("changeSize RPC", () => {
+  it("serves the stored verdict and the null shape for a thread with no entry", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    expect(await host.harness.behavior.callRpc("changeSize", { threadId: "thread-1" })).toEqual({
+      verdict: null,
+      messageSeq: null,
+    });
+    fetchMock.mockResolvedValue(okResponse(triageResponse()));
+    await hookOf(host)(makeMessageDispatchHookContext());
+    expect(await host.harness.behavior.callRpc("changeSize", { threadId: "thread-1" })).toEqual({
+      verdict: "non_trivial",
+      messageSeq: 7,
+    });
+    await host.harness.dispose();
+  });
+
+  it("rejects input outside the contract", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    await expect(host.harness.behavior.callRpc("changeSize", { threadId: "" })).rejects.toThrow();
+    await host.harness.dispose();
+  });
+});
+
+describe("change_size tool", () => {
+  it("serves the stored verdict for the calling thread and the null shape before triage", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    const record = changeSizeTool(host);
+    const before = (await record.execute({}, TOOL_CTX)) as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(before).toEqual({ content: [{ type: "text", text: '{"verdict":null,"messageSeq":null}' }] });
+    fetchMock.mockResolvedValue(okResponse(triageResponse()));
+    await hookOf(host)(makeMessageDispatchHookContext());
+    const after = (await record.execute({}, TOOL_CTX)) as {
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(after).toEqual({ content: [{ type: "text", text: '{"verdict":"non_trivial","messageSeq":7}' }] });
+    await host.harness.dispose();
+  });
+});
+
 describe("triage store", () => {
   it("evicts the oldest entry past the cap", () => {
     const store = new TriageStore();
     for (let i = 0; i <= TRIAGE_STORE_CAP; i += 1) {
-      store.set(`thread-${i}`, { kind: "question", p: 0.5, conf: 0.5, plan: 0.5 });
+      store.set(`thread-${i}`, { kind: "question", p: 0.5, conf: 0.5, plan: 0.5, messageSeq: i });
     }
     expect(store.has("thread-0")).toBe(false);
     expect(store.line("thread-0")).toBeNull();
     expect(store.has(`thread-${TRIAGE_STORE_CAP}`)).toBe(true);
   });
 
+  it("projects the stored entry onto the changeSize shape, or null without an entry", () => {
+    const store = new TriageStore();
+    expect(store.changeSize("thread-1")).toBeNull();
+    store.set("thread-1", { kind: "non_trivial", p: 0.75, conf: 0.83, plan: 0.9, messageSeq: 41 });
+    expect(store.changeSize("thread-1")).toEqual({ verdict: "non_trivial", messageSeq: 41 });
+  });
+
+  it("builds an entry carrying the dispatching message's seq", () => {
+    expect(
+      buildTriageEntry(
+        {
+          kind: {
+            type: "choice",
+            choice: "trivial",
+            confidence: 0.6,
+            probabilities: { trivial: 0.7 },
+          },
+          needs_plan: { type: "noul", noul: 0.4 },
+        },
+        41,
+      ),
+    ).toEqual({ kind: "trivial", p: 0.7, conf: 0.6, plan: 0.4, messageSeq: 41 });
+  });
+
   it("rejects an unvalidated kind", () => {
     expect(
-      buildTriageEntry({
-        kind: {
-          type: "choice",
-          choice: "invented_kind",
-          confidence: 0.9,
-          probabilities: { invented_kind: 0.9 },
+      buildTriageEntry(
+        {
+          kind: {
+            type: "choice",
+            choice: "invented_kind",
+            confidence: 0.9,
+            probabilities: { invented_kind: 0.9 },
+          },
+          needs_plan: { type: "noul", noul: 0.5 },
         },
-        needs_plan: { type: "noul", noul: 0.5 },
-      }),
+        41,
+      ),
     ).toBeNull();
   });
 
   it("rejects answers without a kind answer", () => {
-    expect(buildTriageEntry({ needs_plan: { type: "noul", noul: 0.5 } })).toBeNull();
+    expect(buildTriageEntry({ needs_plan: { type: "noul", noul: 0.5 } }, 41)).toBeNull();
   });
 
   it("rejects a kind answer without a probability for its choice", () => {
     expect(
-      buildTriageEntry({
-        kind: {
-          type: "choice",
-          choice: "question",
-          confidence: 0.9,
-          probabilities: { small_change: 0.9 },
+      buildTriageEntry(
+        {
+          kind: {
+            type: "choice",
+            choice: "question",
+            confidence: 0.9,
+            probabilities: { trivial: 0.9 },
+          },
+          needs_plan: { type: "noul", noul: 0.5 },
         },
-        needs_plan: { type: "noul", noul: 0.5 },
-      }),
+        41,
+      ),
     ).toBeNull();
   });
 
   it("rejects answers without a needs_plan answer", () => {
     expect(
-      buildTriageEntry({
-        kind: {
-          type: "choice",
-          choice: "question",
-          confidence: 0.9,
-          probabilities: { question: 0.9 },
+      buildTriageEntry(
+        {
+          kind: {
+            type: "choice",
+            choice: "question",
+            confidence: 0.9,
+            probabilities: { question: 0.9 },
+          },
         },
-      }),
+        41,
+      ),
     ).toBeNull();
   });
 });
@@ -759,7 +903,7 @@ describe("startup", () => {
     const host = createHost({ skipProjects: "not json" });
     await plugin(host.bb);
     const resolved = await host.harness.resolveAgentConfiguration(makePluginAgentConfigurationContext());
-    expect(resolved.tools.map((tool) => tool.name)).toEqual(["typesafe_decide"]);
+    expect(resolved.tools.map((tool) => tool.name)).toEqual(["typesafe_decide", "change_size"]);
     expect(host.harness.logEntries.some((entry) => entry.message.includes("skipProjects setting ignored"))).toBe(
       true,
     );

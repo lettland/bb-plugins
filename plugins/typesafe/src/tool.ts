@@ -1,6 +1,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { decide, type Answer, type DecideError, type QuestionMap } from "./client.js";
+import type { TriageStore } from "./triage.js";
 
 export const TOOL_INSTRUCTIONS = `\`typesafe_decide\` asks TypeSafe's Jev model typed questions and returns calibrated probabilities. It is advisory: explicit user or brief requirements, and repository rules, always win over it.
 
@@ -160,6 +161,20 @@ export function registerDecideTool(bb: BbPluginApi, opts: DecideToolOptions): vo
       }
       const { model, answers, usage } = outcome.value;
       return { content: [{ type: "text", text: JSON.stringify({ model, answers, usage }) }] };
+    },
+  });
+}
+
+/** Serves the stored triage verdict for the calling thread; no API call. */
+export function registerChangeSizeTool(bb: BbPluginApi, store: TriageStore): void {
+  bb.agents.registerTool({
+    name: "change_size",
+    description:
+      "The stored TypeSafe size verdict for this thread's latest user request: question, trivial, or non_trivial, with the seq of the message it sized. Read-only, no API call.",
+    parameters: z.object({}).strict(),
+    execute(_params, ctx) {
+      const value = store.changeSize(ctx.threadId) ?? { verdict: null, messageSeq: null };
+      return { content: [{ type: "text", text: JSON.stringify(value) }] };
     },
   });
 }

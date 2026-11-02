@@ -1,7 +1,8 @@
 import type { BbPluginApi, MessageDispatchHookContext } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { decide } from "./src/client.js";
-import { registerDecideTool } from "./src/tool.js";
+import { registerChangeSizeRpc } from "./src/rpc.js";
+import { registerChangeSizeTool, registerDecideTool } from "./src/tool.js";
 import {
   TriageStore,
   TRIAGE_QUESTIONS,
@@ -63,9 +64,9 @@ export default async function plugin(bb: BbPluginApi) {
     },
     triage: {
       type: "boolean",
-      label: "Opening-request triage",
+      label: "Request triage",
       description:
-        "Classify each top-level thread's opening request with Jev and add one advisory line to its instructions.",
+        "Classify each top-level thread's user requests with Jev and add one advisory line to its instructions.",
       default: true,
     },
     skipProjects: {
@@ -124,12 +125,14 @@ export default async function plugin(bb: BbPluginApi) {
     getModel: () => config.model,
     log,
   });
+  registerChangeSizeRpc(bb, store);
+  registerChangeSizeTool(bb, store);
 
   const skipped = (projectName: string) =>
     config.skipProjects.some((glob) => globToRegExp(glob).test(projectName));
 
   bb.agents.configure((ctx) => ({
-    tools: ctx.origin.kind === "fork" || skipped(ctx.project.name) ? [] : ["typesafe_decide"],
+    tools: ctx.origin.kind === "fork" || skipped(ctx.project.name) ? [] : ["typesafe_decide", "change_size"],
     skills: [],
   }));
 
@@ -149,10 +152,15 @@ export default async function plugin(bb: BbPluginApi) {
     if (ctx.initiator !== "user") return;
     if (ctx.attempt !== "start-turn") return;
     if (ctx.parentThreadId !== null) return;
-    if (ctx.thread.status !== "pending") return;
     if (ctx.queuedMessages.length !== 0) return;
     const threadId = ctx.thread.id;
-    if (store.has(threadId)) return;
+    // The dispatch context carries no message seq. The timeline's maxSeq at
+    // dispatch time is the dispatching message's row when core logged it
+    // before the hook, else the row just before it; a plan approved for an
+    // earlier request always sits before that turn's end, so it stays under
+    // this seq either way. A failed read lands in the hook's outer catch as
+    // "triage skipped:" and the previous verdict stays.
+    const { maxSeq: messageSeq } = await bb.sdk.threads.timeline({ threadId });
     const outcome = await decide(
       {
         state: triageState(ctx.input.text),
@@ -164,7 +172,7 @@ export default async function plugin(bb: BbPluginApi) {
       { log },
     );
     if (outcome.kind !== "ok") return;
-    const entry = buildTriageEntry(outcome.value.answers);
+    const entry = buildTriageEntry(outcome.value.answers, messageSeq);
     if (entry === null) return;
     store.set(threadId, entry);
   }

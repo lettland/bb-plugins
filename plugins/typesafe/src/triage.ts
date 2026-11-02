@@ -1,6 +1,7 @@
 import { redact, type Answer, type Question } from "./client.js";
+import { CHANGE_SIZE_QUESTION } from "./size.js";
 
-export const TRIAGE_KINDS = ["question", "small_change", "heavy_change"] as const;
+export const TRIAGE_KINDS = ["question", "trivial", "non_trivial"] as const;
 export type TriageKind = (typeof TRIAGE_KINDS)[number];
 
 export const TRIAGE_TIMEOUT_MS = 1500;
@@ -8,19 +9,11 @@ export const TRIAGE_STATE_MAX_CHARS = 8000;
 export const TRIAGE_STORE_CAP = 500;
 
 export const TRIAGE_QUESTIONS: Record<"kind" | "needs_plan", Question> = {
-  kind: {
-    type: "choice",
-    instructions: "Classify the user's opening request to this thread.",
-    criteria: {
-      question: "A question, discussion, or lookup — no code or config change is requested",
-      small_change: "A small, contained change or task — a fix, tweak, or single-area edit",
-      heavy_change: "Substantial work — a new feature, refactor, audit, or multi-file/multi-area change",
-    },
-  },
+  kind: CHANGE_SIZE_QUESTION,
   needs_plan: {
     type: "noul",
     instructions:
-      "Does this opening request need a plan, design, or research step before implementation starts?",
+      "Does this request need a plan, design, or research step before implementation starts?",
   },
 };
 
@@ -29,6 +22,8 @@ export interface TriageEntry {
   p: number;
   conf: number;
   plan: number;
+  /** The timeline seq of the dispatching message the verdict sized. */
+  messageSeq: number;
 }
 
 /** Redacted, then truncated — only fixed questions and clamped numbers leave the process. */
@@ -37,7 +32,10 @@ export function triageState(text: string): string {
 }
 
 /** Validates the fixed triage questions' answers into the clamped entry, or null. */
-export function buildTriageEntry(answers: Record<string, Answer>): TriageEntry | null {
+export function buildTriageEntry(
+  answers: Record<string, Answer>,
+  messageSeq: number,
+): TriageEntry | null {
   const kindAnswer = answers.kind;
   if (kindAnswer === undefined || kindAnswer.type !== "choice") return null;
   if (!(TRIAGE_KINDS as readonly string[]).includes(kindAnswer.choice)) return null;
@@ -50,6 +48,7 @@ export function buildTriageEntry(answers: Record<string, Answer>): TriageEntry |
     p,
     conf: kindAnswer.confidence,
     plan: planAnswer.noul,
+    messageSeq,
   };
 }
 
@@ -70,10 +69,17 @@ export class TriageStore {
     }
   }
 
+  /** The stored verdict projected onto the changeSize contract shape, or null when the thread has none. */
+  changeSize(threadId: string): { verdict: TriageKind; messageSeq: number } | null {
+    const entry = this.#entries.get(threadId);
+    if (entry === undefined) return null;
+    return { verdict: entry.kind, messageSeq: entry.messageSeq };
+  }
+
   /** The fixed-format advisory line for a thread, or null when it has no entry. */
   line(threadId: string): string | null {
     const entry = this.#entries.get(threadId);
     if (entry === undefined) return null;
-    return `TypeSafe triage of this thread's opening request (advisory): ${entry.kind} (p=${entry.p.toFixed(2)}, conf ${entry.conf.toFixed(2)}); plan first p=${entry.plan.toFixed(2)}. Later decisions: call typesafe_decide.`;
+    return `TypeSafe triage of this thread's latest request (advisory): ${entry.kind} (p=${entry.p.toFixed(2)}, conf ${entry.conf.toFixed(2)}); plan first p=${entry.plan.toFixed(2)}. Later decisions: call typesafe_decide.`;
   }
 }
