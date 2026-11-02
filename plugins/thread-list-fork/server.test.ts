@@ -194,6 +194,44 @@ describe("thread-list preferences rpc", () => {
     ]);
   });
 
+  it.each(["thread-list", "thread-list-fork"])(
+    "owns the bare move row action under the plugin id %s",
+    async (pluginId) => {
+      const { bb, harness } = createFakePluginHost({ pluginId });
+      await plugin(bb);
+      await expect(
+        harness.behavior.callRpc("setPreference", {
+          key: "rowActions",
+          value: ["move"],
+        }),
+      ).resolves.toEqual({ key: "rowActions", value: [`${pluginId}/move`] });
+      await expect(
+        harness.behavior.callRpc("setPreference", {
+          key: "rowActions",
+          value: [`${pluginId}/move`],
+        }),
+      ).resolves.toEqual({ key: "rowActions", value: [`${pluginId}/move`] });
+      const listed = await harness.behavior.runCli(["prefs", "list"]);
+      const rowActionsLine = listed.stdout
+        .split("\n")
+        .find((line) => line.startsWith("rowActions\t"));
+      expect(rowActionsLine).toContain(`bb--core/pin, ${pluginId}/move,`);
+    },
+  );
+
+  it("does not treat another plugin's move action as its own", async () => {
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "thread-list-fork",
+    });
+    await plugin(bb);
+    await expect(
+      harness.behavior.callRpc("setPreference", {
+        key: "rowActions",
+        value: ["thread-list/move"],
+      }),
+    ).resolves.toEqual({ key: "rowActions", value: ["thread-list/move"] });
+  });
+
   it("falls back to the default when a stored value no longer parses", async () => {
     const { bb, harness } = setup();
     await bb.storage.kv.set("preference:chronologicalSort", "by-vibes");
@@ -252,7 +290,7 @@ describe("migration from bb's sidebar preferences", () => {
 });
 
 describe("bb thread-list prefs", () => {
-  it("names the CLI after the plugin id", async () => {
+  it("registers the CLI under the fixed name thread-list for any plugin id", async () => {
     const builtIn = setup();
     await plugin(builtIn.bb);
     expect(builtIn.harness.inspection.registrations.cli?.name).toBe(
@@ -261,7 +299,7 @@ describe("bb thread-list prefs", () => {
 
     const copy = createFakePluginHost({ pluginId: "my-sidebar" });
     await plugin(copy.bb);
-    expect(copy.harness.inspection.registrations.cli?.name).toBe("my-sidebar");
+    expect(copy.harness.inspection.registrations.cli?.name).toBe("thread-list");
   });
 
   it("lists, gets, sets, and resets through the CLI", async () => {

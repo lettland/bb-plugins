@@ -72,7 +72,8 @@ write; CLI writes and resets broadcast `origin: null`.
 hover, left to right before its actions menu, as thread action keys: bb's
 `bb--core/split`, `bb--core/copyLink`, `bb--core/read`, `bb--core/pin`,
 `bb--core/rename`, `bb--core/archive`, `bb--core/delete`, the list's
-`thread-list/move` (opens a section menu), or another plugin's
+`thread-list-fork/move` (opens a section menu; this plugin's id plus
+`/move`), or another plugin's
 `<pluginId>/<actionId>`. Bare legacy ids such as `archive` and `core/<id>`
 keys still work. The default is `'["bb--core/archive"]'` and `'[]'` leaves
 only the menu. For example,

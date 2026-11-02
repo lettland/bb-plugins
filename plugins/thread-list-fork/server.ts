@@ -67,7 +67,7 @@ export function createPreferenceStore(bb: BbPluginApi) {
   ): Promise<PreferenceValue<Key>> {
     const stored = await bb.storage.kv.get<unknown>(kvKey(key));
     if (stored === undefined) return getPreferenceDefault(key);
-    const parsed = parseStoredPreferenceValue(key, stored);
+    const parsed = parseStoredPreferenceValue(key, stored, bb.pluginId);
     if (parsed.success) return parsed.value;
     bb.log.warn(
       `stored preference ${key} is invalid (${parsed.message}); using the default`,
@@ -90,7 +90,7 @@ export function createPreferenceStore(bb: BbPluginApi) {
     value: unknown,
     origin: string | null,
   ): Promise<PreferenceValue<Key>> {
-    const parsed = parsePreferenceValue(key, value);
+    const parsed = parsePreferenceValue(key, value, bb.pluginId);
     if (!parsed.success) {
       throw new PreferenceValidationError(key, parsed.message);
     }
@@ -157,7 +157,7 @@ export async function migrateFromUiPreferences(
     if (legacyKey === null) continue;
     const legacy = entries[legacyKey];
     if (legacy === undefined) continue;
-    const parsed = parsePreferenceValue(key, legacy.value);
+    const parsed = parsePreferenceValue(key, legacy.value, bb.pluginId);
     if (!parsed.success) continue;
     if (
       JSON.stringify(parsed.value) === JSON.stringify(getPreferenceDefault(key))
@@ -209,7 +209,7 @@ export default async function threadListPlugin(bb: BbPluginApi) {
 
   bb.cli.register(
     defineCli({
-      name: bb.pluginId,
+      name: "thread-list",
       summary:
         "Inspect and change the sidebar thread list's layout preferences",
       description:
@@ -227,7 +227,7 @@ export default async function threadListPlugin(bb: BbPluginApi) {
               exitCode: 0,
               stdout: PREFERENCE_KEYS.map(
                 (key) =>
-                  `${key}\t${JSON.stringify(values[key])}\t${describePreference(key)}`,
+                  `${key}\t${JSON.stringify(values[key])}\t${describePreference(key, bb.pluginId)}`,
               ).join("\n"),
             };
           },
@@ -279,7 +279,7 @@ export default async function threadListPlugin(bb: BbPluginApi) {
               if (error instanceof PreferenceValidationError) {
                 throw new PluginCliError(error.message, {
                   code: "invalid_preference_value",
-                  hint: describePreference(key),
+                  hint: describePreference(key, bb.pluginId),
                 });
               }
               throw error;

@@ -194,6 +194,7 @@ interface RenderThreadRowArgs extends Omit<HarnessProps, "thread"> {
   threadActions?: TestThreadActionsResolver;
   threadBulkActions?: TestThreadBulkActionsResolver;
   experiments?: string[];
+  pluginId?: string;
 }
 
 function renderThreadRow({
@@ -209,6 +210,7 @@ function renderThreadRow({
   threadActions = hostThreadActions(),
   threadBulkActions,
   experiments,
+  pluginId,
   ...harness
 }: RenderThreadRowArgs = {}): RenderedSlot & {
   rerenderThreadRow(nextThread: PluginSidebarThread): void;
@@ -240,6 +242,7 @@ function renderThreadRow({
       threadActions,
       threadBulkActions,
       experiments,
+      pluginId,
     },
   );
   return Object.assign(slot, {
@@ -733,6 +736,20 @@ describe("ThreadRow", () => {
         await screen.findByRole("menuitem", { name: "Customize actions" }),
       );
       expect(customize).toHaveBeenCalledWith("thr_test");
+    },
+  );
+
+  it.each(["thread-list", "thread-list-fork"])(
+    "keys the Customize actions item by the plugin id %s",
+    async (pluginId) => {
+      renderThreadRow({ onCustomizeRowActions: vi.fn(), pluginId });
+      fireEvent.click(screen.getByRole("button", { name: "Thread actions" }));
+      const item = await screen.findByRole("menuitem", {
+        name: "Customize actions",
+      });
+      expect(item.getAttribute("data-thread-action")).toBe(
+        `${pluginId}/customizeRowActions`,
+      );
     },
   );
 

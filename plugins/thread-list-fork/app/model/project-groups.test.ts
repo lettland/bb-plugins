@@ -221,12 +221,14 @@ describe("project group edits", () => {
   });
 });
 
+const PLUGIN_ID = "thread-list-fork";
+
 describe("projectGroups preference", () => {
   it("rejects a project in two groups", () => {
     const result = parsePreferenceValue("projectGroups", [
       work,
       { id: "other", name: "Other", projectIds: ["b"] },
-    ]);
+    ], PLUGIN_ID);
     expect(result).toEqual({
       success: false,
       message: "A project can belong to only one project group.",
@@ -235,17 +237,21 @@ describe("projectGroups preference", () => {
 
   it("rejects duplicate group ids and blank names", () => {
     expect(
-      parsePreferenceValue("projectGroups", [work, { ...bb, id: "work" }])
-        .success,
+      parsePreferenceValue(
+        "projectGroups",
+        [work, { ...bb, id: "work" }],
+        PLUGIN_ID,
+      ).success,
     ).toBe(false);
     expect(
-      parsePreferenceValue("projectGroups", [{ ...bb, name: "  " }]).success,
+      parsePreferenceValue("projectGroups", [{ ...bb, name: "  " }], PLUGIN_ID)
+        .success,
     ).toBe(false);
   });
 
   it("trims group names", () => {
     expect(
-      parsePreferenceValue("projectGroups", [{ ...bb, name: " bb " }]),
+      parsePreferenceValue("projectGroups", [{ ...bb, name: " bb " }], PLUGIN_ID),
     ).toEqual({ success: true, value: [bb] });
   });
 });

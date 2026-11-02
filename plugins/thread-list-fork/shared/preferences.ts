@@ -42,12 +42,12 @@ const LEGACY_THREAD_ROW_ACTION_KEYS = {
   copyLink: "bb--core/copyLink",
   read: "bb--core/read",
   pin: "bb--core/pin",
-  move: "thread-list/move",
   rename: "bb--core/rename",
   archive: "bb--core/archive",
 } as const;
 type LegacyThreadRowActionId = keyof typeof LEGACY_THREAD_ROW_ACTION_KEYS;
 const LEGACY_CORE_KEY_PREFIX = "core/";
+const LEGACY_PLUGIN_OWNED_ACTION_ID = "move";
 
 function isLegacyThreadRowActionId(
   value: string,
@@ -55,21 +55,39 @@ function isLegacyThreadRowActionId(
   return Object.hasOwn(LEGACY_THREAD_ROW_ACTION_KEYS, value);
 }
 
-function migrateThreadRowActionKey(value: string): string {
+function migrateThreadRowActionKey(
+  value: string,
+  pluginId: string | null,
+): string {
   if (isLegacyThreadRowActionId(value)) {
     return LEGACY_THREAD_ROW_ACTION_KEYS[value];
+  }
+  if (value === LEGACY_PLUGIN_OWNED_ACTION_ID && pluginId !== null) {
+    return `${pluginId}/${value}`;
   }
   return value.startsWith(LEGACY_CORE_KEY_PREFIX) ? `bb--${value}` : value;
 }
 
-export const threadRowActionKeySchema = z
-  .string()
-  .transform(migrateThreadRowActionKey)
-  .pipe(
-    z.string().regex(/^[^/\s]+\/[^/\s]+$/, {
-      message: "Row actions are thread action keys: <owner>/<id>",
-    }),
-  );
+function threadRowActionKeySchemaFor(pluginId: string | null) {
+  return z
+    .string()
+    .transform((value) => migrateThreadRowActionKey(value, pluginId))
+    .pipe(
+      z.string().regex(/^[^/\s]+\/[^/\s]+$/, {
+        message: "Row actions are thread action keys: <owner>/<id>",
+      }),
+    );
+}
+
+function rowActionsSchemaFor(pluginId: string | null) {
+  return z
+    .array(threadRowActionKeySchemaFor(pluginId))
+    .max(LIST_MAX_LENGTH)
+    .transform((value) => [...new Set(value)])
+    .refine((value) => value.length <= THREAD_ROW_ACTION_LIMIT, {
+      message: `Choose at most ${THREAD_ROW_ACTION_LIMIT} row actions`,
+    });
+}
 
 const collapsibleSectionIdSchema = z.enum(["pinned", "threads"]);
 
@@ -107,7 +125,7 @@ const projectGroupsSchema = z
 function definePreference<Schema extends z.ZodTypeAny>(
   schema: Schema,
   defaultValue: z.infer<Schema>,
-  description: string,
+  description: string | ((pluginId: string) => string),
   legacyKey: string | null,
 ) {
   return { schema, defaultValue, description, legacyKey };
@@ -209,15 +227,10 @@ export const preferenceDefinitions = {
     "sidebar.hiddenGroups",
   ),
   rowActions: definePreference(
-    z
-      .array(threadRowActionKeySchema)
-      .max(LIST_MAX_LENGTH)
-      .transform((value) => [...new Set(value)])
-      .refine((value) => value.length <= THREAD_ROW_ACTION_LIMIT, {
-        message: `Choose at most ${THREAD_ROW_ACTION_LIMIT} row actions`,
-      }),
+    rowActionsSchemaFor(null),
     ["bb--core/archive"],
-    `Up to ${THREAD_ROW_ACTION_LIMIT} quick actions shown on a thread row's hover, left to right before its actions menu, as thread action keys: bb--core/split, bb--core/copyLink, bb--core/read, bb--core/pin, thread-list/move, bb--core/rename, bb--core/archive, or a plugin's <pluginId>/<actionId>. Bare legacy ids such as archive and core/<id> keys are accepted. An empty list shows only the menu.`,
+    (pluginId) =>
+      `Up to ${THREAD_ROW_ACTION_LIMIT} quick actions shown on a thread row's hover, left to right before its actions menu, as thread action keys: bb--core/split, bb--core/copyLink, bb--core/read, bb--core/pin, ${pluginId}/move, bb--core/rename, bb--core/archive, or a plugin's <pluginId>/<actionId>. Bare legacy ids such as archive and core/<id> keys are accepted. An empty list shows only the menu.`,
     null,
   ),
   collapsedSections: definePreference(
@@ -299,8 +312,12 @@ export type PreferenceParseResult<Key extends PreferenceKey> =
 export function parsePreferenceValue<Key extends PreferenceKey>(
   key: Key,
   value: unknown,
+  pluginId: string,
 ): PreferenceParseResult<Key> {
-  const schema: z.ZodTypeAny = preferenceDefinitions[key].schema;
+  const schema: z.ZodTypeAny =
+    key === "rowActions"
+      ? rowActionsSchemaFor(pluginId)
+      : preferenceDefinitions[key].schema;
   const parsed = schema.safeParse(value);
   if (parsed.success) {
     return { success: true, value: parsed.data as PreferenceValue<Key> };
@@ -314,24 +331,31 @@ export function parsePreferenceValue<Key extends PreferenceKey>(
 export function parseStoredPreferenceValue<Key extends PreferenceKey>(
   key: Key,
   value: unknown,
+  pluginId: string,
 ): PreferenceParseResult<Key> {
   return parsePreferenceValue(
     key,
-    key === "rowActions" ? knownRowActions(value) : value,
+    key === "rowActions" ? knownRowActions(value, pluginId) : value,
+    pluginId,
   );
 }
 
-function knownRowActions(value: unknown): unknown {
+function knownRowActions(value: unknown, pluginId: string): unknown {
   if (!Array.isArray(value)) return value;
+  const keySchema = threadRowActionKeySchemaFor(pluginId);
   const known = value.flatMap((id) => {
-    const parsed = threadRowActionKeySchema.safeParse(id);
+    const parsed = keySchema.safeParse(id);
     return parsed.success ? [parsed.data] : [];
   });
   return [...new Set(known)].slice(0, THREAD_ROW_ACTION_LIMIT);
 }
 
-export function describePreference(key: PreferenceKey): string {
-  return preferenceDefinitions[key].description;
+export function describePreference(
+  key: PreferenceKey,
+  pluginId: string,
+): string {
+  const { description } = preferenceDefinitions[key];
+  return typeof description === "string" ? description : description(pluginId);
 }
 
 export const PREFERENCES_CHANGED_CHANNEL = "preferences";

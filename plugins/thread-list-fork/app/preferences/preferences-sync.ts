@@ -83,6 +83,15 @@ function mirrorStorageKey(): string | null {
     : preferencesMirrorStorageKey(state.pluginId);
 }
 
+function requirePluginId(): string {
+  if (state.pluginId === null) {
+    throw new Error(
+      "thread-list preferences used before attachPreferencesStore",
+    );
+  }
+  return state.pluginId;
+}
+
 function logPrefix(): string {
   return state.pluginId === null ? "" : `${state.pluginId}: `;
 }
@@ -129,7 +138,7 @@ function readMirror(storage: Storage | null): Partial<PreferenceValues> | null {
   for (const key of PREFERENCE_KEYS) {
     const candidate = (parsed as Record<string, unknown>)[key];
     if (candidate === undefined) continue;
-    const result = parseStoredPreferenceValue(key, candidate);
+    const result = parseStoredPreferenceValue(key, candidate, requirePluginId());
     if (result.success) {
       (values as Record<PreferenceKey, unknown>)[key] = result.value;
     }
@@ -201,6 +210,7 @@ export async function hydratePreferences(rpc: PreferencesRpc): Promise<void> {
       const result = parseStoredPreferenceValue(
         key,
         (preferences as Record<string, unknown>)[key],
+        requirePluginId(),
       );
       if (result.success) {
         (values as Record<PreferenceKey, unknown>)[key] = result.value;
@@ -217,7 +227,7 @@ export function applyRemotePreferenceSignal(payload: unknown): void {
   if (!parsed.success) return;
   const { key, value, origin } = parsed.data;
   if (origin === state.origin) return;
-  const result = parseStoredPreferenceValue(key, value);
+  const result = parseStoredPreferenceValue(key, value, requirePluginId());
   if (!result.success) return;
   applyValues({ [key]: result.value } as Partial<PreferenceValues>);
   writeMirror(mirrorStorage());

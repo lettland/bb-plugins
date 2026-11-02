@@ -45,6 +45,7 @@ import {
   experimental_ThreadRowMetadata as ThreadRowMetadata,
   experimental_THREAD_ACTION_GROUPS,
   experimental_useExperiment,
+  experimental_usePluginId,
   experimental_useThreadActions,
   experimental_useSidebarThreadSplit,
   experimental_ProviderIcon as ProviderIcon,
@@ -340,7 +341,6 @@ function ThreadTrailingIndicator({
 }
 
 const ARCHIVED_ROW_ACTION_KEYS = ["bb--core/archive"];
-const CUSTOMIZE_ROW_ACTIONS_KEY = "thread-list/customizeRowActions";
 
 function renderThreadActionsTrigger(props: PluginThreadActionsTriggerProps) {
   return (
@@ -472,6 +472,7 @@ function ThreadRowComponent({
     },
   });
   const customizeRowActions = useCustomizeThreadRowActions();
+  const pluginId = experimental_usePluginId();
   const isCompactViewport = useIsCompactViewport();
   const pendingMenuCustomize = useRef<(() => void) | null>(null);
   const inlineMenuActions: PluginThreadActionsInlineItem[] =
@@ -479,7 +480,7 @@ function ThreadRowComponent({
       ? []
       : [
           {
-            key: CUSTOMIZE_ROW_ACTIONS_KEY,
+            key: `${pluginId}/customizeRowActions`,
             group: experimental_THREAD_ACTION_GROUPS.settings,
             action: {
               label: "Customize actions",
