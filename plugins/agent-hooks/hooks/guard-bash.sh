@@ -185,6 +185,13 @@ if echo "$COMMAND" | grep -qE '\b(eval|bash[[:space:]]+-c|sh[[:space:]]+-c|zsh[[
   deny "SOFT BLOCK: shell indirection (eval, sh -c, bash -c, fish -c, etc.) bypasses safety checks." "Run the underlying command directly so guard-bash.sh can inspect it. If indirection is genuinely required, ask the user to confirm."
 fi
 
+# Idle no-op calls: a whole command of only `true` / `:` does nothing. Some
+# models emit it in a loop to keep a turn alive while background work runs
+# (seen ~60x in one bb thread). Ending the turn is the correct wait.
+if echo "$COMMAND" | grep -qxE '[[:space:]]*(true|:)([[:space:]]*(;|&&|\|\|)?[[:space:]]*(true|:))*[[:space:]]*;?[[:space:]]*'; then
+  deny "SOFT BLOCK: no-op command ('true' / ':') does nothing." "Do not call tools to wait. End your turn now with no tool call; bb and background-task notifications wake you when work finishes."
+fi
+
 # Force push (F9). The agent must NEVER force push, so this closes two forms the
 # old `git push .*--force` regex let through:
 #   1. `git -c k=v push --force` / `git --git-dir=… push -f` — any global option

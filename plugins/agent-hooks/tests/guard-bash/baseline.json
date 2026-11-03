@@ -909,5 +909,461 @@
     "why": "env-path: stripping the property path leaves the real file",
     "actual": "hard",
     "reason": "HARD BLOCK: Reading .env* files via shell exposes credentials."
+  },
+  {
+    "id": "git-commit-n",
+    "cmd": "git commit -n -m x",
+    "expect": "soft",
+    "why": "git hook bypass: ecc port: -n skips pre-commit",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-commit-an-cluster",
+    "cmd": "git commit -an -m x",
+    "expect": "soft",
+    "why": "git hook bypass: -n inside a short cluster",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-global-C-commit-n",
+    "cmd": "git -C /tmp/x commit -n -m x",
+    "expect": "soft",
+    "why": "git hook bypass: global -C value skipped",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-global-gitdir-no-verify",
+    "cmd": "git --git-dir=/x commit --no-verify",
+    "expect": "soft",
+    "why": "git hook bypass: global --git-dir= form skipped",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-global-c-push-no-verify",
+    "cmd": "git -c core.pager=cat push --no-verify",
+    "expect": "soft",
+    "why": "git hook bypass: global -c with an unrelated key",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-push-no-veri-prefix",
+    "cmd": "git push --no-veri",
+    "expect": "soft",
+    "why": "git hook bypass: unambiguous prefix of --no-verify",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-cherry-pick-no-verify",
+    "cmd": "git cherry-pick --no-verify abc",
+    "expect": "soft",
+    "why": "git hook bypass: cherry-pick is a hook subcommand",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-c-hookspath",
+    "cmd": "git -c core.hooksPath=/dev/null commit -m x",
+    "expect": "soft",
+    "why": "git hook bypass: one-shot hooksPath override",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-c-hookspath-stuck",
+    "cmd": "git -ccore.hooksPath=/dev/null commit -m x",
+    "expect": "soft",
+    "why": "git hook bypass: stuck -c form",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-config-env-hookspath",
+    "cmd": "git --config-env=core.hooksPath=X commit -m x",
+    "expect": "soft",
+    "why": "git hook bypass: --config-env override",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-env-config-parameters",
+    "cmd": "GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/dev/null'\" git commit -m x",
+    "expect": "soft",
+    "why": "git hook bypass: env assignment",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-env-config-key",
+    "cmd": "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null git commit -m x",
+    "expect": "soft",
+    "why": "git hook bypass: GIT_CONFIG_KEY_n",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-config-hookspath-write",
+    "cmd": "git config core.hooksPath /dev/null",
+    "expect": "soft",
+    "why": "git hook bypass: persistent bypass",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: setting core.hooksPath disables or redirects the repo's git hooks."
+  },
+  {
+    "id": "git-commit-no-verify",
+    "cmd": "git commit --no-verify -m x",
+    "expect": "soft",
+    "why": "git hook bypass: plain long flag",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-c-hookspath-case",
+    "cmd": "git -c core.HOOKSPATH=/x commit -m x",
+    "expect": "soft",
+    "why": "git hook bypass: key is case-insensitive",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-newline-clause",
+    "cmd": "git status\ngit commit -n -m x",
+    "expect": "soft",
+    "why": "git hook bypass: newline is a clause break",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-abs-path",
+    "cmd": "/usr/bin/git commit -n -m x",
+    "expect": "soft",
+    "why": "git hook bypass: basename git",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-env-prefix-config",
+    "cmd": "env GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/x'\" git commit -m x",
+    "expect": "soft",
+    "why": "git hook bypass: assignment after env",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-export-config",
+    "cmd": "export GIT_CONFIG_PARAMETERS=\"'core.hooksPath'='/x'\"; git commit -m x",
+    "expect": "soft",
+    "why": "git hook bypass: export persists across clauses",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-sudo",
+    "cmd": "sudo git commit -n -m x",
+    "expect": "soft",
+    "why": "git hook bypass: git anywhere in the clause",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-sudo-user",
+    "cmd": "sudo -u root git commit -n -m x",
+    "expect": "soft",
+    "why": "git hook bypass: git after a flag value",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-subshell",
+    "cmd": "(git commit -n -m x)",
+    "expect": "soft",
+    "why": "git hook bypass: paren welded to the token",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-cmd-subst",
+    "cmd": "x=$(git commit -n -m x)",
+    "expect": "soft",
+    "why": "git hook bypass: assignment + command substitution",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-backtick",
+    "cmd": "`git commit -n -m x`",
+    "expect": "soft",
+    "why": "git hook bypass: backtick welded to the token",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-backslash",
+    "cmd": "\\git commit -n -m x",
+    "expect": "soft",
+    "why": "git hook bypass: alias-bypass backslash",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-comment-then-commit",
+    "cmd": "git status # note\ngit commit -n -m x",
+    "expect": "soft",
+    "why": "git hook bypass: comment ends at the newline",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-line-continuation",
+    "cmd": "git \\\ncommit -n -m x",
+    "expect": "soft",
+    "why": "git hook bypass: backslash-newline joins",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-line-continuation-indented",
+    "cmd": "git \\\n    commit -n -m x",
+    "expect": "soft",
+    "why": "git hook bypass: indented continuation",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-heredoc-then-commit",
+    "cmd": "cat <<EOF > f; git commit -n -m x\nbody\nEOF",
+    "expect": "soft",
+    "why": "git hook bypass: marker line keeps its commit clause",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-config-set-hookspath",
+    "cmd": "git config set core.hooksPath /x",
+    "expect": "soft",
+    "why": "git hook bypass: git 2.46 set form",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: setting core.hooksPath disables or redirects the repo's git hooks."
+  },
+  {
+    "id": "git-config-global-hookspath",
+    "cmd": "git config --global core.hooksPath /x",
+    "expect": "soft",
+    "why": "git hook bypass: scope flag + write",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: setting core.hooksPath disables or redirects the repo's git hooks."
+  },
+  {
+    "id": "git-message-hash-then-n",
+    "cmd": "git commit -m \"#42\" -n",
+    "expect": "soft",
+    "why": "git hook bypass: #42 is a quoted value, -n still seen",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-here-string-then-commit",
+    "cmd": "cat <<<EOF; git commit -n -m x",
+    "expect": "soft",
+    "why": "git hook bypass: <<< is not a heredoc",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-redirect-amp",
+    "cmd": "git commit -m x &>/dev/null --no-verify",
+    "expect": "soft",
+    "why": "git hook bypass: &> is a redirect, not a clause break",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-quoted-git",
+    "cmd": "\"git\" commit -n -m x",
+    "expect": "soft",
+    "why": "git hook bypass: quotes around the command word",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks."
+  },
+  {
+    "id": "git-heredoc-form-comment-first",
+    "cmd": "# don't push\ngit commit -m \"$(cat <<'EOF'\nmention --no-verify here\nEOF\n)\"",
+    "expect": "allow",
+    "why": "git hook bypass: apostrophe in a comment; heredoc body not scanned",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-comment-apostrophe",
+    "cmd": "git status  # it's fine\ngit log -n 5",
+    "expect": "allow",
+    "why": "git hook bypass: apostrophe in a comment must not open a quote",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-message-heredoc-lookalike",
+    "cmd": "git commit -m \"see <<EOF\"",
+    "expect": "allow",
+    "why": "git hook bypass: no terminator line, nothing stripped",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-redirect-2to1",
+    "cmd": "git commit -m x >/dev/null 2>&1",
+    "expect": "allow",
+    "why": "git hook bypass: 2>&1 is not a clause break",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-message-mentions-n",
+    "cmd": "git commit -m \"drop -n flag\"",
+    "expect": "allow",
+    "why": "git hook bypass: quoted message text",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-message-mentions-no-verify",
+    "cmd": "git commit -m \"why --no-verify is blocked\"",
+    "expect": "allow",
+    "why": "git hook bypass: quoted message text",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-message-colon-n",
+    "cmd": "git commit -m fix:-n",
+    "expect": "allow",
+    "why": "git hook bypass: one token",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-config-read",
+    "cmd": "git config core.hooksPath",
+    "expect": "allow",
+    "why": "git hook bypass: read",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-config-get",
+    "cmd": "git config --get core.hooksPath",
+    "expect": "allow",
+    "why": "git hook bypass: read",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-heredoc-form-no-verify",
+    "cmd": "git commit -m \"$(cat <<'EOF'\nbody mentions --no-verify\nEOF\n)\"",
+    "expect": "allow",
+    "why": "git hook bypass: Claude Code heredoc commit form",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-heredoc-form-balanced-quotes",
+    "cmd": "git commit -m \"$(cat <<'EOF'\nbody with \"balanced -n quotes\" here\nEOF\n)\"",
+    "expect": "allow",
+    "why": "git hook bypass: balanced quotes in the body",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-heredoc-form-odd-quote",
+    "cmd": "git commit -m \"$(cat <<'EOF'\nbody with an odd \" quote\nEOF\n)\"",
+    "expect": "allow",
+    "why": "git hook bypass: odd number of double quotes in the body",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-commit-uno",
+    "cmd": "git commit -uno -m x",
+    "expect": "allow",
+    "why": "git hook bypass: -u takes a stuck optional value",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-commit-mn-message",
+    "cmd": "git commit -mn",
+    "expect": "allow",
+    "why": "git hook bypass: -mn is the message n",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-commit-c-reedit",
+    "cmd": "git commit -c HEAD",
+    "expect": "allow",
+    "why": "git hook bypass: -c after commit is reedit-message",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-log-n",
+    "cmd": "git log -n 5",
+    "expect": "allow",
+    "why": "git hook bypass: -n only matters for commit",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "grep-no-verify",
+    "cmd": "grep -- --no-verify file",
+    "expect": "allow",
+    "why": "git hook bypass: no git word",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-push-plain",
+    "cmd": "git push",
+    "expect": "allow",
+    "why": "git hook bypass: plain push",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "git-message-dash-n-value",
+    "cmd": "git commit -m \"-n\"",
+    "expect": "allow",
+    "why": "git hook bypass: value of -m",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "noop-true",
+    "cmd": "true",
+    "expect": "soft",
+    "why": "idle no-op loop seen in bb thread thr_edupihyktb: end the turn instead",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: no-op command ('true' / ':') does nothing."
+  },
+  {
+    "id": "noop-colon-chain",
+    "cmd": ": && true",
+    "expect": "soft",
+    "why": "idle no-op variants",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: no-op command ('true' / ':') does nothing."
+  },
+  {
+    "id": "noop-true-in-real-command",
+    "cmd": "make test || true",
+    "expect": "allow",
+    "why": "true as part of a real command is fine",
+    "actual": "allow",
+    "reason": null
   }
 ]

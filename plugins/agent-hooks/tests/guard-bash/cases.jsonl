@@ -165,3 +165,6 @@
 {"id": "grep-no-verify", "cmd": "grep -- --no-verify file", "expect": "allow", "why": "git hook bypass: no git word"}
 {"id": "git-push-plain", "cmd": "git push", "expect": "allow", "why": "git hook bypass: plain push"}
 {"id": "git-message-dash-n-value", "cmd": "git commit -m \"-n\"", "expect": "allow", "why": "git hook bypass: value of -m"}
+{"id": "noop-true", "cmd": "true", "expect": "soft", "why": "idle no-op loop seen in bb thread thr_edupihyktb: end the turn instead"}
+{"id": "noop-colon-chain", "cmd": ": && true", "expect": "soft", "why": "idle no-op variants"}
+{"id": "noop-true-in-real-command", "cmd": "make test || true", "expect": "allow", "why": "true as part of a real command is fine"}
