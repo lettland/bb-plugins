@@ -117,7 +117,7 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   turn commits, it judges from the thread's plan whether work remains and continues any
   genuinely-unfinished planned work instead of halting mid-plan (never inventing work).
 - Later reviews are delta-scoped: plan reviews, and code reviews of every commit policy
-  (protected mainline, over-400-files, and the ordinary commit path), review only what changed
+  (top-level branch on a non-eligible mainline, over-400-files, and the ordinary commit path), review only what changed
   since the last clean review. The plugin keeps those baselines itself (plugin KV, per thread:
   `baseline:plan:<thread>:<sha256(path)>`, `baseline:code:<thread>`), computes each delta with
   `diff` (jsdiff) and embeds it in the prompt as a ```diff block, so the agent runs no shell

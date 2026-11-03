@@ -340,7 +340,6 @@ export async function evaluate(
   const decision = decide({
     base,
     currentBranch: workspace.branch.currentBranch,
-    isDedicatedWorktree: reviewed.isWorktree,
     mergeEligibleMainlines: config.mergeEligibleMainlines,
   });
   if (

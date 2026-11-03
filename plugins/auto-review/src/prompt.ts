@@ -327,7 +327,7 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
     }
   } else {
     lines.push(
-      "6. Do NOT commit. This is the shared primary checkout of a project whose mainline is protected, so auto-review leaves it untouched regardless of the branch checked out here — protected-mainline work belongs in a dedicated worktree. State clearly in your final reply that the reviewed fixes are left uncommitted in the working tree intentionally, by auto-review's branch policy — this is not an error, and the user should commit them from a dedicated worktree, or commit or discard them here, as they see fit.",
+      "6. Do NOT commit. The branch checked out here is a top-level branch (its name has no `/`, such as `main` or `dev`) and this project's mainline is not merge-eligible, so auto-review does not commit on it: there it commits only on feature branches, whose name contains a `/`. State clearly in your final reply that the reviewed fixes are left uncommitted in the working tree intentionally, by auto-review's branch policy — this is not an error, and the user should move them to a feature branch and commit them there, or commit or discard them here, as they see fit.",
     );
   }
   const finalStep = lines.filter((line) => /^\d+\. /u.test(line)).length + 1;

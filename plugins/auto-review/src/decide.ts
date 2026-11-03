@@ -1,7 +1,6 @@
 export interface DecideInput {
   base: string | null;
   currentBranch: string | null;
-  isDedicatedWorktree: boolean;
   mergeEligibleMainlines: readonly string[];
 }
 
@@ -30,9 +29,12 @@ export function decide(input: DecideInput): Decision {
   // is local-only and its working-tree-safety guard lives in the injected prompt,
   // not in a worktree precondition. A non-personal mainline (e.g. main) is never a
   // merge target, and a top-level branch is never a merge source. The mainline
-  // guard still matters: a configured mainline may itself contain a "/". commit
-  // still depends on isDedicatedWorktree, just below.
+  // guard still matters: a configured mainline may itself contain a "/".
   const merge = personal && !onMainline && isFeatureBranch(input.currentBranch);
-  const commit = input.isDedicatedWorktree || personal;
+  // Commit on a personal mainline (e.g. master) anywhere. On a non-eligible
+  // mainline (e.g. main, dev) commit only on a feature branch — never on a
+  // top-level branch or a detached HEAD — in a dedicated worktree or the
+  // primary checkout alike: the worktree status does not affect the decision.
+  const commit = personal || isFeatureBranch(input.currentBranch);
   return { commit, merge };
 }

@@ -6988,11 +6988,13 @@ describe("auto-review plugin: review baselines", () => {
     async function protectedHost(content: string) {
       const host = createHost({
         worktree: false,
+        onMainline: true,
         headSha: "head-0",
         workingTreeFiles: [{ path: "src/a.ts", content }],
       });
       await plugin(host.bb);
-      // Only "trunk" is a personal mainline here, so this checkout's review never commits.
+      // Only "trunk" is a personal mainline here, and this checkout sits on the
+      // top-level branch master, so the review never commits.
       await host.bb.storage.kv.set("project:project-1", { mergeEligibleMainlines: ["trunk"] });
       return host;
     }

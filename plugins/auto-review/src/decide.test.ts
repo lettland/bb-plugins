@@ -9,43 +9,19 @@ describe("decide branch policy", () => {
       decide({
         base: "master",
         currentBranch: "bb/feature",
-        isDedicatedWorktree: true,
         mergeEligibleMainlines: ELIGIBLE,
       }),
     ).toEqual({ commit: true, merge: true });
   });
 
-  it("worktree on non-eligible mainline: commit only", () => {
-    expect(
-      decide({
-        base: "main",
-        currentBranch: "bb/feature",
-        isDedicatedWorktree: true,
-        mergeEligibleMainlines: ELIGIBLE,
-      }),
-    ).toEqual({ commit: true, merge: false });
-  });
-
-  it("primary checkout on a feature branch: commit + merge (eligible)", () => {
+  it("primary checkout on a feature branch (eligible): commit + merge", () => {
     expect(
       decide({
         base: "master",
         currentBranch: "fix/oh-1/feature",
-        isDedicatedWorktree: false,
         mergeEligibleMainlines: ELIGIBLE,
       }),
     ).toEqual({ commit: true, merge: true });
-  });
-
-  it("primary checkout on a feature branch: nothing when the root is protected (non-eligible)", () => {
-    expect(
-      decide({
-        base: "main",
-        currentBranch: "feature",
-        isDedicatedWorktree: false,
-        mergeEligibleMainlines: ELIGIBLE,
-      }),
-    ).toEqual({ commit: false, merge: false });
   });
 
   it("primary checkout on eligible mainline: commit, no merge", () => {
@@ -53,29 +29,16 @@ describe("decide branch policy", () => {
       decide({
         base: "master",
         currentBranch: "master",
-        isDedicatedWorktree: false,
         mergeEligibleMainlines: ELIGIBLE,
       }),
     ).toEqual({ commit: true, merge: false });
   });
 
-  it("primary checkout on non-eligible mainline: nothing (no commit)", () => {
-    expect(
-      decide({
-        base: "main",
-        currentBranch: "main",
-        isDedicatedWorktree: false,
-        mergeEligibleMainlines: ELIGIBLE,
-      }),
-    ).toEqual({ commit: false, merge: false });
-  });
-
-  it("never merges when on the base branch, even in a worktree", () => {
+  it("never merges when on the base branch", () => {
     expect(
       decide({
         base: "master",
         currentBranch: "master",
-        isDedicatedWorktree: true,
         mergeEligibleMainlines: ELIGIBLE,
       }),
     ).toEqual({ commit: true, merge: false });
@@ -86,18 +49,6 @@ describe("decide branch policy", () => {
       decide({
         base: "master",
         currentBranch: "develop",
-        isDedicatedWorktree: false,
-        mergeEligibleMainlines: ELIGIBLE,
-      }),
-    ).toEqual({ commit: true, merge: false });
-  });
-
-  it("never merges a top-level branch, even in a worktree", () => {
-    expect(
-      decide({
-        base: "master",
-        currentBranch: "develop",
-        isDedicatedWorktree: true,
         mergeEligibleMainlines: ELIGIBLE,
       }),
     ).toEqual({ commit: true, merge: false });
@@ -108,7 +59,6 @@ describe("decide branch policy", () => {
       decide({
         base: "team/master",
         currentBranch: "team/master",
-        isDedicatedWorktree: false,
         mergeEligibleMainlines: ["team/master"],
       }),
     ).toEqual({ commit: true, merge: false });
@@ -119,20 +69,58 @@ describe("decide branch policy", () => {
       decide({
         base: "master",
         currentBranch: null,
-        isDedicatedWorktree: true,
         mergeEligibleMainlines: ELIGIBLE,
       }),
     ).toEqual({ commit: true, merge: false });
   });
 
-  it("worktree on a non-eligible mainline branch: commit, no merge", () => {
+  it("primary checkout on a feature branch (non-eligible base): commit, no merge", () => {
+    expect(
+      decide({
+        base: "main",
+        currentBranch: "fix/oh-1/feature",
+        mergeEligibleMainlines: ELIGIBLE,
+      }),
+    ).toEqual({ commit: true, merge: false });
+  });
+
+  it("primary checkout on non-eligible mainline: nothing (no commit)", () => {
     expect(
       decide({
         base: "main",
         currentBranch: "main",
-        isDedicatedWorktree: true,
+        mergeEligibleMainlines: ELIGIBLE,
+      }),
+    ).toEqual({ commit: false, merge: false });
+  });
+
+  it("worktree on a non-eligible top-level branch (main): nothing (no commit)", () => {
+    expect(
+      decide({
+        base: "main",
+        currentBranch: "main",
+        mergeEligibleMainlines: ELIGIBLE,
+      }),
+    ).toEqual({ commit: false, merge: false });
+  });
+
+  it("worktree on a feature branch with a non-eligible base: commit, no merge", () => {
+    expect(
+      decide({
+        base: "main",
+        currentBranch: "OH-6155/rest-cleanup-batch-7",
         mergeEligibleMainlines: ELIGIBLE,
       }),
     ).toEqual({ commit: true, merge: false });
+  });
+
+  it("detached HEAD with a non-eligible base: nothing (no commit)", () => {
+    expect(
+      decide({
+        base: "main",
+        currentBranch: null,
+        mergeEligibleMainlines: ELIGIBLE,
+      }),
+    ).toEqual({ commit: false, merge: false });
   });
 });

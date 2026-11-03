@@ -803,7 +803,7 @@ describe("buildReviewPrompt", () => {
     const step2 = (text: string): string => text.split("\n").find((line) => line.startsWith("2. ")) ?? "";
     const step5 = (text: string): string => text.split("\n").find((line) => line.startsWith("5. ")) ?? "";
     const noCommitInputs = {
-      "protected mainline": { decision: { commit: false, merge: false }, scope: baseScope },
+      "top-level branch on a non-eligible mainline": { decision: { commit: false, merge: false }, scope: baseScope },
       overflow: {
         decision: { commit: true, merge: false },
         scope: renderScope(Array.from({ length: MAX_SCOPE_ENTRIES + 1 }, (_, i) => `f${i}.ts`)),
@@ -858,7 +858,7 @@ describe("buildReviewPrompt", () => {
 
     it("fences a delta that itself contains backtick fences with a longer fence", () => {
       const tricky: CodeFileScope = { path: "docs/a.md", kind: "delta", diff: "@@ -1 +1 @@\n-```\n+````js\n" };
-      const text = buildReviewPrompt({ ...noCommitInputs["protected mainline"], reviewMode: "auto", codeBaseline: [tricky] });
+      const text = buildReviewPrompt({ ...noCommitInputs["top-level branch on a non-eligible mainline"], reviewMode: "auto", codeBaseline: [tricky] });
       expect(text).toContain("`docs/a.md`\n`````diff\n@@ -1 +1 @@\n-```\n+````js\n`````");
     });
 
@@ -930,7 +930,7 @@ describe("buildReviewPrompt", () => {
     });
 
     it("keeps step 2 and step 5 the same on the no-commit path", () => {
-      const text = buildReviewPrompt({ ...noCommitInputs["protected mainline"], reviewMode: "auto", codeBaseline: [changed] });
+      const text = buildReviewPrompt({ ...noCommitInputs["top-level branch on a non-eligible mainline"], reviewMode: "auto", codeBaseline: [changed] });
       expect(step2(text)).toBe(
         "2. Apply the fixes the review reports. If it asks for a re-run, re-run only over the changes since its previous pass (devkit's closure rule); a self-review is one pass.",
       );
