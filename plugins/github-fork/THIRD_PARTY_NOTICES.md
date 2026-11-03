@@ -7,8 +7,8 @@ github-fork is licensed MIT (see `LICENSE`). It is a derivative of the built-in 
 ## bb built-in `github` plugin (MIT)
 
 - Upstream: <https://github.com/get-bb/bb>, directory `plugins/github`.
-- Upstream copy base: commit `916d684ac2` of `get-bb/bb`, the upstream commit the fork was last rebased onto.
-- Fork ref: this copy was taken from the Lettland fork of bb, which carries modifications to the upstream plugin on top of that base. The fork source is recorded as the annotated tag `fork-copy-github-fork-20261102` in the fork repository, tree hash `750026e092bff8d4fefca48ac49f8619451e8af9`. The modifications are the difference between `plugins/github` at `916d684ac2` and at that tag.
+- Upstream copy base: commit `dbb247c60f` of `get-bb/bb`, the upstream commit the fork was last rebased onto.
+- Fork ref: this copy was taken from the Lettland fork of bb, which carries modifications to the upstream plugin on top of that base. The fork source is recorded as the annotated tag `fork-copy-github-fork-20261103` in the fork repository, tree hash `3899dcf8320e5d44ea0c0c3822e0b5bf7c00f95f`. The modifications are the difference between `plugins/github` at `dbb247c60f` and at that tag.
 - Derived github-fork files (modified): every source file of the plugin, including the fork's modifications; plus these changes made for this collection:
   - `package.json` (package name `@lettland/bb-plugin-github-fork`, repository, homepage, bugs, and `publishConfig` point at this collection; `@get-bb/plugin-sdk` and every dependency pinned exactly; `@bb/shared-ui` replaced by the registry items' packages; `build` and `test` scripts adapted; `private` removed),
   - `package-lock.json` (added),

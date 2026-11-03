@@ -139,4 +139,67 @@ describe("GitHub app navigation", () => {
     );
     slot.lifecycle.unmount();
   });
+
+  it("renders pull-request bodies and comments through the host Markdown component", async () => {
+    const slot = renderSlot(
+      app.threadPanelActions[0]!,
+      { threadId: "thr-1", environment: null, params: null },
+      {
+        rpc: {
+          pullForThread: () => ({
+            pull: {
+              repo: "get-bb/bb",
+              number: 42,
+              environmentId: "env-1",
+            },
+          }),
+          getPull: () => ({
+            pull: {
+              repo: "get-bb/bb",
+              number: 42,
+              title: "Markdown fix",
+              state: "OPEN",
+              author: "octocat",
+              body: "1. first\n   - nested\n2. second\n\n> quoted",
+              url: "https://github.com/get-bb/bb/pull/42",
+              createdAt: "2026-08-20T00:00:00.000Z",
+              updatedAt: "2026-08-20T00:00:00.000Z",
+              baseRefName: "main",
+              headRefName: "fix-markdown",
+              additions: 1,
+              deletions: 1,
+              changedFiles: 0,
+              labels: [],
+              assignees: [],
+              reviewDecision: "",
+              mergeStateStatus: "CLEAN",
+              reviewRequests: [],
+              checks: [],
+              comments: [
+                {
+                  author: "hubot",
+                  body: "- [x] done ~~old~~",
+                  createdAt: "2026-08-20T00:00:00.000Z",
+                },
+              ],
+              reviews: [],
+              reviewThreads: [],
+              files: [],
+            },
+          }),
+          listLinks: () => ({ links: {} }),
+        },
+      },
+    );
+
+    await act(async () => {});
+    const rendered = slot
+      .getAllByTestId("bb-markdown")
+      .map((node) => node.textContent);
+    expect(rendered).toEqual([
+      "1. first\n   - nested\n2. second\n\n> quoted",
+      "- [x] done ~~old~~",
+    ]);
+    slot.lifecycle.unmount();
+  });
 });
