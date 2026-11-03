@@ -34,10 +34,11 @@ does not apply and the reply says devkit needs an update.
 When it commits, the injected turn then judges — from the thread's own plan — whether the
 work is actually finished, and continues any genuinely-remaining planned work (reviewing and
 committing each further step) rather than halting mid-plan. It never invents work: if the
-plan is complete or unclear, it stops and reports done. In the top-level-branch no-commit
-case (a top-level branch on a non-eligible mainline) it does not auto-continue.
+plan is complete or unclear, it stops and reports done. In the no-commit case on a
+non-eligible mainline (the mainline itself, a top-level branch, or a detached HEAD) it does not
+auto-continue.
 
-Reviews that leave HEAD where it was (the top-level-branch and over-400-files no-commit
+Reviews that leave HEAD where it was (the non-eligible-mainline and over-400-files no-commit
 cases) are delta-scoped: the plugin keeps a private copy of the files the last clean review read
 (in its own per-thread storage, not the agent's shell), compares it with the files at dispatch,
 and embeds each file's delta as a diff in the review prompt, so the review covers only what
@@ -402,15 +403,14 @@ Run `enable`, `disable`, `auto-approve` and `reset` only when the user explicitl
 
 ## Branch policy
 
-| Where the thread runs | eligible mainline (e.g. `master`) | non-eligible mainline (e.g. `main`) |
+| Branch checked out (worktree or primary checkout) | eligible mainline (e.g. `master`) | non-eligible mainline (e.g. `main`, `dev`) |
 |---|---|---|
-| Worktree, feature branch | review + fixes + commit + local merge | review + fixes + commit |
-| Worktree, on the mainline | review + fixes + commit | review + fixes + commit |
-| Primary checkout, feature branch | review + fixes + commit + local merge | review + fixes, no commit |
-| Primary checkout, on the mainline | review + fixes + commit | review + fixes, no commit |
-| Either, on a top-level branch (e.g. `develop`) | review + fixes + commit, no merge | worktree: review + fixes + commit; primary: review + fixes, no commit |
+| Feature branch (name contains `/`) | review + fixes + commit + local merge | review + fixes + commit |
+| The mainline itself | review + fixes + commit | review + fixes, no commit |
+| Top-level branch (no `/`, e.g. `develop`) | review + fixes + commit, no merge | review + fixes, no commit |
+| Detached HEAD | review + fixes + commit, no merge | review + fixes, no commit |
 
-A feature branch is one whose name contains a `/` (`fix/oh-1/x`, `OH-2/y`, bb's own `bb/<slug>` worktree branches). A top-level branch — no `/`, such as `develop`, `dev`, `sandbox` — is never merged into the mainline, in a worktree or not. A feature branch merges into an eligible mainline (e.g. `master`) whether it runs in a dedicated worktree or the primary checkout. On an eligible mainline auto-review commits anywhere; on a non-eligible mainline (protected, e.g. `main`) it commits only on a feature branch — in a dedicated worktree or the primary checkout alike — and never on a top-level branch or a detached HEAD. Merge is local only — auto-review never pushes.
+A feature branch is one whose name contains a `/` (`fix/oh-1/x`, `OH-2/y`, bb's own `bb/<slug>` worktree branches). A top-level branch — no `/`, such as `develop`, `dev`, `sandbox` — is never merged into the mainline. A feature branch merges into an eligible mainline (e.g. `master`) whether it runs in a dedicated worktree or the primary checkout. On an eligible mainline auto-review commits anywhere; on a non-eligible mainline (protected, e.g. `main`) it commits only on a feature branch — in a dedicated worktree or the primary checkout alike — and never on the mainline itself (even when its name contains a `/`), a top-level branch, or a detached HEAD. Merge is local only — auto-review never pushes.
 
 ## One review per provider
 

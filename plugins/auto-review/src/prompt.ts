@@ -327,7 +327,7 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
     }
   } else {
     lines.push(
-      "6. Do NOT commit. The branch checked out here is a top-level branch (its name has no `/`, such as `main` or `dev`) and this project's mainline is not merge-eligible, so auto-review does not commit on it: there it commits only on feature branches, whose name contains a `/`. State clearly in your final reply that the reviewed fixes are left uncommitted in the working tree intentionally, by auto-review's branch policy — this is not an error, and the user should move them to a feature branch and commit them there, or commit or discard them here, as they see fit.",
+      "6. Do NOT commit. This project's mainline is not merge-eligible, and the checkout here is not on a feature branch (it is on the mainline itself, which never counts as a feature branch even when its name contains a `/`; on a top-level branch whose name has no `/` such as `main` or `dev`; or on a detached HEAD), so auto-review does not commit: on such a project it commits only on feature branches, whose name contains a `/`. State clearly in your final reply that the reviewed fixes are left uncommitted in the working tree intentionally, by auto-review's branch policy — this is not an error, and the user should move them to a feature branch and commit them there, or commit or discard them here, as they see fit.",
     );
   }
   const finalStep = lines.filter((line) => /^\d+\. /u.test(line)).length + 1;

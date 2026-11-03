@@ -4,7 +4,7 @@ import { decide } from "./decide.js";
 const ELIGIBLE = ["master"];
 
 describe("decide branch policy", () => {
-  it("worktree on eligible mainline: commit + merge", () => {
+  it("feature branch on eligible mainline: commit + merge", () => {
     expect(
       decide({
         base: "master",
@@ -14,7 +14,7 @@ describe("decide branch policy", () => {
     ).toEqual({ commit: true, merge: true });
   });
 
-  it("primary checkout on a feature branch (eligible): commit + merge", () => {
+  it("feature branch with a multi-segment name (eligible): commit + merge", () => {
     expect(
       decide({
         base: "master",
@@ -24,17 +24,7 @@ describe("decide branch policy", () => {
     ).toEqual({ commit: true, merge: true });
   });
 
-  it("primary checkout on eligible mainline: commit, no merge", () => {
-    expect(
-      decide({
-        base: "master",
-        currentBranch: "master",
-        mergeEligibleMainlines: ELIGIBLE,
-      }),
-    ).toEqual({ commit: true, merge: false });
-  });
-
-  it("never merges when on the base branch", () => {
+  it("on the eligible mainline: commit, no merge", () => {
     expect(
       decide({
         base: "master",
@@ -74,7 +64,7 @@ describe("decide branch policy", () => {
     ).toEqual({ commit: true, merge: false });
   });
 
-  it("primary checkout on a feature branch (non-eligible base): commit, no merge", () => {
+  it("feature branch on non-eligible mainline: commit, no merge", () => {
     expect(
       decide({
         base: "main",
@@ -84,7 +74,7 @@ describe("decide branch policy", () => {
     ).toEqual({ commit: true, merge: false });
   });
 
-  it("primary checkout on non-eligible mainline: nothing (no commit)", () => {
+  it("on the non-eligible mainline: nothing (no commit)", () => {
     expect(
       decide({
         base: "main",
@@ -94,17 +84,27 @@ describe("decide branch policy", () => {
     ).toEqual({ commit: false, merge: false });
   });
 
-  it("worktree on a non-eligible top-level branch (main): nothing (no commit)", () => {
+  it("never commits on a non-eligible mainline whose name contains a slash", () => {
     expect(
       decide({
-        base: "main",
-        currentBranch: "main",
+        base: "team/main",
+        currentBranch: "team/main",
         mergeEligibleMainlines: ELIGIBLE,
       }),
     ).toEqual({ commit: false, merge: false });
   });
 
-  it("worktree on a feature branch with a non-eligible base: commit, no merge", () => {
+  it("top-level branch on a non-eligible mainline: nothing (no commit)", () => {
+    expect(
+      decide({
+        base: "main",
+        currentBranch: "dev",
+        mergeEligibleMainlines: ELIGIBLE,
+      }),
+    ).toEqual({ commit: false, merge: false });
+  });
+
+  it("feature branch with a multi-segment name on a non-eligible base: commit, no merge", () => {
     expect(
       decide({
         base: "main",

@@ -32,9 +32,9 @@ export function decide(input: DecideInput): Decision {
   // guard still matters: a configured mainline may itself contain a "/".
   const merge = personal && !onMainline && isFeatureBranch(input.currentBranch);
   // Commit on a personal mainline (e.g. master) anywhere. On a non-eligible
-  // mainline (e.g. main, dev) commit only on a feature branch — never on a
-  // top-level branch or a detached HEAD — in a dedicated worktree or the
-  // primary checkout alike: the worktree status does not affect the decision.
-  const commit = personal || isFeatureBranch(input.currentBranch);
+  // mainline (e.g. main, dev) commit only on a feature branch, in a dedicated
+  // worktree or the primary checkout alike — never on the mainline itself
+  // (even when its name contains a "/"), a top-level branch, or a detached HEAD.
+  const commit = personal || (!onMainline && isFeatureBranch(input.currentBranch));
   return { commit, merge };
 }

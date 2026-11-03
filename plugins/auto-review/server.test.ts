@@ -6993,8 +6993,8 @@ describe("auto-review plugin: review baselines", () => {
         workingTreeFiles: [{ path: "src/a.ts", content }],
       });
       await plugin(host.bb);
-      // Only "trunk" is a personal mainline here, and this checkout sits on the
-      // top-level branch master, so the review never commits.
+      // Only "trunk" is a personal mainline here, and onMainline puts this checkout on
+      // its non-eligible mainline master itself, so the review never commits.
       await host.bb.storage.kv.set("project:project-1", { mergeEligibleMainlines: ["trunk"] });
       return host;
     }
@@ -7004,6 +7004,11 @@ describe("auto-review plugin: review baselines", () => {
         await emitActive(host);
       }
       await emitIdle(host);
+    }
+
+    async function lastFire(host: Host): Promise<Record<string, unknown>> {
+      const status = await host.harness.runCli(["status", THREAD_ID, "--json"]);
+      return JSON.parse(status.stdout).lastFire;
     }
 
     const reportClean = (host: Host, input: Record<string, unknown> = {}) =>
@@ -7028,6 +7033,22 @@ describe("auto-review plugin: review baselines", () => {
       expect(await codeRecord(host)).toEqual({
         copies: { "src/a.ts": { content: "one\ntwo\n", headSha: "head-0", at: expect.any(Number) } },
       });
+      await host.harness.dispose();
+    });
+
+    it("commits on a feature branch in the primary checkout even though the mainline is not merge-eligible", async () => {
+      const host = createHost({
+        worktree: false,
+        headSha: "head-0",
+        workingTreeFiles: [{ path: "src/a.ts", content: "one\ntwo\n" }],
+      });
+      await plugin(host.bb);
+      await host.bb.storage.kv.set("project:project-1", { mergeEligibleMainlines: ["trunk"] });
+      await reviewTurn(host, 2);
+      expect(await lastFire(host)).toMatchObject({ outcome: "fired", commit: true, merge: false });
+      const prompt = promptText(host);
+      expect(prompt).toContain("6. Commit the staged changes");
+      expect(prompt).not.toContain("6. Do NOT commit");
       await host.harness.dispose();
     });
 

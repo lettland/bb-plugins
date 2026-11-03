@@ -90,7 +90,8 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   branch (name contains a `/`; a top-level branch such as `develop` is never merged)
   merges into a personal mainline (e.g. `master`) whether the thread runs in a
   dedicated worktree or the primary checkout; a non-personal mainline (e.g. `main`) is
-  never a merge target.
+  never a merge target, and on it auto-review commits only on a feature branch (worktree
+  or primary checkout alike), never on the mainline, a top-level branch, or a detached HEAD.
 - Holds the turn while any child the thread spawned (`bb thread spawn --parent-self`), in
   any turn, directly or transitively, is still running: bb wakes the parent with a new turn
   each time one ends, but a wake-up with another child still running just re-parks. Only
@@ -117,7 +118,7 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   turn commits, it judges from the thread's plan whether work remains and continues any
   genuinely-unfinished planned work instead of halting mid-plan (never inventing work).
 - Later reviews are delta-scoped: plan reviews, and code reviews of every commit policy
-  (top-level branch on a non-eligible mainline, over-400-files, and the ordinary commit path), review only what changed
+  (no commit on a non-eligible mainline, over-400-files, and the ordinary commit path), review only what changed
   since the last clean review. The plugin keeps those baselines itself (plugin KV, per thread:
   `baseline:plan:<thread>:<sha256(path)>`, `baseline:code:<thread>`), computes each delta with
   `diff` (jsdiff) and embeds it in the prompt as a ```diff block, so the agent runs no shell
