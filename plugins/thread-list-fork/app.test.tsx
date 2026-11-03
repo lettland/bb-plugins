@@ -155,6 +155,45 @@ afterEach(() => {
 });
 
 describe("thread-list plugin", () => {
+  it.each([
+    ["empty", true],
+    ["empty", false],
+    ["hidden", false],
+    ["pinned", false],
+  ] as const)(
+    "with only %s threads, shows the project group when showEmptyProjects is %s",
+    async (kind, showEmptyProjects) => {
+      setPreferencesMirrorStorageForTest(null);
+      renderList(
+        { organizationMode: "project", showEmptyProjects },
+        {
+          sidebarThreads: {
+            projects: PROJECTS,
+            sections: [],
+            threads: [
+              ...THREADS.filter((thread) => thread.projectId === "proj_app"),
+              ...(kind === "empty"
+                ? []
+                : [
+                    makeSidebarThread({
+                      id: "thr_web_only",
+                      projectId: "proj_web",
+                      title: "Web only",
+                      isHidden: kind === "hidden",
+                      isPinned: kind === "pinned",
+                      pinnedAt: kind === "pinned" ? 10 : null,
+                    }),
+                  ]),
+            ],
+          },
+        },
+      );
+      await screen.findByText("Parent thread");
+      expect(sectionHeaders()).toContain("App");
+      expect(sectionHeaders().includes("Web")).toBe(showEmptyProjects);
+    },
+  );
+
   it("shows the navigation skeleton until preferences load", () => {
     setPreferencesMirrorStorageForTest(null);
     renderSlot(registration, props(), {
@@ -458,6 +497,29 @@ describe("thread-list plugin", () => {
       expect(within(group).getByTitle("App")).not.toBeNull();
       expect(within(group).getByTitle("Web")).not.toBeNull();
       expect(within(group).queryByTitle("Docs")).toBeNull();
+    });
+
+    it("drops an empty project from its group when showEmptyProjects is off", async () => {
+      setPreferencesMirrorStorageForTest(null);
+      renderGroupedList({
+        showEmptyProjects: false,
+        projectGroups: [{ ...workGroup, projectIds: ["proj_docs", "proj_web"] }],
+      });
+
+      await screen.findByText("Parent thread");
+      expect(sectionHeaders()).toEqual([
+        "Pinned",
+        "App",
+        "Work",
+        "Web",
+        "Threads",
+      ]);
+      const group = document.querySelector(
+        '[data-sidebar-project-group-id="work"]',
+      ) as HTMLElement;
+      expect(within(group).getByTitle("Web")).not.toBeNull();
+      expect(within(group).queryByTitle("Docs")).toBeNull();
+      expect(screen.queryByTitle("Docs")).toBeNull();
     });
 
     it("hides member projects while the group is collapsed", async () => {

@@ -29,19 +29,10 @@ import {
 import { cn } from "@/lib/utils";
 import { LIST_HOVER_TRANSITION } from "@/components/ui/motion";
 import {
-  combineCollapsedPendingInteractionKind,
-  hasThreadListWorkingActivity,
-  resolveThreadListIndicator,
-  resolveThreadStatus,
-  threadListIndicatorStateForThread,
-  NO_COLLAPSED_CHILD_ACTIVITY,
-  type CollapsedChildActivity,
-  type ThreadListIndicatorState,
-} from "../model/thread-activity.js";
-import {
+  experimental_resolveThreadStatus,
   experimental_ThreadActionsContextMenu as ThreadActionsContextMenu,
   experimental_ThreadActionsMenu as ThreadActionsMenu,
-  experimental_ThreadStatusGlyph as SdkThreadStatusGlyph,
+  experimental_ThreadStatusGlyph as ThreadStatusGlyph,
   experimental_ThreadRowMetadata as ThreadRowMetadata,
   experimental_THREAD_ACTION_GROUPS,
   experimental_useExperiment,
@@ -59,15 +50,12 @@ import {
   type PluginThreadActionsContextMenuProps,
   type PluginThreadActionsInlineItem,
   type PluginThreadActionsTriggerProps,
-  type PluginSidebarThreadRowStatus,
   type PluginProvidersState,
+  type PluginThreadStatus,
 } from "@get-bb/plugin-sdk/app";
-import type { ForkThreadStatusGlyph } from "../../fork-sdk-types";
 import type { SidebarThread } from "../model/sidebar-thread.js";
-import {
-  NO_THREAD_IDS,
-  useThreadsHaveDraft,
-} from "../list/sidebarDraftPresence.js";
+import { useThreadsHaveDraft } from "../list/sidebarDraftPresence.js";
+import { NO_HIDDEN_THREADS } from "../list/groupRollups.js";
 import { useSidebarProjectName } from "../model/use-sidebar-data.js";
 import {
   sidebarShowProviderIconsAtom,
@@ -167,7 +155,7 @@ export type ThreadRowOptions =
       kind: "parent";
       isCollapsed: boolean;
       childCount: number;
-      childActivity: CollapsedChildActivity;
+      hiddenThreads: readonly SidebarThread[];
       stickyLevel?: number;
       onToggleCollapsed: (threadId: string) => void;
     });
@@ -271,55 +259,14 @@ function renderThreadRowContainer({
   );
 }
 
-const ThreadStatusGlyph = SdkThreadStatusGlyph as ForkThreadStatusGlyph;
-
-interface CollapsedThreadStatusGlyphProps {
-  activity: CollapsedChildActivity;
-  pluginStatus?: PluginSidebarThreadRowStatus | null;
-}
-
-export function CollapsedThreadStatusGlyph({
-  activity,
-  pluginStatus = null,
-}: CollapsedThreadStatusGlyphProps) {
-  const hasUnsubmittedDraft = useThreadsHaveDraft(activity.threadIds);
-  const statusProps: ThreadListIndicatorState = {
-    hasPendingInteraction: activity.pending,
-    pendingInteractionKind: activity.pendingInteractionKind,
-    hasUnsubmittedDraft,
-    hasUnreadError: activity.unreadError,
-    hasUnreadSuccess: activity.unread,
-    isBackgroundAgentActive: activity.backgroundAgent,
-    isBackgroundCommandActive: activity.backgroundCommand,
-    isGoalActive: activity.goal,
-    queuedWork: "none",
-    isPlanModeActive: activity.planMode,
-    isRuntimeActive: activity.runtimeWorking,
-    isWorkflowActive: activity.workflow,
-  };
-  return (
-    <ThreadStatusGlyph
-      indicator={resolveThreadListIndicator(statusProps)}
-      rowStatus={pluginStatus}
-    />
-  );
-}
-
 function ThreadTrailingIndicator({
-  state,
+  status,
   hideIdleDraftLabel,
-  rowStatus,
 }: {
-  state: ThreadListIndicatorState;
+  status: PluginThreadStatus;
   hideIdleDraftLabel: boolean;
-  rowStatus: PluginSidebarThreadRowStatus | null;
 }) {
-  const { indicatorKind, rowStatusIsVisible } = resolveThreadStatus(
-    state,
-    rowStatus,
-  );
-
-  if (indicatorKind === "none" && !rowStatusIsVisible) {
+  if (status.indicator === "none" && status.rowStatus === null) {
     return null;
   }
 
@@ -332,8 +279,8 @@ function ThreadTrailingIndicator({
       )}
     >
       <ThreadStatusGlyph
-        indicator={indicatorKind}
-        rowStatus={rowStatus}
+        indicator={status.indicator}
+        rowStatus={status.rowStatus}
         hideIdleDraftLabel={hideIdleDraftLabel}
       />
     </span>
@@ -415,10 +362,6 @@ function ThreadRowComponent({
     thread.id,
   );
   const showActive = isSelected || (isActive && !selectionHidesActive);
-  const threadStatus = threadListIndicatorStateForThread(
-    thread,
-    hasComposerDraft,
-  );
   const labelTitle = thread.displayTitle;
   const crossProjectName = useSidebarProjectName(crossProjectId);
   const crossProjectLabel =
@@ -500,60 +443,23 @@ function ThreadRowComponent({
   const isParentRow = parentOptions !== null;
   const isParentCollapsed = parentOptions?.isCollapsed ?? false;
   const childCount = parentOptions?.childCount ?? 0;
-  const childActivity =
-    parentOptions?.childActivity ?? NO_COLLAPSED_CHILD_ACTIVITY;
   const hasChildren = childCount > 0;
   const reserveActionSpace =
     crossProjectLabel !== null || (isParentRow && hasChildren);
   const hasHiddenChildren = isParentRow && isParentCollapsed && hasChildren;
-  const hiddenChildrenHaveDraft = useThreadsHaveDraft(
-    hasHiddenChildren ? childActivity.threadIds : NO_THREAD_IDS,
-  );
-  const trailingIndicatorState: ThreadListIndicatorState = {
-    hasPendingInteraction:
-      threadStatus.hasPendingInteraction ||
-      (hasHiddenChildren && childActivity.pending),
-    pendingInteractionKind: hasHiddenChildren
-      ? combineCollapsedPendingInteractionKind(threadStatus, childActivity)
-      : threadStatus.pendingInteractionKind,
-    hasUnsubmittedDraft:
-      threadStatus.hasUnsubmittedDraft || hiddenChildrenHaveDraft,
-    hasUnreadError:
-      threadStatus.hasUnreadError ||
-      (hasHiddenChildren && childActivity.unreadError),
-    hasUnreadSuccess:
-      threadStatus.hasUnreadSuccess ||
-      (hasHiddenChildren && childActivity.unread),
-    isBackgroundAgentActive:
-      threadStatus.isBackgroundAgentActive ||
-      (hasHiddenChildren && childActivity.backgroundAgent),
-    isBackgroundCommandActive:
-      threadStatus.isBackgroundCommandActive ||
-      (hasHiddenChildren && childActivity.backgroundCommand),
-    isGoalActive:
-      threadStatus.isGoalActive || (hasHiddenChildren && childActivity.goal),
-    queuedWork: threadStatus.queuedWork,
-    isPlanModeActive:
-      threadStatus.isPlanModeActive ||
-      (hasHiddenChildren && childActivity.planMode),
-    isRuntimeActive:
-      threadStatus.isRuntimeActive ||
-      (hasHiddenChildren && childActivity.runtimeWorking),
-    isWorkflowActive:
-      threadStatus.isWorkflowActive ||
-      (hasHiddenChildren && childActivity.workflow),
-  };
-  const trailingIndicatorResolution = resolveThreadStatus(
-    trailingIndicatorState,
-    pluginThreadRowStatus,
-  );
-  const trailingIndicatorKind = trailingIndicatorResolution.indicatorKind;
-  const splitIndicatorIsWorking = hasThreadListWorkingActivity(
-    trailingIndicatorState,
-    pluginThreadRowStatus?.tone === "running",
-  );
-  const splitIndicatorLabel = trailingIndicatorResolution.accessibleLabel
-    ? `${labelTitle} — open in split; ${trailingIndicatorResolution.accessibleLabel}`
+  const hiddenThreads =
+    hasHiddenChildren && parentOptions
+      ? parentOptions.hiddenThreads
+      : NO_HIDDEN_THREADS;
+  const hiddenChildrenHaveDraft = useThreadsHaveDraft(hiddenThreads);
+  const trailingStatus = experimental_resolveThreadStatus({
+    thread,
+    hiddenThreads,
+    hasUnsubmittedDraft: hasComposerDraft || hiddenChildrenHaveDraft,
+    rowStatus: pluginThreadRowStatus,
+  });
+  const splitIndicatorLabel = trailingStatus.label
+    ? `${labelTitle} — open in split; ${trailingStatus.label}`
     : `${labelTitle} — open in split`;
   const linkLabel = hasComposerDraft
     ? `Open ${labelTitle} (unsubmitted draft)`
@@ -893,16 +799,15 @@ function ThreadRowComponent({
                     <SplitPaneMiniMap
                       slots={miniMap}
                       label={splitIndicatorLabel}
-                      isWorking={splitIndicatorIsWorking}
+                      isWorking={trailingStatus.isWorking}
                     />
                   </span>
                 ) : (
                   <ThreadTrailingIndicator
-                    state={trailingIndicatorState}
+                    status={trailingStatus}
                     hideIdleDraftLabel={
-                      !hasHiddenChildren && trailingIndicatorKind === "draft"
+                      !hasHiddenChildren && trailingStatus.indicator === "draft"
                     }
-                    rowStatus={pluginThreadRowStatus}
                   />
                 )}
               </span>

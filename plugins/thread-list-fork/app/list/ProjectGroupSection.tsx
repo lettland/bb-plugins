@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useSetAtom } from "jotai";
 import {
   ContextMenu,
@@ -12,10 +12,6 @@ import {
   renameProjectGroup,
 } from "../model/project-groups.js";
 import type { SidebarThread } from "../model/sidebar-thread.js";
-import {
-  getCollapsedChildActivity,
-  NO_COLLAPSED_CHILD_ACTIVITY,
-} from "../model/thread-activity.js";
 import { useSidebarRename } from "../rows/SidebarInlineRename.js";
 import {
   ActionMenuItem,
@@ -77,13 +73,6 @@ export function ProjectGroupSection({
   const ungroup = () =>
     setGroups((current) => deleteProjectGroup(current, group.id));
   const collapsedThreads = isCollapsed ? threads : EMPTY_GROUP_THREADS;
-  const collapsedActivity = useMemo(
-    () =>
-      collapsedThreads.length === 0
-        ? NO_COLLAPSED_CHILD_ACTIVITY
-        : getCollapsedChildActivity(collapsedThreads),
-    [collapsedThreads],
-  );
 
   return (
     <ContextMenu>
@@ -114,7 +103,6 @@ export function ProjectGroupSection({
               isCollapsed,
               onToggleCollapsed: () => onToggleCollapsed(group.id),
             }}
-            collapsedActivity={collapsedActivity}
             collapsedThreads={collapsedThreads}
           >
             <div className="ml-2 space-y-4 border-l border-border-hairline pl-1">

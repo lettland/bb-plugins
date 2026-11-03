@@ -1,7 +1,6 @@
-import type { ComponentType } from "react";
 import type {
   PluginSidebarThreadIndicator as PublishedPluginSidebarThreadIndicator,
-  PluginThreadStatusGlyphProps as PublishedPluginThreadStatusGlyphProps,
+  PluginThreadStatus as PublishedPluginThreadStatus,
 } from "@get-bb/plugin-sdk/app";
 
 export type PluginSidebarThreadIndicator =
@@ -9,8 +8,9 @@ export type PluginSidebarThreadIndicator =
   | "waiting-for-plan-approval"
   | "waiting-for-answer";
 
-export type ForkThreadStatusGlyph = ComponentType<
-  Omit<PublishedPluginThreadStatusGlyphProps, "indicator"> & {
-    indicator: PluginSidebarThreadIndicator;
-  }
->;
+export type ForkThreadStatus = Omit<
+  PublishedPluginThreadStatus,
+  "indicator"
+> & {
+  indicator: PluginSidebarThreadIndicator;
+};
