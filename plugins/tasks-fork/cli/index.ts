@@ -1,5 +1,6 @@
-import { resolve } from "node:path";
 import {
+  experimental_getHostPathBasename as getHostPathBasename,
+  experimental_resolveHostPath as resolveHostPath,
   PluginCliError,
   cliCommand,
   defineCli,
@@ -264,8 +265,14 @@ async function writeClientFile(
   });
 }
 
+function resolveClientPath(rootPath: string, path: string): string {
+  const resolved = resolveHostPath({ rootPath, path });
+  if (resolved === null) throw new CliError(`Invalid host path: ${path}`);
+  return resolved;
+}
+
 function attachmentFileName(path: string): string {
-  return path.split(/[\\/]/).at(-1) || "attachment";
+  return getHostPathBasename(path) || "attachment";
 }
 
 async function readTextOption(
@@ -276,7 +283,7 @@ async function readTextOption(
   file: string | undefined,
 ): Promise<string | undefined> {
   if (file === undefined) return inline;
-  const path = resolve(ctx.cwd ?? process.cwd(), file);
+  const path = resolveClientPath(ctx.cwd ?? process.cwd(), file);
   try {
     const { text } = await readClientFile(bb, hostId, path);
     if (text === null) {
@@ -1255,7 +1262,7 @@ export function registerTasksCli(
           run(input, ctx) {
             return guard(async () => {
               const attachPaths = input.options.attach.map((path) =>
-                resolve(ctx.cwd ?? process.cwd(), path),
+                resolveClientPath(ctx.cwd ?? process.cwd(), path),
               );
               const descriptionFile = input.options["description-file"];
               const usesClientFiles =
@@ -2167,7 +2174,7 @@ export function registerTasksCli(
           run(input, ctx) {
             return guard(async () => {
               const ownerAddress = input.positionals["key-or-comment-id"];
-              const sourcePath = resolve(
+              const sourcePath = resolveClientPath(
                 ctx.cwd ?? process.cwd(),
                 input.options.file,
               );
@@ -2239,7 +2246,7 @@ export function registerTasksCli(
           },
           run(input, ctx) {
             return guard(async () => {
-              const outPath = resolve(
+              const outPath = resolveClientPath(
                 ctx.cwd ?? process.cwd(),
                 input.options.out,
               );

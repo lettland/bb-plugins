@@ -1505,6 +1505,20 @@ describe("bb tasks CLI", () => {
       expect(missing.exitCode).toBe(1);
       expect(missing.stderr).toContain("attachment source is not a file");
 
+      const windowsStyle = await harness.runCli([
+        "create",
+        "--project",
+        "att",
+        "--title",
+        "Windows-style attach",
+        "--attach",
+        "C:\\repos\\shot.png",
+      ]);
+      expect(windowsStyle.exitCode).toBe(1);
+      expect(windowsStyle.stderr).toContain(
+        "attachment source is not a file: C:\\repos\\shot.png",
+      );
+
       const hugePath = join(directory, "huge.bin");
       await writeFile(hugePath, "");
       await truncate(hugePath, 25 * 1024 * 1024 + 1);
