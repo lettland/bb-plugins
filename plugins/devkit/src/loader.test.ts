@@ -656,17 +656,28 @@ describe("review-code content", () => {
   });
 
   it("picks the permission mode from provider capabilities, never skips auto on missing data, and never falls back to accept-edits", () => {
-    expect(normalized).toContain(".capabilities.permissionModes");
-    expect(normalized).toContain("The list contains `auto`: request `auto`");
-    expect(normalized).toContain("The list is a non-empty array without `auto`");
-    expect(normalized).toContain("request the parent's own mode on the first spawn");
-    expect(normalized).toContain("no permission-mode retry");
-    // Regression (learned 2026-11-05 in a bb review run; see the commit that adds this test): a
-    // provider whose capabilities list only accept-edits/full rejects `--permission-mode auto`
-    // with HTTP 400 on every reviewer spawn.
-    expect(normalized).toContain("some providers accept only `accept-edits`/`full`");
-    expect(normalized).toContain("missing, `null`, empty, or not an array");
-    expect(normalized).toContain("missing data never skips `auto`");
+    expect(normalized).toContain(
+      "the entry whose `id` is `<providerId>` in `bb provider list --json`, field `.capabilities.permissionModes`",
+    );
+    // Each case's rule is asserted on that case's own bullet, so rules cannot swap between cases.
+    const casesStart = normalized.indexOf("Three cases:");
+    const casesEnd = normalized.indexOf("On a provider without `auto`");
+    expect(casesStart).toBeGreaterThan(-1);
+    expect(casesEnd).toBeGreaterThan(casesStart);
+    const bullets = normalized.slice(casesStart, casesEnd).split(" - ");
+    expect(bullets).toHaveLength(4);
+    const [, hasAuto, noAuto, noData] = bullets;
+    expect(hasAuto).toContain("The list contains `auto`: request `auto`");
+    expect(hasAuto).toContain("retry once with the parent's own mode");
+    expect(noAuto).toContain("The list is a non-empty array without `auto`");
+    expect(noAuto).toContain("request the parent's own mode on the first spawn");
+    expect(noAuto).toContain("no `auto` attempt and no permission-mode retry");
+    // Regression (learned 2026-11-05): a Claude Code-family provider whose bb capabilities list
+    // only accept-edits/full returned HTTP 400 for `--permission-mode auto` on every reviewer spawn.
+    expect(noAuto).toContain("some providers accept only `accept-edits`/`full`");
+    expect(noData).toContain("missing, `null`, empty, or not an array: request `auto`");
+    expect(noData).toContain("keep the one retry with the parent's own mode on an HTTP 400");
+    expect(noData).toContain("missing data never skips `auto`");
     expect(normalized).not.toContain("always request `auto`");
     expect(normalized).toContain("Never map `full` to `accept-edits`");
     expect(normalized).toContain("--permission-mode <mode>");
