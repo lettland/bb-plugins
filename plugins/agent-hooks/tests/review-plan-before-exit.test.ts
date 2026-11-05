@@ -8,11 +8,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { cleanup, makeProjectDir, runHook } from "./run-hook.mjs";
+import { cleanup, incidentLogFile, makeProjectDir, runHook } from "./run-hook.mjs";
 
 const PLAN = "do the thing";
 const GATE_REL = path.join(".claude", "logs", ".plan-review-gate-test-session");
-const LOG_REL = path.join(".claude", "logs", "incident-log.md");
 
 let scratch: string[] = [];
 
@@ -52,7 +51,7 @@ function gatePath(projectDir: string): string {
 }
 
 function incidentLog(projectDir: string): string {
-  return readFileSync(path.join(projectDir, LOG_REL), "utf8");
+  return readFileSync(incidentLogFile(projectDir), "utf8");
 }
 
 function isDeny(stdout: string): boolean {

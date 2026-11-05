@@ -29,7 +29,26 @@ export function makeProjectDir() {
   return dir;
 }
 
+/** Where a test project's hooks write their incident log. Always inside the
+ *  throwaway project dir (via AGENT_HOOKS_LOG_DIR), never the real ~/.bb/logs. */
+export function incidentLogDir(projectDir) {
+  return path.join(projectDir, ".incident-logs");
+}
+
+/** The incident log file the hooks write for `projectDir`: <key>.md, where the key
+ *  is the project dir with every "/" replaced by "-". */
+export function incidentLogFile(projectDir) {
+  return path.join(incidentLogDir(projectDir), `${projectDir.replaceAll("/", "-")}.md`);
+}
+
 export function cleanup(dir) {
+  // The hooks set the user append-only flag on their incident log (chflags uappnd,
+  // macOS/BSD); rmSync cannot remove a flagged file. Clear it first.
+  try {
+    execFileSync("chflags", ["-R", "nouappnd", dir], { stdio: "ignore" });
+  } catch {
+    // no chflags on this host, so nothing was flagged
+  }
   rmSync(dir, { recursive: true, force: true });
 }
 
@@ -89,6 +108,8 @@ export function runHook(
         // The whole point. Never the real checkout: guard-bash appends a LOW
         // incident-log entry for every allowed rm/mv.
         CLAUDE_PROJECT_DIR: dir,
+        // Same rule for the incident log: never the real ~/.bb/logs/agent-hooks.
+        AGENT_HOOKS_LOG_DIR: incidentLogDir(dir),
         ...env,
       },
       stdio: ["pipe", "pipe", "pipe"],

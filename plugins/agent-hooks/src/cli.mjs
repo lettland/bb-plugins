@@ -5,6 +5,7 @@
 // the evidence for that, and it checks behaviour, not just file presence.
 
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   PROVIDERS,
@@ -175,13 +176,20 @@ async function cmdUninstall(argv, out) {
   return 0;
 }
 
+/** The directory the hooks write incident logs to: AGENT_HOOKS_LOG_DIR, else
+ *  ~/.bb/logs/agent-hooks. Outside the project on purpose, so wiping a project
+ *  cannot take its log along. Mirrors INCIDENT_LOG_DIR in the hook scripts. */
+function incidentLogDir() {
+  return process.env.AGENT_HOOKS_LOG_DIR || path.join(homedir(), ".bb", "logs", "agent-hooks");
+}
+
 function cmdLog(argv, out) {
-  // Hooks append to the per-project incident log; there is no central store.
+  // One log file per project, named after the project dir with "/" replaced by "-".
   const limit = Number(pick(argv, "--limit") ?? 20);
   const roots = [process.cwd()];
   let found = 0;
   for (const root of roots) {
-    const file = path.join(root, ".claude", "logs", "incident-log.md");
+    const file = path.join(incidentLogDir(), `${root.replaceAll("/", "-")}.md`);
     if (!existsSync(file)) continue;
     const lines = readFileSync(file, "utf8").trim().split("\n").filter(Boolean);
     const tail = lines.slice(-limit);
@@ -190,7 +198,7 @@ function cmdLog(argv, out) {
     found += 1;
   }
   if (found === 0) {
-    out("no incident log in the current project — hooks write to <project>/.claude/logs/incident-log.md");
+    out(`no incident log for the current project — hooks write to ${path.join(incidentLogDir(), "<project dir with / replaced by ->.md")}`);
   }
   return 0;
 }

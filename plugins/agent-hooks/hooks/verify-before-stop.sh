@@ -150,12 +150,29 @@ honest, accepted outcome, not failure. Do NOT report success for work you have n
 Restate the real status (verified-done / blocked / needs-input) and stop."
 
 # Best-effort observability (fail-soft); mirrors guard-bash / completeness-gate format.
+# Incident log: outside the project, so a wipe of the project cannot take it along.
+# Same helper as guard-bash.sh; keep the copies in step.
+INCIDENT_LOG_DIR="${AGENT_HOOKS_LOG_DIR:-${HOME:-}/.bb/logs/agent-hooks}"
+INCIDENT_LOG="$INCIDENT_LOG_DIR/${CLAUDE_PROJECT_DIR//\//-}.md"
+
+# Append one line to the incident log, then set the user append-only flag on the
+# log dir and file (macOS/BSD; skipped silently where chflags is missing). Fail-soft.
+incident_append() {
+  mkdir -p "$INCIDENT_LOG_DIR" 2> /dev/null || return 0
+  printf '%s\n' "$1" >> "$INCIDENT_LOG" 2> /dev/null || true
+  command -v chflags > /dev/null 2>&1 || return 0
+  local p
+  for p in "$INCIDENT_LOG_DIR" "$INCIDENT_LOG"; do
+    case "$(stat -f %Sf "$p" 2> /dev/null)" in
+      *uappnd*) ;;
+      *) chflags uappnd "$p" 2> /dev/null ;;
+    esac
+  done
+  return 0
+}
+
 if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
-  LOG_DIR="$CLAUDE_PROJECT_DIR/.claude/logs"
-  if mkdir -p "$LOG_DIR" 2> /dev/null; then
-    printf -- "- \`%s\` | VERIFY | BLOCK | %s\n" "$(date +"%Y-%m-%d %H:%M:%S")" "$SIGNAL" \
-      >> "$LOG_DIR/incident-log.md" 2> /dev/null || true
-  fi
+  incident_append "$(printf -- "- \`%s\` | VERIFY | BLOCK | %s" "$(date +"%Y-%m-%d %H:%M:%S")" "$SIGNAL")"
 fi
 
 if [ "${AGENT_HOOKS_HOST:-}" = "codex" ]; then

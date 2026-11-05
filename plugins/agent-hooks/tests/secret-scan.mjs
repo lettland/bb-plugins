@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
-import { makeProjectDir, makeGitRepo, cleanup, HOOKS_DIR } from "./run-hook.mjs";
+import { makeProjectDir, makeGitRepo, cleanup, incidentLogDir, HOOKS_DIR } from "./run-hook.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -53,7 +53,7 @@ function runSecretScan(toolInput, toolName, projectDir) {
   });
   return new Promise((resolve) => {
     const child = spawn("bash", [path.join(HOOKS_DIR, "secret-scan.sh")], {
-      env: { ...process.env, CLAUDE_PROJECT_DIR: projectDir },
+      env: { ...process.env, CLAUDE_PROJECT_DIR: projectDir, AGENT_HOOKS_LOG_DIR: incidentLogDir(projectDir) },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";

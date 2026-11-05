@@ -5,8 +5,14 @@
 #
 # Three tiers:
 #   HARD BLOCK  — always blocked, no override (permissionDecision: deny)
-#   SOFT BLOCK  — blocked with explanation, user can re-request (permissionDecision: deny)
+#   SOFT BLOCK  — blocked with explanation (permissionDecision: deny); skipped, and
+#                 logged as ALLOWED, when permission_mode=bypassPermissions (full access)
 #   LOG WARNING — allowed but logged to incident log (exit 0, no JSON)
+#
+# Incident log: ${AGENT_HOOKS_LOG_DIR:-$HOME/.bb/logs/agent-hooks}/<key>.md, outside
+# the project so a wipe of the project cannot take the log with it. <key> is
+# $CLAUDE_PROJECT_DIR with every "/" replaced by "-". On macOS/BSD the file and
+# its directory get the user append-only flag (chflags uappnd), best effort.
 #
 # Note: regex-on-shell-text is fundamentally fragile. This hook is a best-effort
 # tripwire, not a sandbox. Catastrophic-rm and secret-exfil checks use token-scan
@@ -17,11 +23,31 @@
 
 INPUT=$(cat)
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
+# Full access = bypassPermissions only. Missing or any other value stays 0.
+PERMISSION_MODE=$(echo "$INPUT" | jq -r '.permission_mode // empty')
+FULL_ACCESS=0
+[ "$PERMISSION_MODE" = "bypassPermissions" ] && FULL_ACCESS=1
 TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
-LOG_DIR="$CLAUDE_PROJECT_DIR/.claude/logs"
-INCIDENT_LOG="$LOG_DIR/incident-log.md"
+INCIDENT_LOG_DIR="${AGENT_HOOKS_LOG_DIR:-${HOME:-}/.bb/logs/agent-hooks}"
+INCIDENT_LOG="$INCIDENT_LOG_DIR/${CLAUDE_PROJECT_DIR//\//-}.md"
 
-mkdir -p "$LOG_DIR"
+# Append one line to the incident log, then set the user append-only flag on the
+# log dir and file (macOS/BSD; skipped silently where chflags is missing). The flag
+# is only set when not already set, so the steady-state cost is two stat calls.
+# Fail-soft: a log that cannot be written never changes a verdict.
+incident_append() {
+  mkdir -p "$INCIDENT_LOG_DIR" 2> /dev/null || return 0
+  printf '%s\n' "$1" >> "$INCIDENT_LOG" 2> /dev/null || true
+  command -v chflags > /dev/null 2>&1 || return 0
+  local p
+  for p in "$INCIDENT_LOG_DIR" "$INCIDENT_LOG"; do
+    case "$(stat -f %Sf "$p" 2> /dev/null)" in
+      *uappnd*) ;;
+      *) chflags uappnd "$p" 2> /dev/null ;;
+    esac
+  done
+  return 0
+}
 
 log_incident() {
   local SEVERITY="$1"
@@ -29,10 +55,16 @@ log_incident() {
   # Fence user-controlled MSG to prevent markdown injection in the log file
   local SAFE_MSG
   SAFE_MSG="$(printf '%s' "$MSG" | tr '\n' ' ' | sed 's/`/'"'"'/g')"
-  echo "- \`$TIMESTAMP\` | GUARD | $SEVERITY | $SAFE_MSG" >> "$INCIDENT_LOG"
+  incident_append "- \`$TIMESTAMP\` | GUARD | $SEVERITY | $SAFE_MSG"
 }
 
 deny() {
+  # Full access: a SOFT BLOCK is logged as allowed and the scan continues, so a
+  # later HARD BLOCK still denies. Prints nothing and returns (never exits) here.
+  if [ "$FULL_ACCESS" = 1 ] && [[ "$1" == "SOFT BLOCK:"* ]]; then
+    log_incident "LOW" "ALLOWED (full access, mode=$PERMISSION_MODE): $1 | ${COMMAND%%$'\n'*}"
+    return 0
+  fi
   local REASON="$1"
   local CONTEXT="$2"
   jq -n \
@@ -125,6 +157,145 @@ home_rm_is_catastrophic() {
   return 1
 }
 
+# ── Tree wipe (HARD in every mode) ──────────────────────────────────────────
+# A recursive rm whose target is the whole working tree or the project root, a
+# `find` that deletes from there, and any rm/chflags aimed at the incident log.
+# These are the commands that destroyed a project dir, `.git` and its in-project
+# incident log in one go; narrow rms (`rm -rf ./dist`, `rm -rf dist/*`) stay allowed.
+
+# Strip quotes, then trailing slashes (but keep a lone "/").
+wipe_norm() {
+  local t="${1//[\"\']/}"
+  while [ "${#t}" -gt 1 ] && [ "${t%/}" != "$t" ]; do t="${t%/}"; done
+  printf '%s' "$t"
+}
+
+# Names that, directly under a directory, empty it (or its history): every glob
+# form of "all entries" and `.git`.
+wipe_glob_name() {
+  case "$1" in
+    '*' | '.*' | '.??*' | '.[!.]*' | '.[^.]*' | .git) return 0 ;;
+  esac
+  return 1
+}
+
+# `.` or the project root: the literal value, or the unexpanded spellings.
+# shellcheck disable=SC2016  # the unexpanded spellings are matched as literal text
+WIPE_ROOT_FORMS=('$CLAUDE_PROJECT_DIR' '${CLAUDE_PROJECT_DIR}' '$PWD' '${PWD}' '$(pwd)' '`pwd`')
+wipe_is_root() {
+  local t="$1" form
+  [ "$t" = . ] && return 0
+  [ "$t" = "${CLAUDE_PROJECT_DIR%/}" ] && return 0
+  for form in "${WIPE_ROOT_FORMS[@]}"; do [ "$t" = "$form" ] && return 0; done
+  return 1
+}
+
+# A recursive-rm target that is the whole tree: cwd-relative (`.`, `..`, `*`,
+# `./.??*`, `.git`, ...), the project root, or root/<all-entries glob>.
+wipe_target() {
+  local t="$1" form
+  wipe_is_root "$t" && return 0
+  [ "$t" = .. ] && return 0
+  wipe_glob_name "${t#./}" && return 0
+  for form in "${CLAUDE_PROJECT_DIR%/}" "${WIPE_ROOT_FORMS[@]}"; do
+    [ "${t#"$form"/}" != "$t" ] && wipe_glob_name "${t#"$form"/}" && return 0
+  done
+  return 1
+}
+
+# Does this token name the incident log (or its directory)?
+wipe_names_log() {
+  local t="$1" dir="${AGENT_HOOKS_LOG_DIR%/}"
+  case "$t" in *.bb/logs/agent-hooks* | *AGENT_HOOKS_LOG_DIR*) return 0 ;; esac
+  [ -n "$dir" ] && case "$t" in *"$dir"*) return 0 ;; esac
+  return 1
+}
+
+# Inspect one clause. Returns 0 and sets WIPE_REASON when it is a tree wipe.
+# Tokens come from `read -ra`, never an unquoted expansion: a bare `*` must not be
+# globbed against the hook's own cwd before it is compared.
+WIPE_REASON=""
+tree_wipe_clause() {
+  local -a toks
+  read -ra toks <<< "$1"
+  WIPE_REASON=""
+  local n=${#toks[@]} i kind="" seen_git=0 raw tok t
+  for ((i = 0; i < n; i++)); do
+    raw="${toks[i]}"
+    case "$raw" in -*) continue ;; esac # a flag is never the command
+    tok="$(normalize_token "${raw#*=}")"
+    case "${tok##*/}" in
+      rm | find | chflags) kind="${tok##*/}"; break ;;
+      git) seen_git=1 ;;
+    esac
+  done
+  [ -z "$kind" ] && return 1
+  local rest=("${toks[@]:i+1}")
+
+  case "$kind" in
+    rm)
+      # `git rm --cached` only edits the index; it deletes nothing from disk.
+      if [ "$seen_git" = 1 ]; then
+        for t in "${rest[@]}"; do [ "$t" = --cached ] && return 1; done
+      fi
+      local rec=0 ended=0 cand
+      local -a targets=()
+      for t in "${rest[@]}"; do
+        if [ "$ended" = 0 ]; then
+          case "$t" in
+            --) ended=1; continue ;;
+            --recursive) rec=1; continue ;;
+            --*) continue ;;
+            -?*) case "$t" in *[rR]*) rec=1 ;; esac; continue ;;
+          esac
+        fi
+        targets+=("$(wipe_norm "$t")")
+      done
+      for t in "${targets[@]}"; do
+        # The second candidate drops one trailing `)`/`}`/`;` welded on by `$(rm ... )`.
+        for cand in "$t" "${t%[\)\};]}"; do
+          if wipe_names_log "$cand"; then WIPE_REASON="incident log target '$t'"; return 0; fi
+          if [ "$rec" = 1 ] && wipe_target "$cand"; then WIPE_REASON="recursive rm of '$t'"; return 0; fi
+        done
+      done
+      ;;
+    find)
+      local in_paths=1 hasdel=0 hasfilter=0 after_exec=0
+      local -a paths=()
+      for t in "${rest[@]}"; do
+        if [ "$in_paths" = 1 ]; then
+          case "$t" in
+            -H | -L | -P) continue ;;
+            -* | \(* | \!*) in_paths=0 ;;
+            *) paths+=("$(wipe_norm "$t")"); continue ;;
+          esac
+        fi
+        if [ "$after_exec" = 1 ]; then
+          after_exec=0
+          case "$(normalize_token "$t")" in rm | */rm) hasdel=1 ;; esac
+          continue
+        fi
+        case "$t" in
+          -delete) hasdel=1 ;;
+          -exec | -execdir | -ok | -okdir) after_exec=1 ;;
+          -name | -iname | -path | -ipath | -regex | -iregex | -newer | -mtime | -mmin) hasfilter=1 ;;
+        esac
+      done
+      if [ "$hasdel" = 1 ] && [ "$hasfilter" = 0 ]; then
+        for t in "${paths[@]}"; do
+          if wipe_is_root "$t"; then WIPE_REASON="find '$t' with -delete/-exec rm and no filter"; return 0; fi
+        done
+      fi
+      ;;
+    chflags)
+      for t in "${rest[@]}"; do
+        if wipe_names_log "$(wipe_norm "$t")"; then WIPE_REASON="chflags on the incident log ('$t')"; return 0; fi
+      done
+      ;;
+  esac
+  return 1
+}
+
 # ═══════════════════════════════════════════════════════
 # HARD BLOCK — never allowed, no exceptions
 # ═══════════════════════════════════════════════════════
@@ -141,7 +312,8 @@ home_rm_is_catastrophic() {
 #   - `xargs` taking its command from stdin rather than argv
 #   - mid-token quoting (`r'm' -rf /etc`) — evades the old \brm\b equally
 #   - dynamic paths (`rm -rf $(mktemp -d)/../etc`) — the recursive-rm soft block
-#     below still fires, so this is not an open hole
+#     below still fires, so this is not an open hole (except under full access,
+#     where that soft block is skipped and nothing backstops it)
 #
 # KNOWN FALSE POSITIVE, kept on purpose: prose is scanned like argv. A heredoc
 # body or a `git commit -m "..."` message that contains the word rm next to a
@@ -174,22 +346,36 @@ if echo "$COMMAND" | grep -qE '\brm\b'; then
   done <<< "$RM_CLAUSES"
 fi
 
+# Tree wipe. Runs on every clause of a compound command, after the catastrophic-rm
+# scan, so it also covers `cd sub; rm -rf *` and `a && rm -rf ./.??*`. HARD: the
+# full-access lift in deny() applies to SOFT BLOCKs only.
+if echo "$COMMAND" | grep -qE '\b(rm|find|chflags)\b'; then
+  WIPE_CLAUSES="$(echo "$COMMAND" | tr ';|&' '\n' | tr -s '\n')"
+  while IFS= read -r wipe_clause; do
+    [ -z "$wipe_clause" ] && continue
+    if tree_wipe_clause "$wipe_clause"; then
+      log_incident "CRITICAL" "HARD BLOCKED: tree wipe ($WIPE_REASON): $COMMAND"
+      deny "HARD BLOCK: tree wipe — $WIPE_REASON." "Delete the specific paths you mean (e.g. 'rm -rf ./dist'), never the whole working tree, the project root or .git. The incident log under ~/.bb/logs/agent-hooks is not yours to remove or unflag. If this is really needed, the user runs the command themselves."
+    fi
+  done <<< "$WIPE_CLAUSES"
+fi
+
 # Shell indirection bypass (B2): eval, sh -c, bash -c — these wrap commands in
-# a way that defeats every other regex below. Soft-block so legitimate uses
-# (build scripts, oneliners) can be re-requested.
+# a way that defeats every other regex below. Hard-block in every mode, full
+# access included; if it is really needed, the user runs the command themselves.
 # `fish` is in the list because it is this user's login shell: `fish -c "set"`
 # otherwise evades both this rule and the environment-dump block (F8), since the
 # dump token is a quoted argument rather than a clause of its own.
 if echo "$COMMAND" | grep -qE '\b(eval|bash[[:space:]]+-c|sh[[:space:]]+-c|zsh[[:space:]]+-c|ksh[[:space:]]+-c|dash[[:space:]]+-c|fish[[:space:]]+-c|fish[[:space:]]+--command)\b'; then
-  log_incident "HIGH" "SOFT BLOCKED: shell indirection: $COMMAND"
-  deny "SOFT BLOCK: shell indirection (eval, sh -c, bash -c, fish -c, etc.) bypasses safety checks." "Run the underlying command directly so guard-bash.sh can inspect it. If indirection is genuinely required, ask the user to confirm."
+  log_incident "HIGH" "HARD BLOCKED: shell indirection: $COMMAND"
+  deny "HARD BLOCK: shell indirection (eval, sh -c, bash -c, fish -c, etc.) bypasses safety checks." "Run the underlying command directly so guard-bash.sh can inspect it. If indirection is genuinely required, the user runs the command themselves."
 fi
 
 # Idle no-op calls: a whole command of only `true` / `:` does nothing. Some
 # models emit it in a loop to keep a turn alive while background work runs
 # (seen ~60x in one bb thread). Ending the turn is the correct wait.
 if echo "$COMMAND" | grep -qxE '[[:space:]]*(true|:)([[:space:]]*(;|&&|\|\|)?[[:space:]]*(true|:))*[[:space:]]*;?[[:space:]]*'; then
-  deny "SOFT BLOCK: no-op command ('true' / ':') does nothing." "Do not call tools to wait. End your turn now with no tool call; bb and background-task notifications wake you when work finishes."
+  deny "HARD BLOCK: no-op command ('true' / ':') does nothing." "Do not call tools to wait. End your turn now with no tool call; bb and background-task notifications wake you when work finishes."
 fi
 
 # Force push (F9). The agent must NEVER force push, so this closes two forms the
@@ -332,7 +518,7 @@ while IFS= read -r dump_clause; do
       deny "HARD BLOCK: '$bare' prints every environment variable, exposing every credential at once." "Name the variable you actually need (e.g. 'printenv NODE_ENV' for a benign one). A full dump puts secrets into the transcript as literal text, where no later check can catch them."
       ;;
     'compgen -v')
-      log_incident "MEDIUM" "SOFT BLOCKED: environment name listing: $COMMAND"
+      [ "$FULL_ACCESS" = 1 ] || log_incident "MEDIUM" "SOFT BLOCKED: environment name listing: $COMMAND"
       deny "SOFT BLOCK: 'compgen -v' lists every variable name." "Names only, no values, so this is recoverable — but confirm you need the full list rather than a specific variable."
       ;;
   esac
@@ -373,7 +559,8 @@ if echo "$COMMAND" | grep -qE '\bgit[[:space:]]+add\b'; then
 fi
 
 # ═══════════════════════════════════════════════════════
-# SOFT BLOCK — blocked, but user can re-request
+# SOFT BLOCK — blocked, but skipped (logged as ALLOWED) when
+# permission_mode=bypassPermissions. A HARD BLOCK in this section still denies.
 # ═══════════════════════════════════════════════════════
 
 # Git hook bypass. The agent must fix what a hook reports, not skip the hook:
@@ -758,11 +945,11 @@ if [[ "$COMMAND" =~ $GIT_WORD || "$COMMAND" == *GIT_CONFIG* ]]; then
   esac
   case "$GIT_VERDICT" in
     BLOCK:bypass)
-      log_incident "HIGH" "SOFT BLOCKED: git hook bypass: $COMMAND"
+      [ "$FULL_ACCESS" = 1 ] || log_incident "HIGH" "SOFT BLOCKED: git hook bypass: $COMMAND"
       deny "SOFT BLOCK: bypassing git hooks (--no-verify, commit -n, a core.hooksPath override) skips the repo's checks." "Fix what the git hook reports and re-run without the bypass. If a bypass is really needed, ask the user to run the command themselves.${GIT_FALLBACK_NOTE}"
       ;;
     BLOCK:hookspath)
-      log_incident "HIGH" "SOFT BLOCKED: git core.hooksPath write: $COMMAND"
+      [ "$FULL_ACCESS" = 1 ] || log_incident "HIGH" "SOFT BLOCKED: git core.hooksPath write: $COMMAND"
       deny "SOFT BLOCK: setting core.hooksPath disables or redirects the repo's git hooks." "This disables or redirects the repo's git hooks. If the repo really uses a custom hooks dir, ask the user to confirm; don't retry.${GIT_FALLBACK_NOTE}"
       ;;
   esac
@@ -791,7 +978,7 @@ if echo "$COMMAND" | grep -qE '\brm\b' && echo "$COMMAND" | grep -qE "$RECURSIVE
   done <<< "$CLAUSES"
 
   if [ "$CLAUSE_FAILED" = "true" ]; then
-    log_incident "MEDIUM" "SOFT BLOCKED: recursive rm (or in compound): $COMMAND"
+    [ "$FULL_ACCESS" = 1 ] || log_incident "MEDIUM" "SOFT BLOCKED: recursive rm (or in compound): $COMMAND"
     deny "SOFT BLOCK: rm -r/-R deletes a directory tree permanently." "Command blocked: recursive delete. If intentional, ask the user to confirm with the specific paths listed. Compound commands are checked clause-by-clause; an allowlisted clause does not exempt other clauses. (Force-only 'rm -f <file>' is allowed.)"
   fi
 fi
@@ -840,12 +1027,12 @@ while IFS= read -r wclause; do
     # Ignored destination + append of a variable: the legitimate case. Allowed,
     # and WRITE_APPROVED stops the name-based fallback below from re-blocking it.
     # Truncation (`>`) is deliberately NOT exempted — destroying a populated
-    # secrets file needs confirmation whether or not git can see it.
+    # secrets file is blocked whether or not git can see it.
     WRITE_APPROVED=1
     log_incident "LOW" "ALLOWED: variable appended to gitignored '$WRITE_TARGET'"
   elif ! path_is_gitignored "$WRITE_TARGET"; then
-    log_incident "HIGH" "SOFT BLOCKED: variable written to committable '$WRITE_TARGET': $COMMAND"
-    deny "SOFT BLOCK: '$WRITE_TARGET' is not gitignored, so this variable could be committed." "Put it in a gitignored file (and confirm that file is in .gitignore), or confirm with the user that this value is safe to commit. Appending to an ignored file is allowed without asking."
+    log_incident "HIGH" "HARD BLOCKED: variable written to committable '$WRITE_TARGET': $COMMAND"
+    deny "HARD BLOCK: '$WRITE_TARGET' is not gitignored, so this variable could be committed." "Put it in a gitignored file (and confirm that file is in .gitignore). If it is really needed, the user runs the command themselves. Appending to an ignored file is allowed without asking."
   fi
 done <<< "$WRITE_CLAUSES"
 
@@ -855,14 +1042,14 @@ done <<< "$WRITE_CLAUSES"
 # gate positively approved this write.
 if [ "$WRITE_APPROVED" = "0" ] \
   && echo "$COMMAND" | grep -qE '>[[:space:]]*(~\/\.|\/etc\/|\.env|\.ssh|\.claude\/settings)'; then
-  log_incident "HIGH" "SOFT BLOCKED: config/system file overwrite: $COMMAND"
+  [ "$FULL_ACCESS" = 1 ] || log_incident "HIGH" "SOFT BLOCKED: config/system file overwrite: $COMMAND"
   deny "SOFT BLOCK: Writing to a sensitive config/system file." "Command blocked: system file overwrite detected. Verify this is intentional with the user."
 fi
 
 # curl/wget piped to shell (arbitrary code execution)
 if echo "$COMMAND" | grep -qE '(curl|wget)[[:space:]].*\|[[:space:]]*(bash|sh|zsh|ksh|dash)'; then
-  log_incident "HIGH" "SOFT BLOCKED: curl pipe to shell: $COMMAND"
-  deny "SOFT BLOCK: Piping curl/wget to a shell executes arbitrary remote code." "Command blocked: pipe to shell. Download the file first, inspect it, then run it."
+  log_incident "HIGH" "HARD BLOCKED: curl pipe to shell: $COMMAND"
+  deny "HARD BLOCK: Piping curl/wget to a shell executes arbitrary remote code." "Command blocked: pipe to shell. Download the file first, inspect it, then run it."
 fi
 
 # ═══════════════════════════════════════════════════════

@@ -75,7 +75,28 @@ PERMISSION_MODE=$(printf '%s' "$INPUT" | jq -r '.permission_mode // empty' 2> /d
 # but re-check so a loose matcher can never block an unrelated tool.
 [ "$TOOL" = "ExitPlanMode" ] || exit 0
 
-LOG_DIR="$CLAUDE_PROJECT_DIR/.claude/logs"
+LOG_DIR="$CLAUDE_PROJECT_DIR/.claude/logs" # state files only; the incident log lives elsewhere
+# Incident log: outside the project, so a wipe of the project cannot take it along.
+# Same helper as guard-bash.sh; keep the copies in step.
+INCIDENT_LOG_DIR="${AGENT_HOOKS_LOG_DIR:-${HOME:-}/.bb/logs/agent-hooks}"
+INCIDENT_LOG="$INCIDENT_LOG_DIR/${CLAUDE_PROJECT_DIR//\//-}.md"
+
+# Append one line to the incident log, then set the user append-only flag on the
+# log dir and file (macOS/BSD; skipped silently where chflags is missing). Fail-soft.
+incident_append() {
+  mkdir -p "$INCIDENT_LOG_DIR" 2> /dev/null || return 0
+  printf '%s\n' "$1" >> "$INCIDENT_LOG" 2> /dev/null || true
+  command -v chflags > /dev/null 2>&1 || return 0
+  local p
+  for p in "$INCIDENT_LOG_DIR" "$INCIDENT_LOG"; do
+    case "$(stat -f %Sf "$p" 2> /dev/null)" in
+      *uappnd*) ;;
+      *) chflags uappnd "$p" 2> /dev/null ;;
+    esac
+  done
+  return 0
+}
+
 # Scope the gate to THIS session so two plan-mode sessions in the same repo never
 # consume each other's gate. Fall back to a fixed name when the runtime gives no
 # session_id. session-reset prunes stale gates by age, so a private name is safe.
@@ -128,8 +149,8 @@ if [ "$PERMISSION_MODE" = "plan" ] && [ -n "${BB_THREAD_ID:-}" ] &&
   if [ -n "$BB_BIN" ] && [ -n "$STATUS_FILE" ] && run_bb_status "$STATUS_FILE"; then
     SERVED=$(jq -r 'if .planGate == true then "true" else empty end' < "$STATUS_FILE" 2> /dev/null || true)
     if [ "$SERVED" = "true" ]; then
-      printf -- "- \`%s\` | PLAN-REVIEW | SKIP | deferred to auto-review (%s)\n" \
-        "$(date +"%Y-%m-%d %H:%M:%S")" "$BB_THREAD_ID" >> "$LOG_DIR/incident-log.md" 2> /dev/null || true
+      incident_append "$(printf -- "- \`%s\` | PLAN-REVIEW | SKIP | deferred to auto-review (%s)" \
+        "$(date +"%Y-%m-%d %H:%M:%S")" "$BB_THREAD_ID")"
       rm -f "$STATUS_FILE" 2> /dev/null
       exit 0
     fi
@@ -154,8 +175,8 @@ outside plan mode ExitPlanMode approves itself without asking the user. \
 Note: this is a 5-reviewer pass (tokens + latency). This review always runs."
 
 # Best-effort observability (fail-soft); mirrors completeness-gate / verify-before-stop.
-printf -- "- \`%s\` | PLAN-REVIEW | DENY | armed gate, routed to /review:review-plan\n" \
-  "$(date +"%Y-%m-%d %H:%M:%S")" >> "$LOG_DIR/incident-log.md" 2> /dev/null || true
+incident_append "$(printf -- "- \`%s\` | PLAN-REVIEW | DENY | armed gate, routed to /review:review-plan" \
+  "$(date +"%Y-%m-%d %H:%M:%S")")"
 
 jq -n --arg reason "$SHORT" --arg ctx "$CONTEXT" '{
   hookSpecificOutput: {

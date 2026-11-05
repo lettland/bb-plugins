@@ -26,10 +26,26 @@ INPUT=$(cat)
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 TOOL=$(echo "$INPUT" | jq -r '.tool_name // empty')
 TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
-LOG_DIR="$CLAUDE_PROJECT_DIR/.claude/logs"
-INCIDENT_LOG="$LOG_DIR/incident-log.md"
+# Incident log: outside the project, so a wipe of the project cannot take it along.
+# Same helper as guard-bash.sh; keep the copies in step.
+INCIDENT_LOG_DIR="${AGENT_HOOKS_LOG_DIR:-${HOME:-}/.bb/logs/agent-hooks}"
+INCIDENT_LOG="$INCIDENT_LOG_DIR/${CLAUDE_PROJECT_DIR//\//-}.md"
 
-mkdir -p "$LOG_DIR"
+# Append one line to the incident log, then set the user append-only flag on the
+# log dir and file (macOS/BSD; skipped silently where chflags is missing). Fail-soft.
+incident_append() {
+  mkdir -p "$INCIDENT_LOG_DIR" 2> /dev/null || return 0
+  printf '%s\n' "$1" >> "$INCIDENT_LOG" 2> /dev/null || true
+  command -v chflags > /dev/null 2>&1 || return 0
+  local p
+  for p in "$INCIDENT_LOG_DIR" "$INCIDENT_LOG"; do
+    case "$(stat -f %Sf "$p" 2> /dev/null)" in
+      *uappnd*) ;;
+      *) chflags uappnd "$p" 2> /dev/null ;;
+    esac
+  done
+  return 0
+}
 
 [ -z "$FILE_PATH" ] && exit 0
 
@@ -56,7 +72,7 @@ log_incident() {
   local MSG="$2"
   local SAFE_MSG
   SAFE_MSG="$(printf '%s' "$MSG" | tr '\n' ' ' | sed 's/`/'"'"'/g')"
-  echo "- \`$TIMESTAMP\` | SECRET-SCAN | $SEVERITY | $SAFE_MSG" >> "$INCIDENT_LOG"
+  incident_append "- \`$TIMESTAMP\` | SECRET-SCAN | $SEVERITY | $SAFE_MSG"
 }
 
 block_high() {

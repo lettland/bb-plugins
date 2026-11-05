@@ -10,7 +10,7 @@
 //
 // Nothing here ever executes the probe command. It is a string on stdin.
 
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -65,6 +65,18 @@ export const PROBES = [
   },
 ];
 
+/** The hooks put the user append-only flag on their incident log (chflags uappnd,
+ *  macOS/BSD), which makes a plain rmSync fail. Clear it first; where chflags is
+ *  missing there is no flag to clear. */
+function removeProbeDir(dir) {
+  try {
+    execFileSync("chflags", ["-R", "nouappnd", dir], { stdio: "ignore" });
+  } catch {
+    // no chflags on this host, so nothing was flagged
+  }
+  rmSync(dir, { recursive: true, force: true });
+}
+
 function runOne(scriptPath, probe, projectDir) {
   const toolInput = JSON.parse(
     JSON.stringify(probe.toolInput).replaceAll("PROBE_DIR", projectDir),
@@ -81,7 +93,14 @@ function runOne(scriptPath, probe, projectDir) {
       // BB_THREAD_ID names a thread auto-review's plan gate serves. Cleared
       // here so a probe run from inside a real (gated) bb thread still
       // exercises this hook's own deny, not auto-review's handoff.
-      env: { ...process.env, CLAUDE_PROJECT_DIR: projectDir, BB_THREAD_ID: "" },
+      // AGENT_HOOKS_LOG_DIR keeps the hooks' incident log inside the throwaway
+      // dir; otherwise every probe would add a flagged file to the real log dir.
+      env: {
+        ...process.env,
+        CLAUDE_PROJECT_DIR: projectDir,
+        AGENT_HOOKS_LOG_DIR: path.join(projectDir, ".incident-logs"),
+        BB_THREAD_ID: "",
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
@@ -140,7 +159,7 @@ export async function probeAll({ installDir = INSTALL_DIR } = {}) {
       const r = await runOne(scriptPath, probe, dir);
       results.push({ script: probe.script, ...r, note: probe.note });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeProbeDir(dir);
     }
   }
   return results;

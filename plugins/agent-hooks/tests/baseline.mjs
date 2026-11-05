@@ -40,7 +40,8 @@ export async function runCase(c) {
     owned = true;
   }
   try {
-    const r = await runHook("guard-bash.sh", { command: c.cmd }, { projectDir: dir });
+    // An optional "mode" on a case is sent as the envelope's permission_mode.
+    const r = await runHook("guard-bash.sh", { command: c.cmd }, { projectDir: dir, permissionMode: c.mode });
     return { ...c, actual: r.verdict, reason: r.reason };
   } finally {
     if (owned && dir) cleanup(dir);

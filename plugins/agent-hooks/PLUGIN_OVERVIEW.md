@@ -31,7 +31,7 @@ hook execution, because bb never sees it.
 | `bb agent-hooks install [--provider <id>] [--dry-run]` | Sync scripts to `~/.bb/agent-hooks`, then wire each provider config. `--dry-run` prints the diff and writes nothing. |
 | `bb agent-hooks status [--provider <id>] [--probe]` | Per-provider entry counts plus script drift. `--probe` additionally proves each hook responds. |
 | `bb agent-hooks uninstall [--provider <id>]` | Remove only our entries. Scripts stay in the install dir. |
-| `bb agent-hooks log [--limit <n>]` | Recent firings from the current project's `.claude/logs/incident-log.md`. |
+| `bb agent-hooks log [--limit <n>]` | Recent firings from the current project's incident log (`~/.bb/logs/agent-hooks/<key>.md`). |
 
 Providers: `claude-code` (`~/.claude`), `claude-work` (`~/.claude-work`), `codex`
 (`~/.codex`, wired through `codex-shim.sh`).
@@ -40,7 +40,7 @@ Providers: `claude-code` (`~/.claude`), `claude-work` (`~/.claude-work`), `codex
 
 | Script | Event | Job |
 |---|---|---|
-| `guard-bash.sh` | PreToolUse(Bash) | Catastrophic `rm`, force push, secret exfiltration, environment dumps; soft-blocks a git hook bypass (`--no-verify`, `commit -n`, `core.hooksPath`) |
+| `guard-bash.sh` | PreToolUse(Bash) | Catastrophic `rm`, tree wipes (working tree, project root, `.git`; hard in every permission mode), force push, secret exfiltration, environment dumps; soft-blocks a git hook bypass (`--no-verify`, `commit -n`, `core.hooksPath`) |
 | `secret-scan.sh` | PreToolUse(Write\|Edit) | Refuses to write a credential into a file that could be committed |
 | `review-plan-before-exit.sh` | PreToolUse(ExitPlanMode) | Denies a plan's first presentation until it has been reviewed — in plan mode, defers to auto-review's own plan gate where it already owns the review (`bb auto-review status --json` reports `planGate: true`) |
 | `verify-before-stop.sh` | Stop, SubagentStop | Blocks one stop when this turn's tool output shows an unresolved failure |
@@ -52,6 +52,12 @@ can itself release a plan unreviewed on its own failure (queue failed, deny fail
 went stale — each recorded as a reason in `bb auto-review status`'s `lastFire`). The hook's
 deny+arm only falls back when reading `planGate` itself fails; it does not re-check whether
 auto-review's review actually ran.
+
+Incident log: hooks append to `${AGENT_HOOKS_LOG_DIR:-~/.bb/logs/agent-hooks}/<key>.md`, where `<key>` is
+`$CLAUDE_PROJECT_DIR` with every `/` replaced by `-`. It sits outside the project so a wipe of the project
+cannot take it along, and on macOS/BSD the hooks set the user append-only flag (`chflags uappnd`) on it.
+`AGENT_HOOKS_LOG_DIR` is the one env var; it relocates the directory and nothing else. State files stay in
+`<project>/.claude/logs`. README.md has the details.
 
 `context-nudge.sh` fires once per 200k band (capped at 800k), keyed by session in
 `.claude/logs/.context-nudge-<session-id>`, and re-arms after a compaction drops the reading below

@@ -13,7 +13,7 @@ full rationale.
 
 | Script | Event | Job |
 |---|---|---|
-| `guard-bash.sh` | PreToolUse(Bash) | Blocks catastrophic `rm` (system paths, a home directory or its direct children), force push, secret exfiltration, environment dumps. Soft-blocks a git hook bypass (`--no-verify`, `commit -n`, a `core.hooksPath` override or write) |
+| `guard-bash.sh` | PreToolUse(Bash) | Blocks catastrophic `rm` (system paths, a home directory or its direct children), tree wipes (the working tree, the project root, `.git`), force push, secret exfiltration, environment dumps. Soft-blocks a git hook bypass (`--no-verify`, `commit -n`, a `core.hooksPath` override or write) |
 | `secret-scan.sh` | PreToolUse(Write\|Edit) | Refuses to write a credential into a file that could be committed |
 | `review-plan-before-exit.sh` | PreToolUse(ExitPlanMode) | Denies a plan's first presentation until it has been reviewed — in plan mode, defers to auto-review's own plan gate where it already owns the review (`bb auto-review status --json` reports `planGate: true`) |
 | `verify-before-stop.sh` | Stop, SubagentStop | Blocks one stop when this turn's tool output shows an unresolved failure |
@@ -26,6 +26,38 @@ two segments (`~/*/*`, `~/workspace/*`), and anything under `~/.ssh`, `~/.gnupg`
 or `~/.aws` are hard-blocked. Deeper files are allowed; deeper `rm -r` gets the
 recursive soft block. Heredoc bodies and `-m` messages are scanned like argv, so
 prose that says rm next to a home path is blocked too: use `git commit -F <file>`.
+
+**Tree wipes are hard-blocked in every permission mode.** `guard-bash.sh` denies, with a `HARD BLOCK:`
+reason that full access never lifts: a recursive `rm` (`-r`, `-R`, `-rf`, `--recursive`, behind `sudo`,
+`command`, `env`) of the working tree (`.`, `..`, `*`, `./*`, `.*`, `.??*`, `.[!.]*`, `.[^.]*`, `.git`) or
+of the project root (`$CLAUDE_PROJECT_DIR`, its literal value, `$PWD`, `$(pwd)`, with or without a
+`/`, `/*`, `/.*`, `/.??*` or `/.git` suffix, quotes ignored); and a `find` that starts at `.`, the project
+root or `$PWD` and deletes (`-delete`, `-exec rm`) without any of `-name -iname -path -ipath -regex
+-iregex -newer -mtime -mmin`. Every clause of a compound command is checked. Narrow deletes
+(`rm -rf ./dist`, `rm -rf dist/*`, `find . -name '*.pyc' -delete`) stay allowed, and so does
+`git rm --cached`. Known gap: the check reads literal tokens, so a path built at run time
+(`rm -rf $(mktemp -d)/..`) is not seen.
+
+**Full access** (`permission_mode` = `bypassPermissions`) turns a `SOFT BLOCK:` into a logged
+`ALLOWED (full access, ...)` and lets the scan continue; a later `HARD BLOCK:` still denies. Shell
+indirection (`eval`, shell `-c`), the no-op `true` loop, a variable written to a committable file and
+`curl | sh` are hard blocks for that reason.
+
+**Incident log.** Hook firings go to `${AGENT_HOOKS_LOG_DIR:-~/.bb/logs/agent-hooks}/<key>.md`, one file per
+project; `<key>` is `$CLAUDE_PROJECT_DIR` with every `/` replaced by `-`
+(`/Users/x/ws/foo` becomes `-Users-x-ws-foo.md`). It lives outside the project so a wipe of the project
+cannot delete it. On macOS/BSD the hooks set the user append-only flag (`chflags uappnd`) on the log
+file and its directory after each append, so appends and new log files still work while `rm` fails
+with "Operation not permitted"; where `chflags` is missing this is skipped. Clear the flag with
+`chflags -R nouappnd <dir>` before deleting by hand. `guard-bash.sh` also hard-blocks any `rm` or
+`chflags` that names `.bb/logs/agent-hooks` or `AGENT_HOOKS_LOG_DIR`. The state files
+(`.plan-review-gate*`, `.session-blocks-*`, `.context-nudge-*`) stay in
+`$CLAUDE_PROJECT_DIR/.claude/logs`. Logs an older version wrote to
+`<project>/.claude/logs/incident-log.md` are left where they are.
+
+| Env var | Effect |
+|---|---|
+| `AGENT_HOOKS_LOG_DIR` | Directory for incident logs. Default `~/.bb/logs/agent-hooks`. Path relocation only; the hooks and `bb agent-hooks log` read it the same way. |
 
 The git hook-bypass block tokenizes the command with python's `shlex` (`python3 -I`, command on
 stdin, never evaluated), so `git commit -m "drop -n flag"` is allowed while `git commit -an -m x`,
@@ -60,7 +92,7 @@ re-check whether auto-review's review actually ran.
 | `bb agent-hooks install [--provider <id>] [--dry-run]` | Sync scripts to `~/.bb/agent-hooks`, then wire each provider config. `--dry-run` prints the diff and writes nothing. |
 | `bb agent-hooks status [--provider <id>] [--probe]` | Per-provider entry counts plus script drift. `--probe` also proves each hook responds. |
 | `bb agent-hooks uninstall [--provider <id>]` | Remove only this plugin's entries. Scripts stay in the install dir. |
-| `bb agent-hooks log [--limit <n>]` | Recent firings from the current project's `.claude/logs/incident-log.md`. |
+| `bb agent-hooks log [--limit <n>]` | Recent firings from the current project's incident log (`~/.bb/logs/agent-hooks/<key>.md`, see "Incident log"). |
 
 Providers: `claude-code` (`~/.claude/settings.json`), `claude-work`
 (`~/.claude-work/settings.json`), `codex` (`~/.codex/hooks.json`, wired through

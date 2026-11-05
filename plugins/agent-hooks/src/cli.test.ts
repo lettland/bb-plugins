@@ -374,13 +374,18 @@ describe("log", () => {
   beforeEach(() => {
     project = mkdtempSync(path.join(tmpdir(), "cli-test-project-"));
     vi.spyOn(process, "cwd").mockReturnValue(project);
+    vi.stubEnv("AGENT_HOOKS_LOG_DIR", ""); // empty means unset: default dir under the fake HOME
   });
   afterEach(() => {
+    vi.unstubAllEnvs();
     rmSync(project, { recursive: true, force: true });
   });
 
-  const writeLog = (lines: string[]) => {
-    const f = path.join(project, ".claude", "logs", "incident-log.md");
+  // The log lives outside the project: <log dir>/<project dir, "/" -> "-">.md
+  const defaultLogDir = () => path.join(fakeHome, ".bb", "logs", "agent-hooks");
+  const keyOf = (dir: string) => `${dir.replaceAll("/", "-")}.md`;
+  const writeLog = (lines: string[], logDir = defaultLogDir()) => {
+    const f = path.join(logDir, keyOf(project));
     put(f, lines.join("\n") + "\n\n");
     return f;
   };
@@ -389,7 +394,31 @@ describe("log", () => {
     const r = await run("log");
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toBe(
-      "no incident log in the current project — hooks write to <project>/.claude/logs/incident-log.md",
+      `no incident log for the current project — hooks write to ${defaultLogDir()}/<project dir with / replaced by ->.md`,
+    );
+  });
+
+  it("does not read an incident-log.md left inside the project by an older version", async () => {
+    put(path.join(project, ".claude", "logs", "incident-log.md"), "old entry\n");
+    const r = await run("log");
+    expect(r.stdout).toMatch(/^no incident log for the current project/);
+  });
+
+  it("reads the log from AGENT_HOOKS_LOG_DIR when it is set", async () => {
+    const custom = path.join(fakeHome, "custom-logs");
+    vi.stubEnv("AGENT_HOOKS_LOG_DIR", custom);
+    const f = writeLog(["from custom dir"], custom);
+    writeLog(["from default dir"]);
+    const r = await run("log");
+    expect(r.stdout.split("\n")).toEqual([`${f}  (last 1 of 1)`, "  from custom dir"]);
+  });
+
+  it("names the overridden directory when the project has no log there", async () => {
+    const custom = path.join(fakeHome, "custom-logs");
+    vi.stubEnv("AGENT_HOOKS_LOG_DIR", custom);
+    const r = await run("log");
+    expect(r.stdout).toBe(
+      `no incident log for the current project — hooks write to ${custom}/<project dir with / replaced by ->.md`,
     );
   });
 
