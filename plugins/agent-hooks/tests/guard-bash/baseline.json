@@ -1936,7 +1936,7 @@
     "expect": "hard",
     "why": "incident log: clearing the append-only flag",
     "actual": "hard",
-    "reason": "HARD BLOCK: tree wipe — chflags on the incident log ('~/.bb/logs/agent-hooks')."
+    "reason": "HARD BLOCK: tree wipe — chflags on the incident log or a directory above it ('~/.bb/logs/agent-hooks')."
   },
   {
     "id": "wipe-hard-chflags-log-dir-default",
@@ -1944,7 +1944,7 @@
     "expect": "hard",
     "why": "incident log: clearing the flag on one file, absolute path",
     "actual": "hard",
-    "reason": "HARD BLOCK: tree wipe — chflags on the incident log ('/Users/me/.bb/logs/agent-hooks/x.md')."
+    "reason": "HARD BLOCK: tree wipe — chflags on the incident log or a directory above it ('/Users/me/.bb/logs/agent-hooks/x.md')."
   },
   {
     "id": "wipe-hard-rm-log-dir-env-var",
@@ -1954,5 +1954,369 @@
     "why": "incident log: the relocation variable, unexpanded",
     "actual": "hard",
     "reason": "HARD BLOCK: tree wipe — incident log target '$AGENT_HOOKS_LOG_DIR'."
+  },
+  {
+    "id": "wipe-prose-commit-message",
+    "cmd": "git commit -m \"docs: never run rm -rf . here\"",
+    "mode": "bypassPermissions",
+    "expect": "allow",
+    "why": "round 1: a quoted commit message is prose, not a command (no mode: the old recursive-rm soft block still fires on the word rm)",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "wipe-prose-commit-message-default",
+    "cmd": "git commit -m \"docs: never run rm -rf . here\"",
+    "expect": "soft",
+    "why": "round 1: not hard; the pre-existing token-scan soft block is the known prose false positive",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: rm -r/-R deletes a directory tree permanently."
+  },
+  {
+    "id": "wipe-prose-echo-single-quoted",
+    "cmd": "echo 'find . -delete is dangerous'",
+    "mode": "bypassPermissions",
+    "expect": "allow",
+    "why": "round 1: single-quoted prose",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "wipe-prose-echo-single-quoted-default",
+    "cmd": "echo 'find . -delete is dangerous'",
+    "expect": "allow",
+    "why": "round 1: single-quoted prose, no mode",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "wipe-prose-gh-body",
+    "cmd": "gh pr comment 5 --body \"blocked rm -rf ./* in CI\"",
+    "mode": "bypassPermissions",
+    "expect": "allow",
+    "why": "round 1: a --body argument is prose",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "wipe-prose-echo-rm",
+    "cmd": "echo \"rm -rf .\"",
+    "mode": "bypassPermissions",
+    "expect": "allow",
+    "why": "round 1: quoted rm after echo",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "wipe-prose-echo-unquoted-rm",
+    "cmd": "echo rm -rf .",
+    "mode": "bypassPermissions",
+    "expect": "allow",
+    "why": "round 1: rm is an argument of echo, not the command word",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "wipe-quoted-keeps-pwd-glob",
+    "cmd": "rm -rf \"$PWD\"/*",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: a quoted string without whitespace or ; | & is kept",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of '$PWD/*'."
+  },
+  {
+    "id": "wipe-heredoc-body-is-prose",
+    "cmd": "cat > ci.yml <<'EOF'\nrm -rf ./* && rm -rf ./.??*\nEOF",
+    "mode": "bypassPermissions",
+    "expect": "allow",
+    "why": "round 1: a heredoc body written to a file is data",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "wipe-heredoc-body-is-prose-default",
+    "cmd": "cat > ci.yml <<'EOF'\nrm -rf ./* && rm -rf ./.??*\nEOF",
+    "expect": "soft",
+    "why": "round 1: not hard; the pre-existing recursive-rm soft block still scans heredoc bodies like argv (known false positive)",
+    "actual": "soft",
+    "reason": "SOFT BLOCK: rm -r/-R deletes a directory tree permanently."
+  },
+  {
+    "id": "wipe-heredoc-to-shell",
+    "cmd": "bash <<'EOF'\nrm -rf ./*\nEOF",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: a heredoc fed to a shell is executed",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of './*'."
+  },
+  {
+    "id": "wipe-heredoc-to-shell-default",
+    "cmd": "bash <<'EOF'\nrm -rf ./*\nEOF",
+    "expect": "hard",
+    "why": "round 1: same, no mode",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of './*'."
+  },
+  {
+    "id": "wipe-heredoc-to-sudo-shell",
+    "cmd": "sudo -u root sh <<EOF\nrm -rf .\nEOF",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: shell reached through prefixes and a flag value",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of '.'."
+  },
+  {
+    "id": "wipe-heredoc-piped-to-shell",
+    "cmd": "cat <<EOF | bash\nrm -rf .\nEOF",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: a later clause of the opening line runs a shell",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of '.'."
+  },
+  {
+    "id": "wipe-heredoc-apostrophe-then-wipe",
+    "cmd": "cat <<'EOF' > notes.txt\ndon't\nEOF\nrm -rf .",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: an apostrophe in a dropped body must not open a quote that swallows the next command",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of '.'."
+  },
+  {
+    "id": "wipe-chflags-ancestor-logs",
+    "cmd": "chflags -R nouappnd ~/.bb/logs",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: the parent of the log dir",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — chflags on the incident log or a directory above it ('~/.bb/logs')."
+  },
+  {
+    "id": "wipe-chflags-ancestor-bb",
+    "cmd": "chflags -R nouappnd ~/.bb",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: an ancestor of the log dir",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — chflags on the incident log or a directory above it ('~/.bb')."
+  },
+  {
+    "id": "wipe-chflags-ancestor-bb-slash",
+    "cmd": "chflags -R nouappnd ~/.bb/",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: trailing slash is stripped",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — chflags on the incident log or a directory above it ('~/.bb')."
+  },
+  {
+    "id": "wipe-chflags-ancestor-tilde",
+    "cmd": "chflags -R nouappnd ~",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: home contains the log dir",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — chflags on the incident log or a directory above it ('~')."
+  },
+  {
+    "id": "wipe-chflags-ancestor-home-var",
+    "cmd": "chflags -R nouappnd $HOME",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: $HOME is expanded",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — chflags on the incident log or a directory above it ('$HOME')."
+  },
+  {
+    "id": "wipe-chflags-ancestor-home-brace",
+    "cmd": "chflags -R nouappnd ${HOME}/.bb",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: ${HOME} is expanded",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — chflags on the incident log or a directory above it ('${HOME}/.bb')."
+  },
+  {
+    "id": "wipe-chflags-ancestor-root",
+    "cmd": "chflags -R nouappnd /",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: / contains the log dir",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — chflags on the incident log or a directory above it ('/')."
+  },
+  {
+    "id": "wipe-chflags-ancestor-glob",
+    "cmd": "chflags -R nouappnd ~/.bb/*",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: a glob that matches an ancestor",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — chflags on the incident log or a directory above it ('~/.bb/*')."
+  },
+  {
+    "id": "wipe-chflags-ancestor-default",
+    "cmd": "chflags -R nouappnd ~/.bb/logs",
+    "expect": "hard",
+    "why": "round 1: same, no mode",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — chflags on the incident log or a directory above it ('~/.bb/logs')."
+  },
+  {
+    "id": "wipe-chflags-unrelated-home-dir",
+    "cmd": "chflags -R nouappnd ~/projects/x",
+    "mode": "bypassPermissions",
+    "expect": "allow",
+    "why": "round 1: a directory under home that is not an ancestor of the log dir",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "wipe-chflags-prose",
+    "cmd": "echo \"chflags -R nouappnd ~/.bb/logs\"",
+    "mode": "bypassPermissions",
+    "expect": "allow",
+    "why": "round 1: quoted chflags is prose",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "wipe-cmdpos-subshell",
+    "cmd": "(rm -rf .)",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: an opening ( precedes the command word",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of '.)'."
+  },
+  {
+    "id": "wipe-cmdpos-brace-group",
+    "cmd": "{ rm -rf .; }",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: an opening { precedes the command word",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of '.'."
+  },
+  {
+    "id": "wipe-cmdpos-sudo",
+    "cmd": "sudo rm -rf ./*",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: sudo prefix",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of './*'."
+  },
+  {
+    "id": "wipe-cmdpos-sudo-flag-value",
+    "cmd": "sudo -u root rm -rf .",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: sudo -u takes a value, so root is not the command word",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of '.'."
+  },
+  {
+    "id": "wipe-cmdpos-assignment",
+    "cmd": "X=1 rm -rf .",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: assignment prefix",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of '.'."
+  },
+  {
+    "id": "wipe-cmdpos-env-nice-stack",
+    "cmd": "env FOO=1 nice -n 5 rm -rf ./*",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: stacked prefixes, nice -n takes a value",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of './*'."
+  },
+  {
+    "id": "wipe-cmdpos-bang",
+    "cmd": "! rm -rf .",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: ! negation",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of '.'."
+  },
+  {
+    "id": "wipe-cmdpos-command-substitution",
+    "cmd": "echo $(rm -rf .)",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: $( welded to a later token starts a command",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of '.)'."
+  },
+  {
+    "id": "wipe-cmdpos-backtick",
+    "cmd": "echo `rm -rf .`",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: a backtick starts a command",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of '.`'."
+  },
+  {
+    "id": "wipe-cmdpos-loop-body",
+    "cmd": "for f in a b; do rm -rf .; done",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: do precedes the command word",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of '.'."
+  },
+  {
+    "id": "wipe-cmdpos-xargs",
+    "cmd": "ls | xargs -n 1 rm -rf ./*",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: xargs prefix with a value flag",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of './*'."
+  },
+  {
+    "id": "wipe-cmdpos-git-rm-dot",
+    "cmd": "git -C sub rm -r .",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: git global option, then the rm subcommand",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — recursive rm of '.'."
+  },
+  {
+    "id": "wipe-cmdpos-find-after-xargs-prefix",
+    "cmd": "time find . -delete",
+    "mode": "bypassPermissions",
+    "expect": "hard",
+    "why": "round 1: time prefix before find",
+    "actual": "hard",
+    "reason": "HARD BLOCK: tree wipe — find '.' with -delete/-exec rm and no filter."
+  },
+  {
+    "id": "gap-wipe-quoted-command-word",
+    "cmd": "\"rm\" -rf .",
+    "mode": "bypassPermissions",
+    "expect": "allow",
+    "why": "DOCUMENTED GAP: a token that starts with a quote is never the command word, by design of the round 1 rule; the catastrophic-rm scan still covers system and home paths",
+    "actual": "allow",
+    "reason": null
+  },
+  {
+    "id": "gap-wipe-quoted-substitution",
+    "cmd": "echo \"$(rm -rf .)\"",
+    "mode": "bypassPermissions",
+    "expect": "allow",
+    "why": "DOCUMENTED GAP: a quoted string with whitespace is dropped as prose, including a command substitution inside it",
+    "actual": "allow",
+    "reason": null
   }
 ]

@@ -35,8 +35,15 @@ of the project root (`$CLAUDE_PROJECT_DIR`, its literal value, `$PWD`, `$(pwd)`,
 root or `$PWD` and deletes (`-delete`, `-exec rm`) without any of `-name -iname -path -ipath -regex
 -iregex -newer -mtime -mmin`. Every clause of a compound command is checked. Narrow deletes
 (`rm -rf ./dist`, `rm -rf dist/*`, `find . -name '*.pyc' -delete`) stay allowed, and so does
-`git rm --cached`. Known gap: the check reads literal tokens, so a path built at run time
-(`rm -rf $(mktemp -d)/..`) is not seen.
+`git rm --cached`. The rule is HARD with no override, so prose never triggers it: `rm`, `find`
+and `chflags` count only as a clause's command word (after `VAR=value`, `sudo`, `env`, `command`, `exec`,
+`nohup`, `nice`, `time`, `xargs`, `!`, `then`/`do`, and an opening `(`, `{`, `$(` or backtick); quoted
+strings that contain whitespace, `;`, `|` or `&` are dropped before the scan (`git commit -m "never
+rm -rf ."`); and heredoc bodies are dropped unless a shell runs them (`bash <<EOF`, `cat <<EOF | bash`).
+`chflags` is also blocked on any directory above the log dir (`~/.bb/logs`, `~/.bb`, `~`, `/`).
+Known gaps: the check reads literal tokens, so a path built at run time (`rm -rf $(mktemp -d)/..`) is
+not seen; a command word that starts with a quote (`"rm" -rf .`) and a command substitution inside a
+quoted string (`echo "$(rm -rf .)"`) are not seen either.
 
 **Full access** (`permission_mode` = `bypassPermissions`) turns a `SOFT BLOCK:` into a logged
 `ALLOWED (full access, ...)` and lets the scan continue; a later `HARD BLOCK:` still denies. Shell

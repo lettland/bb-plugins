@@ -162,6 +162,12 @@ home_rm_is_catastrophic() {
 # `find` that deletes from there, and any rm/chflags aimed at the incident log.
 # These are the commands that destroyed a project dir, `.git` and its in-project
 # incident log in one go; narrow rms (`rm -rf ./dist`, `rm -rf dist/*`) stay allowed.
+#
+# HARD with no override, so it must not fire on prose: rm/find/chflags count only as
+# a clause's COMMAND word (wipe_find_command), quoted strings containing whitespace
+# or ; | & are dropped (wipe_drop_quoted_prose), and heredoc bodies are dropped
+# unless a shell runs them (wipe_strip_heredocs). Deliberate gaps: a command word
+# that starts with a quote, and a command substitution inside a dropped string.
 
 # Strip quotes, then trailing slashes (but keep a lone "/").
 wipe_norm() {
@@ -211,6 +217,232 @@ wipe_names_log() {
   return 1
 }
 
+# Does the flag `$2` of the prefix command `$1` take the NEXT token as its value?
+# Needed so `sudo -u root rm -rf .` finds `rm`, not `root`, as the command word.
+wipe_prefix_value_flag() {
+  case "$1:$2" in
+    sudo:-u | sudo:-g | sudo:-h | sudo:-p | sudo:-C | sudo:-D | sudo:-R | sudo:-T | sudo:-U | \
+      sudo:--user | sudo:--group | sudo:--host | sudo:--prompt | sudo:--chdir | sudo:--chroot | \
+      sudo:--other-user | sudo:--command-timeout | \
+      env:-u | env:-C | env:-S | env:--unset | env:--chdir | env:--split-string | \
+      nice:-n | nice:--adjustment | time:-f | time:-o | time:--format | time:--output | \
+      xargs:-I | xargs:-n | xargs:-P | xargs:-L | xargs:-s | xargs:-E | xargs:-d | xargs:-a | \
+      xargs:--max-args | xargs:--max-procs | xargs:--max-lines | xargs:--delimiter | xargs:--arg-file | \
+      exec:-a)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# Find the command word of ONE clause (tokens in "$@") and tell whether it is rm,
+# find or chflags. Sets:
+#   WIPE_CMD      basename of the clause's first command word ("" if none)
+#   WIPE_KIND     rm | find | chflags, or "" when no such command is run here
+#   WIPE_GIT      1 when the rm is `git rm`
+#   WIPE_ARGS_AT  index in "$@" of the first argument of that command
+# The command word is the first token after leading VAR=value assignments and the
+# prefixes sudo env command exec nohup nice time xargs (with their flags), `!`, the
+# shell keywords then/do/else/elif/if/while/until, and an opening `(`, `{`, `$(` or
+# backtick. `rm` anywhere else (an argument of echo, a quoted word) is just text.
+# An opener welded to a later token (`echo $(rm ...)`) starts a new command there.
+# A token that starts with a quote is never the command word.
+WIPE_CMD="" WIPE_KIND="" WIPE_GIT=0 WIPE_ARGS_AT=0
+wipe_find_command() {
+  WIPE_CMD="" WIPE_KIND="" WIPE_GIT=0 WIPE_ARGS_AT=0
+  local -a tk=("$@")
+  local n=${#tk[@]} i=0 t pos=cmd prefix="" git=0 base v
+  while [ "$i" -lt "$n" ]; do
+    t="${tk[i]}"
+    i=$((i + 1))
+    while :; do
+      case "$t" in
+        '$('*) t="${t#\$(}" ;;
+        '('* | '{'* | '`'*) t="${t#?}" ;;
+        *) break ;;
+      esac
+      pos=cmd prefix="" git=0
+    done
+    [ -z "$t" ] && continue
+    [ "$pos" = args ] && continue
+
+    if [ "$git" = 1 ]; then # after `git`: skip its global options, the next word is the subcommand
+      case "$t" in
+        -C | -c | --git-dir | --work-tree | --namespace) i=$((i + 1)); continue ;;
+        -*) continue ;;
+      esac
+      if [ "$t" = rm ]; then
+        WIPE_KIND=rm WIPE_GIT=1 WIPE_ARGS_AT=$i
+        return 0
+      fi
+      pos=args
+      continue
+    fi
+
+    case "$t" in
+      '!' | then | do | else | elif | if | while | until) continue ;;
+      -*)
+        if [ -n "$prefix" ]; then
+          wipe_prefix_value_flag "$prefix" "$t" && i=$((i + 1))
+          continue
+        fi
+        pos=args
+        continue
+        ;;
+      \"* | \'*)
+        [ -z "$WIPE_CMD" ] && WIPE_CMD="$t"
+        pos=args
+        continue
+        ;;
+    esac
+    if [[ "$t" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      v="${t#*=}"
+      case "$v" in
+        '$('* | '('* | '`'*) # NAME=$(cmd ...): the value starts a command
+          i=$((i - 1))
+          tk[i]="$v"
+          ;;
+      esac
+      continue # a plain assignment: still looking for the command word
+    fi
+
+    base="${t#\\}"
+    base="${base##*/}"
+    case "$base" in
+      sudo | env | command | exec | nohup | nice | time | xargs)
+        prefix="$base"
+        ;;
+      git)
+        [ -z "$WIPE_CMD" ] && WIPE_CMD=git
+        git=1
+        ;;
+      rm | find | chflags)
+        [ -z "$WIPE_CMD" ] && WIPE_CMD="$base"
+        WIPE_KIND="$base" WIPE_ARGS_AT=$i
+        return 0
+        ;;
+      *)
+        [ -z "$WIPE_CMD" ] && WIPE_CMD="$base"
+        pos=args
+        ;;
+    esac
+  done
+  return 0
+}
+
+# Does one clause run a shell as its command (so a heredoc fed to it is executed)?
+wipe_line_feeds_shell() {
+  local clause
+  local -a toks
+  while IFS= read -r clause; do
+    read -ra toks <<< "$clause"
+    wipe_find_command "${toks[@]}"
+    case "$WIPE_CMD" in bash | sh | zsh | fish | dash | ksh) return 0 ;; esac
+  done <<< "$(printf '%s' "$1" | tr ';|&' '\n' | tr -s '\n')"
+  return 1
+}
+
+# Drop heredoc bodies (same rule as strip_heredocs in the git-bypass scan: a marker
+# without a terminator line changes nothing), EXCEPT when a clause on the opening
+# line runs a shell: `bash <<'EOF'` and `cat <<EOF | bash` execute their body.
+wipe_strip_heredocs() {
+  local text="$1" line rest delim dash cand k cur j found i=0 n
+  local -a lines=() out=()
+  local re='(^|[^<])<<(-?)[[:space:]]*['"'"'"]?([[:alnum:]_]+)'
+  while IFS= read -r line || [ -n "$line" ]; do lines+=("$line"); done <<< "$text"
+  n=${#lines[@]}
+  while [ "$i" -lt "$n" ]; do
+    line="${lines[i]}"
+    out+=("$line")
+    i=$((i + 1))
+    cur=$i
+    rest="$line"
+    while [[ "$rest" =~ $re ]]; do
+      dash="${BASH_REMATCH[2]}"
+      delim="${BASH_REMATCH[3]}"
+      rest="${rest#*"${BASH_REMATCH[0]}"}"
+      k=$cur
+      found=0
+      while [ "$k" -lt "$n" ]; do
+        cand="${lines[k]}"
+        [ -n "$dash" ] && cand="${cand#"${cand%%[!$'\t']*}"}"
+        if [ "$cand" = "$delim" ]; then
+          found=1
+          break
+        fi
+        k=$((k + 1))
+      done
+      if [ "$found" = 1 ]; then
+        if wipe_line_feeds_shell "$line"; then
+          j=$cur
+          while [ "$j" -lt "$k" ]; do out+=("${lines[j]}"); j=$((j + 1)); done
+        fi
+        cur=$((k + 1))
+      fi
+    done
+    i=$cur
+  done
+  printf '%s\n' "${out[@]}"
+}
+
+# Remove every quoted string that contains whitespace, ; | or & (prose: a commit
+# message, an echo, a --body), keep the rest (`"$PWD"/*`, `"$CLAUDE_PROJECT_DIR"`).
+# Single quotes hold everything literally; inside double quotes a backslash escapes
+# the next character; an unterminated quote is left alone.
+wipe_drop_quoted_prose() {
+  printf '%s' "$1" | awk -v sq="'" 'BEGIN { RS = "\001"; ORS = "" } {
+    n = length($0); out = ""; i = 1
+    while (i <= n) {
+      c = substr($0, i, 1)
+      if (c == "\\") { out = out c substr($0, i + 1, 1); i += 2; continue }
+      if (c == "\"" || c == sq) {
+        j = i + 1
+        while (j <= n) {
+          d = substr($0, j, 1)
+          if (c == "\"" && d == "\\") { j += 2; continue }
+          if (d == c) break
+          j++
+        }
+        if (j > n) { out = out substr($0, i); break }
+        s = substr($0, i + 1, j - i - 1)
+        if (s !~ /[ \t\n;|&]/) out = out substr($0, i, j - i + 1)
+        i = j + 1
+        continue
+      }
+      out = out c; i++
+    }
+    print out
+  }'
+}
+
+# Is this chflags target the incident log dir or a directory ABOVE it? A leading
+# ~, $HOME or ${HOME} is expanded first, and a glob (~/.bb/*) counts. Both the
+# resolved log dir and the default one are protected.
+wipe_chflags_hits_log() {
+  local t="$1" home="${HOME:-}" dir p
+  # shellcheck disable=SC2088,SC2016  # literal ~ / $HOME / ${HOME} text, as in home_rm_is_catastrophic
+  case "$t" in
+    '~' | '$HOME' | '${HOME}') t="$home" ;;
+    '~/'*) t="$home/${t#\~/}" ;;
+    '$HOME/'*) t="$home/${t#\$HOME/}" ;;
+    '${HOME}/'*) t="$home/${t#\$\{HOME\}/}" ;;
+  esac
+  t="$(wipe_norm "$t")"
+  case "$t" in /*) ;; *) return 1 ;; esac
+  for dir in "${INCIDENT_LOG_DIR%/}" "$home/.bb/logs/agent-hooks"; do
+    p="$dir"
+    case "$p" in /*) ;; *) continue ;; esac
+    while :; do
+      # shellcheck disable=SC2053  # $t is deliberately a pattern: ~/.bb/* names this dir
+      [[ "$p" == $t ]] && return 0
+      [ "$p" = "/" ] && break
+      p="${p%/*}"
+      [ -z "$p" ] && p="/"
+    done
+  done
+  return 1
+}
+
 # Inspect one clause. Returns 0 and sets WIPE_REASON when it is a tree wipe.
 # Tokens come from `read -ra`, never an unquoted expansion: a bare `*` must not be
 # globbed against the hook's own cwd before it is compared.
@@ -219,23 +451,15 @@ tree_wipe_clause() {
   local -a toks
   read -ra toks <<< "$1"
   WIPE_REASON=""
-  local n=${#toks[@]} i kind="" seen_git=0 raw tok t
-  for ((i = 0; i < n; i++)); do
-    raw="${toks[i]}"
-    case "$raw" in -*) continue ;; esac # a flag is never the command
-    tok="$(normalize_token "${raw#*=}")"
-    case "${tok##*/}" in
-      rm | find | chflags) kind="${tok##*/}"; break ;;
-      git) seen_git=1 ;;
-    esac
-  done
-  [ -z "$kind" ] && return 1
-  local rest=("${toks[@]:i+1}")
+  wipe_find_command "${toks[@]}"
+  [ -z "$WIPE_KIND" ] && return 1
+  local -a rest=("${toks[@]:WIPE_ARGS_AT}")
+  local t
 
-  case "$kind" in
+  case "$WIPE_KIND" in
     rm)
       # `git rm --cached` only edits the index; it deletes nothing from disk.
-      if [ "$seen_git" = 1 ]; then
+      if [ "$WIPE_GIT" = 1 ]; then
         for t in "${rest[@]}"; do [ "$t" = --cached ] && return 1; done
       fi
       local rec=0 ended=0 cand
@@ -252,8 +476,9 @@ tree_wipe_clause() {
         targets+=("$(wipe_norm "$t")")
       done
       for t in "${targets[@]}"; do
-        # The second candidate drops one trailing `)`/`}`/`;` welded on by `$(rm ... )`.
-        for cand in "$t" "${t%[\)\};]}"; do
+        # The second candidate drops one trailing `)`, `}`, `;` or backtick welded on
+        # by `$(rm ... )` / `(rm ...)` / a backtick pair.
+        for cand in "$t" "${t%[\)\};\`]}"; do
           if wipe_names_log "$cand"; then WIPE_REASON="incident log target '$t'"; return 0; fi
           if [ "$rec" = 1 ] && wipe_target "$cand"; then WIPE_REASON="recursive rm of '$t'"; return 0; fi
         done
@@ -289,7 +514,12 @@ tree_wipe_clause() {
       ;;
     chflags)
       for t in "${rest[@]}"; do
-        if wipe_names_log "$(wipe_norm "$t")"; then WIPE_REASON="chflags on the incident log ('$t')"; return 0; fi
+        case "$t" in -*) continue ;; esac
+        t="$(wipe_norm "$t")"
+        if wipe_names_log "$t" || wipe_chflags_hits_log "$t"; then
+          WIPE_REASON="chflags on the incident log or a directory above it ('$t')"
+          return 0
+        fi
       done
       ;;
   esac
@@ -350,7 +580,11 @@ fi
 # scan, so it also covers `cd sub; rm -rf *` and `a && rm -rf ./.??*`. HARD: the
 # full-access lift in deny() applies to SOFT BLOCKs only.
 if echo "$COMMAND" | grep -qE '\b(rm|find|chflags)\b'; then
-  WIPE_CLAUSES="$(echo "$COMMAND" | tr ';|&' '\n' | tr -s '\n')"
+  # Prose is not a command: drop heredoc bodies (unless a shell runs them) and quoted
+  # strings that contain whitespace or ; | & before splitting into clauses.
+  WIPE_TEXT="$(wipe_strip_heredocs "$COMMAND")"
+  WIPE_TEXT="$(wipe_drop_quoted_prose "$WIPE_TEXT")"
+  WIPE_CLAUSES="$(printf '%s\n' "$WIPE_TEXT" | tr ';|&' '\n' | tr -s '\n')"
   while IFS= read -r wipe_clause; do
     [ -z "$wipe_clause" ] && continue
     if tree_wipe_clause "$wipe_clause"; then

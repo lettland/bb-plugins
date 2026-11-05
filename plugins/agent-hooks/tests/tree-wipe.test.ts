@@ -67,6 +67,77 @@ describe("tree wipe: the project root by its literal value", () => {
   });
 });
 
+describe("tree wipe: chflags on the log dir or any ancestor of it", () => {
+  const home = "/tmp/agent-hooks-fake-home/user";
+  const run = (cmd: string, env: Record<string, string> = {}) =>
+    runHook("guard-bash.sh", { command: cmd }, { projectDir: project(), env: { HOME: home, AGENT_HOOKS_LOG_DIR: "", ...env }, permissionMode: FULL });
+
+  it("blocks every ancestor of the default log dir, up to /", async () => {
+    for (const target of [
+      `${home}/.bb/logs/agent-hooks`,
+      `${home}/.bb/logs`,
+      `${home}/.bb`,
+      home,
+      path.dirname(home), // the parent of home (/Users on macOS)
+      "/tmp",
+      "/",
+      "~/.bb/logs",
+      "~",
+      "$HOME",
+      "${HOME}/.bb/",
+      "~/.bb/*",
+    ]) {
+      const r = await run(`chflags -R nouappnd ${target}`);
+      expect(r.verdict, target).toBe(HARD);
+    }
+  });
+
+  it("blocks the ancestors of a relocated log dir (AGENT_HOOKS_LOG_DIR), and still the default one", async () => {
+    const env = { AGENT_HOOKS_LOG_DIR: "/tmp/agent-hooks-elsewhere/deep/logs" };
+    for (const target of ["/tmp/agent-hooks-elsewhere/deep/logs", "/tmp/agent-hooks-elsewhere/deep", "/tmp/agent-hooks-elsewhere", `${home}/.bb/logs`]) {
+      const r = await run(`chflags -R nouappnd ${target}`, env);
+      expect(r.verdict, target).toBe(HARD);
+    }
+  });
+
+  it("allows chflags on a sibling, a child of an ancestor that is not on the path, and a relative path", async () => {
+    for (const target of [`${home}/projects/x`, `${home}/.bb/other`, "/tmp/agent-hooks-elsewhere2", "build/out", "-h"]) {
+      const r = await run(`chflags nouappnd ${target}`);
+      expect(r.verdict, target).toBe(ALLOW);
+    }
+  });
+
+  it("ignores a relative AGENT_HOOKS_LOG_DIR instead of looping on it", async () => {
+    const r = await run("chflags -R nouappnd /tmp/x", { AGENT_HOOKS_LOG_DIR: "relative/logs" });
+    expect(r.verdict).toBe(ALLOW);
+  });
+});
+
+describe("tree wipe: command position", () => {
+  const run = (cmd: string) => runHook("guard-bash.sh", { command: cmd }, { projectDir: project(), permissionMode: FULL });
+
+  it("a pipeline stage, a keyword or a nested command is still a command", async () => {
+    for (const cmd of ["ls | sudo rm -rf .", "if true; then rm -rf .; fi", "x=$(rm -rf ./*)", "time -p rm -rf .", "exec rm -rf .", "nohup rm -rf ./* &"]) {
+      expect((await run(cmd)).verdict, cmd).toBe(HARD);
+    }
+  });
+
+  it("rm, find and chflags as arguments or inside quotes are not commands", async () => {
+    for (const cmd of ["ls rm -rf .", "grep -r 'rm -rf .' src", "man find", "printf '%s\\n' 'find . -delete' | cat", "git log --grep=rm"]) {
+      expect((await run(cmd)).verdict, cmd).toBe(ALLOW);
+    }
+  });
+
+  it("a quoted string stays in play when it has no whitespace or separator", async () => {
+    expect((await run("rm -rf './.??*'")).verdict).toBe(HARD);
+    expect((await run('find "." -delete')).verdict).toBe(HARD);
+  });
+
+  it("an unterminated quote does not hide a later command", async () => {
+    expect((await run("echo it's; rm -rf .")).verdict).toBe(HARD);
+  });
+});
+
 describe("tree wipe: the incident log by its configured value", () => {
   it("hard-blocks rm and chflags naming AGENT_HOOKS_LOG_DIR's value, but not an unrelated path", async () => {
     const dir = project();
