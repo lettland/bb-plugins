@@ -159,7 +159,7 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   changes with feedback, Cancel). The agent's turn stays blocked, and the answer becomes the
   tool result: approved (implement), changes requested (revise and call `PresentPlan` again; the
   feedback is quoted as data), cancelled (not approved; end the turn, ask again later), or "Answer
-  not readable" (a value that fails the strict shape, e.g. feedback over 2000 characters, is
+  not readable" (a value that fails the strict shape, e.g. feedback past the form's length cap, is
   discarded and never credited; not approved, the agent tells the user their answer was not read). The
   form waits 60 minutes, under the fork daemon's 65-minute ceiling on forwarded tool calls. The
   plugin cannot detect the hold, so after the form settles it reads the lifecycle events: a
@@ -167,7 +167,7 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   opened or read, return a "form unavailable" text (not approved; end the turn and tell the user)
   whatever was clicked. One form is open per thread: `presentPlanFormOpenAt` marks it, a release
   that would open a second one returns an error and stays armed, and the form's `finally` clears the
-  mark (a mark older than the form timeout plus 60 seconds no longer blocks). The missing-plan Blocker (`approvedPlanSince`), the turn-end approvals
+  mark (a mark younger than 30 seconds always blocks, since its form may still be registering; a mark older than the form timeout plus 60 seconds no longer blocks; an older mark with no pending `plan-approval` interaction behind it is stale and replaced at the next release, and a release that cannot list the interactions is refused with its own text). If the plugin restarts while a form is open, bb closes that form, and the next release finds the open marker stale and replaces it. If a form is still pending in the app (for example after a bb crash), answer or dismiss it there first. The missing-plan Blocker (`approvedPlanSince`), the turn-end approvals
   and the user-turn bookkeeping credit only a turn-scoped, resolved `plan-approval` form whose
   row says `approved: true` and whose resolution says `answeredVia: "app"` (`planFormResolution`;
   the field is fork-only, read by narrowing); the row keeps no feedback. The form is opened with

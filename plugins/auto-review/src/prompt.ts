@@ -20,7 +20,7 @@ export {
 } from "./prompt-plan.js";
 export {
   PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM, PRESENT_PLAN_FORM_APPROVED_MESSAGE,
-  PRESENT_PLAN_FORM_OPEN_MESSAGE, PRESENT_PLAN_FORM_UNREADABLE_MESSAGE,
+  PRESENT_PLAN_FORM_CHECK_FAILED_MESSAGE, PRESENT_PLAN_FORM_OPEN_MESSAGE, PRESENT_PLAN_FORM_UNREADABLE_MESSAGE,
   presentPlanChangesRequestedMessage, presentPlanApprovalCancelledMessage,
   presentPlanFormUnavailableMessage,
 } from "./prompt-plan-form.js";

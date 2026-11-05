@@ -44,7 +44,8 @@ export function planFormResolution(event: EventOf<"system/interaction/lifecycle"
     held: event.scope.kind === "turn",
     approved: planApprovalDescribed(resolution.description?.payload),
     // `answeredVia` is fork-only (bb core `packages/domain/src/pending-interactions.ts`,
-    // the `plugin_submitted` resolution): the pinned SDK types lack it, so it is read by narrowing.
+    // the `plugin_submitted` resolution): @get-bb/plugin-sdk 0.6.79 (the pinned version) lacks it, so it is read by narrowing;
+    // drop the narrowing once a pinned SDK types it.
     // Absent, `"api"` and any other value are not an app answer.
     app: "answeredVia" in resolution && resolution.answeredVia === "app",
   };

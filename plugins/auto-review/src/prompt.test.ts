@@ -21,6 +21,7 @@ import {
   presentPlanRedoMessage,
   PRESENT_PLAN_REVIEWED_MESSAGE,
   PRESENT_PLAN_FORM_APPROVED_MESSAGE,
+  PRESENT_PLAN_FORM_CHECK_FAILED_MESSAGE,
   PRESENT_PLAN_FORM_OPEN_MESSAGE,
   PRESENT_PLAN_FORM_UNREADABLE_MESSAGE,
   renderScope,
@@ -1995,11 +1996,19 @@ describe("the plan approval form's PresentPlan results", () => {
 
   it("pins the unreadable-answer text and the open-form tool error", () => {
     expect(PRESENT_PLAN_FORM_UNREADABLE_MESSAGE).toBe(
-      `${AUTO_REVIEW_MARKER} The approval form returned an answer that could not be read (feedback is limited to 2000 characters), so the plan is not approved. Do not implement it. End your turn and tell the user their answer was not read. When they ask, call PresentPlan again with the same planFilePath.`,
+      `${AUTO_REVIEW_MARKER} The approval form returned an answer that was not in the expected shape, so the plan is not approved. Do not implement it. End your turn and tell the user their answer was not read. When they ask, call PresentPlan again with the same planFilePath.`,
     );
     expect(PRESENT_PLAN_FORM_OPEN_MESSAGE).toBe(
-      "A plan approval form is already open in this thread. Wait for it to settle; do not call PresentPlan again until it has.",
+      `${AUTO_REVIEW_MARKER} A plan approval form is already open in this thread, so this plan was not released. End your turn and tell the user to answer the open approval form in the bb app first. After it settles, call PresentPlan again with the same planFilePath; this may run the review again.`,
     );
+    expect(PRESENT_PLAN_FORM_UNREADABLE_MESSAGE).not.toContain("2000");
+  });
+
+  it("pins the text for a release that cannot check whether a form is open", () => {
+    expect(PRESENT_PLAN_FORM_CHECK_FAILED_MESSAGE).toBe(
+      `${AUTO_REVIEW_MARKER} auto-review could not check whether a plan approval form is already open in this thread, so this plan was not released. End your turn and tell the user (the auto-review log names the cause). When they ask, call PresentPlan again with the same planFilePath; this may run the review again.`,
+    );
+    expect(PRESENT_PLAN_FORM_CHECK_FAILED_MESSAGE).not.toBe(PRESENT_PLAN_FORM_OPEN_MESSAGE);
   });
 
   it.each([
@@ -2008,7 +2017,7 @@ describe("the plan approval form's PresentPlan results", () => {
   ])("says the form is unavailable and the plan not approved (reviewed %s)", (reviewed, incomplete) => {
     const text = presentPlanFormUnavailableMessage(reviewed);
     expect(text).toBe(
-      `${AUTO_REVIEW_MARKER} ${incomplete}The approval form could not confirm an answer, so the plan is not approved. Do not implement it. End your turn and tell the user the approval form did not work. When they ask, call PresentPlan again with the same planFilePath. If this keeps happening, the bb build may not support the approval form (the auto-review log names the cause): tell the user they can turn off the auto-review "Plan approval form" setting and start a new thread.`,
+      `${AUTO_REVIEW_MARKER} ${incomplete}The approval form could not confirm an answer, so the plan is not approved. Do not implement it. End your turn and tell the user the approval form did not work. When they ask, call PresentPlan again with the same planFilePath. If this keeps happening, the bb build may not support the approval form or app-only answers (the auto-review log names the cause): tell the user to rebuild bb from the fork, or to turn off the auto-review "Plan approval form" setting and start a new thread.`,
     );
     // The form instructions say a chat reply is not approval, so this text must not ask for one.
     expect(text).not.toContain("explicit approval in chat");

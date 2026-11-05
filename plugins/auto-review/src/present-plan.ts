@@ -34,7 +34,17 @@ import {
   PRESENT_PLAN_REVIEWED_MESSAGE,
   SCOPE_PATH_ALLOW,
 } from "./prompt.js";
-import { askPlanApproval, needsForm, planFormOpen, planFormOpenResult, type NeedsForm } from "./present-plan-form.js";
+import {
+  askPlanApproval,
+  needsForm,
+  nextFormOpenedAt,
+  planFormCheckFailedResult,
+  planFormMarkerFresh,
+  planFormOpen,
+  planFormOpenResult,
+  planFormPending,
+  type NeedsForm,
+} from "./present-plan-form.js";
 import { REPORT_REVIEW_TOOL_NAME, registerReportTool } from "./report-tool.js";
 import {
   presentPlanArmed,
@@ -143,12 +153,26 @@ async function releasePlan(
     state.presentPlanArmedSeq !== undefined &&
     (await reviewRanSince(bb, ctx.threadId, state.presentPlanArmedSeq, PRESENT_PLAN_GATE_TOOLS, true, false));
   const autoApproved = reviewRan && config.autoApprovePlans;
+  const opensForm = formMode && !autoApproved;
+  const now = Date.now();
+  const openedAt = nextFormOpenedAt(state, now);
   // A release that would open a form while another is open is refused before
   // anything is cleared, so the plan stays armed for the same call to release later.
-  if (formMode && !autoApproved && planFormOpen(state, Date.now())) {
-    return planFormOpenResult();
+  // A fresh marker counts as open without asking the host: its form may still
+  // be registering. An older marker with no pending form behind it (a restart
+  // skipped the `finally` that clears it) is stale: the write below replaces it.
+  if (opensForm && planFormOpen(state, now)) {
+    const found = planFormMarkerFresh(state, now) ? "pending" : await planFormPending(bb, ctx.threadId);
+    if (found === "pending") {
+      return planFormOpenResult();
+    }
+    if (found === "failed") {
+      return planFormCheckFailedResult();
+    }
+    bb.log.info(`auto-review: the plan approval form's open marker in ${ctx.threadId} has no pending form behind it, so it is stale and replaced`);
   }
-  await writeState(bb, ctx.threadId, {}, [...PRESENT_PLAN_KEYS]);
+  // One patch: a failed write cannot leave the plan disarmed without its marker.
+  await writeState(bb, ctx.threadId, opensForm ? { presentPlanFormOpenAt: openedAt } : {}, [...PRESENT_PLAN_KEYS]);
   await settlePlanBaseline(bb, ctx.threadId, planFilePath, reviewWorked);
   if (autoApproved) {
     await clearPlanBaseline(bb, ctx.threadId, planFilePath);
@@ -176,8 +200,7 @@ async function releasePlan(
   if (!formMode) {
     return text;
   }
-  await writeState(bb, ctx.threadId, { presentPlanFormOpenAt: Date.now() });
-  return { form: { planFilePath, reviewed: check !== "missing" } };
+  return { form: { planFilePath, reviewed: check !== "missing" }, openedAt };
 }
 
 /** `PresentPlan`'s `execute`: the first call for a plan arms its review, the second releases it. */

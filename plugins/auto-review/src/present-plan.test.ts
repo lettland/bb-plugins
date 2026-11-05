@@ -11,6 +11,7 @@ import { reviewSize } from "./change-size.js";
 import { writeProjectConfig } from "./config.js";
 import { createReviewContext } from "./context.js";
 import { registerPlanTools } from "./present-plan.js";
+import { FORM_OPEN_FRESH_MS, nextFormOpenedAt, planFormMarkerFresh } from "./present-plan-form.js";
 import { PLAN_APPROVAL_TIMEOUT_MS } from "./plan-approval-form.js";
 import {
   PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
@@ -23,6 +24,7 @@ import {
   presentPlanRedoMessage,
   PRESENT_PLAN_REVIEWED_MESSAGE,
   PRESENT_PLAN_FORM_APPROVED_MESSAGE,
+  PRESENT_PLAN_FORM_CHECK_FAILED_MESSAGE,
   PRESENT_PLAN_FORM_OPEN_MESSAGE,
   PRESENT_PLAN_FORM_UNREADABLE_MESSAGE,
 } from "./prompt.js";
@@ -266,6 +268,10 @@ describe("PresentPlan's light tier", () => {
 
 type Json = Record<string, unknown>;
 
+const planFormOrigin = (rendererId = "plan-approval", pluginId = "auto-review") => ({ kind: "plugin", pluginId, rendererId });
+/** A pending plan approval form as the thread's interaction list shows it. */
+const LIVE_FORM: Json = { id: "pint-live", status: "pending", origin: planFormOrigin() };
+
 /**
  * A host for the approval form. The plan is armed for its release (redo already
  * used), so the next `PresentPlan` call releases it: with `reviewMode` "self"
@@ -281,8 +287,9 @@ async function withFormHost(
     metadata: Json;
     rows: Json[];
     requestInput: ReturnType<typeof vi.spyOn>;
-    faults: { timelineDown: boolean; lifecycleError: unknown; maxSeq: number; updateError: unknown };
+    faults: { timelineDown: boolean; lifecycleError: unknown; maxSeq: number; updateError: unknown; listed: Json[] | undefined; listError: unknown };
     updates: Json[];
+    patches: { set: Json; remove: string[] }[];
     infos: () => string[];
     warns: () => string[];
     call: (ctx?: { signal?: AbortSignal; threadId?: string }) => Promise<unknown>;
@@ -297,7 +304,15 @@ async function withFormHost(
   };
   const rows: Json[] = [];
   const updates: Json[] = [];
-  const faults = { timelineDown: false, lifecycleError: undefined as unknown, maxSeq: 77, updateError: undefined as unknown };
+  const patches: { set: Json; remove: string[] }[] = [];
+  const faults = {
+    timelineDown: false,
+    lifecycleError: undefined as unknown,
+    maxSeq: 77,
+    updateError: undefined as unknown,
+    listed: undefined as Json[] | undefined,
+    listError: undefined as unknown,
+  };
   const sdk = {
     threads: {
       getPluginMetadata: async () => ({ ...metadata }),
@@ -306,6 +321,7 @@ async function withFormHost(
           throw faults.updateError;
         }
         updates.push(args.set ?? {});
+        patches.push({ set: args.set ?? {}, remove: args.remove ?? [] });
         Object.assign(metadata, args.set ?? {});
         for (const key of args.remove ?? []) {
           delete metadata[key];
@@ -330,6 +346,18 @@ async function withFormHost(
       },
       queuedMessages: { list: async () => [] },
       list: async () => [],
+      // What the thread has pending: the harness's open forms unless a test sets `faults.listed`.
+      interactions: {
+        list: async () => {
+          if (faults.listError !== undefined) {
+            throw faults.listError;
+          }
+          return (
+            faults.listed ??
+            host.harness.pendingInteractions.map((request) => ({ id: request.id, status: "pending", origin: planFormOrigin(request.rendererId) }))
+          );
+        },
+      },
     },
     // The size gate asks typesafe for a verdict; none here, so it falls back to the window cursor.
     plugins: { callRpc: async () => ({ verdict: null, messageSeq: null }) },
@@ -370,7 +398,7 @@ async function withFormHost(
       host.harness.submitInteraction(host.harness.pendingInteractions[0]!.id, value as never);
       return pending;
     };
-    await body({ host, review, metadata, rows, requestInput, faults, updates, infos: logs("info"), warns: logs("warn"), call, settle });
+    await body({ host, review, metadata, rows, requestInput, faults, updates, patches, infos: logs("info"), warns: logs("warn"), call, settle });
   } finally {
     await host.harness.dispose();
   }
@@ -591,6 +619,8 @@ describe("PresentPlan's approval form", () => {
 });
 
 describe("one plan approval form per thread", () => {
+  /** A marker age past the fresh window: the list is consulted for it. */
+  const PAST_FRESH_MS = FORM_OPEN_FRESH_MS + 1_000;
   const armAgain = (metadata: Json) =>
     Object.assign(metadata, { presentPlanArmedAt: Date.now(), presentPlanArmedPath: PLAN, presentPlanArmedSeq: 77, presentPlanRedone: true });
 
@@ -615,7 +645,8 @@ describe("one plan approval form per thread", () => {
   });
 
   it("blocks just inside the staleness window and not past it", async () => {
-    await withFormHost({ form: true }, async ({ call, metadata, requestInput }) => {
+    await withFormHost({ form: true }, async ({ call, metadata, requestInput, faults }) => {
+      faults.listed = [LIVE_FORM];
       metadata.presentPlanFormOpenAt = Date.now() - (PLAN_APPROVAL_TIMEOUT_MS + 60_000 - 5_000);
       expect(await call()).toMatchObject({ isError: true });
       expect(requestInput).not.toHaveBeenCalled();
@@ -639,6 +670,170 @@ describe("one plan approval form per thread", () => {
       expect(await call()).toBe(PRESENT_PLAN_APPROVED_MESSAGE);
       expect(requestInput).not.toHaveBeenCalled();
       expect(metadata.presentPlanFormOpenAt).toEqual(expect.any(Number));
+    });
+  });
+
+  it("refuses a release with the marker's own text while a plan approval form is pending, and lists the thread's interactions", async () => {
+    await withFormHost({ form: true }, async ({ call, metadata, requestInput, faults }) => {
+      faults.listed = [LIVE_FORM];
+      const stamp = Date.now() - PAST_FRESH_MS;
+      metadata.presentPlanFormOpenAt = stamp;
+      const result = (await call()) as { content: { text: string }[]; isError: boolean };
+      expect(result).toEqual({ content: [{ type: "text", text: PRESENT_PLAN_FORM_OPEN_MESSAGE }], isError: true });
+      expect(result.content[0]!.text.startsWith("[bb auto-review]")).toBe(true);
+      expect(requestInput).not.toHaveBeenCalled();
+      expect(metadata.presentPlanFormOpenAt).toBe(stamp);
+      expect(metadata.presentPlanArmedPath).toBe(PLAN);
+    });
+  });
+
+  it("counts a plan approval form that is being resolved as still open", async () => {
+    await withFormHost({ form: true }, async ({ call, metadata, requestInput, faults }) => {
+      faults.listed = [{ ...LIVE_FORM, status: "resolving" }];
+      metadata.presentPlanFormOpenAt = Date.now() - PAST_FRESH_MS;
+      expect(await call()).toMatchObject({ isError: true });
+      expect(requestInput).not.toHaveBeenCalled();
+    });
+  });
+
+  it("replaces a marker older than 30 seconds (a restart skipped the finally) when no form is pending, and releases", async () => {
+    await withFormHost({ form: true }, async ({ settle, metadata, infos, requestInput }) => {
+      const stale = Date.now() - PAST_FRESH_MS;
+      metadata.presentPlanFormOpenAt = stale;
+      expect(await settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+      expect(requestInput).toHaveBeenCalledTimes(1);
+      expect(infos().some((line) => line.includes("open marker") && line.includes("stale"))).toBe(true);
+      expect(metadata.presentPlanFormOpenAt).toBeUndefined();
+      expect(metadata.presentPlanArmedPath).toBeUndefined();
+    });
+  });
+
+  it.each([
+    ["another plugin", [{ id: "a", status: "pending", origin: planFormOrigin("plan-approval", "other-plugin") }]],
+    ["another renderer", [{ id: "b", status: "pending", origin: planFormOrigin("something-else") }]],
+    ["a provider interaction", [{ id: "c", status: "pending", origin: { kind: "provider", providerId: "claude-code" } }]],
+    ["an interaction with no origin", [{ id: "d", status: "pending" }]],
+    ["a settled plan approval form", [{ id: "e", status: "interrupted", origin: planFormOrigin() }]],
+  ])("does not count %s as the open form", async (_name, listed) => {
+    await withFormHost({ form: true }, async ({ settle, metadata, faults, requestInput }) => {
+      faults.listed = listed;
+      metadata.presentPlanFormOpenAt = Date.now() - PAST_FRESH_MS;
+      expect(await settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+      expect(requestInput).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it.each([
+    ["Error", new Error("list down"), "list down"],
+    ["non-Error", "kaboom", "kaboom"],
+  ])("refuses the release with its own text and warns when the pending interactions cannot be listed (%s)", async (_name, thrown, message) => {
+    await withFormHost({ form: true }, async ({ call, metadata, requestInput, faults, warns }) => {
+      faults.listError = thrown;
+      metadata.presentPlanFormOpenAt = Date.now() - PAST_FRESH_MS;
+      expect(await call()).toEqual({ content: [{ type: "text", text: PRESENT_PLAN_FORM_CHECK_FAILED_MESSAGE }], isError: true });
+      expect(requestInput).not.toHaveBeenCalled();
+      expect(metadata.presentPlanArmedPath).toBe(PLAN);
+      expect(warns().some((line) => line.includes("could not list the pending interactions") && line.includes(message))).toBe(true);
+    });
+  });
+
+  it("refuses a marker younger than 30 seconds without listing the interactions", async () => {
+    await withFormHost({ form: true }, async ({ call, metadata, requestInput, faults, warns }) => {
+      // A list call would fail and answer with the check-failed text and a warning.
+      faults.listError = new Error("must not be called");
+      const stamp = Date.now() - (FORM_OPEN_FRESH_MS - 5_000);
+      metadata.presentPlanFormOpenAt = stamp;
+      expect(await call()).toEqual({ content: [{ type: "text", text: PRESENT_PLAN_FORM_OPEN_MESSAGE }], isError: true });
+      expect(requestInput).not.toHaveBeenCalled();
+      expect(warns()).toEqual([]);
+      expect(metadata.presentPlanFormOpenAt).toBe(stamp);
+      expect(metadata.presentPlanArmedPath).toBe(PLAN);
+    });
+  });
+
+  it("refuses a second release inside the opening gap, after the marker is written and before the form is registered", async () => {
+    await withFormHost({ form: true }, async (f) => {
+      let close!: (answer: unknown) => void;
+      f.requestInput.mockImplementationOnce(() => new Promise((resolve) => { close = resolve; }));
+      const first = f.call();
+      await vi.waitFor(() => expect(f.requestInput).toHaveBeenCalledTimes(1));
+      // The host has not registered the pending interaction: the list is empty.
+      expect(f.host.harness.pendingInteractions).toHaveLength(0);
+      expect(typeof f.metadata.presentPlanFormOpenAt).toBe("number");
+      armAgain(f.metadata);
+      expect(await f.call()).toEqual({ content: [{ type: "text", text: PRESENT_PLAN_FORM_OPEN_MESSAGE }], isError: true });
+      expect(f.requestInput).toHaveBeenCalledTimes(1);
+      expect(f.metadata.presentPlanArmedPath).toBe(PLAN);
+      close({ outcome: "cancelled", reason: "user" });
+      expect(await first).toBe(presentPlanApprovalCancelledMessage("user"));
+      expect(f.metadata.presentPlanFormOpenAt).toBeUndefined();
+    });
+  });
+
+  it("releases after a throw following the combined patch left a marker behind, once the marker is older than 30 seconds", async () => {
+    await withFormHost({ form: true }, async (f) => {
+      vi.spyOn(f.host.bb.storage.kv, "set").mockRejectedValueOnce(new Error("kv down"));
+      await expect(f.call()).rejects.toThrow("kv down");
+      // The patch landed: the plan is disarmed and the marker is set, with no form opened.
+      expect(f.requestInput).not.toHaveBeenCalled();
+      expect(f.metadata.presentPlanArmedPath).toBeUndefined();
+      expect(typeof f.metadata.presentPlanFormOpenAt).toBe("number");
+      // Later, the agent arms and releases again: the marker has aged past the fresh window.
+      armAgain(f.metadata);
+      f.metadata.presentPlanFormOpenAt = Date.now() - PAST_FRESH_MS;
+      expect(await f.settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+      expect(f.requestInput).toHaveBeenCalledTimes(1);
+      expect(f.infos().some((line) => line.includes("open marker") && line.includes("stale"))).toBe(true);
+    });
+  });
+
+  it("counts a marker as fresh only for an age from 0 up to, not including, FORM_OPEN_FRESH_MS", () => {
+    const at = 1_700_000_000_000;
+    expect(planFormMarkerFresh({ phase: "idle" }, at)).toBe(false);
+    expect(planFormMarkerFresh({ phase: "idle", presentPlanFormOpenAt: at }, at)).toBe(true);
+    expect(planFormMarkerFresh({ phase: "idle", presentPlanFormOpenAt: at - (FORM_OPEN_FRESH_MS - 1) }, at)).toBe(true);
+    expect(planFormMarkerFresh({ phase: "idle", presentPlanFormOpenAt: at - FORM_OPEN_FRESH_MS }, at)).toBe(false);
+    // A clock stepped back leaves the marker in the future: not fresh, so the host check decides.
+    expect(planFormMarkerFresh({ phase: "idle", presentPlanFormOpenAt: at + 1 }, at)).toBe(false);
+  });
+
+  it("writes a marker time strictly above the one it replaces, also within the same millisecond", () => {
+    const at = 1_700_000_000_000;
+    expect(nextFormOpenedAt({}, at)).toBe(at);
+    expect(nextFormOpenedAt({ presentPlanFormOpenAt: at - 10 }, at)).toBe(at);
+    expect(nextFormOpenedAt({ presentPlanFormOpenAt: at }, at)).toBe(at + 1);
+    expect(nextFormOpenedAt({ presentPlanFormOpenAt: at + 500 }, at)).toBe(at + 501);
+  });
+
+  it("does not list the interactions when there is no marker", async () => {
+    await withFormHost({ form: true }, async ({ settle, faults }) => {
+      faults.listError = new Error("must not be called");
+      expect(await settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+    });
+  });
+
+  it("keeps a newer form's marker when a late finally clears: only the marker it wrote is removed", async () => {
+    await withFormHost({ form: true }, async ({ call, requestInput, metadata }) => {
+      const newer = Date.now() + 123_456;
+      requestInput.mockImplementationOnce(async () => {
+        metadata.presentPlanFormOpenAt = newer;
+        return { outcome: "cancelled", reason: "user" };
+      });
+      expect(await call()).toBe(presentPlanApprovalCancelledMessage("user"));
+      expect(metadata.presentPlanFormOpenAt).toBe(newer);
+    });
+  });
+
+  it("writes the marker in the same patch that disarms the plan", async () => {
+    await withFormHost({ form: true }, async ({ call, patches, requestInput }) => {
+      requestInput.mockResolvedValueOnce({ outcome: "cancelled", reason: "user" });
+      await call();
+      const opened = patches.filter((patch) => typeof patch.set.presentPlanFormOpenAt === "number");
+      expect(opened).toHaveLength(1);
+      expect(opened[0]!.remove).toEqual(expect.arrayContaining([...PRESENT_PLAN_KEYS]));
+      // No patch disarms the plan without carrying the marker.
+      const disarming = patches.filter((patch) => PRESENT_PLAN_KEYS.every((key) => patch.remove.includes(key)));
+      expect(disarming).toEqual(opened);
     });
   });
 

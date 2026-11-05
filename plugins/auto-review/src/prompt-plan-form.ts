@@ -17,8 +17,8 @@ export const PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM = [
 
 /**
  * `PresentPlan`'s reply when the plan was approved in the approval form, held
- * inside this turn: the result IS the approval. Nothing checks who answered
- * the form, so the text does not say the user did.
+ * inside this turn: the result IS the approval. bb checks that the answer came
+ * from the app, but not who used the app, so the text does not say the user did.
  */
 export const PRESENT_PLAN_FORM_APPROVED_MESSAGE =
   `${AUTO_REVIEW_MARKER} The plan was approved in the approval form. This PresentPlan result is the approval: implement the plan.`;
@@ -31,7 +31,7 @@ export const PRESENT_PLAN_FORM_APPROVED_MESSAGE =
  */
 export function presentPlanFormUnavailableMessage(reviewed: boolean): string {
   const incomplete = reviewed ? "" : "The plan was released without a complete calibrated review. ";
-  return `${AUTO_REVIEW_MARKER} ${incomplete}The approval form could not confirm an answer, so the plan is not approved. Do not implement it. End your turn and tell the user the approval form did not work. When they ask, call PresentPlan again with the same planFilePath. If this keeps happening, the bb build may not support the approval form (the auto-review log names the cause): tell the user they can turn off the auto-review "Plan approval form" setting and start a new thread.`;
+  return `${AUTO_REVIEW_MARKER} ${incomplete}The approval form could not confirm an answer, so the plan is not approved. Do not implement it. End your turn and tell the user the approval form did not work. When they ask, call PresentPlan again with the same planFilePath. If this keeps happening, the bb build may not support the approval form or app-only answers (the auto-review log names the cause): tell the user to rebuild bb from the fork, or to turn off the auto-review "Plan approval form" setting and start a new thread.`;
 }
 
 /**
@@ -40,15 +40,25 @@ export function presentPlanFormUnavailableMessage(reviewed: boolean): string {
  * was discarded and the plan is not approved; the agent says so to the user.
  */
 export const PRESENT_PLAN_FORM_UNREADABLE_MESSAGE =
-  `${AUTO_REVIEW_MARKER} The approval form returned an answer that could not be read (feedback is limited to 2000 characters), so the plan is not approved. Do not implement it. End your turn and tell the user their answer was not read. When they ask, call PresentPlan again with the same planFilePath.`;
+  `${AUTO_REVIEW_MARKER} The approval form returned an answer that was not in the expected shape, so the plan is not approved. Do not implement it. End your turn and tell the user their answer was not read. When they ask, call PresentPlan again with the same planFilePath.`;
 
 /**
  * `PresentPlan`'s error result when a plan approval form is already open in the
- * thread: the plan stays armed, so the same call can release it once that form
- * settles. No marker: it is a tool error, not a verdict on the plan.
+ * thread: the plan stays armed, so a later call can release it once that form
+ * settles. It is a tool error, not a verdict on the plan; the marker only
+ * tells the agent the text comes from auto-review.
  */
 export const PRESENT_PLAN_FORM_OPEN_MESSAGE =
-  "A plan approval form is already open in this thread. Wait for it to settle; do not call PresentPlan again until it has.";
+  `${AUTO_REVIEW_MARKER} A plan approval form is already open in this thread, so this plan was not released. End your turn and tell the user to answer the open approval form in the bb app first. After it settles, call PresentPlan again with the same planFilePath; this may run the review again.`;
+
+/**
+ * `PresentPlan`'s error result when the plugin cannot list the thread's
+ * interactions to check for an open plan approval form: the plan stays armed
+ * and nothing is released, so no second form opens and no text names a form
+ * that may not exist.
+ */
+export const PRESENT_PLAN_FORM_CHECK_FAILED_MESSAGE =
+  `${AUTO_REVIEW_MARKER} auto-review could not check whether a plan approval form is already open in this thread, so this plan was not released. End your turn and tell the user (the auto-review log names the cause). When they ask, call PresentPlan again with the same planFilePath; this may run the review again.`;
 
 /**
  * The form answer as data. The fence is longer than any run of backticks in
@@ -63,7 +73,7 @@ function feedbackBlock(feedback: string): string {
 /**
  * `PresentPlan`'s reply when the form was answered without approval: the user
  * asked for changes (a malformed answer gets the unreadable text instead). The feedback
- * is untrusted (any agent can answer a form), so it only ever appears inside
+ * is untrusted (a forged app header or an agent driving the app UI can still answer the form), so it only ever appears inside
  * the data block below the instruction.
  */
 export function presentPlanChangesRequestedMessage(feedback?: string): string {
