@@ -78,6 +78,8 @@ export interface GlobalDefaults {
   enabled: boolean;
   mergeEligibleMainlines: string[];
   reviewMode: ReviewMode;
+  /** Absent reads as off. */
+  planApprovalForm?: boolean;
 }
 
 export interface EffectiveConfig {
@@ -86,6 +88,8 @@ export interface EffectiveConfig {
   reviewMode: ReviewMode;
   /** Per project only, off by default: approve a plan that completed the review cycle. */
   autoApprovePlans: boolean;
+  /** Global only, off by default: `PresentPlan` asks for approval in a form that holds the turn. */
+  planApprovalForm: boolean;
 }
 
 export function parseMainlines(csv: string): string[] {
@@ -119,6 +123,13 @@ export function defineAutoReviewSettings(bb: BbPluginApi) {
       options: [...REVIEW_MODES],
       default: "auto",
     },
+    planApprovalForm: {
+      type: "boolean",
+      label: "Plan approval form",
+      description:
+        "PresentPlan asks for plan approval in a form that holds the agent's turn until you answer. Needs a bb build that supports holding a tool call for a form (experimental_holdToolCall); leave off otherwise. If the agent keeps working while the form is open, your bb doesn't support this; turn it off. The toggle applies to new threads.",
+      default: false,
+    },
   });
 }
 
@@ -126,6 +137,7 @@ export function globalDefaultsFrom(values: {
   enabled: boolean;
   mergeEligibleMainlines: string;
   reviewMode: string;
+  planApprovalForm: boolean;
 }): GlobalDefaults {
   const mainlines = parseMainlines(values.mergeEligibleMainlines);
   const reviewMode = (REVIEW_MODES as readonly string[]).includes(
@@ -138,6 +150,7 @@ export function globalDefaultsFrom(values: {
     mergeEligibleMainlines:
       mainlines.length > 0 ? mainlines : [...DEFAULT_MERGE_ELIGIBLE_MAINLINES],
     reviewMode,
+    planApprovalForm: values.planApprovalForm,
   };
 }
 
@@ -151,6 +164,7 @@ export function effectiveConfig(
       project.mergeEligibleMainlines ?? globals.mergeEligibleMainlines,
     reviewMode: project.reviewMode ?? globals.reviewMode,
     autoApprovePlans: project.autoApprovePlans ?? false,
+    planApprovalForm: globals.planApprovalForm ?? false,
   };
 }
 

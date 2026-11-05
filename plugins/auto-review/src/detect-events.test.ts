@@ -11,6 +11,8 @@ import {
   tryCaptureSinceSeq,
   UnreadTurnError,
 } from "./detect-events.js";
+import { planFormResolutionSince } from "./detect-plan-form.js";
+import { PLAN_APPROVAL_TIMEOUT_MS } from "./plan-approval-form.js";
 
 interface Row {
   seq: number;
@@ -19,9 +21,16 @@ interface Row {
   data: Record<string, unknown>;
 }
 
-/** A fake thread whose event log is `rows`; `pageSizes` records how many events each page request returned. */
-function logOf(rows: readonly Row[]): { bb: BbPluginApi; pageSizes: number[] } {
+/**
+ * A fake thread whose event log is `rows`; `pageSizes` records how many events each page request returned.
+ * `metadata` is the thread's plugin state (an Error is thrown by the read); `warnings` collects the plugin's warnings.
+ */
+function logOf(
+  rows: readonly Row[],
+  metadata: unknown = {},
+): { bb: BbPluginApi; pageSizes: number[]; warnings: string[] } {
   const pageSizes: number[] = [];
+  const warnings: string[] = [];
   const list = async (args: { afterSeq?: string; types?: string[]; limit?: string }) => {
     const page = rows
       .filter((row) => row.seq > Number(args.afterSeq ?? 0) && args.types?.includes(row.type) === true)
@@ -29,7 +38,20 @@ function logOf(rows: readonly Row[]): { bb: BbPluginApi; pageSizes: number[] } {
     pageSizes.push(page.length);
     return page;
   };
-  return { bb: { sdk: { threads: { events: { list } } } } as unknown as BbPluginApi, pageSizes };
+  const getPluginMetadata = async () => {
+    if (metadata instanceof Error) {
+      throw metadata;
+    }
+    return metadata;
+  };
+  return {
+    bb: {
+      log: { warn: (message: string) => warnings.push(message) },
+      sdk: { threads: { events: { list }, getPluginMetadata } },
+    } as unknown as BbPluginApi,
+    pageSizes,
+    warnings,
+  };
 }
 
 const request = (seq: number, requestId: string, initiator: string): Row => ({
@@ -70,6 +92,29 @@ const lifecycle = (
       statusReason: null,
       payload: { kind: "approval", availableDecisions: ["allow_once", "deny"], reason: null, subject },
       resolution,
+    },
+  },
+});
+
+/**
+ * A `system/interaction/lifecycle` row for this plugin's plan-approval form,
+ * resolved as approved by default. `scope` is turn-scoped when the host held
+ * the tool call and thread-scoped when the call detached (bb core
+ * `pending-interaction-timeline.ts`, `interactionScope`); `over` reshapes the interaction.
+ */
+const form = (seq: number, scope: Row["scope"] = { kind: "turn", turnId: "turn-1" }, over: Record<string, unknown> = {}): Row => ({
+  seq,
+  type: "system/interaction/lifecycle",
+  scope,
+  data: {
+    interaction: {
+      id: "pint-form",
+      status: "resolved",
+      statusReason: null,
+      origin: { kind: "plugin", pluginId: "auto-review", rendererId: "plan-approval" },
+      payload: { kind: "plugin", title: "Plan approval", data: { planFilePath: "/w/p.md", reviewed: true } },
+      resolution: { kind: "plugin_submitted", description: { title: "Approved", payload: { approved: true } } },
+      ...over,
     },
   },
 });
@@ -304,6 +349,144 @@ describe("approvedPlanSince", () => {
 
   it("finds nothing on a thread with no lifecycle events", async () => {
     expect(await approvedPlanSince(logOf([]).bb, "thr", 0)).toBeNull();
+  });
+});
+
+describe("a held plan approval form", () => {
+  const held = { kind: "turn", turnId: "turn-1" } as const;
+  const detached = { kind: "thread" } as const;
+
+  it("counts as a plan approval in the walk, with the form's interaction id", async () => {
+    const { bb } = logOf([form(12, held)]);
+    expect(await approvedPlanSince(bb, "thr", 10)).toEqual({ id: "pint-form", seq: 12, requestedSeq: undefined });
+  });
+
+  it.each([
+    ["detached (thread-scoped)", form(12, detached)],
+    ["answered approved: false", form(12, held, { resolution: { kind: "plugin_submitted", description: { title: "Changes requested", payload: { approved: false } } } })],
+    ["described without a payload", form(12, held, { resolution: { kind: "plugin_submitted", description: { title: "Approved" } } })],
+    ["described with no description at all", form(12, held, { resolution: { kind: "plugin_submitted" } })],
+    ["described approved with a non-boolean", form(12, held, { resolution: { kind: "plugin_submitted", description: { payload: { approved: "yes" } } } })],
+    ["from another plugin", form(12, held, { origin: { kind: "plugin", pluginId: "other", rendererId: "plan-approval" } })],
+    ["of another renderer", form(12, held, { origin: { kind: "plugin", pluginId: "auto-review", rendererId: "other" } })],
+    ["of provider origin", form(12, held, { origin: { kind: "provider", providerId: "p", providerRequestId: "r" } })],
+    ["still pending", form(12, held, { status: "pending", resolution: null })],
+    ["still resolving", form(12, held, { status: "resolving", resolution: null })],
+    ["cancelled (interrupted)", form(12, held, { status: "interrupted", resolution: null })],
+    ["resolved by a native decision", form(12, held, { resolution: { decision: "allow_once" } })],
+    ["resolved with another kind", form(12, held, { resolution: { kind: "user_answer" } })],
+  ])("does not count when %s", async (_name, row) => {
+    const { bb } = logOf([row]);
+    expect(await approvedPlanSince(bb, "thr", 10)).toBeNull();
+  });
+
+  it("is listed among a turn's approved plans, so the continuation counts it as the user's", async () => {
+    const { bb } = logOf([completed(5, "turn-1"), form(4, held)]);
+    expect(await endedTurn(bb, "thr", 0)).toEqual({
+      users: false,
+      completedSeq: 5,
+      approvedPlans: [{ id: "pint-form", seq: 4, requestedSeq: undefined }],
+      reviewTurn: false,
+    });
+  });
+
+  it("is not listed for a turn when the form detached (thread-scoped)", async () => {
+    const { bb } = logOf([completed(5, "turn-1"), form(4, detached)]);
+    expect((await endedTurn(bb, "thr", 0)).approvedPlans).toEqual([]);
+  });
+});
+
+describe("planFormResolutionSince", () => {
+  const held = { kind: "turn", turnId: "turn-1" } as const;
+
+  it("is null when no form resolved after the cursor", async () => {
+    expect(await planFormResolutionSince(logOf([form(4, held)]).bb, "thr", 4)).toBeNull();
+    expect(await planFormResolutionSince(logOf([]).bb, "thr", 0)).toBeNull();
+  });
+
+  it("reads whether the latest resolution was held and described as approved", async () => {
+    const changes = form(9, { kind: "thread" }, { resolution: { kind: "plugin_submitted", description: { payload: { approved: false } } } });
+    expect(await planFormResolutionSince(logOf([form(5, held)]).bb, "thr", 0)).toEqual({ held: true, approved: true });
+    expect(await planFormResolutionSince(logOf([form(5, held), changes]).bb, "thr", 0)).toEqual({ held: false, approved: false });
+  });
+
+  it("ignores native approvals and forms that are still open", async () => {
+    const rows = [lifecycle(5, "turn-1", "resolved"), form(6, held, { status: "pending", resolution: null })];
+    expect(await planFormResolutionSince(logOf(rows).bb, "thr", 0)).toBeNull();
+  });
+});
+
+describe("approvedPlanSince's auto-approve fallback", () => {
+  it("credits an auto-approval recorded after the window's start", async () => {
+    const { bb } = logOf([], { presentPlanAutoApprovedSeq: 11 });
+    expect(await approvedPlanSince(bb, "thr", 10)).toEqual({ id: "present-plan-auto-11", seq: 11, requestedSeq: undefined });
+  });
+
+  it.each([
+    ["at the window's start", { presentPlanAutoApprovedSeq: 10 }],
+    ["before the window", { presentPlanAutoApprovedSeq: 9 }],
+    ["missing", {}],
+  ])("does not credit an auto-approval %s", async (_name, metadata) => {
+    expect(await approvedPlanSince(logOf([], metadata).bb, "thr", 10)).toBeNull();
+  });
+
+  it("reads unparseable state as idle: nothing is credited, and it warns", async () => {
+    const { bb, warnings } = logOf([], { phase: "bogus", presentPlanAutoApprovedSeq: 99 });
+    expect(await approvedPlanSince(bb, "thr", 10)).toBeNull();
+    expect(warnings[0]).toContain("unparseable thread state");
+  });
+
+  it("throws when the state read fails, so the gate fails closed", async () => {
+    await expect(approvedPlanSince(logOf([], new Error("state down")).bb, "thr", 10)).rejects.toThrow("state down");
+  });
+
+  it("prefers a lifecycle approval and never reads the state when the walk finds one", async () => {
+    const { bb } = logOf([lifecycle(21, "turn-1", "resolved")], new Error("state down"));
+    expect(await approvedPlanSince(bb, "thr", 10)).toEqual({ id: "pint-1", seq: 21, requestedSeq: undefined });
+  });
+});
+
+// Regression ledger: bb core facts learned in thread thr_w92i8w56wb. These run
+// against plugin fixtures and guard the plugin's handling of them, not core
+// drift; the live check is the end-to-end run in that thread's plan.
+describe("regression ledger (thr_w92i8w56wb)", () => {
+  it("plugins cannot create plan-approval interactions, so the plugin opens its own form", () => {
+    // bb core `apps/server/src/routes/threads/interactions.ts` offers answer/cancel only,
+    // and the SDK's `threads.interactions` area has no `create`. A type-level guard: if
+    // the SDK ever adds `create`, this stops compiling and the plan can use a native approval.
+    const probe = (bb: BbPluginApi) => {
+      // @ts-expect-error `create` is not on the SDK's interactions area
+      return bb.sdk.threads.interactions.create;
+    };
+    expect(typeof probe).toBe("function");
+  });
+
+  it("a held form's lifecycle event is turn-scoped and a detached one thread-scoped; only the first is credited", async () => {
+    // bb core `apps/server/src/services/interactions/pending-interaction-timeline.ts`
+    // `interactionScope`: `turnId === null ? threadScope() : turnScope(turnId)`.
+    expect(await approvedPlanSince(logOf([form(12, { kind: "turn", turnId: "turn-1" })]).bb, "thr", 0)).not.toBeNull();
+    expect(await approvedPlanSince(logOf([form(12, { kind: "thread" })]).bb, "thr", 0)).toBeNull();
+  });
+
+  it("the detached delivery text carries no `[bb ` prefix, so it cannot be told from the user's own words", async () => {
+    // bb core `apps/server/src/services/plugins/detached-tool-result-delivery.ts`:
+    // "Your earlier <tool> tool call has finished. Its result: …". With no prefix, a
+    // request carrying it counts as the user's turn, which is why a detached
+    // form is never credited and only a turn-scoped one is.
+    const delivery = "Your earlier PresentPlan tool call has finished. Its result: approved";
+    expect(delivery.startsWith("[bb ")).toBe(false);
+    expect(delivery.startsWith(AUTO_REVIEW_MARKER)).toBe(false);
+    const { bb } = logOf([
+      { seq: 3, type: "client/turn/requested", scope: { kind: "thread" }, data: { requestId: "creq-1", initiator: "user", target: { kind: "new-turn" }, input: [{ type: "text", text: delivery }] } },
+    ]);
+    expect(await firstUserTurnSince(bb, "thr", 0)).toBe(3);
+  });
+
+  it("the fork daemon aborts forwarded tool calls after 65 minutes, so the form waits 60", () => {
+    // bb core `apps/host-daemon/src/server-client.fork.ts` `TOOL_CALL_TIMEOUT_MS = 65 * 60 * 1000`:
+    // past it the held request aborts and the plugin's own cancel text cannot reach the agent.
+    expect(PLAN_APPROVAL_TIMEOUT_MS).toBe(60 * 60 * 1000);
+    expect(PLAN_APPROVAL_TIMEOUT_MS).toBeLessThan(65 * 60 * 1000);
   });
 });
 

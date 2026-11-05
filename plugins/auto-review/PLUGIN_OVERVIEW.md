@@ -146,9 +146,27 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   the review instructions, and the second call (after the agent applies the findings)
   releases it — the agent then ends its turn and waits for the user's own, explicit
   approval, since a tool result is never the user's approval (except when a project opts in
-  to auto-approve and the plan completed the review cycle). Claude Code and its profile
+  to auto-approve and the plan completed the review cycle, or when the plan approval form,
+  below, collected the user's approval). Claude Code and its profile
   providers never get `PresentPlan`, and no other provider gets the native gate's instructions, so the two
   paths never compete for the same plan.
+- The global setting `planApprovalForm` (off by default; applies to new threads) makes the
+  second `PresentPlan` call open a form with `bb.ui.requestInput`, after the thread lock is
+  released and with `experimental_holdToolCall`, on a bb build that supports holding a tool call
+  for a form. The form shows the plan path and whether the review completed (Approve, Request
+  changes with feedback, Cancel). The agent's turn stays blocked, and the answer becomes the
+  tool result: approved (implement), changes requested (revise and call `PresentPlan` again; the
+  feedback is quoted as data), or cancelled (not approved; end the turn, ask again later). The
+  form waits 60 minutes, under the fork daemon's 65-minute ceiling on forwarded tool calls. The
+  plugin cannot detect the hold, so after the form settles it reads the lifecycle events: a
+  form whose resolution is not turn-scoped (a detached call) returns the plain release text
+  whatever was clicked. The missing-plan Blocker (`approvedPlanSince`), the turn-end approvals
+  and the user-turn bookkeeping credit only a turn-scoped, resolved `plan-approval` form whose
+  row says `approved: true`; the row keeps no feedback. Self-approval is possible: bb does not
+  check who answers a pending interaction, and the CLI can answer one with `--self`, as with
+  native ExitPlanMode approvals. An auto-approved `PresentPlan` leaves no interaction, so the
+  gate reads `presentPlanAutoApprovedSeq` from the thread state instead; `bb auto-review reset`
+  keeps that key.
 - Per project and off by default (the Plan auto-approve section on the settings page, or
   `bb auto-review auto-approve on --project <id>`), a plan is approved automatically once it completed the review cycle (reason `plan-approved`);
   anything the gate cannot show was reviewed still goes to the user. The CLI validates the
@@ -192,7 +210,7 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
 
 ## Surfaces
 
-- Settings: global `enabled`, default `mergeEligibleMainlines`, default `reviewMode`, plus a
+- Settings: global `enabled`, default `mergeEligibleMainlines`, default `reviewMode`, `planApprovalForm` (off by default), plus a
   Plan auto-approve section listing each project with its own switch (Tools → Auto review).
 - Per-project overrides live in the plugin's own storage.
 - CLI: `bb auto-review status|show|enable|disable|auto-approve|findings|reset` (all `--json`). `status`

@@ -6,7 +6,7 @@ import type { AvailableWorkspace, WorkingTreeFile } from "./detect-workspace.js"
 interface Row {
   seq: number;
   type: string;
-  scope: { kind: "turn"; turnId: string };
+  scope: { kind: "turn"; turnId: string } | { kind: "thread" };
   data: Record<string, unknown>;
 }
 
@@ -31,6 +31,23 @@ const lifecycle = (seq: number, decision = "allow_once"): Row => ({
   },
 });
 
+/** This plugin's plan-approval form resolved as approved; turn-scoped when the host held the call, thread-scoped when it detached. */
+const approvalForm = (seq: number, scope: Row["scope"] = { kind: "turn", turnId: "turn-1" }): Row => ({
+  seq,
+  type: "system/interaction/lifecycle",
+  scope,
+  data: {
+    interaction: {
+      id: "pint-form",
+      status: "resolved",
+      statusReason: null,
+      origin: { kind: "plugin", pluginId: "auto-review", rendererId: "plan-approval" },
+      payload: { kind: "plugin", title: "Plan approval", data: { planFilePath: "/w/p.md", reviewed: true } },
+      resolution: { kind: "plugin_submitted", description: { title: "Approved", payload: { approved: true } } },
+    },
+  },
+});
+
 const file = (path: string, insertions: number | null, deletions: number | null): WorkingTreeFile =>
   ({ path, status: "M", insertions, deletions }) as WorkingTreeFile;
 
@@ -45,11 +62,13 @@ const workspace = (workingTree: WorkingTreeFile[], mergeBase?: WorkingTreeFile[]
 /**
  * A bb whose `changeSize` rpc resolves `rpc` (or throws), and whose event log
  * is `rows`; `afterSeq` filtering mirrors the host's, so a stale plan row
- * before the window cannot be found.
+ * before the window cannot be found. `metadata` is the thread's plugin state
+ * (an Error is thrown by the read).
  */
 function bbOf(
   rpc: unknown,
   rows: Row[] | "throws" = [],
+  metadata: unknown = {},
 ): { bb: BbPluginApi; warnings: string[]; rpcCalls: Array<Record<string, unknown>>; walkStarts: string[] } {
   const warnings: string[] = [];
   const rpcCalls: Array<Record<string, unknown>> = [];
@@ -67,6 +86,12 @@ function bbOf(
         },
       },
       threads: {
+        getPluginMetadata: async () => {
+          if (metadata instanceof Error) {
+            throw metadata;
+          }
+          return metadata;
+        },
         events: {
           list: async (args: { afterSeq?: string; types?: string[]; limit?: string }) => {
             walkStarts.push(args.afterSeq ?? "");
@@ -294,5 +319,45 @@ describe("reviewSize", () => {
     });
     expect(warnings[0]).toContain("blocker fires");
     expect(warnings[0]).toContain("kaboom");
+  });
+});
+
+describe("reviewSize's plan credits", () => {
+  const over = workspace([file("a.ts", 30, 30)]);
+
+  it("a held form approval after the anchor clears the missing-plan blocker", async () => {
+    const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, [approvalForm(12)]);
+    expect(await reviewSize(bb, "thr_1", ["a.ts"], over, 0)).toEqual({ trivial: false, blocker: false });
+  });
+
+  it.each([
+    ["before the anchor", [approvalForm(8)]],
+    ["missing", []],
+    ["detached (thread-scoped)", [approvalForm(12, { kind: "thread" })]],
+  ])("a form approval %s leaves the blocker", async (_name, rows) => {
+    const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, rows);
+    expect(await reviewSize(bb, "thr_1", ["a.ts"], over, 0)).toEqual({ trivial: false, blocker: true });
+  });
+
+  it("an auto-approval recorded after the anchor clears the blocker", async () => {
+    const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, [], { presentPlanAutoApprovedSeq: 11 });
+    expect(await reviewSize(bb, "thr_1", ["a.ts"], over, 0)).toEqual({ trivial: false, blocker: false });
+  });
+
+  it.each([
+    ["at the anchor", { presentPlanAutoApprovedSeq: 10 }],
+    ["before the anchor", { presentPlanAutoApprovedSeq: 4 }],
+    ["missing", {}],
+    ["unparseable state", { phase: "bogus", presentPlanAutoApprovedSeq: 99 }],
+  ])("an auto-approval %s leaves the blocker", async (_name, metadata) => {
+    const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, [], metadata);
+    expect(await reviewSize(bb, "thr_1", ["a.ts"], over, 0)).toEqual({ trivial: false, blocker: true });
+  });
+
+  it("a failed state read keeps the blocker and warns", async () => {
+    const { bb, warnings } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, [], new Error("state down"));
+    expect(await reviewSize(bb, "thr_1", ["a.ts"], over, 0)).toEqual({ trivial: false, blocker: true });
+    expect(warnings[0]).toContain("blocker fires");
+    expect(warnings[0]).toContain("state down");
   });
 });

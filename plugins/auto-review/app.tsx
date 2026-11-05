@@ -6,7 +6,12 @@ import {
   useRealtimeConnectionState,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
-import type { PluginThreadHeaderActionProps } from "@get-bb/plugin-sdk/app";
+import type { PluginPendingInteractionProps, PluginThreadHeaderActionProps } from "@get-bb/plugin-sdk/app";
+import {
+  PLAN_APPROVAL_FEEDBACK_MAX,
+  PLAN_APPROVAL_RENDERER,
+  planApprovalPayloadSchema,
+} from "./src/plan-approval-form.js";
 import type { AutoReviewRpcContract, ProjectSetting, ThreadReview } from "./src/rpc-contract.js";
 
 const SOFT_INK = "color-mix(in oklch, var(--ink) 68%, var(--canvas))";
@@ -477,6 +482,93 @@ function ReviewBadge(props: PluginThreadHeaderActionProps) {
   );
 }
 
+/**
+ * The plan approval form `PresentPlan` opens. Approve and Request changes
+ * submit the shapes `parsePlanApprovalValue` reads; Cancel postpones the
+ * decision. Chat sends are rejected while a held form is open, so Cancel is
+ * the visible way out. A payload that does not parse shows only Cancel.
+ */
+function PlanApproval(props: PluginPendingInteractionProps) {
+  const { interaction, submit, cancel } = props;
+  const [feedback, setFeedback] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const feedbackId = useId();
+  const payload = planApprovalPayloadSchema.safeParse(interaction.payload);
+
+  const run = async (action: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (nextError) {
+      setError(describeError(nextError));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {payload.success ? (
+        <>
+          <div style={{ color: "var(--ink)", fontWeight: 500 }}>Approve this plan?</div>
+          <div style={{ fontSize: 12, color: SOFT_INK }}>
+            <div>{payload.data.planFilePath}</div>
+            <div>
+              {payload.data.reviewed
+                ? "auto-review completed its review of this plan."
+                : "auto-review could not confirm that its review of this plan completed."}
+            </div>
+          </div>
+          <label htmlFor={feedbackId} style={{ fontSize: 12, color: SOFT_INK }}>
+            Feedback, sent with Request changes
+          </label>
+          <textarea
+            id={feedbackId}
+            value={feedback}
+            maxLength={PLAN_APPROVAL_FEEDBACK_MAX}
+            disabled={busy}
+            rows={3}
+            onChange={(event) => setFeedback(event.target.value)}
+          />
+        </>
+      ) : (
+        <div role="alert" style={{ color: "var(--destructive-text)" }}>
+          This plan approval form could not be read. Cancel it and ask the agent to present the plan again.
+        </div>
+      )}
+      {error === null ? null : (
+        <div role="alert" style={{ fontSize: 12, color: "var(--destructive-text)" }}>
+          {error}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8 }}>
+        {payload.success ? (
+          <>
+            <button type="button" disabled={busy} onClick={() => void run(() => submit({ approved: true }))}>
+              Approve
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() =>
+                void run(() =>
+                  submit(feedback.trim() === "" ? { approved: false } : { approved: false, feedback }),
+                )
+              }
+            >
+              Request changes
+            </button>
+          </>
+        ) : null}
+        <button type="button" disabled={busy} onClick={() => void run(cancel)}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "project-auto-approve",
@@ -490,4 +582,5 @@ export default definePluginApp((app) => {
     title: "Auto-review",
     component: ReviewBadge,
   });
+  app.slots.pendingInteraction({ id: PLAN_APPROVAL_RENDERER, component: PlanApproval });
 });

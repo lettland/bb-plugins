@@ -201,6 +201,7 @@ export const threadStateSchema = z.object({
   presentPlanRedone: z.literal(true).optional(),
   /** `planReviewLight` for the `PresentPlan` arm: computed from the plan file at arm time, read back at release. */
   presentPlanLight: z.boolean().optional(),
+  presentPlanAutoApprovedSeq: z.number().int().nonnegative().optional(), // Auto-approval cursor the missing-plan gate reads; outside PRESENT_PLAN_KEYS and the latch keys on purpose, so a reset keeps it.
   /**
    * The interaction ids of the plan approvals auto-review resolved itself
    * (auto-approved, or re-approved on an earlier approval), most recent last,

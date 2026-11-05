@@ -5,6 +5,8 @@ import { installTestPluginRuntime, loadPluginApp, renderSlot } from "@get-bb/plu
 import type { PluginRpcTestHandlers, RenderSlotOptions } from "@get-bb/plugin-sdk/testing/app";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type {
+  PluginPendingInteractionProps,
+  PluginPendingInteractionRegistration,
   PluginSettingsSectionRegistration,
   PluginThreadHeaderActionProps,
   PluginThreadHeaderActionRegistration,
@@ -30,12 +32,14 @@ vi.mock("@get-bb/plugin-sdk/app", async (importOriginal) => {
 
 let approveSection: PluginSettingsSectionRegistration;
 let badgeSlot: PluginThreadHeaderActionRegistration;
+let planFormSlot: PluginPendingInteractionRegistration;
 
 beforeAll(async () => {
   installTestPluginRuntime();
   const app = await loadPluginApp(() => import("./app"));
   approveSection = app.settingsSections.find((section) => section.id === "project-auto-approve")!;
   badgeSlot = app.threadHeaderActions.find((action) => action.id === "review-status")!;
+  planFormSlot = app.pendingInteractions.find((form) => form.id === "plan-approval")!;
 });
 
 // Vitest globals are off, so Testing Library does not clean up by itself.
@@ -631,5 +635,113 @@ describe("Review badge", () => {
     expect((await screen.findByRole("button")).textContent).toBe("Committed");
     await act(async () => { pending[0]!.reject(new Error("late")); });
     expect(screen.getByRole("button").textContent).toBe("Committed");
+  });
+});
+
+describe("Plan approval form", () => {
+  function renderForm(
+    payload: unknown = { planFilePath: "/w/docs/plans/p.md", reviewed: true },
+    over: Partial<Pick<PluginPendingInteractionProps, "submit" | "cancel">> = {},
+  ) {
+    const submit = vi.fn<PluginPendingInteractionProps["submit"]>(async () => undefined);
+    const cancel = vi.fn<PluginPendingInteractionProps["cancel"]>(async () => undefined);
+    renderSlot<PluginPendingInteractionProps>(planFormSlot, {
+      interaction: {
+        id: "pint-1",
+        threadId: "thr_1",
+        title: "Plan approval",
+        payload: payload as never,
+        createdAt: 1,
+        expiresAt: null,
+      },
+      submit,
+      cancel,
+      ...over,
+    });
+    return { submit, cancel };
+  }
+
+  it("registers the renderer the backend opens", () => {
+    expect(planFormSlot.id).toBe("plan-approval");
+  });
+
+  it("shows the plan path and that the review completed, with all three actions", () => {
+    renderForm();
+    expect(screen.getByText("/w/docs/plans/p.md")).toBeTruthy();
+    expect(screen.getByText("auto-review completed its review of this plan.")).toBeTruthy();
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "Approve",
+      "Request changes",
+      "Cancel",
+    ]);
+  });
+
+  it("says when the review could not be confirmed", () => {
+    renderForm({ planFilePath: "/w/p.md", reviewed: false });
+    expect(screen.getByText("auto-review could not confirm that its review of this plan completed.")).toBeTruthy();
+  });
+
+  it("Approve submits { approved: true }", async () => {
+    const { submit, cancel } = renderForm();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(submit).toHaveBeenCalledWith({ approved: true }));
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("Request changes submits the feedback, and nothing but the answer when it is blank", async () => {
+    const { submit } = renderForm();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "split step 2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Request changes" }));
+    await waitFor(() => expect(submit).toHaveBeenCalledWith({ approved: false, feedback: "split step 2" }));
+    cleanup();
+    const blank = renderForm();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "   " } });
+    fireEvent.click(screen.getByRole("button", { name: "Request changes" }));
+    await waitFor(() => expect(blank.submit).toHaveBeenCalledWith({ approved: false }));
+  });
+
+  it("caps the feedback box at the 2000 characters the answer allows", () => {
+    renderForm();
+    expect(screen.getByRole("textbox").getAttribute("maxlength")).toBe("2000");
+  });
+
+  it("Cancel calls cancel() and submits nothing", async () => {
+    const { submit, cancel } = renderForm();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("disables every action while an answer is in flight", async () => {
+    let finish: () => void = () => undefined;
+    renderForm(undefined, { submit: () => new Promise<void>((resolve) => { finish = resolve; }) });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true));
+    expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).disabled).toBe(true);
+    await act(async () => { finish(); });
+  });
+
+  it.each([
+    ["an Error", () => Promise.reject(new Error("host refused")), "host refused"],
+    ["a non-Error", () => Promise.reject("gone"), "gone"],
+  ])("shows %s from a failed answer and lets the user try again", async (_name, submit, message) => {
+    renderForm(undefined, { submit });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(message);
+    expect((screen.getByRole("button", { name: "Approve" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it.each([
+    ["a missing field", { planFilePath: "/w/p.md" }],
+    ["a wrong type", { planFilePath: 3, reviewed: true }],
+    ["null", null],
+  ])("a payload with %s renders only the error and Cancel", async (_name, payload) => {
+    const { cancel } = renderForm(payload);
+    expect(screen.getByRole("alert").textContent).toContain("could not be read");
+    expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["Cancel"]);
+    expect(screen.queryByRole("textbox")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
   });
 });

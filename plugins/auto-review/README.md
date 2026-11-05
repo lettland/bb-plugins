@@ -14,7 +14,7 @@ plan to a file and call the `PresentPlan` tool before substantial work, even out
 mode; `PresentPlan` holds the first call back for review and releases it on the second,
 after the agent applies the review's findings to the plan file — the agent then ends its
 turn and waits for the user's own, explicit approval, since a tool result is never
-treated as that approval (unless the project opted in to auto-approve, below). If the
+treated as that approval (unless the project opted in to auto-approve, or the plan approval form is on; both below). If the
 agent's very next tool call after an ExitPlanMode hold is the native `AskUserQuestion` (an MCP one, such as the bb-bridge tool of the same name, does
 not count) asking the user what to change, auto-review answers that one question itself
 (marked `[bb auto-review]`) so the queued review still reaches it instead of the user
@@ -519,6 +519,7 @@ plugin, so agents can read it too.
 | Enabled | on | Global kill switch |
 | Merge-eligible mainlines | `master` | Comma-separated branch names a feature branch may be merged into locally |
 | Review mode | `auto` | `auto` uses devkit's calibrated review when `devkit_load_skill` is available, else self-review; `devkit` requires it; `self` always self-reviews |
+| Plan approval form | off | `PresentPlan` asks for plan approval in a form that holds the agent's turn until you answer (needs a bb build with `experimental_holdToolCall`); applies to new threads |
 
 Under bb, `auto` (when devkit is available) and `devkit` modes hand the five lens reviews — and
 the closure review — to bb child threads when the thread can spawn children (otherwise provider
@@ -544,6 +545,42 @@ record — including when the hold expires instead of releasing.
 Per-project overrides are stored in the plugin's own storage. bb's settings page for this
 plugin (Tools → Auto review) also has a Plan auto-approve section that lists every project with its own switch for approving reviewed
 plans automatically; it writes the same storage as `bb auto-review auto-approve`.
+
+### Plan approval form
+
+Global setting, off by default. With it off, `PresentPlan` behaves as described above: after
+the review it tells the agent to wait for the user's approval in chat.
+
+With it on, `PresentPlan` opens an approval form once the review is done, on providers other
+than Claude Code. The form shows the plan path and whether the review completed, with Approve,
+Request changes (with optional feedback) and Cancel. The agent's turn stays blocked until you
+answer, and the answer is the `PresentPlan` result itself:
+
+- **Approve:** the result says the user approved the plan in the form, and the agent implements it. The missing-plan Blocker of the code review counts this approval.
+- **Request changes:** the agent revises the plan file from your feedback and calls `PresentPlan` again, which runs a new review and then a new form. The feedback reaches the agent as quoted data, never as an instruction.
+- **Cancel** (or a stop, or the 60-minute limit): the plan stays unapproved. The agent ends its turn and says so; ask it to present the plan again and it calls `PresentPlan` with the same path. For an unchanged plan file that is a short re-review followed by a new form.
+
+With the form on, a chat reply is not approval: the agent's instructions say to call
+`PresentPlan` again so you can approve in the form. The form waits at most 60 minutes, which
+stays under the 65-minute limit the fork daemon puts on forwarded tool calls.
+
+**What it needs from bb.** The form only works on a bb build that can hold a tool call while a
+form is open (`bb.ui.requestInput` with `experimental_holdToolCall`). The published plugin SDK
+(0.6.79 here, and 0.6.121) has no such option in its types and no flag to detect it, so the
+plugin cannot check; it passes the option and checks the result instead. Self-test: if the
+agent keeps working while the form is open, your bb does not support this; turn the setting
+off. On a bb without the hold, the form detaches from the turn; the plugin then returns the
+plain release text whatever you clicked, and the missing-plan Blocker does not count it (it
+fails closed, as with the setting off). The setting applies to new threads, because the
+agent's instructions are fixed when a thread is configured.
+
+**Self-approval.** bb does not check who answers a pending interaction, and the `bb` CLI can
+answer one (`bb thread interactions respond <id> --self --value …`). An agent could therefore
+approve its own form, for example from a background shell started before `PresentPlan`, from
+a parallel tool call, or from another thread. Native ExitPlanMode approvals have the same gap,
+so this is parity, not a new hole. The host exposes no resolver to check. Another plugin
+cannot forge the approval: the host sets the form's origin plugin, and the missing-plan check
+also requires the form to have been held in the turn.
 
 ## CLI
 

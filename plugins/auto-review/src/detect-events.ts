@@ -1,6 +1,9 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
+import { EVENT_PAGE_MAX, eventsSince, type EventOf } from "./detect-event-log.js";
+import { planFormResolution } from "./detect-plan-form.js";
 import { AUTO_REVIEW_MARKER, CODE_REVIEW_OPENING } from "./prompt.js";
+import { readState } from "./state.js";
 
 export async function captureSinceSeq(
   bb: BbPluginApi,
@@ -54,49 +57,9 @@ export async function stoppedByUser(
   );
 }
 
-/** The most events one `threads.events.list` page may request; the server rejects a larger `limit`. */
-export const EVENT_PAGE_MAX = 100;
-/** Bounds the walk through a thread with a very long run of turn requests: 50 pages of 100. */
-const TURN_REQUEST_MAX_PAGES = 50;
+export { EVENT_PAGE_MAX };
 
-type EventPage = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["events"]["list"]>>;
-type EventOf<T extends EventPage[number]["type"]> = Extract<EventPage[number], { type: T }>;
 type TurnRequestData = EventOf<"client/turn/requested">["data"];
-
-/**
- * The events of one type after the cursor, oldest first. The event log is paged,
- * so a long run of them could push the one that matters past the first page;
- * this walks the pages, and throws if the walk hits its cap rather than let the
- * caller conclude "none" from a log it did not finish reading.
- */
-async function* eventsSince<T extends EventPage[number]["type"]>(
-  bb: BbPluginApi,
-  threadId: string,
-  sinceSeq: number,
-  type: T,
-): AsyncGenerator<EventOf<T>> {
-  let afterSeq = sinceSeq;
-  for (let page = 0; page < TURN_REQUEST_MAX_PAGES; page += 1) {
-    const events = await bb.sdk.threads.events.list({
-      threadId,
-      afterSeq: String(afterSeq),
-      types: [type],
-      order: "asc",
-      limit: String(EVENT_PAGE_MAX),
-    });
-    for (const event of events) {
-      if (event.type === type) {
-        yield event as EventOf<T>;
-      }
-    }
-    const last = events.at(-1);
-    if (last === undefined || events.length < EVENT_PAGE_MAX) {
-      return;
-    }
-    afterSeq = last.seq;
-  }
-  throw new Error(`more than ${TURN_REQUEST_MAX_PAGES * EVENT_PAGE_MAX} ${type} events since seq ${sinceSeq}`);
-}
 
 async function collect<T>(events: AsyncGenerator<T>): Promise<T[]> {
   const found: T[] = [];
@@ -149,9 +112,11 @@ function isCodeReviewRequest(data: TurnRequestData): boolean {
 /**
  * The plan approval the interaction lifecycle event resolved, or null when it
  * resolves none: a `resolved` approval whose decision is `allow_once` or
- * `allow_for_session` of a plan; a deny, an interaction still `resolving`, or
- * an approval of anything else is not one. The event carries no resolver, so
- * the caller tells an approval the user gave from one auto-review gave itself.
+ * `allow_for_session` of a plan, or a held plan-approval form answered
+ * `approved` (`planFormResolution`); a deny, an interaction still
+ * `resolving`, or an approval of anything else is not one. The event carries
+ * no resolver, so the caller tells an approval the user gave from one
+ * auto-review gave itself.
  * `requestedSeq` rides along: when the interaction was asked for.
  */
 function approvedPlanOf(
@@ -159,6 +124,10 @@ function approvedPlanOf(
   requestedSeq: number | undefined,
 ): ApprovedPlan | null {
   const { interaction } = event.data;
+  const form = planFormResolution(event);
+  if (form !== null) {
+    return form.held && form.approved ? { id: interaction.id, seq: event.seq, requestedSeq } : null;
+  }
   if (
     interaction.payload.kind !== "approval" ||
     interaction.payload.subject.kind !== "plan" ||
@@ -178,10 +147,14 @@ function approvedPlanOf(
 }
 
 /**
- * A plan approved at or after `sinceSeq` in this thread, across turns — the
- * window a change sized non-trivial needs a plan in — or null when none is.
- * User and auto-approve resolutions both count (see `approvedPlanOf`); the
- * request time is not read here, so `requestedSeq` stays undefined.
+ * A plan approved after `sinceSeq` in this thread, across turns — the window a
+ * change sized non-trivial needs a plan in — or null when none is. User and
+ * auto-approve resolutions both count (see `approvedPlanOf`); the request time
+ * is not read here, so `requestedSeq` stays undefined. `PresentPlan`'s own
+ * auto-approval leaves no interaction, so when the walk finds none the cursor
+ * it recorded in the thread state is read. Both are strict: an approval at
+ * `sinceSeq` itself is before the window. A failed read throws, so the caller
+ * fails closed.
  */
 export async function approvedPlanSince(
   bb: BbPluginApi,
@@ -192,7 +165,8 @@ export async function approvedPlanSince(
     const approval = approvedPlanOf(event, undefined);
     if (approval !== null) return approval;
   }
-  return null;
+  const { presentPlanAutoApprovedSeq: seq } = await readState(bb, threadId);
+  return seq !== undefined && seq > sinceSeq ? { id: `present-plan-auto-${seq}`, seq, requestedSeq: undefined } : null;
 }
 
 /**

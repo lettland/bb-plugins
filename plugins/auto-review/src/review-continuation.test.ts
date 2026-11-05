@@ -173,4 +173,41 @@ describe("noteUserTurn", () => {
     expect(held.userTurnStart).toBeUndefined();
     expect(lookups.turnChangedPaths).not.toHaveBeenCalled();
   });
+
+  it("a turn whose only credit is a held plan approval form counts as the user's and as authored", async () => {
+    // The real endedTurn reads this log: the turn has no accepted input, only a
+    // turn-scoped, approved plan-approval form, so `byApproval` alone carries it.
+    const rows = [
+      { seq: 5, type: "turn/completed", scope: { kind: "turn", turnId: "turn-1" }, data: {} },
+      {
+        seq: 4,
+        type: "system/interaction/lifecycle",
+        scope: { kind: "turn", turnId: "turn-1" },
+        data: {
+          interaction: {
+            id: "pint-form",
+            status: "resolved",
+            statusReason: null,
+            origin: { kind: "plugin", pluginId: "auto-review", rendererId: "plan-approval" },
+            payload: { kind: "plugin", title: "Plan approval", data: { planFilePath: "/w/p.md", reviewed: true } },
+            resolution: { kind: "plugin_submitted", description: { title: "Approved", payload: { approved: true } } },
+          },
+        },
+      },
+    ];
+    const f = fakeBb();
+    lookups.fetchWorkspace.mockClear();
+    (f.bb.sdk.threads as unknown as Record<string, unknown>).events = {
+      list: async (args: { afterSeq?: string; types?: string[]; limit?: string }) =>
+        rows.filter((row) => row.seq > Number(args.afterSeq ?? 0) && args.types?.includes(row.type) === true),
+    };
+    const { endedTurn } = await vi.importActual<typeof import("./detect-events.js")>("./detect-events.js");
+    lookups.endedTurn.mockImplementationOnce(endedTurn);
+    lookups.endedTurn.mockImplementationOnce(endedTurn);
+    const held = await noteUserTurn(f.ctx, thread("env"), { phase: "awaiting-review", turnStart } as ThreadState);
+    expect(held).toMatchObject({ handledTurnEndSeq: 5, userTurnStart: turnStart, userTurnAuthored: true });
+    expect(held.userStopFloorSeq).toBeUndefined();
+    // Authored by the approval alone: the tree is never checked.
+    expect(lookups.fetchWorkspace).not.toHaveBeenCalled();
+  });
 });

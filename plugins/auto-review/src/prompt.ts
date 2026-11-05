@@ -18,6 +18,10 @@ export {
   PRESENT_PLAN_INCOMPLETE_MESSAGE, PRESENT_PLAN_APPROVED_MESSAGE, PRESENT_PLAN_INVALID_PATH_MESSAGE,
   PLAN_HOLD_ANSWER,
 } from "./prompt-plan.js";
+export {
+  PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM, PRESENT_PLAN_USER_APPROVED_MESSAGE,
+  presentPlanChangesRequestedMessage, presentPlanApprovalCancelledMessage,
+} from "./prompt-plan-form.js";
 /**
  * Past this many paths the list is too long to hand over reliably. It is then
  * not truncated into a partial commit boundary: the review runs, but the commit

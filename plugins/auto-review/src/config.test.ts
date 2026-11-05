@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import {
+  defineAutoReviewSettings,
   effectiveConfig,
   globalDefaultsFrom,
   parseMainlines,
@@ -27,11 +28,13 @@ describe("globalDefaultsFrom", () => {
         enabled: true,
         mergeEligibleMainlines: "master,trunk",
         reviewMode: "devkit",
+        planApprovalForm: false,
       }),
     ).toEqual({
       enabled: true,
       mergeEligibleMainlines: ["master", "trunk"],
       reviewMode: "devkit",
+      planApprovalForm: false,
     });
   });
 
@@ -41,6 +44,7 @@ describe("globalDefaultsFrom", () => {
         enabled: false,
         mergeEligibleMainlines: "  ",
         reviewMode: "auto",
+        planApprovalForm: false,
       }).mergeEligibleMainlines,
     ).toEqual(["master"]);
   });
@@ -51,8 +55,32 @@ describe("globalDefaultsFrom", () => {
         enabled: true,
         mergeEligibleMainlines: "master",
         reviewMode: "nonsense",
+        planApprovalForm: false,
       }).reviewMode,
     ).toBe("auto");
+  });
+
+  it("passes the plan approval form switch through", () => {
+    const values = { enabled: true, mergeEligibleMainlines: "master", reviewMode: "auto" };
+    expect(globalDefaultsFrom({ ...values, planApprovalForm: true }).planApprovalForm).toBe(true);
+    expect(globalDefaultsFrom({ ...values, planApprovalForm: false }).planApprovalForm).toBe(false);
+  });
+});
+
+describe("the plan approval form setting", () => {
+  it("is a global boolean, off by default, that says what it needs and how to self-test", async () => {
+    const host = createFakePluginHost({ pluginId: "auto-review" });
+    try {
+      const settings = defineAutoReviewSettings(host.bb);
+      expect((await settings.get()).planApprovalForm).toBe(false);
+      const descriptor = host.harness.registrations.settingsDescriptors.planApprovalForm;
+      expect(descriptor).toMatchObject({ type: "boolean", label: "Plan approval form", default: false });
+      expect(descriptor.description).toContain("experimental_holdToolCall");
+      expect(descriptor.description).toContain("If the agent keeps working while the form is open, your bb doesn't support this; turn it off.");
+      expect(descriptor.description).toContain("applies to new threads");
+    } finally {
+      await host.harness.dispose();
+    }
   });
 });
 
@@ -69,7 +97,14 @@ describe("effectiveConfig", () => {
       mergeEligibleMainlines: ["master"],
       reviewMode: "auto",
       autoApprovePlans: false,
+      planApprovalForm: false,
     });
+  });
+
+  it("takes the plan approval form switch from the globals alone, reading an absent one as off", () => {
+    expect(effectiveConfig({ ...globals, planApprovalForm: true }, {}).planApprovalForm).toBe(true);
+    expect(effectiveConfig({ ...globals, planApprovalForm: true }, { enabled: false }).planApprovalForm).toBe(true);
+    expect(effectiveConfig({ ...globals, planApprovalForm: false }, {}).planApprovalForm).toBe(false);
   });
 
   it("applies a partial project override without clobbering the rest", () => {
