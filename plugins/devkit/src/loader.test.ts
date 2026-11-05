@@ -655,8 +655,19 @@ describe("review-code content", () => {
     expect(normalized).toContain("bb thread delete --yes");
   });
 
-  it("always requests auto permission mode, never falls back to accept-edits, and passes --permission-mode", () => {
-    expect(normalized).toContain("always request `auto`");
+  it("picks the permission mode from provider capabilities, never skips auto on missing data, and never falls back to accept-edits", () => {
+    expect(normalized).toContain(".capabilities.permissionModes");
+    expect(normalized).toContain("The list contains `auto`: request `auto`");
+    expect(normalized).toContain("The list is a non-empty array without `auto`");
+    expect(normalized).toContain("request the parent's own mode on the first spawn");
+    expect(normalized).toContain("no permission-mode retry");
+    // Regression (learned 2026-11-05 in a bb review run; see the commit that adds this test): a
+    // provider whose capabilities list only accept-edits/full rejects `--permission-mode auto`
+    // with HTTP 400 on every reviewer spawn.
+    expect(normalized).toContain("some providers accept only `accept-edits`/`full`");
+    expect(normalized).toContain("missing, `null`, empty, or not an array");
+    expect(normalized).toContain("missing data never skips `auto`");
+    expect(normalized).not.toContain("always request `auto`");
     expect(normalized).toContain("Never map `full` to `accept-edits`");
     expect(normalized).toContain("--permission-mode <mode>");
   });

@@ -133,13 +133,23 @@ that lens through to the next, independently per lens.
   change nothing in the project. A "don't run non-readonly tools" reminder is no reason to skip
   this tier — only an actual failed or denied call is.
 
-  **Permission mode**: always request `auto` — simpler, and it covers every parent mode. If the
-  spawn is rejected for an unsupported mode (some providers, e.g. `acp-claude-work`, accept only
-  `accept-edits`/`full` and reject `auto` with an HTTP 400), retry once with the parent's own
-  mode (omit the flag only if that is `null`). On such a provider the reviewer can end up
-  running at the parent's mode, possibly `full` — the tree guard below is then the only
-  backstop. Never map `full` to `accept-edits`: on Claude Code that stalls at the first shell
-  approval, which drops the lens straight to subagents.
+  **Permission mode**: read the provider's supported modes once, before the first spawn: the
+  entry whose `id` is `<providerId>` in `bb provider list --json`, field
+  `.capabilities.permissionModes`. Three cases:
+  - The list contains `auto`: request `auto`. If the spawn is still rejected for an unsupported
+    mode (HTTP 400), retry once with the parent's own mode (omit the flag only if that is `null`).
+  - The list is a non-empty array without `auto` (some providers accept only
+    `accept-edits`/`full`): request the parent's own mode on the first spawn (omit the flag only
+    if that is `null`), with no `auto` attempt and no permission-mode retry.
+  - The command fails, the provider has no entry, or the field is missing, `null`, empty, or not
+    an array: request `auto` and keep the one retry with the parent's own mode on an HTTP 400 —
+    missing data never skips `auto`.
+
+  On a provider without `auto` the reviewer runs at the parent's mode, possibly `full` — the tree
+  guard below is then the only backstop. With a parent at `accept-edits` there, the reviewer can
+  stall at its first shell approval on Claude Code; still spawn it, and if it stalls the lens
+  falls through as usual. Never map `full` to `accept-edits`: on Claude Code that stalls at the
+  first shell approval, which drops the lens straight to subagents.
 
   **Reasoning level**: this skill sets no default level. Use the level your thread's rules give
   reviewer threads (project, plugin or user instructions) when it is one lowercase word such as
