@@ -42,6 +42,7 @@ async function setup() {
     sdk: {
       threads: {
         get: async () => thread,
+        list: async () => [],
         spawn: async () => makeThreadResponse({ id: `spawned-${(spawnCount += 1)}` }),
         update: async () => thread,
         stop: async () => ({}),
@@ -69,7 +70,7 @@ async function setup() {
     harness.behavior.callRpc(method, input) as Promise<Record<string, any>>;
   const createTask = async (overrides: Record<string, unknown> = {}) =>
     rpc("createTask", createTaskInput(overrides));
-  return { harness, thread, rpc, createTask };
+  return { bb, harness, thread, rpc, createTask };
 }
 
 // Raw row surgery for defensive branches the RPC surface cannot reach. The
@@ -343,8 +344,8 @@ test("running a card dispatches once with a normalized prompt and announces the 
   } finally { await harness.lifecycle.dispose(); }
 });
 
-test("a failed dispatch parks the card for attention and announces the failure", async () => {
-  const { harness, rpc, createTask } = await setup();
+test("a failed dispatch retains its stage and history without an attention notice", async () => {
+  const { bb, harness, rpc, createTask } = await setup();
   try {
     harness.inspection.sdk.stub("threads.spawn", async () => { throw new Error("Provider offline"); });
     // runNow surfaces the dispatch failure to the caller as well.
@@ -352,14 +353,15 @@ test("a failed dispatch parks the card for attention and announces the failure",
     const snapshot = await rpc("snapshot");
     const task = snapshot.tasks[0];
     expect(task.runState).toBe("failed");
-    expect(task.stageId).toBe("stage-attention");
+    expect(task.stageId).toBe("stage-todo");
     expect(task.attentionReason).toBe("Provider offline");
     expect(task.readAt).toBe(null);
-    const signal = lastSignal(harness);
-    expect(signal.payload.notification).toMatchObject({
-      action: "Needs attention", taskTitle: "New task", body: "Provider offline", level: "attention",
-    });
-    expect(snapshot.unreadCount).toBe(1);
+    expect(snapshot.notifications).toStrictEqual([]);
+    expect(lastSignal(harness).payload.notification).toBeUndefined();
+    expect(snapshot.unreadCount).toBe(0);
+    expect(bb.storage.database()
+      .prepare("SELECT event, summary FROM triage_events WHERE task_id = ?")
+      .all(task.id)).toContainEqual({ event: "dispatch failed", summary: "Provider offline" });
   } finally { await harness.lifecycle.dispose(); }
 });
 
@@ -612,8 +614,13 @@ test("stage administration creates, renames, reorders, and deletes user stages",
 test("notification read and delete calls act on the stored rows", async () => {
   const { harness, rpc, createTask } = await setup();
   try {
-    harness.inspection.sdk.stub("threads.spawn", async () => { throw new Error("Provider offline"); });
-    await expect(createTask({ runNow: true })).rejects.toThrow(/Provider offline/);
+    const waitForReview = async (title?: string) => {
+      const task = await createTask({ ...(title ? { title } : {}) });
+      await rpc("runTask", { number: task.number });
+      await harness.behavior.emitThreadEvent("thread.active", { thread: makeThreadResponse({ id: task.threadId }) });
+      await harness.behavior.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: task.threadId }), lastAssistantText: "Done" });
+    };
+    await waitForReview();
     let snapshot = await rpc("snapshot");
     expect(snapshot.notifications.length).toBe(1);
     expect(snapshot.unreadCount).toBe(1);
@@ -625,8 +632,8 @@ test("notification read and delete calls act on the stored rows", async () => {
     snapshot = await rpc("snapshot");
     expect(snapshot.unreadCount).toBe(0);
     expect(snapshot.notifications[0].readAt).toBeGreaterThan(0);
-    // A fresh failure plus mark-all clears everything.
-    await expect(createTask({ title: "Second", runNow: true })).rejects.toThrow(/Provider offline/);
+    // A second genuine review request plus mark-all clears everything.
+    await waitForReview("Second");
     expect((await rpc("snapshot")).unreadCount).toBe(1);
     await rpc("markNotificationsRead", { ids: null });
     expect((await rpc("snapshot")).unreadCount).toBe(0);
@@ -763,12 +770,13 @@ test("thread events move cards through the board", async () => {
     await harness.behavior.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "spawned-1" }), lastAssistantText: "Done" });
     expect(harness.realtimeSignals.length).toBe(finishedSignals + 1);
     expect(lastSignal(harness).payload.notification).toBeUndefined();
-    // Failures land in the attention stage with the provided reason.
+    // Failures retain the current stage and preserve their reason without a notice.
     await harness.behavior.emitThreadEvent("thread.failed", { thread: makeThreadResponse({ id: "spawned-1" }), error: "  Provider crashed  " });
     snapshot = await rpc("snapshot");
-    expect(snapshot.tasks[0].stageId).toBe("stage-attention");
+    expect(snapshot.tasks[0].stageId).toBe("stage-completed");
+    expect(snapshot.tasks[0].runState).toBe("failed");
     expect(snapshot.tasks[0].attentionReason).toBe("Provider crashed");
-    expect(lastSignal(harness).payload.notification.action).toBe("Needs attention");
+    expect(lastSignal(harness).payload.notification).toBeUndefined();
     // Deleting the linked thread detaches the card and keeps it on the board.
     await harness.behavior.emitThreadEvent("thread.deleted", { thread: makeThreadResponse({ id: "unrelated" }) });
     await harness.behavior.emitThreadEvent("thread.deleted", { thread: makeThreadResponse({ id: "spawned-1" }) });

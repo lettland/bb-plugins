@@ -46,6 +46,7 @@ const TASKS = [
   task({ number: 4, title: "Settled card", stageId: "stage-completed", runState: "completed", threadId: "thr-done", readAt: 50, settledAt: 999, projectId: "p2", machineId: "machine-2", machineName: "Machine Two" }),
   task({ number: 5, title: "Scheduled card", runState: "scheduled", scheduledAt: NOW + 3_600_000 }),
   task({ number: 6, title: "Fallback machine card", stageId: "stage-progress", runState: "working", threadId: "thr-fallback", readAt: 10, machineId: null }),
+  task({ number: 7, title: "Legacy failed attention", stageId: "stage-attention", runState: "failed", attentionReason: "Provider failed", settledAt: 777 }),
 ];
 
 const SNAPSHOT = {
@@ -276,6 +277,7 @@ describe("filters", () => {
     expect(screen.queryByText("Scheduled card")).toBe(null);
     fireEvent.click(screen.getByRole("button", { name: /^Settled\d*$/ }));
     expect(screen.getByText("Settled card")).toBeTruthy();
+    expect(screen.queryByText("Legacy failed attention")).toBe(null);
     expect(within(columnOf("To Do")).getByText("Nothing matches this filter")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /^All\d*$/ }));
     expect(screen.getByText("Queued card")).toBeTruthy();

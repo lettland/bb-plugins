@@ -857,18 +857,11 @@ export default async function plugin(bb: BbPluginApi) {
       return toTask(getTaskRow(number));
     } catch (error) {
       const message = errorMessage(error);
-      const attention = getSystemStage("attention");
       db.prepare(
-        "UPDATE triage_tasks SET stage_id = ?, run_state = 'failed', attention_reason = ?, read_at = NULL, updated_at = ? WHERE id = ?",
-      ).run(attention.id, message, Date.now(), current.id);
+        "UPDATE triage_tasks SET run_state = 'failed', attention_reason = ?, updated_at = ? WHERE id = ?",
+      ).run(message, Date.now(), current.id);
       addEvent(current.id, "scheduler", "dispatch failed", message);
-      notify({
-        taskNumber: number,
-        action: "Needs attention",
-        taskTitle: current.title,
-        body: message,
-        level: "attention",
-      });
+      publish();
       if (throwOnFailure) throw error;
       return toTask(getTaskRow(number));
     }
@@ -916,17 +909,7 @@ export default async function plugin(bb: BbPluginApi) {
     //  - archived is a selector, not an include flag: archived:true returns
     //    only the archived half, so each chunk needs a companion call or the
     //    settled cards of archived sessions lose their visibility and branch.
-    // Each call has its own catch so one bad batch degrades only that batch.
-    // The fake host throws synchronously for unstubbed sdk calls (learned from
-    // @get-bb/plugin-sdk dist/testing host), so the helper wraps the call in
-    // try/catch instead of relying on .catch at the call site.
-    const listBatch = async (args: ThreadListArgs) => {
-      try {
-        return await bb.sdk.threads.list(args);
-      } catch {
-        return [] as ThreadListItem[];
-      }
-    };
+    const listBatch = (args: ThreadListArgs) => bb.sdk.threads.list(args);
     const threadIds = cards.flatMap((card) => (card.threadId ? [card.threadId] : []));
     const batches: Promise<ThreadListItem[]>[] = [];
     for (let start = 0; start < threadIds.length; start += THREAD_LIST_BATCH) {
@@ -938,7 +921,12 @@ export default async function plugin(bb: BbPluginApi) {
     for (const batch of await Promise.all(batches)) {
       for (const listed of batch) threadsById.set(listed.id, listed);
     }
-    const tasks = await Promise.all(cards.map(async (task) => {
+    const visibleCards = cards.filter((task) => {
+      if (!task.threadId) return true;
+      const thread = threadsById.get(task.threadId);
+      return thread === undefined || thread.archivedAt === null;
+    });
+    const tasks = await Promise.all(visibleCards.map(async (task) => {
       const thread = task.threadId ? threadsById.get(task.threadId) ?? null : null;
       const requestEnvironment = task.request?.environment;
       const environmentId = thread?.environmentId ??
@@ -1559,24 +1547,16 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.failed", ({ thread, error }) => {
     const task = getTaskByThread(thread.id);
     if (!task) return;
-    const attention = getSystemStage("attention");
     const reason = error?.trim() || "The assigned BB thread failed.";
     db.prepare(
-      "UPDATE triage_tasks SET stage_id = ?, run_state = 'failed', attention_reason = ?, updated_at = ? WHERE id = ?",
-    ).run(attention.id, reason, Date.now(), task.id);
+      "UPDATE triage_tasks SET run_state = 'failed', attention_reason = ?, updated_at = ? WHERE id = ?",
+    ).run(reason, Date.now(), task.id);
+    addEvent(task.id, "bb", "agent failed", reason);
     if (task.origin === "mirror") {
-      // Silent: the reason stays on the card, nobody is notified about a view.
       publishSoon();
       return;
     }
-    addEvent(task.id, "bb", "agent failed", reason);
-    notify({
-      taskNumber: task.number,
-      action: "Needs attention",
-      taskTitle: task.title,
-      body: reason,
-      level: "attention",
-    });
+    publish();
   });
 
   bb.events.on("thread.archived", ({ thread }) => {

@@ -143,11 +143,9 @@ export function toCardRow(task: Task): CardRow {
   };
 }
 
-/** A broken card outranks a merely waiting one; after that, most recent wins. */
+/** A card with a stated human request outranks one merely waiting for review. */
 export function attentionRank(task: Task): number {
-  if (task.runState === "failed") return 0;
-  if (task.attentionReason !== null) return 1;
-  return 2;
+  return task.attentionReason !== null ? 0 : 1;
 }
 
 /**

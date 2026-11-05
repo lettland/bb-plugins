@@ -103,9 +103,9 @@ export function isTaskRunning(task: Task): boolean {
 
 /** Cards a person still owes something to. Drives the "Needs you" filter. */
 export function needsAttention(task: Task): boolean {
+  if (task.settledAt !== null || task.runState === "failed") return false;
   return (
     task.runState === "idle" ||
-    task.runState === "failed" ||
     task.attentionReason !== null
   );
 }

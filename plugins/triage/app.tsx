@@ -63,6 +63,7 @@ function showNotification(payload: RealtimePayload["notification"]): void {
 }
 
 function matchesFilter(task: Task, filter: TaskFilter): boolean {
+  if (task.runState === "failed") return false;
   switch (filter) {
     case "live":
       return task.settledAt === null && isTaskRunning(task);
@@ -122,12 +123,15 @@ function TriageBoard() {
   }, [machineFilter, projectFilter, snapshot]);
 
   const counts = useMemo(
-    () => ({
-      all: scopedTasks.filter((task) => task.settledAt === null).length,
-      live: scopedTasks.filter((task) => task.settledAt === null && isTaskRunning(task)).length,
-      unread: scopedTasks.filter((task) => task.settledAt === null && supportsTaskRead(task) && task.readAt === null).length,
-      settled: scopedTasks.filter((task) => task.settledAt !== null).length,
-    }),
+    () => {
+      const boardTasks = scopedTasks.filter((task) => task.runState !== "failed");
+      return {
+        all: boardTasks.filter((task) => task.settledAt === null).length,
+        live: boardTasks.filter((task) => task.settledAt === null && isTaskRunning(task)).length,
+        unread: boardTasks.filter((task) => task.settledAt === null && supportsTaskRead(task) && task.readAt === null).length,
+        settled: boardTasks.filter((task) => task.settledAt !== null).length,
+      };
+    },
     [scopedTasks],
   );
 

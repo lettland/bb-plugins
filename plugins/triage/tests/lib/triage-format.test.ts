@@ -149,9 +149,10 @@ describe("run and stage presentation", () => {
     expect(isPending(task({ runState: "completed" }))).toBe(false);
   });
 
-  test("needsAttention follows the run state and the stored reason", () => {
+  test("needsAttention excludes failed and settled cards while retaining genuine requests", () => {
     expect(needsAttention(task({ runState: "idle" }))).toBe(true);
-    expect(needsAttention(task({ runState: "failed" }))).toBe(true);
+    expect(needsAttention(task({ runState: "failed", attentionReason: "Provider failed" }))).toBe(false);
+    expect(needsAttention(task({ runState: "idle", settledAt: 10 }))).toBe(false);
     expect(needsAttention(task({ runState: "working", attentionReason: "needs access" }))).toBe(true);
     expect(needsAttention(task({ runState: "working" }))).toBe(false);
   });

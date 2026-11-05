@@ -12,7 +12,6 @@ import {
   toCardRow,
   unreadIds,
   attentionRank,
-  type CardRow,
   type FeedRow,
 } from "../lib/notification-feed.ts";
 import type { Task, TriageNotification } from "../lib/triage-types.ts";
@@ -134,7 +133,7 @@ test("foldRuns: keeps the newest stamp in a run", () => {
    and absorbed ids leave the chronological feed
    ------------------------------------------------------------------------ */
 
-test("buildAttention: folds attention notifications into the matching card", () => {
+test("buildAttention: leaves legacy failed attention history out of the human-review feed", () => {
   const tasks = [task({ number: 1, runState: "failed", attentionReason: "boom" })];
   const { rows, absorbed } = buildAttention(tasks, [
     notification({ id: "a", taskNumber: 1, action: "Needs attention", level: "attention", body: "boom", createdAt: 100 }),
@@ -142,13 +141,8 @@ test("buildAttention: folds attention notifications into the matching card", () 
     notification({ id: "c", taskNumber: 1, action: "Agent started", level: "info", createdAt: 300 }),
   ]);
 
-  expect(rows.length).toBe(1);
-  const row: CardRow = rows[0];
-  expect(row.events).toBe(2);
-  expect(row.notificationIds).toStrictEqual(["a", "b"]);
-  expect(row.unread).toBe(true);
-  expect(row.reason).toBe("boom");
-  expect([...absorbed]).toStrictEqual(["a", "b"]);
+  expect(rows).toStrictEqual([]);
+  expect([...absorbed]).toStrictEqual([]);
 });
 
 test("buildAttention: non-attention or unmatchable notifications are not absorbed", () => {
@@ -168,13 +162,13 @@ test("buildAttention: a card with no attention notifications has no delete targe
   expect(rows[0].events).toBe(0);
 });
 
-test("buildAttention: failed cards rank above merely-idle ones", () => {
+test("buildAttention: excludes failed cards even when their old stage was attention", () => {
   const tasks = [
     task({ number: 2, runState: "idle" }),
-    task({ number: 1, runState: "failed", attentionReason: "err" }),
+    task({ number: 1, stageId: "stage-attention", runState: "failed", attentionReason: "err", settledAt: 10 }),
   ];
   const { rows } = buildAttention(tasks, []);
-  expect(rows.map((r) => r.task.number)).toStrictEqual([1, 2]);
+  expect(rows.map((r) => r.task.number)).toStrictEqual([2]);
 });
 
 /* ---------------------------------------------------------------------------
@@ -301,10 +295,9 @@ test("toCardRow carries the attention reason and the stamp", () => {
   expect(row.stamp).toBe(9);
 });
 
-test("attentionRank orders failed, then reasoned, then the rest", () => {
-  expect(attentionRank(task({ number: 1, runState: "failed" }))).toBe(0);
-  expect(attentionRank(task({ number: 1, runState: "working", attentionReason: "why" }))).toBe(1);
-  expect(attentionRank(task({ number: 1, runState: "idle" }))).toBe(2);
+test("attentionRank orders stated human requests before idle cards", () => {
+  expect(attentionRank(task({ number: 1, runState: "working", attentionReason: "why" }))).toBe(0);
+  expect(attentionRank(task({ number: 1, runState: "idle" }))).toBe(1);
 });
 
 test("buildAttention: an idle card takes its reason from the notification body", () => {
@@ -344,7 +337,8 @@ test("buildAttention: cards of equal rank sort newest first", () => {
    ------------------------------------------------------------------------ */
 
 test("the lenses reuse the board predicates", () => {
-  expect(LENSES.attention.match(task({ number: 1, runState: "failed" }))).toBe(true);
+  expect(LENSES.attention.match(task({ number: 1, runState: "failed", attentionReason: "Provider failed" }))).toBe(false);
+  expect(LENSES.attention.match(task({ number: 1, runState: "working", attentionReason: "Need access" }))).toBe(true);
   expect(LENSES.attention.match(task({ number: 1, runState: "working" }))).toBe(false);
   expect(LENSES.live.match(task({ number: 1, runState: "working" }))).toBe(true);
   expect(LENSES.live.match(task({ number: 1, runState: "idle" }))).toBe(false);

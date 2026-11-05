@@ -542,13 +542,16 @@ test("an active turn refreshes a mirror card's title, provider and machine witho
   expect(harness.inspection.sdk.callsTo("threads.update").length).toBe(0);
 });
 
-test("a failed turn on a mirror card lands in attention silently", async () => {
+test("a failed turn retains a card's stage and history without an attention notice", async () => {
   const { cardOf, notifications, eventsOf, emit, mirror } = await start();
   const card = await mirror(thr("f-1", { status: "active" }));
   await emit("thread.failed", { thread: thr("f-1"), error: "  Provider crashed  " });
-  expect(cardOf("f-1")).toMatchObject({ stage_id: "stage-attention", run_state: "failed", attention_reason: "Provider crashed" });
+  expect(cardOf("f-1")).toMatchObject({ stage_id: "stage-progress", run_state: "failed", attention_reason: "Provider crashed" });
   expect(notifications()).toStrictEqual([]);
-  expect(eventsOf(card.id)).toStrictEqual([{ actor: "bb", event: "mirrored" }]);
+  expect(eventsOf(card.id)).toStrictEqual([
+    { actor: "bb", event: "mirrored" },
+    { actor: "bb", event: "agent failed" },
+  ]);
 });
 
 test("moving a session to Triage by hand adopts its mirror card as a manual one", async () => {
@@ -570,17 +573,15 @@ test("moving a session to Triage by hand adopts its mirror card as a manual one"
   expect(JSON.stringify(config)).toContain("triage_move_task");
 });
 
-test("the snapshot reads sessions in chunked list calls with an archived companion, never threads.get", async () => {
+test("a failed snapshot lookup rejects instead of hiding cards from the failed batch", async () => {
   const sessions = Array.from({ length: 250 }, (_, index) =>
     thr(`b-${index + 1}`, { createdAt: index + 1, visibility: "hidden", environmentId: null }));
   const archivedIds = new Set<string>();
-  let rejected: readonly string[] = [];
   const handler: ListHandler = (args) => {
     if (args.threadIds) {
       // The smaller chunk's live call fails; the other chunk and every
       // companion call must still answer.
       if (!args.archived && args.threadIds.length === 50) {
-        rejected = args.threadIds;
         throw new Error("Batch failed");
       }
       return sessions
@@ -598,7 +599,7 @@ test("the snapshot reads sessions in chunked list calls with an archived compani
   harness.inspection.sdk.stub("hosts.list", async () => []);
   const before = harness.inspection.sdk.callsTo("threads.list").length;
   archivedIds.add("b-7");
-  const snapshot = await rpc("snapshot");
+  await expect(rpc("snapshot")).rejects.toThrow(/Batch failed/);
   // Quirks (SDK ThreadListArgs doc, bundled-types d.ts:18210-18232): at most 200
   // ids per call, so 250 cards need two chunks; archived is a selector, so each
   // chunk gets a companion archived:true call; includeHidden is on every call
@@ -612,14 +613,38 @@ test("the snapshot reads sessions in chunked list calls with an archived compani
     expect(args.threadIds!.length).toBeLessThanOrEqual(200);
   }
   expect(harness.inspection.sdk.callsTo("threads.get").length).toBe(0);
-  // One chunk rejecting degrades only its own cards; the other chunk still renders.
-  const visibility = new Map<string, boolean | null>(snapshot.tasks.map((task: any) => [task.threadId, task.sidebarVisible]));
-  const unknown = [...visibility].filter(([, visible]) => visible === null).map(([id]) => id).sort();
-  expect(unknown).toStrictEqual(rejected.filter((id) => id !== "b-7").sort());
-  expect(unknown.length).toBe(49);
-  expect([...visibility.values()].filter((visible) => visible === false).length).toBe(200);
-  // The archived id only exists in its companion call's results and is merged in.
-  expect(visibility.get("b-7")).toBe(true);
+});
+
+test("snapshot omits confirmed archived manual and mirror cards without rewriting their settled state", async () => {
+  const archived = new Set<string>();
+  const { cardOf, ctx, importManual, mirror, rpc } = await start();
+  const manual = await importManual(thr("snapshot-manual"));
+  const mirrorCard = await mirror(thr("snapshot-mirror"));
+  ctx.list = (args) => (args.threadIds ?? [])
+    .filter((threadId) => archived.has(threadId) === Boolean(args.archived))
+    .map((threadId) => thr(threadId, { archivedAt: archived.has(threadId) ? 10 : null }));
+
+  await rpc("setTaskSettled", { number: manual.number, settled: true });
+  expect((await rpc("snapshot")).tasks.map((task: any) => task.threadId).sort())
+    .toStrictEqual(["snapshot-manual", "snapshot-mirror"]);
+
+  // No archive event arrives; the successful refresh alone must hide both cards.
+  archived.add("snapshot-manual");
+  archived.add("snapshot-mirror");
+  expect((await rpc("snapshot")).tasks).toStrictEqual([]);
+  expect(cardOf("snapshot-manual").settled_at).toBeGreaterThan(0);
+  expect(cardOf("snapshot-mirror").settled_at).toBe(null);
+
+  // A settled manual card retains that state on unarchive; the unsettled mirror reappears.
+  archived.delete("snapshot-manual");
+  let snapshot = await rpc("snapshot");
+  expect(snapshot.tasks).toHaveLength(1);
+  expect(snapshot.tasks[0]).toMatchObject({ threadId: "snapshot-manual", settledAt: expect.any(Number) });
+  archived.delete("snapshot-mirror");
+  snapshot = await rpc("snapshot");
+  expect(snapshot.tasks.map((task: any) => task.threadId).sort())
+    .toStrictEqual(["snapshot-manual", "snapshot-mirror"]);
+  expect(snapshot.tasks.find((task: any) => task.threadId === mirrorCard.thread_id).settledAt).toBe(null);
 });
 
 test("a board without sessions asks the host for none", async () => {
