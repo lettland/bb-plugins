@@ -19,7 +19,8 @@ export {
   PLAN_HOLD_ANSWER,
 } from "./prompt-plan.js";
 export {
-  PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM, PRESENT_PLAN_USER_APPROVED_MESSAGE,
+  PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM, PRESENT_PLAN_FORM_APPROVED_MESSAGE,
+  PRESENT_PLAN_FORM_OPEN_MESSAGE, PRESENT_PLAN_FORM_UNREADABLE_MESSAGE,
   presentPlanChangesRequestedMessage, presentPlanApprovalCancelledMessage,
   presentPlanFormUnavailableMessage,
 } from "./prompt-plan-form.js";

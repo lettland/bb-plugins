@@ -22,7 +22,9 @@ import {
   presentPlanFormUnavailableMessage,
   presentPlanRedoMessage,
   PRESENT_PLAN_REVIEWED_MESSAGE,
-  PRESENT_PLAN_USER_APPROVED_MESSAGE,
+  PRESENT_PLAN_FORM_APPROVED_MESSAGE,
+  PRESENT_PLAN_FORM_OPEN_MESSAGE,
+  PRESENT_PLAN_FORM_UNREADABLE_MESSAGE,
 } from "./prompt.js";
 import { LATCH_KEYS, PLAN_GATE_KEYS, PRESENT_PLAN_KEYS } from "./state.js";
 
@@ -419,7 +421,7 @@ describe("PresentPlan's approval form", () => {
 
   it("returns the user's approval when a held form is approved, and logs it", async () => {
     await withFormHost({ form: true }, async ({ settle, infos }) => {
-      expect(await settle({ approved: true })).toBe(PRESENT_PLAN_USER_APPROVED_MESSAGE);
+      expect(await settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
       expect(infos().some((line) => line.includes("approved the plan"))).toBe(true);
     });
   });
@@ -440,8 +442,12 @@ describe("PresentPlan's approval form", () => {
       const feedback = "x".repeat(2000);
       expect(await settle({ approved: false, feedback })).toContain(feedback);
     });
-    await withFormHost({ form: true }, async ({ settle }) => {
-      expect(await settle({ approved: false, feedback: "x".repeat(2001) })).toBe(presentPlanChangesRequestedMessage());
+    await withFormHost({ form: true }, async ({ settle, requestInput, infos }) => {
+      const oversized = { approved: false, feedback: "x".repeat(2001) };
+      expect(await settle(oversized)).toBe(PRESENT_PLAN_FORM_UNREADABLE_MESSAGE);
+      const [request] = requestInput.mock.calls[0] as [{ describeSubmission(value: unknown): unknown }];
+      expect(request.describeSubmission(oversized)).toEqual({ title: "Answer not readable", payload: { approved: false } });
+      expect(infos().some((line) => line.includes("could not be read"))).toBe(true);
     });
   });
 
@@ -451,17 +457,25 @@ describe("PresentPlan's approval form", () => {
     ["a string", "approve"],
     ["null", null],
     ["feedback on an approval", { approved: true, feedback: "x" }],
-  ])("treats a malformed answer (%s) as changes requested, never as approval", async (_name, value) => {
+  ])("treats a malformed answer (%s) as unreadable, never as approval or as a change request", async (_name, value) => {
     await withFormHost({ form: true }, async ({ settle }) => {
-      expect(await settle(value)).toBe(presentPlanChangesRequestedMessage());
+      expect(await settle(value)).toBe(PRESENT_PLAN_FORM_UNREADABLE_MESSAGE);
+    });
+  });
+
+  it("still returns the change request, with no unreadable text, for a valid answer without feedback", async () => {
+    await withFormHost({ form: true }, async ({ settle, requestInput }) => {
+      expect(await settle({ approved: false })).toBe(presentPlanChangesRequestedMessage());
+      const [request] = requestInput.mock.calls[0] as [{ describeSubmission(value: unknown): unknown }];
+      expect(request.describeSubmission({ approved: false })).toEqual({ title: "Changes requested", payload: { approved: false } });
     });
   });
 
   it("describeSubmission and the tool branch agree on a malformed value, and the row never keeps feedback", async () => {
     await withFormHost({ form: true }, async ({ settle, requestInput, rows }) => {
-      expect(await settle({ approved: true, extra: 1 })).toBe(presentPlanChangesRequestedMessage());
+      expect(await settle({ approved: true, extra: 1 })).toBe(PRESENT_PLAN_FORM_UNREADABLE_MESSAGE);
       const [request] = requestInput.mock.calls[0] as [{ describeSubmission(value: unknown): unknown }];
-      expect(request.describeSubmission({ approved: true, extra: 1 })).toEqual({ title: "Changes requested", payload: { approved: false } });
+      expect(request.describeSubmission({ approved: true, extra: 1 })).toEqual({ title: "Answer not readable", payload: { approved: false } });
       expect(request.describeSubmission({ approved: true })).toEqual({ title: "Approved", payload: { approved: true } });
       const withFeedback = request.describeSubmission({ approved: false, feedback: "secret plan notes" });
       expect(withFeedback).toEqual({ title: "Changes requested", payload: { approved: false } });
@@ -572,6 +586,99 @@ describe("PresentPlan's approval form", () => {
   });
 });
 
+describe("one plan approval form per thread", () => {
+  const armAgain = (metadata: Json) =>
+    Object.assign(metadata, { presentPlanArmedAt: Date.now(), presentPlanArmedPath: PLAN, presentPlanArmedSeq: 77, presentPlanRedone: true });
+
+  it("marks the form open while it is pending, and refuses a second release without disarming the plan", async () => {
+    await withFormHost({ form: true }, async (f) => {
+      const first = f.call();
+      await vi.waitFor(() => expect(f.host.harness.pendingInteractions).toHaveLength(1));
+      expect(typeof f.metadata.presentPlanFormOpenAt).toBe("number");
+      armAgain(f.metadata);
+      const second = (await f.host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX)) as { content: Json[]; isError: boolean };
+      expect(second).toEqual({ content: [{ type: "text", text: PRESENT_PLAN_FORM_OPEN_MESSAGE }], isError: true });
+      expect(f.requestInput).toHaveBeenCalledTimes(1);
+      expect(f.metadata.presentPlanArmedPath).toBe(PLAN);
+      expect(f.metadata.presentPlanArmedAt).toEqual(expect.any(Number));
+      f.host.harness.submitInteraction(f.host.harness.pendingInteractions[0]!.id, { approved: false, feedback: "f" } as never);
+      await first;
+      expect(f.metadata.presentPlanFormOpenAt).toBeUndefined();
+      // The same call releases the still-armed plan once the first form has settled.
+      expect(await f.settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+      expect(f.requestInput).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("blocks just inside the staleness window and not past it", async () => {
+    await withFormHost({ form: true }, async ({ call, metadata, requestInput }) => {
+      metadata.presentPlanFormOpenAt = Date.now() - (PLAN_APPROVAL_TIMEOUT_MS + 60_000 - 5_000);
+      expect(await call()).toMatchObject({ isError: true });
+      expect(requestInput).not.toHaveBeenCalled();
+      expect(metadata.presentPlanArmedPath).toBe(PLAN);
+    });
+    await withFormHost({ form: true }, async ({ settle, metadata }) => {
+      metadata.presentPlanFormOpenAt = Date.now() - (PLAN_APPROVAL_TIMEOUT_MS + 60_001);
+      expect(await settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+    });
+  });
+
+  it("does not block a release that opens no form: setting off, or an auto-approval", async () => {
+    await withFormHost({ form: false }, async ({ call, metadata }) => {
+      metadata.presentPlanFormOpenAt = Date.now();
+      expect(await call()).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+    });
+    await withFormHost({ form: true }, async ({ host, call, rows, metadata, requestInput }) => {
+      await writeProjectConfig(host.bb, CTX.projectId, { autoApprovePlans: true });
+      rows.push({ seq: 78, type: "item/completed", scope: { kind: "turn", turnId: "turn-1" }, data: { item: { type: "toolCall", tool: "Read" } } });
+      metadata.presentPlanFormOpenAt = Date.now();
+      expect(await call()).toBe(PRESENT_PLAN_APPROVED_MESSAGE);
+      expect(requestInput).not.toHaveBeenCalled();
+      expect(metadata.presentPlanFormOpenAt).toEqual(expect.any(Number));
+    });
+  });
+
+  it.each([
+    ["approve", async (f: Parameters<Parameters<typeof withFormHost>[1]>[0]) => f.settle({ approved: true })],
+    ["changes", async (f: Parameters<Parameters<typeof withFormHost>[1]>[0]) => f.settle({ approved: false, feedback: "f" })],
+    ["unreadable", async (f: Parameters<Parameters<typeof withFormHost>[1]>[0]) => f.settle({ approved: true, extra: 1 })],
+    ["not held", async (f: Parameters<Parameters<typeof withFormHost>[1]>[0]) => f.settle({ approved: true }, { kind: "thread" })],
+    ["cancel", async (f: Parameters<Parameters<typeof withFormHost>[1]>[0]) => {
+      f.requestInput.mockResolvedValueOnce({ outcome: "cancelled", reason: "user" });
+      return f.call();
+    }],
+    ["throw", async (f: Parameters<Parameters<typeof withFormHost>[1]>[0]) => {
+      f.requestInput.mockRejectedValueOnce(new Error("boom"));
+      return f.call();
+    }],
+    ["cursor-capture failure", async (f: Parameters<Parameters<typeof withFormHost>[1]>[0]) => {
+      f.faults.timelineDown = true;
+      return f.call();
+    }],
+  ])("clears the open marker after %s", async (_name, run) => {
+    await withFormHost({ form: true }, async (f) => {
+      await run(f);
+      expect(f.updates.some((set) => typeof set.presentPlanFormOpenAt === "number")).toBe(true);
+      expect(f.metadata.presentPlanFormOpenAt).toBeUndefined();
+    });
+  });
+
+  it.each([
+    ["Error", new Error("clear down"), "clear down"],
+    ["non-Error", "kaboom", "kaboom"],
+  ])("logs a failed clear (%s) and still returns the form's result", async (_name, thrown, message) => {
+    await withFormHost({ form: true }, async ({ call, requestInput, faults, metadata, warns }) => {
+      requestInput.mockImplementationOnce(async () => {
+        faults.updateError = thrown;
+        return { outcome: "cancelled", reason: "user" };
+      });
+      expect(await call()).toBe(presentPlanApprovalCancelledMessage("user"));
+      expect(warns().some((line) => line.includes("could not clear") && line.includes(message))).toBe(true);
+      expect(typeof metadata.presentPlanFormOpenAt).toBe("number");
+    });
+  });
+});
+
 /**
  * Regression ledger. The plugin cannot detect whether bb held the call, so
  * `formHeld` reads the lifecycle resolution once `requestInput` returns. That
@@ -606,7 +713,7 @@ describe("the approval form's dependence on bb core's event-before-resolve order
         rows.push(resolvedRow());
         return { outcome: "submitted", value: { approved: true } };
       });
-      expect(await call()).toBe(PRESENT_PLAN_USER_APPROVED_MESSAGE);
+      expect(await call()).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
     });
   });
 
@@ -630,8 +737,15 @@ describe("a form approval and the missing-plan size gate, on one event log", () 
 
   it("a held (turn-scoped) approval clears the missing-plan blocker", async () => {
     await withFormHost({ form: true }, async (f) => {
-      expect(await f.settle({ approved: true })).toBe(PRESENT_PLAN_USER_APPROVED_MESSAGE);
+      expect(await f.settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
       expect(await size(f)).toEqual({ trivial: false, blocker: false });
+    });
+  });
+
+  it("an unreadable answer is never credited: the blocker stays", async () => {
+    await withFormHost({ form: true }, async (f) => {
+      expect(await f.settle({ approved: true, extra: 1 })).toBe(PRESENT_PLAN_FORM_UNREADABLE_MESSAGE);
+      expect(await size(f)).toEqual({ trivial: false, blocker: true });
     });
   });
 

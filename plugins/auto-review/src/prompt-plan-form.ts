@@ -20,7 +20,7 @@ export const PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM = [
  * inside this turn: the result IS the approval. Nothing checks who answered
  * the form, so the text does not say the user did.
  */
-export const PRESENT_PLAN_USER_APPROVED_MESSAGE =
+export const PRESENT_PLAN_FORM_APPROVED_MESSAGE =
   `${AUTO_REVIEW_MARKER} The plan was approved in the approval form. This PresentPlan result is the approval: implement the plan.`;
 
 /**
@@ -35,6 +35,22 @@ export function presentPlanFormUnavailableMessage(reviewed: boolean): string {
 }
 
 /**
+ * `PresentPlan`'s reply when the form returned a value the plugin could not
+ * read (it failed the strict schema, e.g. feedback past the cap). The answer
+ * was discarded and the plan is not approved; the agent says so to the user.
+ */
+export const PRESENT_PLAN_FORM_UNREADABLE_MESSAGE =
+  `${AUTO_REVIEW_MARKER} The approval form returned an answer that could not be read (feedback is limited to 2000 characters), so the plan is not approved. Do not implement it. End your turn and tell the user their answer was not read. When they ask, call PresentPlan again with the same planFilePath.`;
+
+/**
+ * `PresentPlan`'s error result when a plan approval form is already open in the
+ * thread: the plan stays armed, so the same call can release it once that form
+ * settles. No marker: it is a tool error, not a verdict on the plan.
+ */
+export const PRESENT_PLAN_FORM_OPEN_MESSAGE =
+  "A plan approval form is already open in this thread. Wait for it to settle; do not call PresentPlan again until it has.";
+
+/**
  * The form answer as data. The fence is longer than any run of backticks in
  * the text, so the text cannot close it and pass for instructions.
  */
@@ -46,7 +62,7 @@ function feedbackBlock(feedback: string): string {
 
 /**
  * `PresentPlan`'s reply when the form was answered without approval: the user
- * asked for changes, or the answer was malformed (no `feedback`). The feedback
+ * asked for changes (a malformed answer gets the unreadable text instead). The feedback
  * is untrusted (any agent can answer a form), so it only ever appears inside
  * the data block below the instruction.
  */

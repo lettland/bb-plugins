@@ -203,6 +203,7 @@ export const threadStateSchema = z.object({
   presentPlanLight: z.boolean().optional(),
   presentPlanAutoApprovedSeq: z.number().int().nonnegative().optional(), // Auto-approval cursor the missing-plan gate reads; outside PRESENT_PLAN_KEYS and the latch keys on purpose, so a reset keeps it.
   presentPlanFormMode: z.boolean().optional(), // Whether the thread's instructions describe the approval form, written once at its first configure; outside PRESENT_PLAN_KEYS and the latch keys on purpose, so a reset keeps it: it must match the instructions the thread was started with.
+  presentPlanFormOpenAt: z.number().int().nonnegative().optional(), // Ms time the thread's one plan approval form opened; outside PRESENT_PLAN_KEYS on purpose, only the form's own finally clears it.
   /**
    * The interaction ids of the plan approvals auto-review resolved itself
    * (auto-approved, or re-approved on an earlier approval), most recent last,

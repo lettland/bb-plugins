@@ -158,12 +158,16 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   for a form. The form shows the plan path and whether the review completed (Approve, Request
   changes with feedback, Cancel). The agent's turn stays blocked, and the answer becomes the
   tool result: approved (implement), changes requested (revise and call `PresentPlan` again; the
-  feedback is quoted as data), or cancelled (not approved; end the turn, ask again later). The
+  feedback is quoted as data), cancelled (not approved; end the turn, ask again later), or "Answer
+  not readable" (a value that fails the strict shape, e.g. feedback over 2000 characters, is
+  discarded and never credited; not approved, the agent tells the user their answer was not read). The
   form waits 60 minutes, under the fork daemon's 65-minute ceiling on forwarded tool calls. The
   plugin cannot detect the hold, so after the form settles it reads the lifecycle events: a
   form whose resolution is not turn-scoped (a detached call), and a form that cannot be
   opened or read, return a "form unavailable" text (not approved; end the turn and tell the user)
-  whatever was clicked. The missing-plan Blocker (`approvedPlanSince`), the turn-end approvals
+  whatever was clicked. One form is open per thread: `presentPlanFormOpenAt` marks it, a release
+  that would open a second one returns an error and stays armed, and the form's `finally` clears the
+  mark (a mark older than the form timeout plus 60 seconds no longer blocks). The missing-plan Blocker (`approvedPlanSince`), the turn-end approvals
   and the user-turn bookkeeping credit only a turn-scoped, resolved `plan-approval` form whose
   row says `approved: true`; the row keeps no feedback. Self-approval is possible: bb does not
   check who answers a pending interaction, and the CLI can answer one with `--self`, as with

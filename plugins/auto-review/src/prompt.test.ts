@@ -20,7 +20,9 @@ import {
   PRESENT_PLAN_OFF_MESSAGE,
   presentPlanRedoMessage,
   PRESENT_PLAN_REVIEWED_MESSAGE,
-  PRESENT_PLAN_USER_APPROVED_MESSAGE,
+  PRESENT_PLAN_FORM_APPROVED_MESSAGE,
+  PRESENT_PLAN_FORM_OPEN_MESSAGE,
+  PRESENT_PLAN_FORM_UNREADABLE_MESSAGE,
   renderScope,
 } from "./prompt.js";
 import type { Decision } from "./decide.js";
@@ -1972,22 +1974,32 @@ describe("PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM", () => {
 describe("the plan approval form's PresentPlan results", () => {
   it("opens every text with the marker", () => {
     for (const text of [
-      PRESENT_PLAN_USER_APPROVED_MESSAGE,
+      PRESENT_PLAN_FORM_APPROVED_MESSAGE,
       presentPlanChangesRequestedMessage(),
       presentPlanChangesRequestedMessage("fix step 2"),
       presentPlanApprovalCancelledMessage("user"),
       presentPlanFormUnavailableMessage(true),
       presentPlanFormUnavailableMessage(false),
+      PRESENT_PLAN_FORM_UNREADABLE_MESSAGE,
     ]) {
       expect(text.startsWith(AUTO_REVIEW_MARKER)).toBe(true);
     }
   });
 
   it("states the approval in the form as the approval to implement, without naming who answered", () => {
-    expect(PRESENT_PLAN_USER_APPROVED_MESSAGE).toBe(
+    expect(PRESENT_PLAN_FORM_APPROVED_MESSAGE).toBe(
       `${AUTO_REVIEW_MARKER} The plan was approved in the approval form. This PresentPlan result is the approval: implement the plan.`,
     );
-    expect(PRESENT_PLAN_USER_APPROVED_MESSAGE).not.toMatch(/\buser\b/);
+    expect(PRESENT_PLAN_FORM_APPROVED_MESSAGE).not.toMatch(/\buser\b/);
+  });
+
+  it("pins the unreadable-answer text and the open-form tool error", () => {
+    expect(PRESENT_PLAN_FORM_UNREADABLE_MESSAGE).toBe(
+      `${AUTO_REVIEW_MARKER} The approval form returned an answer that could not be read (feedback is limited to 2000 characters), so the plan is not approved. Do not implement it. End your turn and tell the user their answer was not read. When they ask, call PresentPlan again with the same planFilePath.`,
+    );
+    expect(PRESENT_PLAN_FORM_OPEN_MESSAGE).toBe(
+      "A plan approval form is already open in this thread. Wait for it to settle; do not call PresentPlan again until it has.",
+    );
   });
 
   it.each([

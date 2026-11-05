@@ -36,16 +36,18 @@ const planApprovalValueSchema = z.union([
   z.strictObject({ approved: z.literal(true) }),
   z.strictObject({ approved: z.literal(false), feedback: z.string().max(PLAN_APPROVAL_FEEDBACK_MAX).optional() }),
 ]);
-export type PlanApprovalDecision = z.infer<typeof planApprovalValueSchema>;
+/** A value that failed the schema: told apart from a change request so the answer is not passed off as feedback-less. */
+export type PlanApprovalDecision = z.infer<typeof planApprovalValueSchema> | { approved: false; unreadable: true };
 
 /**
  * The one reading of a submitted value. `describeSubmission` (the row the gate
  * credits) and the tool result both run it, so they cannot disagree. Anything
- * that is not exactly an approval or a change request counts as not approved.
+ * that is not exactly an approval or a change request is `unreadable`: not
+ * approved, and reported as discarded, not as a change request.
  */
 export function parsePlanApprovalValue(value: unknown): PlanApprovalDecision {
   const parsed = planApprovalValueSchema.safeParse(value);
-  return parsed.success ? parsed.data : { approved: false };
+  return parsed.success ? parsed.data : { approved: false, unreadable: true };
 }
 
 /** What the resolved row keeps. Never the feedback: it is free text from whoever answered. */
@@ -56,7 +58,7 @@ export function planApprovalDescription(decision: PlanApprovalDecision): {
   payload: { approved: boolean };
 } {
   return {
-    title: decision.approved ? "Approved" : "Changes requested",
+    title: decision.approved ? "Approved" : "unreadable" in decision ? "Answer not readable" : "Changes requested",
     payload: { approved: decision.approved },
   };
 }

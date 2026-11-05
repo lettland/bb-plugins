@@ -280,6 +280,17 @@ describe("PRESENT_PLAN_KEYS", () => {
   });
 });
 
+describe("presentPlanFormOpenAt", () => {
+  it("is a non-negative integer ms key that no reset key set clears", () => {
+    expect(threadStateSchema.safeParse({ phase: "idle", presentPlanFormOpenAt: 1_700_000_000_000 }).success).toBe(true);
+    expect(threadStateSchema.safeParse({ phase: "idle", presentPlanFormOpenAt: -1 }).success).toBe(false);
+    expect(threadStateSchema.safeParse({ phase: "idle", presentPlanFormOpenAt: 1.5 }).success).toBe(false);
+    for (const keys of [LATCH_KEYS, PLAN_GATE_KEYS, PRESENT_PLAN_KEYS]) {
+      expect(keys).not.toContain("presentPlanFormOpenAt");
+    }
+  });
+});
+
 describe("presentPlanArmed", () => {
   it("is false when PresentPlan never armed", () => {
     expect(presentPlanArmed({ phase: "idle" }, "a.md", Date.now())).toBe(false);

@@ -559,10 +559,13 @@ answer, and the answer is the `PresentPlan` result itself:
 - **Approve:** the result says the plan was approved in the form, and the agent implements it. The missing-plan Blocker of the code review counts this approval.
 - **Request changes:** the agent revises the plan file from your feedback and calls `PresentPlan` again, which runs a new review and then a new form. The feedback reaches the agent as quoted data, never as an instruction.
 - **Cancel** (or a stop, or the 60-minute limit): the plan stays unapproved. The agent ends its turn and says so; ask it to present the plan again and it calls `PresentPlan` with the same path. For an unchanged plan file that is a short re-review followed by a new form.
+- **Answer not readable:** an answer that fails the form's strict shape (for example feedback over 2000 characters) is discarded, not read as a change request. The plan stays unapproved, and the agent is told your answer was not read; ask it to present the plan again.
 
 With the form on, a chat reply is not approval: the agent's instructions say to call
 `PresentPlan` again so you can approve in the form. The form waits at most 60 minutes, which
 stays under the 65-minute limit the fork daemon puts on forwarded tool calls.
+
+**One form per thread.** While a plan approval form is open, a `PresentPlan` call that would open a second one gets an error and leaves the plan armed, so the same call releases it after the first form settles.
 
 **What it needs from bb.** The form only works on a bb build that can hold a tool call while a
 form is open (`bb.ui.requestInput` with `experimental_holdToolCall`). Neither the SDK version this

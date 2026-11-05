@@ -1,7 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import type {
-  BbPluginApi,
   PluginAgentConfiguration,
   PluginAgentConfigurationContext,
   PluginAgentToolContext,
@@ -12,7 +11,6 @@ import { clearPlanBaseline, planScope, settlePlanBaseline, stagePlanPending } fr
 import { effectiveConfig, readProjectConfig } from "./config.js";
 import { recordFire, type EffectiveConfig, type ReviewContext } from "./context.js";
 import { tryCaptureSinceSeq } from "./detect.js";
-import { planFormResolutionSince } from "./detect-plan-form.js";
 import { isNativePlanGateProvider } from "./gate.js";
 import {
   lightPlan,
@@ -24,30 +22,19 @@ import {
   warnPlanUnreviewed,
 } from "./plan.js";
 import {
-  PLAN_APPROVAL_RENDERER,
-  PLAN_APPROVAL_TIMEOUT_MS,
-  PLAN_APPROVAL_TITLE,
-  parsePlanApprovalValue,
-  planApprovalDescription,
-  type PlanApprovalPayload,
-} from "./plan-approval-form.js";
-import {
   buildPresentPlanReviewPrompt,
   PLAN_FIRST_INSTRUCTIONS,
   PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
   PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM,
   PRESENT_PLAN_APPROVED_MESSAGE,
-  presentPlanApprovalCancelledMessage,
-  presentPlanChangesRequestedMessage,
-  presentPlanFormUnavailableMessage,
   PRESENT_PLAN_INCOMPLETE_MESSAGE,
   PRESENT_PLAN_INVALID_PATH_MESSAGE,
   PRESENT_PLAN_OFF_MESSAGE,
   presentPlanRedoMessage,
   PRESENT_PLAN_REVIEWED_MESSAGE,
-  PRESENT_PLAN_USER_APPROVED_MESSAGE,
   SCOPE_PATH_ALLOW,
 } from "./prompt.js";
+import { askPlanApproval, needsForm, planFormOpen, planFormOpenResult, type NeedsForm } from "./present-plan-form.js";
 import { REPORT_REVIEW_TOOL_NAME, registerReportTool } from "./report-tool.js";
 import {
   presentPlanArmed,
@@ -93,15 +80,6 @@ function captureArmedSeq(review: ReviewContext, threadId: string): Promise<numbe
   );
 }
 
-/** What a release hands back instead of its text when the approval form is on: the form to open once the thread lock is released. */
-interface NeedsForm {
-  form: PlanApprovalPayload;
-}
-
-function needsForm(result: PluginAgentToolResult | NeedsForm): result is NeedsForm {
-  return typeof result === "object" && "form" in result;
-}
-
 /**
  * The second call for an armed plan. A plan whose review never loaded
  * `review-code` (`planSkillCheck`) is sent back once instead, staying armed
@@ -110,7 +88,8 @@ function needsForm(result: PluginAgentToolResult | NeedsForm): result is NeedsFo
  * approved only when the skill was loaded and a tool call completed in between,
  * which cannot show a deliberate skip. A subagent's call counts: the review may
  * run in one. With the approval form on (`formMode`), the two outcomes that
- * wait for the user return a `NeedsForm` instead of their text.
+ * wait for the user return a `NeedsForm` instead of their text, and record the
+ * form as open; with a form already open the release is refused, still armed.
  */
 async function releasePlan(
   review: ReviewContext,
@@ -147,7 +126,6 @@ async function releasePlan(
     await stagePlanPending(bb, ctx.threadId, planFilePath, content, Date.now());
     return presentPlanRedoMessage(config.reviewMode, light);
   }
-  await writeState(bb, ctx.threadId, {}, [...PRESENT_PLAN_KEYS]);
   // The release moment is exactly when the reviewers are done, so the tally
   // counts them here, from the tier the arm stored.
   const tallyExtras = planReviewTallyExtras(
@@ -164,8 +142,15 @@ async function releasePlan(
     reviewWorked &&
     state.presentPlanArmedSeq !== undefined &&
     (await reviewRanSince(bb, ctx.threadId, state.presentPlanArmedSeq, PRESENT_PLAN_GATE_TOOLS, true, false));
+  const autoApproved = reviewRan && config.autoApprovePlans;
+  // A release that would open a form while another is open is refused before
+  // anything is cleared, so the plan stays armed for the same call to release later.
+  if (formMode && !autoApproved && planFormOpen(state, Date.now())) {
+    return planFormOpenResult();
+  }
+  await writeState(bb, ctx.threadId, {}, [...PRESENT_PLAN_KEYS]);
   await settlePlanBaseline(bb, ctx.threadId, planFilePath, reviewWorked);
-  if (reviewRan && config.autoApprovePlans) {
+  if (autoApproved) {
     await clearPlanBaseline(bb, ctx.threadId, planFilePath);
     await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-approved", tallyExtras);
     bb.log.info(
@@ -188,101 +173,11 @@ async function releasePlan(
   }
   await recordFire(review, ctx.projectId, ctx.threadId, "stood-down", planReleaseReason(check), tallyExtras);
   const text = check === "missing" ? PRESENT_PLAN_INCOMPLETE_MESSAGE : PRESENT_PLAN_REVIEWED_MESSAGE;
-  return formMode ? { form: { planFilePath, reviewed: check !== "missing" } } : text;
-}
-
-/**
- * The options the held form is opened with. `experimental_holdToolCall` is
- * not in the SDK types this plugin pins, nor in the published SDK,
- * so the type adds it. Bb builds with the fork change keep the tool call
- * blocked until the form settles and bind the form to the active turn (bb
- * core `apps/server/src/services/plugins/plugin-api.ts` `requestInput`,
- * `apps/server/src/services/interactions/pending-interactions.fork.ts`);
- * upstream bb ignores the flag and detaches the call instead.
- */
-type HoldOptions = NonNullable<Parameters<BbPluginApi["ui"]["requestInput"]>[1]> & {
-  experimental_holdToolCall?: boolean;
-};
-
-/**
- * Whether the form's resolution is one the gate will credit as held: found,
- * turn-scoped, and, for an approval, described as approved. A host without the
- * hold detaches the call, so its resolution is thread-scoped and the agent
- * must not be told to implement from it. A failed read counts as not held.
- */
-async function formHeld(bb: BbPluginApi, threadId: string, sinceSeq: number, approved: boolean): Promise<boolean> {
-  try {
-    const resolution = await planFormResolutionSince(bb, threadId, sinceSeq);
-    return resolution !== null && resolution.held && (!approved || resolution.approved);
-  } catch (error) {
-    bb.log.warn(
-      `auto-review: could not read the plan approval form's resolution in ${threadId}, so it counts as not held: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return false;
+  if (!formMode) {
+    return text;
   }
-}
-
-/**
- * Opens the plan approval form, outside the thread lock so a pending form never
- * holds it, and turns its outcome into the tool result inside the same blocked
- * turn. The agent is told to implement only when the host held the form and
- * the gate will credit the approval; otherwise it is told the form could not
- * confirm an answer (`presentPlanFormUnavailableMessage`), never to wait for a
- * chat approval, which the form instructions do not accept.
- */
-async function askPlanApproval(
-  review: ReviewContext,
-  ctx: PluginAgentToolContext,
-  { form }: NeedsForm,
-): Promise<PluginAgentToolResult> {
-  const { bb } = review;
-  const unavailable = presentPlanFormUnavailableMessage(form.reviewed);
-  const where = `${basename(form.planFilePath)} in thread ${ctx.threadId}`;
-  const sinceSeq = await tryCaptureSinceSeq(
-    bb,
-    ctx.threadId,
-    `the plan approval form in ${ctx.threadId}; no form is opened`,
-  );
-  if (sinceSeq === undefined) {
-    return unavailable;
-  }
-  const holdOptions: HoldOptions = { signal: ctx.signal, experimental_holdToolCall: true };
-  let result: Awaited<ReturnType<BbPluginApi["ui"]["requestInput"]>>;
-  try {
-    result = await bb.ui.requestInput(
-      {
-        threadId: ctx.threadId,
-        rendererId: PLAN_APPROVAL_RENDERER,
-        title: PLAN_APPROVAL_TITLE,
-        payload: form,
-        timeoutMs: PLAN_APPROVAL_TIMEOUT_MS,
-        describeSubmission: (value) => planApprovalDescription(parsePlanApprovalValue(value)),
-      },
-      holdOptions,
-    );
-  } catch (error) {
-    bb.log.warn(
-      `auto-review: the plan approval form for ${where} failed, so the plan is released without it: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    return unavailable;
-  }
-  if (result.outcome === "cancelled") {
-    bb.log.info(`auto-review: the plan approval form for ${where} was cancelled (${result.reason})`);
-    return presentPlanApprovalCancelledMessage(result.reason);
-  }
-  const decision = parsePlanApprovalValue(result.value);
-  if (!(await formHeld(bb, ctx.threadId, sinceSeq, decision.approved))) {
-    bb.log.info(`auto-review: the plan approval form for ${where} was not held by the host, so nothing is approved`);
-    return unavailable;
-  }
-  bb.log.info(
-    `auto-review: the plan approval form for ${where} ${decision.approved ? "approved the plan" : "asked for changes"}`,
-  );
-  return decision.approved ? PRESENT_PLAN_USER_APPROVED_MESSAGE : presentPlanChangesRequestedMessage(decision.feedback);
+  await writeState(bb, ctx.threadId, { presentPlanFormOpenAt: Date.now() });
+  return { form: { planFilePath, reviewed: check !== "missing" } };
 }
 
 /** `PresentPlan`'s `execute`: the first call for a plan arms its review, the second releases it. */
