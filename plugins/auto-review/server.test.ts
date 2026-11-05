@@ -1012,7 +1012,7 @@ function emitPlan(host: Host, interaction = planInteraction()) {
   } as never);
 }
 
-/** The `data` of the `provider/unhandled` row core records a delivered steer as, copied from thr_ijhpz5srpe seq 2069 (2026-10-26) with the content string trimmed. */
+/** The `data` of the `provider/unhandled` row core records a delivered steer as, copied from thr_steerdemo1 seq 2069 (2026-10-26) with the content string trimmed. */
 function steerData(content: unknown): Record<string, unknown> {
   return {
     providerThreadId: "b1189688-7a83-4bcd-9574-b88701cc2a98",
@@ -1031,7 +1031,7 @@ function steerData(content: unknown): Record<string, unknown> {
           timestamp: "2026-10-26T12:12:10.037Z",
           isReplay: true,
         },
-        threadId: "thr_ijhpz5srpe",
+        threadId: "thr_steerdemo1",
       },
     },
   };
@@ -4184,7 +4184,7 @@ describe("auto-review plugin", () => {
     await emitPlan(host);
     expect(host.metadata.planDenied).toMatchObject({ sinceSeq: 100 });
     // The deny's reaction may carry preamble text: the agent answers and asks
-    // in one response, before the steered review arrives (thr_ijhpz5srpe
+    // in one response, before the steered review arrives (thr_steerdemo1
     // seq 2059-2064, 2026-10-26).
     host.startItem({ seq: 101, item: { type: "reasoning" } });
     host.startItem({ seq: 102, item: { type: "agentMessage" } });

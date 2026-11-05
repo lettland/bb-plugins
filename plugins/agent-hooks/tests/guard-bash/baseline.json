@@ -1,7 +1,7 @@
 [
   {
     "id": "fp-docker-rm-project-mount",
-    "cmd": "docker run --rm -v /Users/k0d3r1s/ws/foo:/app node:22",
+    "cmd": "docker run --rm -v /Users/me/ws/foo:/app node:22",
     "expect": "allow",
     "why": "F1 FP: --rm is a flag on docker, not an rm command",
     "actual": "allow",
@@ -812,7 +812,7 @@
     "expect": "hard",
     "why": "home-glob: glob in the user segment hits every home",
     "actual": "hard",
-    "reason": "HARD BLOCK: rm targets a home directory or its direct child (/Users/k0d3r1s/.zshrc). Catastrophic."
+    "reason": "HARD BLOCK: rm targets a home directory or its direct child (/Users/me/.zshrc). Catastrophic."
   },
   {
     "id": "home-rm-glob-deep-ok",
@@ -1346,7 +1346,7 @@
     "id": "noop-true",
     "cmd": "true",
     "expect": "soft",
-    "why": "idle no-op loop seen in bb thread thr_edupihyktb: end the turn instead",
+    "why": "idle no-op loop seen in bb thread thr_idleloop01: end the turn instead",
     "actual": "soft",
     "reason": "SOFT BLOCK: no-op command ('true' / ':') does nothing."
   },

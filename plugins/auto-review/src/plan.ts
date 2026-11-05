@@ -80,7 +80,7 @@ export function userQuestionOf(interaction: PendingInteraction): PendingUserQues
  * An `agentMessage` item no longer disqualifies on its own: the deny text
  * reads as a rejection until the steered review arrives, so preamble text in
  * the same response as the question is exactly the reaction this function
- * exists to wave through (thr_ijhpz5srpe seq 2059-2064, 2026-10-26: text and
+ * exists to wave through (thr_steerdemo1 seq 2059-2064, 2026-10-26: text and
  * question, one response). What does disqualify is a delivered steer — core
  * records it as a `provider/unhandled` row with `rawType: "sdk/user"`, and
  * once the steered user message is in the log the review has reached the
@@ -117,7 +117,7 @@ export function isImmediateReactionToDeny(events: readonly ThreadEventRow[]): bo
 /** The `rawType` of a `provider/unhandled` row, read to tell a steered user message from every other unhandled event. */
 const UNHANDLED_RAW_TYPE = z.object({ rawType: z.string() });
 
-/** The path under `data` where a steered user row carries its content (thr_ijhpz5srpe seq 2069, 2026-10-26). */
+/** The path under `data` where a steered user row carries its content (thr_steerdemo1 seq 2069, 2026-10-26). */
 const STEER_CONTENT = z.object({
   rawEvent: z.object({
     params: z.object({

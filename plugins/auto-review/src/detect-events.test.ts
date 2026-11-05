@@ -49,7 +49,7 @@ const completed = (seq: number, turnId: string): Row => ({ seq, type: "turn/comp
 /**
  * A `system/interaction/lifecycle` row for a plan approval resolved inside
  * `turnId`, as core logged it for the incident this fix replays (thread
- * `thr_3w9ztbnir9`: `resolving` at seq 1296, `resolved` at seq 1297). The
+ * `thr_resolve001`: `resolving` at seq 1296, `resolved` at seq 1297). The
  * decision defaults to `allow_once`; `subject` reshapes the approval's subject
  * and `resolution` `null` leaves it unresolved.
  */

@@ -114,7 +114,7 @@ describe("isImmediateReactionToDeny", () => {
     return { type: "item/started", data: { item } } as never;
   }
 
-  /** The `provider/unhandled` row core records a delivered steer as, copied from thr_ijhpz5srpe seq 2069 (2026-10-26) with the content string trimmed. */
+  /** The `provider/unhandled` row core records a delivered steer as, copied from thr_steerdemo1 seq 2069 (2026-10-26) with the content string trimmed. */
   function steerRow(content: unknown, rawType = "sdk/user") {
     return {
       type: "provider/unhandled",
@@ -135,7 +135,7 @@ describe("isImmediateReactionToDeny", () => {
               timestamp: "2026-10-26T12:12:10.037Z",
               isReplay: true,
             },
-            threadId: "thr_ijhpz5srpe",
+            threadId: "thr_steerdemo1",
           },
         },
       },
@@ -158,7 +158,7 @@ describe("isImmediateReactionToDeny", () => {
     );
   });
 
-  it("is true when preamble text and the question share one response, before any steer (thr_ijhpz5srpe seq 2059-2064, 2026-10-26)", () => {
+  it("is true when preamble text and the question share one response, before any steer (thr_steerdemo1 seq 2059-2064, 2026-10-26)", () => {
     expect(
       isImmediateReactionToDeny([
         itemStarted({ type: "reasoning" }),
@@ -212,7 +212,7 @@ describe("isImmediateReactionToDeny", () => {
               message: { role: "user" },
               isReplay: true,
             },
-            threadId: "thr_ijhpz5srpe",
+            threadId: "thr_steerdemo1",
           },
         },
       },

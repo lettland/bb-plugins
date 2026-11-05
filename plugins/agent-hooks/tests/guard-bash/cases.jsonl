@@ -1,4 +1,4 @@
-{"id": "fp-docker-rm-project-mount", "cmd": "docker run --rm -v /Users/k0d3r1s/ws/foo:/app node:22", "expect": "allow", "why": "F1 FP: --rm is a flag on docker, not an rm command"}
+{"id": "fp-docker-rm-project-mount", "cmd": "docker run --rm -v /Users/me/ws/foo:/app node:22", "expect": "allow", "why": "F1 FP: --rm is a flag on docker, not an rm command"}
 {"id": "fp-docker-rm-docker-sock", "cmd": "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock alpine", "expect": "allow", "why": "F1 FP: volume token matched /var/* under the old scan"}
 {"id": "rm-sudo-flag-value", "cmd": "sudo -u root rm -rf /etc", "expect": "hard", "why": "F1: -u takes a value; a command-word resolver would land on 'root'"}
 {"id": "rm-absolute-path", "cmd": "/bin/rm -rf /etc", "expect": "hard", "why": "F1: basename of /bin/rm is rm"}
@@ -165,6 +165,6 @@
 {"id": "grep-no-verify", "cmd": "grep -- --no-verify file", "expect": "allow", "why": "git hook bypass: no git word"}
 {"id": "git-push-plain", "cmd": "git push", "expect": "allow", "why": "git hook bypass: plain push"}
 {"id": "git-message-dash-n-value", "cmd": "git commit -m \"-n\"", "expect": "allow", "why": "git hook bypass: value of -m"}
-{"id": "noop-true", "cmd": "true", "expect": "soft", "why": "idle no-op loop seen in bb thread thr_edupihyktb: end the turn instead"}
+{"id": "noop-true", "cmd": "true", "expect": "soft", "why": "idle no-op loop seen in bb thread thr_idleloop01: end the turn instead"}
 {"id": "noop-colon-chain", "cmd": ": && true", "expect": "soft", "why": "idle no-op variants"}
 {"id": "noop-true-in-real-command", "cmd": "make test || true", "expect": "allow", "why": "true as part of a real command is fine"}
