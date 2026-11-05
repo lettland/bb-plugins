@@ -236,14 +236,29 @@ describe("buildReviewPrompt", () => {
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*re-review the fix under step 2's closure rule/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*re-run steps 3 to 5/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*A secret or credential finding is a step 5 STOP, never something to fix and commit/u);
-    expect(text).toMatch(/6\. Commit the staged changes[^\n]*Never commit while a Blocker or security Concern is still open/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*left open in the files above is not a reason to stop/u);
+    expect(text).toMatch(
+      /6\. Commit the staged changes[^\n]*A finding step 1 tells you to report and not fix \(outside the files above, or skipped under the named-feature exception\) does not hold the commit/u,
+    );
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*Never commit while a Blocker or security Concern is still open in the files above/u);
+    const step6 = text.split("\n").find((line) => line.startsWith("6. Commit the staged changes")) ?? "";
+    expect(step6).toContain("that re-review says so. A secret or credential finding is a step 5 STOP");
+    expect(step6.indexOf("is not a reason to stop")).toBeLessThan(step6.indexOf("A secret or credential finding is a step 5 STOP"));
+    expect(step6.indexOf("A secret or credential finding is a step 5 STOP")).toBeLessThan(step6.indexOf("Never commit while"));
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*end your turn with that decision as a direct question to the user/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*the files you left uncommitted/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*report the outcome as `uncommitted`/u);
-    expect(text).toMatch(/6\. Commit the staged changes[^\n]*If you cannot close it and no user decision would help, do not commit/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*If you cannot close such a finding and no user decision would help, do not commit/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*If closing an open Blocker or security Concern in the files above needs a decision only the user can make/u);
+    expect(text).not.toContain("If closing it needs");
+    expect(text).not.toContain("If you cannot close it ");
+    expect(text).toMatch(
+      /6\. Commit the staged changes[^\n]*report which finding is open and what you tried, and report the outcome as `uncommitted`/u,
+    );
     expect(text).not.toContain("other than the missing-plan Blocker");
     expect(text).not.toContain("The missing-plan Blocker above is the one exception");
-    expect(text).toMatch(/8\. Merge[^\n]*or a Blocker or security Concern is still open \(the missing-plan Blocker included\),/u);
+    expect(text).toMatch(/8\. Merge[^\n]*or a Blocker or security Concern is still open, or when/u);
+    expect(text).not.toContain("(the missing-plan Blocker included)");
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*plain `git commit`, which records exactly what is staged/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*never pass paths to `git commit`/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*`git restore --staged -- <file> …`/u);
@@ -1012,12 +1027,41 @@ describe("the size gate in the review prompt", () => {
       changeSize: { trivial: false, blocker: true },
     });
     expect(text).toMatch(
-      /6\. Commit the staged changes[^\n]*Never commit while a Blocker or security Concern other than the missing-plan Blocker is still open/u,
+      /6\. Commit the staged changes[^\n]*Never commit while a Blocker or security Concern other than the missing-plan Blocker is still open in the files above/u,
     );
     expect(text).toMatch(
-      /6\. Commit the staged changes[^\n]*The missing-plan Blocker above is the one exception: no code change closes it, so it does not hold the commit — commit the change and leave it unmerged\./u,
+      /6\. Commit the staged changes[^\n]*The missing-plan Blocker above is the one exception: no code change closes it and it is not a decision to ask about here, so it alone does not hold the commit; the rest of this step still applies, and the change stays unmerged\./u,
     );
-    expect(text).toMatch(/8\. Merge[^\n]*or a Blocker or security Concern is still open \(the missing-plan Blocker included\),/u);
+    const step6 = text.split("\n").find((line) => line.startsWith("6. Commit the staged changes")) ?? "";
+    expect(step6).toContain("other than the missing-plan Blocker is still open in the files above. The missing-plan Blocker above is the one exception");
+    expect(step6.indexOf("The missing-plan Blocker above is the one exception")).toBeLessThan(
+      step6.indexOf("If closing an open Blocker or security Concern in the files above needs a decision"),
+    );
+    expect(text).toMatch(/8\. Merge[^\n]*or a Blocker or security Concern is still open \(the missing-plan Blocker included\), or when/u);
+  });
+
+  it("a missing-plan blocker without a merge decision still carries the exception and renders no step 8", () => {
+    const text = buildReviewPrompt({
+      decision: { commit: true, merge: false },
+      reviewMode: "auto",
+      scope,
+      changeSize: { trivial: false, blocker: true },
+    });
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*The missing-plan Blocker above is the one exception/u);
+    expect(text).not.toMatch(/^8\. Merge/mu);
+  });
+
+  it("without a missing-plan blocker the step 6 and step 8 texts carry no plan wording", () => {
+    const text = buildReviewPrompt({
+      decision: { commit: true, merge: true },
+      reviewMode: "auto",
+      scope,
+      changeSize: { trivial: false, blocker: false },
+    });
+    expect(text).not.toContain("other than the missing-plan Blocker");
+    expect(text).not.toContain("The missing-plan Blocker above is the one exception");
+    expect(text).not.toContain("(the missing-plan Blocker included)");
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*Never commit while a Blocker or security Concern is still open in the files above/u);
   });
 
   it("a trivial change never carries the blocker even when the gate reports one", () => {
