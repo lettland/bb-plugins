@@ -27,6 +27,7 @@ import {
   sidebarProjectSortDirectionAtom,
   sidebarSortDirectionAtom,
   sidebarShowProviderIconsAtom,
+  sidebarShowEmptyProjectsAtom,
   sidebarShowRowMetadataAtom,
 } from "../preferences/atoms.js";
 import type { OrganizationMode } from "../../shared/preferences.js";
@@ -446,5 +447,48 @@ it.each([false, true])(
     expect(store.get(sidebarThreadLifecyclesAtom)).toEqual(["archived"]);
     fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Archived" }));
     expect(store.get(sidebarThreadLifecyclesAtom)).toEqual(["archived"]);
+  },
+);
+
+async function openFilter(compact: boolean) {
+  if (compact) {
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Pinned actions(?:;|$)/ }),
+    );
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Filter" }));
+  } else {
+    await openMenu();
+    await openSubmenu("Filter");
+  }
+}
+
+it.each([false, true])(
+  "toggles empty projects in the project filter (compact=%s)",
+  async (compact) => {
+    const { store } = setup("Pinned", false, "project", compact);
+    await openFilter(compact);
+    const toggle = await screen.findByRole("menuitemcheckbox", {
+      name: "Empty projects",
+    });
+    expect(store.get(sidebarShowEmptyProjectsAtom)).toBe(true);
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(toggle);
+    expect(store.get(sidebarShowEmptyProjectsAtom)).toBe(false);
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(toggle);
+    expect(store.get(sidebarShowEmptyProjectsAtom)).toBe(true);
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+  },
+);
+
+it.each(["machine", "chronological"] as const)(
+  "offers no empty-projects filter under %s organization",
+  async (organization) => {
+    setup("Pinned", false, organization);
+    await openFilter(false);
+    await screen.findByRole("menuitemcheckbox", { name: "Active" });
+    expect(
+      screen.queryByRole("menuitemcheckbox", { name: "Empty projects" }),
+    ).toBeNull();
   },
 );
