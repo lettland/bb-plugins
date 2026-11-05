@@ -231,7 +231,19 @@ describe("buildReviewPrompt", () => {
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*keep both sides of a rename in the same group/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*never bypass hooks with `--no-verify`/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*skip step 7/u);
-    expect(text).toMatch(/6\. Commit the staged changes[^\n]*the checks still fail, the review left a Blocker or security Concern open, or the change could only be committed in part[^\n]*do NOT commit/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*the checks still fail after your fixes, or the change could only be committed in part[^\n]*do NOT commit/u);
+    expect(text).not.toMatch(/the review left a Blocker or security Concern open, or the change/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*re-review the fix under step 2's closure rule/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*re-run steps 3 to 5/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*A secret or credential finding is a step 5 STOP, never something to fix and commit/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*Never commit while a Blocker or security Concern is still open/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*end your turn with that decision as a direct question to the user/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*the files you left uncommitted/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*report the outcome as `uncommitted`/u);
+    expect(text).toMatch(/6\. Commit the staged changes[^\n]*If you cannot close it and no user decision would help, do not commit/u);
+    expect(text).not.toContain("other than the missing-plan Blocker");
+    expect(text).not.toContain("The missing-plan Blocker above is the one exception");
+    expect(text).toMatch(/8\. Merge[^\n]*or a Blocker or security Concern is still open \(the missing-plan Blocker included\),/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*plain `git commit`, which records exactly what is staged/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*never pass paths to `git commit`/u);
     expect(text).toMatch(/6\. Commit the staged changes[^\n]*`git restore --staged -- <file> …`/u);
@@ -990,6 +1002,22 @@ describe("the size gate in the review prompt", () => {
     // Between the reviewer-message rules and step 1.
     expect(text.indexOf(BLOCKER_LINE)).toBeGreaterThan(text.indexOf("If the user asks you to stop the review"));
     expect(text.indexOf(BLOCKER_LINE)).toBeLessThan(text.indexOf("\n1. "));
+  });
+
+  it("a missing-plan blocker holds the merge but not the commit, while any other open Blocker holds both", () => {
+    const text = buildReviewPrompt({
+      decision: { commit: true, merge: true },
+      reviewMode: "auto",
+      scope,
+      changeSize: { trivial: false, blocker: true },
+    });
+    expect(text).toMatch(
+      /6\. Commit the staged changes[^\n]*Never commit while a Blocker or security Concern other than the missing-plan Blocker is still open/u,
+    );
+    expect(text).toMatch(
+      /6\. Commit the staged changes[^\n]*The missing-plan Blocker above is the one exception: no code change closes it, so it does not hold the commit — commit the change and leave it unmerged\./u,
+    );
+    expect(text).toMatch(/8\. Merge[^\n]*or a Blocker or security Concern is still open \(the missing-plan Blocker included\),/u);
   });
 
   it("a trivial change never carries the blocker even when the gate reports one", () => {
