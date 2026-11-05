@@ -77,7 +77,7 @@ describe("the plan approval form setting", () => {
       expect(descriptor).toMatchObject({ type: "boolean", label: "Plan approval form", default: false });
       expect(descriptor.description).toContain("experimental_holdToolCall");
       expect(descriptor.description).toContain("If the agent keeps working while the form is open, your bb doesn't support this; turn it off.");
-      expect(descriptor.description).toContain("applies to new threads");
+      expect(descriptor.description).toContain("A toggle applies to threads started after it; a thread keeps the mode it started with.");
     } finally {
       await host.harness.dispose();
     }
@@ -89,6 +89,7 @@ describe("effectiveConfig", () => {
     enabled: true,
     mergeEligibleMainlines: ["master"],
     reviewMode: "auto",
+    planApprovalForm: false,
   };
 
   it("uses globals when there is no project override", () => {
@@ -101,7 +102,7 @@ describe("effectiveConfig", () => {
     });
   });
 
-  it("takes the plan approval form switch from the globals alone, reading an absent one as off", () => {
+  it("takes the plan approval form switch from the globals alone", () => {
     expect(effectiveConfig({ ...globals, planApprovalForm: true }, {}).planApprovalForm).toBe(true);
     expect(effectiveConfig({ ...globals, planApprovalForm: true }, { enabled: false }).planApprovalForm).toBe(true);
     expect(effectiveConfig({ ...globals, planApprovalForm: false }, {}).planApprovalForm).toBe(false);

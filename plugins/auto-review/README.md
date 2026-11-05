@@ -519,7 +519,7 @@ plugin, so agents can read it too.
 | Enabled | on | Global kill switch |
 | Merge-eligible mainlines | `master` | Comma-separated branch names a feature branch may be merged into locally |
 | Review mode | `auto` | `auto` uses devkit's calibrated review when `devkit_load_skill` is available, else self-review; `devkit` requires it; `self` always self-reviews |
-| Plan approval form | off | `PresentPlan` asks for plan approval in a form that holds the agent's turn until you answer (needs a bb build with `experimental_holdToolCall`); applies to new threads |
+| Plan approval form | off | `PresentPlan` asks for plan approval in a form that holds the agent's turn until you answer (needs a bb build with `experimental_holdToolCall`); a toggle applies to threads started after it; a thread keeps the mode it started with |
 
 Under bb, `auto` (when devkit is available) and `devkit` modes hand the five lens reviews — and
 the closure review — to bb child threads when the thread can spawn children (otherwise provider
@@ -553,10 +553,10 @@ the review it tells the agent to wait for the user's approval in chat.
 
 With it on, `PresentPlan` opens an approval form once the review is done, on providers other
 than Claude Code. The form shows the plan path and whether the review completed, with Approve,
-Request changes (with optional feedback) and Cancel. The agent's turn stays blocked until you
+Request changes (which needs feedback) and Cancel. The agent's turn stays blocked until you
 answer, and the answer is the `PresentPlan` result itself:
 
-- **Approve:** the result says the user approved the plan in the form, and the agent implements it. The missing-plan Blocker of the code review counts this approval.
+- **Approve:** the result says the plan was approved in the form, and the agent implements it. The missing-plan Blocker of the code review counts this approval.
 - **Request changes:** the agent revises the plan file from your feedback and calls `PresentPlan` again, which runs a new review and then a new form. The feedback reaches the agent as quoted data, never as an instruction.
 - **Cancel** (or a stop, or the 60-minute limit): the plan stays unapproved. The agent ends its turn and says so; ask it to present the plan again and it calls `PresentPlan` with the same path. For an unchanged plan file that is a short re-review followed by a new form.
 
@@ -565,14 +565,16 @@ With the form on, a chat reply is not approval: the agent's instructions say to 
 stays under the 65-minute limit the fork daemon puts on forwarded tool calls.
 
 **What it needs from bb.** The form only works on a bb build that can hold a tool call while a
-form is open (`bb.ui.requestInput` with `experimental_holdToolCall`). The published plugin SDK
-(0.6.79 here, and 0.6.121) has no such option in its types and no flag to detect it, so the
+form is open (`bb.ui.requestInput` with `experimental_holdToolCall`). Neither the SDK version this
+plugin pins nor the published SDK has such an option in its types or a flag to detect it, so the
 plugin cannot check; it passes the option and checks the result instead. Self-test: if the
 agent keeps working while the form is open, your bb does not support this; turn the setting
-off. On a bb without the hold, the form detaches from the turn; the plugin then returns the
-plain release text whatever you clicked, and the missing-plan Blocker does not count it (it
-fails closed, as with the setting off). The setting applies to new threads, because the
-agent's instructions are fixed when a thread is configured.
+off. On a bb without the hold, the form detaches from the turn; the plugin then returns a
+"form unavailable" text whatever you clicked (the plan is not approved; the agent tells you the form did not work), and the missing-plan Blocker does not count it (it
+fails closed, as with the setting off). A toggle applies to threads started after it; a thread
+keeps the mode it started with. The agent's instructions are fixed when the thread starts, so
+auto-review stores the mode in the thread's metadata at its first configure and `PresentPlan`
+follows that stored mode, not the live setting.
 
 **Self-approval.** bb does not check who answers a pending interaction, and the `bb` CLI can
 answer one (`bb thread interactions respond <id> --self --value …`). An agent could therefore

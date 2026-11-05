@@ -78,8 +78,7 @@ export interface GlobalDefaults {
   enabled: boolean;
   mergeEligibleMainlines: string[];
   reviewMode: ReviewMode;
-  /** Absent reads as off. */
-  planApprovalForm?: boolean;
+  planApprovalForm: boolean;
 }
 
 export interface EffectiveConfig {
@@ -127,7 +126,7 @@ export function defineAutoReviewSettings(bb: BbPluginApi) {
       type: "boolean",
       label: "Plan approval form",
       description:
-        "PresentPlan asks for plan approval in a form that holds the agent's turn until you answer. Needs a bb build that supports holding a tool call for a form (experimental_holdToolCall); leave off otherwise. If the agent keeps working while the form is open, your bb doesn't support this; turn it off. The toggle applies to new threads.",
+        "PresentPlan asks for plan approval in a form that holds the agent's turn until you answer. Needs a bb build that supports holding a tool call for a form (experimental_holdToolCall); leave off otherwise. If the agent keeps working while the form is open, your bb doesn't support this; turn it off. A toggle applies to threads started after it; a thread keeps the mode it started with.",
       default: false,
     },
   });
@@ -164,7 +163,7 @@ export function effectiveConfig(
       project.mergeEligibleMainlines ?? globals.mergeEligibleMainlines,
     reviewMode: project.reviewMode ?? globals.reviewMode,
     autoApprovePlans: project.autoApprovePlans ?? false,
-    planApprovalForm: globals.planApprovalForm ?? false,
+    planApprovalForm: globals.planApprovalForm,
   };
 }
 

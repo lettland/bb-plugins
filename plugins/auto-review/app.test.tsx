@@ -688,16 +688,28 @@ describe("Plan approval form", () => {
     expect(cancel).not.toHaveBeenCalled();
   });
 
-  it("Request changes submits the feedback, and nothing but the answer when it is blank", async () => {
+  it("Request changes submits the feedback", async () => {
     const { submit } = renderForm();
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "split step 2" } });
     fireEvent.click(screen.getByRole("button", { name: "Request changes" }));
     await waitFor(() => expect(submit).toHaveBeenCalledWith({ approved: false, feedback: "split step 2" }));
-    cleanup();
-    const blank = renderForm();
-    fireEvent.change(screen.getByRole("textbox"), { target: { value: "   " } });
-    fireEvent.click(screen.getByRole("button", { name: "Request changes" }));
-    await waitFor(() => expect(blank.submit).toHaveBeenCalledWith({ approved: false }));
+  });
+
+  it("keeps Request changes disabled until the feedback holds non-whitespace text", () => {
+    const { submit } = renderForm();
+    const button = () => screen.getByRole("button", { name: "Request changes" }) as HTMLButtonElement;
+    expect(button().disabled).toBe(true);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "  \n " } });
+    expect(button().disabled).toBe(true);
+    fireEvent.click(button());
+    expect(submit).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "fix step 2" } });
+    expect(button().disabled).toBe(false);
+  });
+
+  it("labels the feedback box as required for Request changes", () => {
+    renderForm();
+    expect(screen.getByLabelText("Feedback (required for Request changes)")).toBe(screen.getByRole("textbox"));
   });
 
   it("caps the feedback box at the 2000 characters the answer allows", () => {

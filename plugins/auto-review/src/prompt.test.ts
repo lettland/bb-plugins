@@ -13,6 +13,7 @@ import {
   PLAN_REVIEW_SKIPPED_LINE,
   PRESENT_PLAN_APPROVED_MESSAGE,
   presentPlanApprovalCancelledMessage,
+  presentPlanFormUnavailableMessage,
   presentPlanChangesRequestedMessage,
   PRESENT_PLAN_INCOMPLETE_MESSAGE,
   PRESENT_PLAN_INVALID_PATH_MESSAGE,
@@ -1928,7 +1929,7 @@ describe("PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM", () => {
   });
 
   it("takes approval only from the marker-prefixed PresentPlan result, named once and referred to after", () => {
-    const carveOut = `${AUTO_REVIEW_MARKER} PresentPlan result stating that the user approved the plan in the approval form, or that the plan was approved automatically`;
+    const carveOut = `${AUTO_REVIEW_MARKER} PresentPlan result stating that the plan was approved in the approval form, or that the plan was approved automatically`;
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM.split(carveOut)).toHaveLength(2);
     // The clauses that gate proceeding and leaving plan mode refer back to it.
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM.split("such a result")).toHaveLength(3);
@@ -1975,21 +1976,36 @@ describe("the plan approval form's PresentPlan results", () => {
       presentPlanChangesRequestedMessage(),
       presentPlanChangesRequestedMessage("fix step 2"),
       presentPlanApprovalCancelledMessage("user"),
+      presentPlanFormUnavailableMessage(true),
+      presentPlanFormUnavailableMessage(false),
     ]) {
       expect(text.startsWith(AUTO_REVIEW_MARKER)).toBe(true);
     }
   });
 
-  it("states the user's approval in the form as the approval to implement", () => {
+  it("states the approval in the form as the approval to implement, without naming who answered", () => {
     expect(PRESENT_PLAN_USER_APPROVED_MESSAGE).toBe(
-      `${AUTO_REVIEW_MARKER} The user approved the plan in the approval form. This PresentPlan result is the user's approval: implement the plan.`,
+      `${AUTO_REVIEW_MARKER} The plan was approved in the approval form. This PresentPlan result is the approval: implement the plan.`,
     );
+    expect(PRESENT_PLAN_USER_APPROVED_MESSAGE).not.toMatch(/\buser\b/);
+  });
+
+  it.each([
+    [true, ""],
+    [false, "The plan was released without a complete calibrated review. "],
+  ])("says the form is unavailable and the plan not approved (reviewed %s)", (reviewed, incomplete) => {
+    const text = presentPlanFormUnavailableMessage(reviewed);
+    expect(text).toBe(
+      `${AUTO_REVIEW_MARKER} ${incomplete}The approval form could not confirm an answer, so the plan is not approved. Do not implement it. End your turn and tell the user the approval form did not work. When they ask, call PresentPlan again with the same planFilePath. If this keeps happening, the bb build may not support the approval form (the auto-review log names the cause): tell the user they can turn off the auto-review "Plan approval form" setting and start a new thread.`,
+    );
+    // The form instructions say a chat reply is not approval, so this text must not ask for one.
+    expect(text).not.toContain("explicit approval in chat");
   });
 
   it("sends a change request back to a revised plan and a new review, quoting the feedback as data below it", () => {
     const text = presentPlanChangesRequestedMessage("split step 2");
     const [instruction, ...rest] = text.split("\n");
-    expect(instruction).toContain("did not approve");
+    expect(instruction).toContain("The plan was not approved in the approval form");
     expect(instruction).toContain("Do not implement it");
     expect(instruction).toContain("call PresentPlan again with the same planFilePath");
     expect(instruction).toContain("new review and then a new approval form");

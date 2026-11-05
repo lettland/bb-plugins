@@ -202,6 +202,7 @@ export const threadStateSchema = z.object({
   /** `planReviewLight` for the `PresentPlan` arm: computed from the plan file at arm time, read back at release. */
   presentPlanLight: z.boolean().optional(),
   presentPlanAutoApprovedSeq: z.number().int().nonnegative().optional(), // Auto-approval cursor the missing-plan gate reads; outside PRESENT_PLAN_KEYS and the latch keys on purpose, so a reset keeps it.
+  presentPlanFormMode: z.boolean().optional(), // Whether the thread's instructions describe the approval form, written once at its first configure; outside PRESENT_PLAN_KEYS and the latch keys on purpose, so a reset keeps it: it must match the instructions the thread was started with.
   /**
    * The interaction ids of the plan approvals auto-review resolved itself
    * (auto-approved, or re-approved on an earlier approval), most recent last,
@@ -221,10 +222,7 @@ export const IDLE_STATE: ThreadState = { phase: "idle" };
 
 export const withThreadLock = createKeyedLock();
 
-export async function readState(
-  bb: BbPluginApi,
-  threadId: string,
-): Promise<ThreadState> {
+export async function readState(bb: BbPluginApi, threadId: string): Promise<ThreadState> {
   const raw = await bb.sdk.threads.getPluginMetadata({ threadId });
   const parsed = threadStateSchema.safeParse(raw);
   if (parsed.success) {

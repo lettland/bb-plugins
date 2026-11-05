@@ -39,6 +39,7 @@ import {
   PRESENT_PLAN_APPROVED_MESSAGE,
   presentPlanApprovalCancelledMessage,
   presentPlanChangesRequestedMessage,
+  presentPlanFormUnavailableMessage,
   PRESENT_PLAN_INCOMPLETE_MESSAGE,
   PRESENT_PLAN_INVALID_PATH_MESSAGE,
   PRESENT_PLAN_OFF_MESSAGE,
@@ -92,14 +93,9 @@ function captureArmedSeq(review: ReviewContext, threadId: string): Promise<numbe
   );
 }
 
-/**
- * What a release hands back instead of its text when the approval form is on:
- * the form to open once the thread lock is released, and the text the release
- * returns when no held form can answer (`fallback`, today's behaviour).
- */
+/** What a release hands back instead of its text when the approval form is on: the form to open once the thread lock is released. */
 interface NeedsForm {
   form: PlanApprovalPayload;
-  fallback: string;
 }
 
 function needsForm(result: PluginAgentToolResult | NeedsForm): result is NeedsForm {
@@ -113,8 +109,8 @@ function needsForm(result: PluginAgentToolResult | NeedsForm): result is NeedsFo
  * are cleared, which would erase `presentPlanRedone`. Otherwise it is released:
  * approved only when the skill was loaded and a tool call completed in between,
  * which cannot show a deliberate skip. A subagent's call counts: the review may
- * run in one. With the approval form on, the two outcomes that wait for the
- * user return a `NeedsForm` instead of their text.
+ * run in one. With the approval form on (`formMode`), the two outcomes that
+ * wait for the user return a `NeedsForm` instead of their text.
  */
 async function releasePlan(
   review: ReviewContext,
@@ -122,6 +118,7 @@ async function releasePlan(
   state: ThreadState,
   config: EffectiveConfig,
   planFilePath: string,
+  formMode: boolean,
 ): Promise<PluginAgentToolResult | NeedsForm> {
   const { bb } = review;
   const check = await planSkillCheck(bb, ctx.threadId, config.reviewMode, state.presentPlanArmedSeq);
@@ -191,12 +188,12 @@ async function releasePlan(
   }
   await recordFire(review, ctx.projectId, ctx.threadId, "stood-down", planReleaseReason(check), tallyExtras);
   const text = check === "missing" ? PRESENT_PLAN_INCOMPLETE_MESSAGE : PRESENT_PLAN_REVIEWED_MESSAGE;
-  return config.planApprovalForm ? { form: { planFilePath, reviewed: check !== "missing" }, fallback: text } : text;
+  return formMode ? { form: { planFilePath, reviewed: check !== "missing" } } : text;
 }
 
 /**
  * The options the held form is opened with. `experimental_holdToolCall` is
- * not in the SDK types this plugin pins (0.6.79, nor the published 0.6.121),
+ * not in the SDK types this plugin pins, nor in the published SDK,
  * so the type adds it. Bb builds with the fork change keep the tool call
  * blocked until the form settles and bind the form to the active turn (bb
  * core `apps/server/src/services/plugins/plugin-api.ts` `requestInput`,
@@ -231,14 +228,17 @@ async function formHeld(bb: BbPluginApi, threadId: string, sinceSeq: number, app
  * Opens the plan approval form, outside the thread lock so a pending form never
  * holds it, and turns its outcome into the tool result inside the same blocked
  * turn. The agent is told to implement only when the host held the form and
- * the gate will credit the approval; otherwise it gets `fallback`.
+ * the gate will credit the approval; otherwise it is told the form could not
+ * confirm an answer (`presentPlanFormUnavailableMessage`), never to wait for a
+ * chat approval, which the form instructions do not accept.
  */
 async function askPlanApproval(
   review: ReviewContext,
   ctx: PluginAgentToolContext,
-  { form, fallback }: NeedsForm,
+  { form }: NeedsForm,
 ): Promise<PluginAgentToolResult> {
   const { bb } = review;
+  const unavailable = presentPlanFormUnavailableMessage(form.reviewed);
   const where = `${basename(form.planFilePath)} in thread ${ctx.threadId}`;
   const sinceSeq = await tryCaptureSinceSeq(
     bb,
@@ -246,7 +246,7 @@ async function askPlanApproval(
     `the plan approval form in ${ctx.threadId}; no form is opened`,
   );
   if (sinceSeq === undefined) {
-    return fallback;
+    return unavailable;
   }
   const holdOptions: HoldOptions = { signal: ctx.signal, experimental_holdToolCall: true };
   let result: Awaited<ReturnType<BbPluginApi["ui"]["requestInput"]>>;
@@ -268,7 +268,7 @@ async function askPlanApproval(
         error instanceof Error ? error.message : String(error)
       }`,
     );
-    return fallback;
+    return unavailable;
   }
   if (result.outcome === "cancelled") {
     bb.log.info(`auto-review: the plan approval form for ${where} was cancelled (${result.reason})`);
@@ -277,7 +277,7 @@ async function askPlanApproval(
   const decision = parsePlanApprovalValue(result.value);
   if (!(await formHeld(bb, ctx.threadId, sinceSeq, decision.approved))) {
     bb.log.info(`auto-review: the plan approval form for ${where} was not held by the host, so nothing is approved`);
-    return fallback;
+    return unavailable;
   }
   bb.log.info(
     `auto-review: the plan approval form for ${where} ${decision.approved ? "approved the plan" : "asked for changes"}`,
@@ -307,7 +307,8 @@ async function presentPlan(
     }
     const now = Date.now();
     if (presentPlanArmed(state, planFilePath, now)) {
-      return releasePlan(review, ctx, state, config, planFilePath);
+      // The mode the thread's instructions were written with; the live setting only before one is stored.
+      return releasePlan(review, ctx, state, config, planFilePath, state.presentPlanFormMode ?? config.planApprovalForm);
     }
     const armedSeq = await captureArmedSeq(review, ctx.threadId);
     // The tier comes from the file as armed; release reads the stored key,
@@ -346,8 +347,8 @@ async function presentPlan(
 // `ReportReview`, with or without the global switch (see below). The
 // callback must be synchronous, so the plan-first part follows the global
 // switch only (the plan approval form's instruction variant follows its global
-// setting the same way, resolved when core configures the thread, so a toggle
-// applies to new threads): a project or thread that turned
+// setting the same way, resolved once per thread and stored in its metadata, so
+// a toggle applies to threads started after it): a project or thread that turned
 // auto-review off still gets one of these, and its plan then goes to the
 // user unreviewed (or, on `PresentPlan`, is told review is off here — see
 // `presentPlan` above).
@@ -389,13 +390,33 @@ function agentConfiguration(
         skills: ["auto-review"],
         instructions: PLAN_FIRST_INSTRUCTIONS,
       }
-    : {
-        tools: [PRESENT_PLAN_TOOL_NAME, REPORT_REVIEW_TOOL_NAME],
-        skills: ["auto-review"],
-        instructions: review.globals.planApprovalForm
-          ? PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM
-          : PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
-      };
+    : presentPlanConfiguration(review, context);
+}
+
+/**
+ * Decided once per thread and stored: bb configures a thread every turn, but a
+ * provider keeps only the instructions it started with (Codex: `thread/start`;
+ * ACP: the session's first prompt). The first configure stores the live
+ * setting, later ones read it back, and `PresentPlan` follows the stored mode.
+ * The agent can write this metadata, but a forged value only switches between
+ * two modes that both fail closed for gate credit. The write is fire-and-forget
+ * because the callback is synchronous; a failed one is logged, and the next configure
+ * stores the setting as it is then (off the thread-start mode only after a toggle).
+ */
+function presentPlanConfiguration(review: ReviewContext, context: PluginAgentConfigurationContext): PluginAgentConfiguration {
+  const { bb } = review;
+  const stored = context.pluginMetadata.presentPlanFormMode;
+  const form = typeof stored === "boolean" ? stored : review.globals.planApprovalForm;
+  if (typeof stored !== "boolean") {
+    void writeState(bb, context.thread.id, { presentPlanFormMode: form }).catch((error: unknown) => {
+      bb.log.warn(`auto-review: could not store the plan approval form mode for ${context.thread.id}: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+  return {
+    tools: [PRESENT_PLAN_TOOL_NAME, REPORT_REVIEW_TOOL_NAME],
+    skills: ["auto-review"],
+    instructions: form ? PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM : PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
+  };
 }
 
 export function registerPlanTools(review: ReviewContext): void {

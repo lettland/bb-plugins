@@ -21,6 +21,7 @@ export {
 export {
   PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM, PRESENT_PLAN_USER_APPROVED_MESSAGE,
   presentPlanChangesRequestedMessage, presentPlanApprovalCancelledMessage,
+  presentPlanFormUnavailableMessage,
 } from "./prompt-plan-form.js";
 /**
  * Past this many paths the list is too long to hand over reliably. It is then

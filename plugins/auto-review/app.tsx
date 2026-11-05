@@ -486,7 +486,7 @@ function ReviewBadge(props: PluginThreadHeaderActionProps) {
  * The plan approval form `PresentPlan` opens. Approve and Request changes
  * submit the shapes `parsePlanApprovalValue` reads; Cancel postpones the
  * decision. Chat sends are rejected while a held form is open, so Cancel is
- * the visible way out. A payload that does not parse shows only Cancel.
+ * the visible way out and Request changes needs feedback typed here. A payload that does not parse shows only Cancel.
  */
 function PlanApproval(props: PluginPendingInteractionProps) {
   const { interaction, submit, cancel } = props;
@@ -521,7 +521,7 @@ function PlanApproval(props: PluginPendingInteractionProps) {
             </div>
           </div>
           <label htmlFor={feedbackId} style={{ fontSize: 12, color: SOFT_INK }}>
-            Feedback, sent with Request changes
+            Feedback (required for Request changes)
           </label>
           <textarea
             id={feedbackId}
@@ -550,12 +550,8 @@ function PlanApproval(props: PluginPendingInteractionProps) {
             </button>
             <button
               type="button"
-              disabled={busy}
-              onClick={() =>
-                void run(() =>
-                  submit(feedback.trim() === "" ? { approved: false } : { approved: false, feedback }),
-                )
-              }
+              disabled={busy || feedback.trim() === ""}
+              onClick={() => void run(() => submit({ approved: false, feedback }))}
             >
               Request changes
             </button>

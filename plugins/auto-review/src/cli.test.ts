@@ -86,6 +86,7 @@ function createCliHost(options: CliHostOptions = {}) {
     enabled: true,
     mergeEligibleMainlines: ["master"],
     reviewMode: "auto",
+    planApprovalForm: false,
   };
   registerAutoReviewCli(fake.bb, settings, () => globals);
 
@@ -789,6 +790,7 @@ describe("auto-review cli: status", () => {
           enabled: true,
           mergeEligibleMainlines: ["master", "main"],
           reviewMode: "devkit",
+          planApprovalForm: false,
         },
       },
       async (host) => {
@@ -822,7 +824,7 @@ describe("auto-review cli: status", () => {
 
   it("reads the globals afresh on every call", async () => {
     await withHost({}, async (host) => {
-      host.setGlobals({ enabled: false, mergeEligibleMainlines: ["trunk"], reviewMode: "self" });
+      host.setGlobals({ enabled: false, mergeEligibleMainlines: ["trunk"], reviewMode: "self", planApprovalForm: false });
       const result = await host.run(["status", THREAD_ID]);
       expect(result.stdout).toContain("enabled: false\n");
       expect(result.stdout).toContain("mergeEligibleMainlines: trunk\n");
@@ -1197,7 +1199,7 @@ describe("auto-review cli: status — planGate", () => {
 
   it("is false when disabled globally", async () => {
     await withHost({ threads: { [THREAD_ID]: claudeCodeThread } }, async (host) => {
-      host.setGlobals({ enabled: false, mergeEligibleMainlines: ["master"], reviewMode: "auto" });
+      host.setGlobals({ enabled: false, mergeEligibleMainlines: ["master"], reviewMode: "auto", planApprovalForm: false });
       const result = await host.run(["status", THREAD_ID, "--json"]);
       expect(parse(result.stdout)).toMatchObject({ planGate: false });
     });
@@ -1230,7 +1232,7 @@ describe("auto-review cli: show", () => {
       const payload = await host.run(["show", "--json"]);
       expect(parse(payload.stdout)).toEqual({
         projectId: null,
-        globals: { enabled: true, mergeEligibleMainlines: ["master"], reviewMode: "auto" },
+        globals: { enabled: true, mergeEligibleMainlines: ["master"], reviewMode: "auto", planApprovalForm: false },
         projectOverride: {},
         effective: {
           enabled: true,
