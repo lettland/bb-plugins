@@ -56,19 +56,6 @@ import {
   ThreadRowActionsCustomizingContext,
 } from "../list/customizeRowActionsContext.js";
 
-vi.mock("@get-bb/plugin-sdk/app", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("@get-bb/plugin-sdk/app")>();
-  const { withForkThreadStatus } =
-    await import("../model/test-fork-thread-status.js");
-  return {
-    ...actual,
-    experimental_resolveThreadStatus: withForkThreadStatus(
-      actual.experimental_resolveThreadStatus,
-    ),
-  };
-});
-
 installTestPluginRuntime();
 const { SidebarDraftPresenceSync } =
   await import("../list/sidebarDraftPresence.js");

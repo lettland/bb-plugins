@@ -29,7 +29,6 @@ import {
 import { cn } from "@/lib/utils";
 import { LIST_HOVER_TRANSITION } from "@/components/ui/motion";
 import {
-  experimental_resolveThreadStatus,
   experimental_ThreadActionsContextMenu as ThreadActionsContextMenu,
   experimental_ThreadActionsMenu as ThreadActionsMenu,
   experimental_ThreadStatusGlyph as ThreadStatusGlyph,
@@ -54,6 +53,7 @@ import {
   type PluginThreadStatus,
 } from "@get-bb/plugin-sdk/app";
 import type { SidebarThread } from "../model/sidebar-thread.js";
+import { resolveThreadStatus } from "../model/thread-status.js";
 import { useThreadsHaveDraft } from "../list/sidebarDraftPresence.js";
 import { NO_HIDDEN_THREADS } from "../list/groupRollups.js";
 import { useSidebarProjectName } from "../model/use-sidebar-data.js";
@@ -452,7 +452,7 @@ function ThreadRowComponent({
       ? parentOptions.hiddenThreads
       : NO_HIDDEN_THREADS;
   const hiddenChildrenHaveDraft = useThreadsHaveDraft(hiddenThreads);
-  const trailingStatus = experimental_resolveThreadStatus({
+  const trailingStatus = resolveThreadStatus({
     thread,
     hiddenThreads,
     hasUnsubmittedDraft: hasComposerDraft || hiddenChildrenHaveDraft,

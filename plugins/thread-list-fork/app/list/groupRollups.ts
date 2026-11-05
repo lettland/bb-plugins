@@ -1,6 +1,5 @@
 import { useMemo } from "react";
 import {
-  experimental_resolveThreadStatus,
   useSidebarSplitLayout,
   useSidebarThreadRowStatuses,
   type PluginSidebarSplitPane,
@@ -8,6 +7,7 @@ import {
   type PluginThreadStatus,
 } from "@get-bb/plugin-sdk/app";
 import type { SidebarThread } from "../model/sidebar-thread.js";
+import { resolveThreadStatus } from "../model/thread-status.js";
 import { useThreadsHaveDraft } from "./sidebarDraftPresence.js";
 
 export interface ThreadSplitIndicatorTarget {
@@ -68,7 +68,7 @@ export function useHiddenThreadsStatus(
   const hasUnsubmittedDraft = useThreadsHaveDraft(threads);
   return useMemo(
     () =>
-      experimental_resolveThreadStatus({
+      resolveThreadStatus({
         thread: null,
         hiddenThreads: threads,
         hasUnsubmittedDraft,
