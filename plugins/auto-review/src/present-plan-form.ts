@@ -48,30 +48,62 @@ export function planFormOpenResult(): PluginAgentToolResult {
 }
 
 /**
- * The options the held form is opened with. `experimental_holdToolCall` is
- * not in the SDK types this plugin pins, nor in the published SDK,
- * so the type adds it. Bb builds with the fork change keep the tool call
- * blocked until the form settles and bind the form to the active turn (bb
- * core `apps/server/src/services/plugins/plugin-api.ts` `requestInput`,
- * `apps/server/src/services/interactions/pending-interactions.fork.ts`);
- * upstream bb ignores the flag and detaches the call instead.
+ * The options the held form is opened with. `experimental_holdToolCall` and
+ * `experimental_requireAppAnswer` are not in the SDK types this plugin pins,
+ * nor in the published SDK, so the type adds them. Bb builds with the fork
+ * change keep the tool call blocked until the form settles and bind the form
+ * to the active turn (bb core `apps/server/src/services/plugins/plugin-api.ts`
+ * `requestInput`, `apps/server/src/services/interactions/pending-interactions.fork.ts`),
+ * and refuse an answer that did not come from the app and record how each
+ * answer arrived (`routes/threads/interactions.ts` `answeredVia`, the
+ * `plugin_submitted` resolution in `packages/domain/src/pending-interactions.ts`);
+ * upstream bb ignores both flags: it detaches the call and records no origin.
  */
 type HoldOptions = NonNullable<Parameters<BbPluginApi["ui"]["requestInput"]>[1]> & {
   experimental_holdToolCall?: boolean;
+  experimental_requireAppAnswer?: boolean;
 };
 
 /**
- * Whether the form's resolution is one the gate will credit as held: found,
- * turn-scoped, and, for an approval, described as approved. A host without the
- * hold detaches the call, so its resolution is thread-scoped and the agent
- * must not be told to implement from it. A failed read counts as not held.
+ * Whether the form's resolution is one the gate will credit: found,
+ * turn-scoped, and, for an approval, described as approved and answered
+ * through the app. A host without the hold detaches the call, so its
+ * resolution is thread-scoped and the agent must not be told to implement from
+ * it. An approval needs the app origin because the gate credits only that
+ * (`approvedPlanOf`); core already refuses a CLI or API answer to the flagged
+ * form, so only a host without the flag leaves one uncredited. A change request
+ * is not credited, so it needs no origin. A failed read counts as not held.
  * With one form per thread (`planFormOpen`), the latest resolution after the
- * cursor is this call's form.
+ * cursor is this call's form. Each way of failing logs its own cause.
  */
-async function formHeld(bb: BbPluginApi, threadId: string, sinceSeq: number, approved: boolean): Promise<boolean> {
+async function formHeld(
+  bb: BbPluginApi,
+  threadId: string,
+  sinceSeq: number,
+  approved: boolean,
+  where: string,
+): Promise<boolean> {
   try {
     const resolution = await planFormResolutionSince(bb, threadId, sinceSeq);
-    return resolution !== null && resolution.held && (!approved || resolution.approved);
+    if (resolution === null) {
+      bb.log.info(`auto-review: the plan approval form for ${where} left no resolution event after it settled, so nothing is approved`);
+      return false;
+    }
+    if (!resolution.held) {
+      bb.log.info(`auto-review: the plan approval form for ${where} was not held by the host (its resolution is not turn-scoped), so nothing is approved`);
+      return false;
+    }
+    if (approved && !resolution.approved) {
+      bb.log.info(`auto-review: the plan approval form for ${where} was answered approved but its resolution does not record approved: true, so nothing is approved`);
+      return false;
+    }
+    if (approved && !resolution.app) {
+      bb.log.info(
+        `auto-review: the plan approval form for ${where} was approved by an answer that did not come from the bb app (no answeredVia "app" on the resolution; does your bb support experimental_requireAppAnswer?), so nothing is approved`,
+      );
+      return false;
+    }
+    return true;
   } catch (error) {
     bb.log.warn(
       `auto-review: could not read the plan approval form's resolution in ${threadId}, so it counts as not held: ${
@@ -132,7 +164,7 @@ async function runPlanApproval(
   if (sinceSeq === undefined) {
     return unavailable;
   }
-  const holdOptions: HoldOptions = { signal: ctx.signal, experimental_holdToolCall: true };
+  const holdOptions: HoldOptions = { signal: ctx.signal, experimental_holdToolCall: true, experimental_requireAppAnswer: true };
   let result: Awaited<ReturnType<BbPluginApi["ui"]["requestInput"]>>;
   try {
     result = await bb.ui.requestInput(
@@ -159,8 +191,7 @@ async function runPlanApproval(
     return presentPlanApprovalCancelledMessage(result.reason);
   }
   const decision = parsePlanApprovalValue(result.value);
-  if (!(await formHeld(bb, ctx.threadId, sinceSeq, decision.approved))) {
-    bb.log.info(`auto-review: the plan approval form for ${where} was not held by the host, so nothing is approved`);
+  if (!(await formHeld(bb, ctx.threadId, sinceSeq, decision.approved, where))) {
     return unavailable;
   }
   if ("unreadable" in decision) {

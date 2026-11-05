@@ -113,7 +113,7 @@ function isCodeReviewRequest(data: TurnRequestData): boolean {
  * The plan approval the interaction lifecycle event resolved, or null when it
  * resolves none: a `resolved` approval whose decision is `allow_once` or
  * `allow_for_session` of a plan, or a held plan-approval form answered
- * `approved` (`planFormResolution`); a deny, an interaction still
+ * `approved` through the app (`planFormResolution`); a deny, an interaction still
  * `resolving`, or an approval of anything else is not one. The event carries
  * no resolver, so the caller tells an approval the user gave from one
  * auto-review gave itself.
@@ -126,7 +126,7 @@ function approvedPlanOf(
   const { interaction } = event.data;
   const form = planFormResolution(event);
   if (form !== null) {
-    return form.held && form.approved ? { id: interaction.id, seq: event.seq, requestedSeq } : null;
+    return form.held && form.approved && form.app ? { id: interaction.id, seq: event.seq, requestedSeq } : null;
   }
   if (
     interaction.payload.kind !== "approval" ||

@@ -519,7 +519,7 @@ plugin, so agents can read it too.
 | Enabled | on | Global kill switch |
 | Merge-eligible mainlines | `master` | Comma-separated branch names a feature branch may be merged into locally |
 | Review mode | `auto` | `auto` uses devkit's calibrated review when `devkit_load_skill` is available, else self-review; `devkit` requires it; `self` always self-reviews |
-| Plan approval form | off | `PresentPlan` asks for plan approval in a form that holds the agent's turn until you answer (needs a bb build with `experimental_holdToolCall`); a toggle applies to threads started after it; a thread keeps the mode it started with |
+| Plan approval form | off | `PresentPlan` asks for plan approval in a form that holds the agent's turn until you answer (needs a bb build with both `experimental_holdToolCall` and `experimental_requireAppAnswer`); only an answer given in the app counts; a toggle applies to threads started after it; a thread keeps the mode it started with |
 
 Under bb, `auto` (when devkit is available) and `devkit` modes hand the five lens reviews — and
 the closure review — to bb child threads when the thread can spawn children (otherwise provider
@@ -556,7 +556,7 @@ than Claude Code. The form shows the plan path and whether the review completed,
 Request changes (which needs feedback) and Cancel. The agent's turn stays blocked until you
 answer, and the answer is the `PresentPlan` result itself:
 
-- **Approve:** the result says the plan was approved in the form, and the agent implements it. The missing-plan Blocker of the code review counts this approval.
+- **Approve:** the result says the plan was approved in the form, and the agent implements it. The missing-plan Blocker of the code review counts this approval, but only when the answer was given in the app.
 - **Request changes:** the agent revises the plan file from your feedback and calls `PresentPlan` again, which runs a new review and then a new form. The feedback reaches the agent as quoted data, never as an instruction.
 - **Cancel** (or a stop, or the 60-minute limit): the plan stays unapproved. The agent ends its turn and says so; ask it to present the plan again and it calls `PresentPlan` with the same path. For an unchanged plan file that is a short re-review followed by a new form.
 - **Answer not readable:** an answer that fails the form's strict shape (for example feedback over 2000 characters) is discarded, not read as a change request. The plan stays unapproved, and the agent is told your answer was not read; ask it to present the plan again.
@@ -567,25 +567,44 @@ stays under the 65-minute limit the fork daemon puts on forwarded tool calls.
 
 **One form per thread.** While a plan approval form is open, a `PresentPlan` call that would open a second one gets an error and leaves the plan armed, so the same call releases it after the first form settles.
 
-**What it needs from bb.** The form only works on a bb build that can hold a tool call while a
-form is open (`bb.ui.requestInput` with `experimental_holdToolCall`). Neither the SDK version this
-plugin pins nor the published SDK has such an option in its types or a flag to detect it, so the
-plugin cannot check; it passes the option and checks the result instead. Self-test: if the
-agent keeps working while the form is open, your bb does not support this; turn the setting
-off. On a bb without the hold, the form detaches from the turn; the plugin then returns a
-"form unavailable" text whatever you clicked (the plan is not approved; the agent tells you the form did not work), and the missing-plan Blocker does not count it (it
-fails closed, as with the setting off). A toggle applies to threads started after it; a thread
-keeps the mode it started with. The agent's instructions are fixed when the thread starts, so
-auto-review stores the mode in the thread's metadata at its first configure and `PresentPlan`
+**What it needs from bb.** The form only works on a bb build with both options of
+`bb.ui.requestInput`: `experimental_holdToolCall`, which holds a tool call while a form is open,
+and `experimental_requireAppAnswer`, which refuses an answer to the form that did not come from
+the bb app and records how each answer arrived (`answeredVia` on the resolution). Neither the SDK
+version this plugin pins nor the published SDK has either option in its types or a flag to detect
+it, so the plugin cannot check; it passes the options and checks the result instead. Self-test: if
+the agent keeps working while the form is open, your bb does not support the hold; turn the
+setting off. If Approve is never accepted (the agent reports the form did not work), your bb lacks
+`experimental_requireAppAnswer`: rebuild bb. On a bb without the hold, the form detaches from the
+turn; the plugin then returns a "form unavailable" text whatever you clicked (the plan is not
+approved; the agent tells you the form did not work), and the missing-plan Blocker does not count
+it (it fails closed, as with the setting off). A toggle applies to threads started after it; a
+thread keeps the mode it started with. The agent's instructions are fixed when the thread starts,
+so auto-review stores the mode in the thread's metadata at its first configure and `PresentPlan`
 follows that stored mode, not the live setting.
 
-**Self-approval.** bb does not check who answers a pending interaction, and the `bb` CLI can
-answer one (`bb thread interactions respond <id> --self --value …`). An agent could therefore
-approve its own form, for example from a background shell started before `PresentPlan`, from
-a parallel tool call, or from another thread. Native ExitPlanMode approvals have the same gap,
-so this is parity, not a new hole. The host exposes no resolver to check. Another plugin
-cannot forge the approval: the host sets the form's origin plugin, and the missing-plan check
-also requires the form to have been held in the turn.
+Roll out in this order: rebuild bb core first, then update the plugin. Form approvals recorded
+before the update carry no `answeredVia` and stop counting: re-approve in-flight plans.
+
+When the form is unavailable, the plugin log names the cause. These are the lines, one per cause
+(`<file>` and `<thread>` are the plan file name and the thread id):
+
+- `auto-review: could not capture a timeline cursor for the plan approval form in <thread>; no form is opened: …`
+- `auto-review: the plan approval form for <file> in thread <thread> failed, so the plan is released without it: …`
+- `auto-review: could not read the plan approval form's resolution in <thread>, so it counts as not held: …`
+- `auto-review: the plan approval form for <file> in thread <thread> left no resolution event after it settled, so nothing is approved`
+- `auto-review: the plan approval form for <file> in thread <thread> was not held by the host (its resolution is not turn-scoped), so nothing is approved`
+- `auto-review: the plan approval form for <file> in thread <thread> was answered approved but its resolution does not record approved: true, so nothing is approved`
+- `auto-review: the plan approval form for <file> in thread <thread> was approved by an answer that did not come from the bb app (no answeredVia "app" on the resolution; does your bb support experimental_requireAppAnswer?), so nothing is approved`
+
+**Self-approval.** For the plan-approval form, CLI and plain API answers are refused and never
+credited: bb core rejects an answer to the form unless it came from the app, and the missing-plan
+check credits only a held, approved form whose resolution says `answeredVia: "app"`. A process
+that forges the app header, or an agent driving the app UI, still can be credited. This is a
+deterrent, not a security boundary. Native ExitPlanMode approvals are not covered and stay
+self-approvable through `bb thread interactions approve --self`. Another plugin cannot forge the
+approval: the host sets the form's origin plugin, and the missing-plan check also requires the
+form to have been held in the turn.
 
 ## CLI
 

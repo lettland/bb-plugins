@@ -126,7 +126,7 @@ export function defineAutoReviewSettings(bb: BbPluginApi) {
       type: "boolean",
       label: "Plan approval form",
       description:
-        "PresentPlan asks for plan approval in a form that holds the agent's turn until you answer. Needs a bb build that supports holding a tool call for a form (experimental_holdToolCall); leave off otherwise. If the agent keeps working while the form is open, your bb doesn't support this; turn it off. A toggle applies to threads started after it; a thread keeps the mode it started with.",
+        "PresentPlan asks for plan approval in a form that holds the agent's turn until you answer. Needs a bb build that supports holding a tool call for a form (experimental_holdToolCall) and refusing answers that did not come from the app (experimental_requireAppAnswer); leave off otherwise. If the agent keeps working while the form is open, your bb doesn't support this; turn it off. If Approve is never accepted, your bb lacks experimental_requireAppAnswer: rebuild bb. Only an answer given in the app counts as approval. A toggle applies to threads started after it; a thread keeps the mode it started with.",
       default: false,
     },
   });

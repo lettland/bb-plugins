@@ -154,8 +154,8 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   after it; a thread keeps the mode it started with, stored in its metadata at the first
   configure, because `PresentPlan` follows the mode the thread's instructions describe) makes the
   second `PresentPlan` call open a form with `bb.ui.requestInput`, after the thread lock is
-  released and with `experimental_holdToolCall`, on a bb build that supports holding a tool call
-  for a form. The form shows the plan path and whether the review completed (Approve, Request
+  released and with `experimental_holdToolCall` and `experimental_requireAppAnswer`, on a bb build that
+  supports holding a tool call for a form and refusing answers that did not come from the app. The form shows the plan path and whether the review completed (Approve, Request
   changes with feedback, Cancel). The agent's turn stays blocked, and the answer becomes the
   tool result: approved (implement), changes requested (revise and call `PresentPlan` again; the
   feedback is quoted as data), cancelled (not approved; end the turn, ask again later), or "Answer
@@ -169,9 +169,13 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   that would open a second one returns an error and stays armed, and the form's `finally` clears the
   mark (a mark older than the form timeout plus 60 seconds no longer blocks). The missing-plan Blocker (`approvedPlanSince`), the turn-end approvals
   and the user-turn bookkeeping credit only a turn-scoped, resolved `plan-approval` form whose
-  row says `approved: true`; the row keeps no feedback. Self-approval is possible: bb does not
-  check who answers a pending interaction, and the CLI can answer one with `--self`, as with
-  native ExitPlanMode approvals. An auto-approved `PresentPlan` leaves no interaction, so the
+  row says `approved: true` and whose resolution says `answeredVia: "app"` (`planFormResolution`;
+  the field is fork-only, read by narrowing); the row keeps no feedback. The form is opened with
+  `experimental_requireAppAnswer`, so bb core refuses a CLI or plain API answer and records how
+  each answer arrived. Self-approval of the form is deterred, not prevented: a process that forges
+  the app header, or an agent driving the app UI, can still approve, and native ExitPlanMode
+  approvals stay self-approvable with `bb thread interactions approve --self`. An auto-approved
+  `PresentPlan` leaves no interaction, so the
   gate reads `presentPlanAutoApprovedSeq` from the thread state instead; `bb auto-review reset`
   keeps that key. A held form approval also counts as the user's turn for review continuation,
   the same as a native plan approval.

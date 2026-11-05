@@ -174,7 +174,11 @@ describe("noteUserTurn", () => {
     expect(lookups.turnChangedPaths).not.toHaveBeenCalled();
   });
 
-  it("a turn whose only credit is a held plan approval form counts as the user's and as authored", async () => {
+  it.each([
+    ["app", true],
+    ["api", false],
+    [undefined, false],
+  ])("a turn whose only plan approval form was answered via %s is credited as the user's: %s", async (answeredVia, credited) => {
     // The real endedTurn reads this log: the turn has no accepted input, only a
     // turn-scoped, approved plan-approval form, so `byApproval` alone carries it.
     const rows = [
@@ -190,7 +194,7 @@ describe("noteUserTurn", () => {
             statusReason: null,
             origin: { kind: "plugin", pluginId: "auto-review", rendererId: "plan-approval" },
             payload: { kind: "plugin", title: "Plan approval", data: { planFilePath: "/w/p.md", reviewed: true } },
-            resolution: { kind: "plugin_submitted", description: { title: "Approved", payload: { approved: true } } },
+            resolution: { kind: "plugin_submitted", description: { title: "Approved", payload: { approved: true } }, ...(answeredVia === undefined ? {} : { answeredVia }) },
           },
         },
       },
@@ -205,6 +209,11 @@ describe("noteUserTurn", () => {
     lookups.endedTurn.mockImplementationOnce(endedTurn);
     lookups.endedTurn.mockImplementationOnce(endedTurn);
     const held = await noteUserTurn(f.ctx, thread("env"), { phase: "awaiting-review", turnStart } as ThreadState);
+    if (!credited) {
+      // thr_w92i8w56wb: an approval not answered in the app (bb core `answeredVia`) is no user turn; plugin fixture, not core.
+      expect(held).toEqual({ handledTurnEndSeq: 5, phase: "awaiting-review", turnStart });
+      return;
+    }
     expect(held).toMatchObject({ handledTurnEndSeq: 5, userTurnStart: turnStart, userTurnAuthored: true });
     expect(held.userStopFloorSeq).toBeUndefined();
     // Authored by the approval alone: the tree is never checked.

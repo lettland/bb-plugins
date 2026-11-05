@@ -286,7 +286,7 @@ async function withFormHost(
     infos: () => string[];
     warns: () => string[];
     call: (ctx?: { signal?: AbortSignal; threadId?: string }) => Promise<unknown>;
-    settle: (value: unknown, scope?: Json) => Promise<unknown>;
+    settle: (value: unknown, scope?: Json, answer?: Json) => Promise<unknown>;
   }) => Promise<void>,
 ) {
   const metadata: Json = {
@@ -347,7 +347,8 @@ async function withFormHost(
       host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, { ...CTX, ...ctx });
     // Answers the open form the way the host would: the row's description is
     // what the plugin's own `describeSubmission` returned for the value.
-    const settle = async (value: unknown, scope: Json = { kind: "turn", turnId: "turn-1" }) => {
+    // `answer` is what the host records beside the description: `answeredVia` as the app answers it by default.
+    const settle = async (value: unknown, scope: Json = { kind: "turn", turnId: "turn-1" }, answer: Json = { answeredVia: "app" }) => {
       const pending = call();
       await vi.waitFor(() => expect(host.harness.pendingInteractions).toHaveLength(1));
       const [request] = requestInput.mock.calls[0] as unknown as [{ describeSubmission(value: unknown): unknown }];
@@ -362,7 +363,7 @@ async function withFormHost(
             statusReason: null,
             origin: { kind: "plugin", pluginId: "auto-review", rendererId: "plan-approval" },
             payload: { kind: "plugin", title: "Plan approval", data: {} },
-            resolution: { kind: "plugin_submitted", description: await request.describeSubmission(value) },
+            resolution: { kind: "plugin_submitted", description: await request.describeSubmission(value), ...answer },
           },
         },
       });
@@ -413,7 +414,7 @@ describe("PresentPlan's approval form", () => {
         timeoutMs: 3_600_000,
       });
       expect(request.timeoutMs).toBe(PLAN_APPROVAL_TIMEOUT_MS);
-      expect(holdOptions).toEqual({ signal: controller.signal, experimental_holdToolCall: true });
+      expect(holdOptions).toEqual({ signal: controller.signal, experimental_holdToolCall: true, experimental_requireAppAnswer: true });
       controller.abort();
       await pending;
     });
@@ -528,21 +529,23 @@ describe("PresentPlan's approval form", () => {
   ] as const))("tells the agent the form is unavailable whatever was clicked (%s review, %s: %s) when the resolution is thread-scoped, a detached call", async (reviewMode, reviewed, _name, value) => {
     await withFormHost({ form: true, reviewMode }, async ({ settle, infos }) => {
       expect(await settle(value, { kind: "thread" })).toBe(presentPlanFormUnavailableMessage(reviewed));
-      expect(infos().some((line) => line.includes("not held by the host"))).toBe(true);
+      expect(infos().filter((line) => line.includes("not held by the host (its resolution is not turn-scoped)"))).toHaveLength(1);
+      expect(infos().some((line) => line.includes("did not come from the bb app"))).toBe(false);
     });
   });
 
   it.each(MODES)("tells the agent the form is unavailable when no resolution is found after the form settles (%s review)", async (reviewMode, reviewed) => {
-    await withFormHost({ form: true, reviewMode }, async ({ host, call, requestInput, rows }) => {
+    await withFormHost({ form: true, reviewMode }, async ({ host, call, requestInput, rows, infos }) => {
       requestInput.mockResolvedValueOnce({ outcome: "submitted", value: { approved: true } });
       expect(await call()).toBe(presentPlanFormUnavailableMessage(reviewed));
       expect(rows).toEqual([]);
       expect(host.harness.pendingInteractions).toHaveLength(0);
+      expect(infos().filter((line) => line.includes("left no resolution event after it settled"))).toHaveLength(1);
     });
   });
 
   it.each(MODES)("tells the agent the form is unavailable on an approval whose row was never described as approved (%s review)", async (reviewMode, reviewed) => {
-    await withFormHost({ form: true, reviewMode }, async ({ call, requestInput, rows }) => {
+    await withFormHost({ form: true, reviewMode }, async ({ call, requestInput, rows, infos }) => {
       // describeSubmission threw or returned too late: the row has no payload, so the gate would not credit it.
       rows.push({
         seq: 80,
@@ -561,6 +564,7 @@ describe("PresentPlan's approval form", () => {
       });
       requestInput.mockResolvedValueOnce({ outcome: "submitted", value: { approved: true } });
       expect(await call()).toBe(presentPlanFormUnavailableMessage(reviewed));
+      expect(infos().filter((line) => line.includes("does not record approved: true"))).toHaveLength(1);
     });
   });
 
@@ -702,7 +706,7 @@ describe("the approval form's dependence on bb core's event-before-resolve order
         statusReason: null,
         origin: { kind: "plugin", pluginId: "auto-review", rendererId: "plan-approval" },
         payload: { kind: "plugin", title: "Plan approval", data: {} },
-        resolution: { kind: "plugin_submitted", description: { title: "Approved", payload: { approved: true } } },
+        resolution: { kind: "plugin_submitted", description: { title: "Approved", payload: { approved: true } }, answeredVia: "app" },
       },
     },
   });
@@ -731,6 +735,52 @@ describe("the approval form's dependence on bb core's event-before-resolve order
   });
 });
 
+/**
+ * Regression ledger (thr_w92i8w56wb). bb core records how each plugin answer
+ * arrived as `answeredVia` on the `plugin_submitted` resolution and, for a form
+ * opened with `experimental_requireAppAnswer`, refuses an answer that did not
+ * come from the app (core `apps/server/src/routes/threads/interactions.ts`,
+ * `apps/server/src/services/interactions/pending-interactions.ts`
+ * `respondToPluginInteraction`, `packages/domain/src/pending-interactions.ts`).
+ * These tests use plugin fixtures: they pin which origin this plugin credits
+ * and do not detect drift in core.
+ */
+describe("the approval form credits only an app answer", () => {
+  it.each(MODES)("opens the form flagged to be answered in the app (%s review)", async (reviewMode) => {
+    await withFormHost({ form: true, reviewMode }, async ({ settle, requestInput }) => {
+      await settle({ approved: true });
+      expect(requestInput.mock.calls[0]?.[1]).toMatchObject({ experimental_requireAppAnswer: true });
+    });
+  });
+
+  it.each(MODES)("approves when the resolution says answeredVia app (%s review)", async (reviewMode) => {
+    await withFormHost({ form: true, reviewMode }, async ({ settle, infos }) => {
+      expect(await settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+      expect(infos().some((line) => line.includes("did not come from the bb app"))).toBe(false);
+    });
+  });
+
+  it.each(MODES.flatMap(([mode, reviewed]) => [
+    [mode, reviewed, "missing", {}],
+    [mode, reviewed, "api", { answeredVia: "api" }],
+    [mode, reviewed, "unexpected (desktop)", { answeredVia: "desktop" }],
+  ] as const))("tells the agent the form is unavailable and logs the cause on an approval whose answeredVia is %s - %s (%s review)", async (reviewMode, reviewed, _name, answer) => {
+    await withFormHost({ form: true, reviewMode }, async ({ settle, infos }) => {
+      expect(await settle({ approved: true }, { kind: "turn", turnId: "turn-1" }, answer)).toBe(presentPlanFormUnavailableMessage(reviewed));
+      expect(infos().filter((line) => line.includes("did not come from the bb app") && line.includes("experimental_requireAppAnswer"))).toHaveLength(1);
+      expect(infos().some((line) => line.includes("not held by the host"))).toBe(false);
+    });
+  });
+
+  it.each(MODES)("still hands back a change request whatever answeredVia says: it is never credited (%s review)", async (reviewMode) => {
+    await withFormHost({ form: true, reviewMode }, async ({ settle }) => {
+      expect(await settle({ approved: false, feedback: "f" }, { kind: "turn", turnId: "turn-1" }, { answeredVia: "api" })).toBe(
+        presentPlanChangesRequestedMessage("f"),
+      );
+    });
+  });
+});
+
 describe("a form approval and the missing-plan size gate, on one event log", () => {
   const size = (review: { host: ReturnType<typeof createFakePluginHost> }) =>
     reviewSize(review.host.bb, THREAD_ID, ["a.ts"], null, 77);
@@ -745,6 +795,17 @@ describe("a form approval and the missing-plan size gate, on one event log", () 
   it("an unreadable answer is never credited: the blocker stays", async () => {
     await withFormHost({ form: true }, async (f) => {
       expect(await f.settle({ approved: true, extra: 1 })).toBe(PRESENT_PLAN_FORM_UNREADABLE_MESSAGE);
+      expect(await size(f)).toEqual({ trivial: false, blocker: true });
+    });
+  });
+
+  it.each([
+    ["missing", {}],
+    ["api", { answeredVia: "api" }],
+    ["unexpected (desktop)", { answeredVia: "desktop" }],
+  ])("an approval whose answeredVia is %s leaves the blocker", async (_name, answer) => {
+    await withFormHost({ form: true }, async (f) => {
+      expect(await f.settle({ approved: true }, { kind: "turn", turnId: "turn-1" }, answer)).toBe(presentPlanFormUnavailableMessage(true));
       expect(await size(f)).toEqual({ trivial: false, blocker: true });
     });
   });

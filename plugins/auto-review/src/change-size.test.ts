@@ -32,7 +32,11 @@ const lifecycle = (seq: number, decision = "allow_once"): Row => ({
 });
 
 /** This plugin's plan-approval form resolved as approved; turn-scoped when the host held the call, thread-scoped when it detached. */
-const approvalForm = (seq: number, scope: Row["scope"] = { kind: "turn", turnId: "turn-1" }): Row => ({
+const approvalForm = (
+  seq: number,
+  scope: Row["scope"] = { kind: "turn", turnId: "turn-1" },
+  answer: Record<string, unknown> = { answeredVia: "app" },
+): Row => ({
   seq,
   type: "system/interaction/lifecycle",
   scope,
@@ -43,7 +47,7 @@ const approvalForm = (seq: number, scope: Row["scope"] = { kind: "turn", turnId:
       statusReason: null,
       origin: { kind: "plugin", pluginId: "auto-review", rendererId: "plan-approval" },
       payload: { kind: "plugin", title: "Plan approval", data: { planFilePath: "/w/p.md", reviewed: true } },
-      resolution: { kind: "plugin_submitted", description: { title: "Approved", payload: { approved: true } } },
+      resolution: { kind: "plugin_submitted", description: { title: "Approved", payload: { approved: true } }, ...answer },
     },
   },
 });
@@ -334,6 +338,10 @@ describe("reviewSize's plan credits", () => {
     ["before the anchor", [approvalForm(8)]],
     ["missing", []],
     ["detached (thread-scoped)", [approvalForm(12, { kind: "thread" })]],
+    // thr_w92i8w56wb: only an app answer is credited (bb core `answeredVia`); plugin fixtures, not core.
+    ["without answeredVia", [approvalForm(12, { kind: "turn", turnId: "turn-1" }, {})]],
+    ["answered via api", [approvalForm(12, { kind: "turn", turnId: "turn-1" }, { answeredVia: "api" })]],
+    ["answered via an unexpected value (desktop)", [approvalForm(12, { kind: "turn", turnId: "turn-1" }, { answeredVia: "desktop" })]],
   ])("a form approval %s leaves the blocker", async (_name, rows) => {
     const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, rows);
     expect(await reviewSize(bb, "thr_1", ["a.ts"], over, 0)).toEqual({ trivial: false, blocker: true });

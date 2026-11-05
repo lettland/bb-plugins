@@ -76,6 +76,8 @@ describe("the plan approval form setting", () => {
       const descriptor = host.harness.registrations.settingsDescriptors.planApprovalForm;
       expect(descriptor).toMatchObject({ type: "boolean", label: "Plan approval form", default: false });
       expect(descriptor.description).toContain("experimental_holdToolCall");
+      expect(descriptor.description).toContain("experimental_requireAppAnswer");
+      expect(descriptor.description).toContain("If Approve is never accepted, your bb lacks experimental_requireAppAnswer: rebuild bb.");
       expect(descriptor.description).toContain("If the agent keeps working while the form is open, your bb doesn't support this; turn it off.");
       expect(descriptor.description).toContain("A toggle applies to threads started after it; a thread keeps the mode it started with.");
     } finally {

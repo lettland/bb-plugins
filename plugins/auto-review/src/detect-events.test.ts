@@ -113,7 +113,7 @@ const form = (seq: number, scope: Row["scope"] = { kind: "turn", turnId: "turn-1
       statusReason: null,
       origin: { kind: "plugin", pluginId: "auto-review", rendererId: "plan-approval" },
       payload: { kind: "plugin", title: "Plan approval", data: { planFilePath: "/w/p.md", reviewed: true } },
-      resolution: { kind: "plugin_submitted", description: { title: "Approved", payload: { approved: true } } },
+      resolution: { kind: "plugin_submitted", description: { title: "Approved", payload: { approved: true } }, answeredVia: "app" },
       ...over,
     },
   },
@@ -380,6 +380,26 @@ describe("a held plan approval form", () => {
     expect(await approvedPlanSince(bb, "thr", 10)).toBeNull();
   });
 
+  const answered = (answer: Record<string, unknown>) =>
+    form(12, held, { resolution: { kind: "plugin_submitted", description: { title: "Approved", payload: { approved: true } }, ...answer } });
+
+  it.each([
+    ["missing", {}],
+    ["api", { answeredVia: "api" }],
+    ["unexpected (desktop)", { answeredVia: "desktop" }],
+  ])("does not count an approval whose answeredVia is %s, in the walk or in a turn's approved plans", async (_name, answer) => {
+    expect(await approvedPlanSince(logOf([answered(answer)]).bb, "thr", 10)).toBeNull();
+    expect((await endedTurn(logOf([completed(15, "turn-1"), answered(answer)]).bb, "thr", 0)).approvedPlans).toEqual([]);
+  });
+
+  it("counts an approval whose answeredVia is app, in the walk and in a turn's approved plans", async () => {
+    const app = answered({ answeredVia: "app" });
+    expect(await approvedPlanSince(logOf([app]).bb, "thr", 10)).toEqual({ id: "pint-form", seq: 12, requestedSeq: undefined });
+    expect((await endedTurn(logOf([completed(15, "turn-1"), app]).bb, "thr", 0)).approvedPlans).toEqual([
+      { id: "pint-form", seq: 12, requestedSeq: undefined },
+    ]);
+  });
+
   it("is listed among a turn's approved plans, so the continuation counts it as the user's", async () => {
     const { bb } = logOf([completed(5, "turn-1"), form(4, held)]);
     expect(await endedTurn(bb, "thr", 0)).toEqual({
@@ -404,10 +424,21 @@ describe("planFormResolutionSince", () => {
     expect(await planFormResolutionSince(logOf([]).bb, "thr", 0)).toBeNull();
   });
 
-  it("reads whether the latest resolution was held and described as approved", async () => {
+  it("reads whether the latest resolution was held, described as approved and answered in the app", async () => {
     const changes = form(9, { kind: "thread" }, { resolution: { kind: "plugin_submitted", description: { payload: { approved: false } } } });
-    expect(await planFormResolutionSince(logOf([form(5, held)]).bb, "thr", 0)).toEqual({ held: true, approved: true });
-    expect(await planFormResolutionSince(logOf([form(5, held), changes]).bb, "thr", 0)).toEqual({ held: false, approved: false });
+    expect(await planFormResolutionSince(logOf([form(5, held)]).bb, "thr", 0)).toEqual({ held: true, approved: true, app: true });
+    expect(await planFormResolutionSince(logOf([form(5, held), changes]).bb, "thr", 0)).toEqual({ held: false, approved: false, app: false });
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["api", "api"],
+    ["unexpected (desktop)", "desktop"],
+  ])("reads an answeredVia that is %s as not an app answer", async (_name, answeredVia) => {
+    const row = form(5, held, {
+      resolution: { kind: "plugin_submitted", description: { payload: { approved: true } }, ...(answeredVia === undefined ? {} : { answeredVia }) },
+    });
+    expect(await planFormResolutionSince(logOf([row]).bb, "thr", 0)).toEqual({ held: true, approved: true, app: false });
   });
 
   it("ignores native approvals and forms that are still open", async () => {
@@ -459,6 +490,24 @@ describe("regression ledger (thr_w92i8w56wb)", () => {
       return bb.sdk.threads.interactions.create;
     };
     expect(typeof probe).toBe("function");
+  });
+
+  it("only an answer the app gave is credited: answeredVia is read off the plugin_submitted resolution, which the pinned SDK types lack", async () => {
+    // bb core `packages/domain/src/pending-interactions.ts` (the `plugin_submitted` resolution) and
+    // `apps/server/src/routes/threads/interactions.ts` (`answeredVia`: "app" for desktop, web and mobile,
+    // "api" for anything else, a missing header included). The pinned SDK 0.6.79 has no such field, so
+    // the plugin reads it by narrowing; the fixtures below carry what a fork build writes.
+    const resolution = (answeredVia?: string) => ({
+      kind: "plugin_submitted",
+      description: { title: "Approved", payload: { approved: true } },
+      ...(answeredVia === undefined ? {} : { answeredVia }),
+    });
+    const credited = async (answeredVia?: string) =>
+      (await approvedPlanSince(logOf([form(12, { kind: "turn", turnId: "turn-1" }, { resolution: resolution(answeredVia) })]).bb, "thr", 0)) !== null;
+    expect(await credited("app")).toBe(true);
+    expect(await credited()).toBe(false);
+    expect(await credited("api")).toBe(false);
+    expect(await credited("desktop")).toBe(false);
   });
 
   it("a held form's lifecycle event is turn-scoped and a detached one thread-scoped; only the first is credited", async () => {
