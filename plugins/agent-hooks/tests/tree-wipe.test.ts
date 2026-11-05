@@ -2,7 +2,7 @@
 // cases.jsonl: the literal $CLAUDE_PROJECT_DIR and the AGENT_HOOKS_LOG_DIR value.
 // The static cases (., *, .git, $PWD, find ...) live in tests/guard-bash/cases.jsonl.
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import path from "node:path";
 import { cleanup, runHook, ALLOW, HARD } from "./run-hook.mjs";
@@ -68,7 +68,16 @@ describe("tree wipe: the project root by its literal value", () => {
 });
 
 describe("tree wipe: chflags on the log dir or any ancestor of it", () => {
-  const home = "/tmp/agent-hooks-fake-home/user";
+  // The hook still logs the denied command, so the (fake) home and the relocated log
+  // dir must be real dirs that get cleaned up (cleanup() clears the append-only flag).
+  let home = "";
+  let elsewhere = "";
+  beforeEach(() => {
+    const base = mkdtempSync("/tmp/agent-hooks-chflags-");
+    scratch.push(base);
+    home = `${base}/user`;
+    elsewhere = `${base}/elsewhere`;
+  });
   const run = (cmd: string, env: Record<string, string> = {}) =>
     runHook("guard-bash.sh", { command: cmd }, { projectDir: project(), env: { HOME: home, AGENT_HOOKS_LOG_DIR: "", ...env }, permissionMode: FULL });
 
@@ -93,15 +102,15 @@ describe("tree wipe: chflags on the log dir or any ancestor of it", () => {
   });
 
   it("blocks the ancestors of a relocated log dir (AGENT_HOOKS_LOG_DIR), and still the default one", async () => {
-    const env = { AGENT_HOOKS_LOG_DIR: "/tmp/agent-hooks-elsewhere/deep/logs" };
-    for (const target of ["/tmp/agent-hooks-elsewhere/deep/logs", "/tmp/agent-hooks-elsewhere/deep", "/tmp/agent-hooks-elsewhere", `${home}/.bb/logs`]) {
+    const env = { AGENT_HOOKS_LOG_DIR: `${elsewhere}/deep/logs` };
+    for (const target of [`${elsewhere}/deep/logs`, `${elsewhere}/deep`, elsewhere, `${home}/.bb/logs`]) {
       const r = await run(`chflags -R nouappnd ${target}`, env);
       expect(r.verdict, target).toBe(HARD);
     }
   });
 
   it("allows chflags on a sibling, a child of an ancestor that is not on the path, and a relative path", async () => {
-    for (const target of [`${home}/projects/x`, `${home}/.bb/other`, "/tmp/agent-hooks-elsewhere2", "build/out", "-h"]) {
+    for (const target of [`${home}/projects/x`, `${home}/.bb/other`, `${elsewhere}2`, "build/out", "-h"]) {
       const r = await run(`chflags nouappnd ${target}`);
       expect(r.verdict, target).toBe(ALLOW);
     }
