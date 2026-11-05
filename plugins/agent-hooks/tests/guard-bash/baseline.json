@@ -1346,7 +1346,7 @@
     "id": "noop-true",
     "cmd": "true",
     "expect": "soft",
-    "why": "idle no-op loop seen in bb thread thr_idleloop01: end the turn instead",
+    "why": "idle no-op loop seen in a local bb thread (id redacted, 2026-11-03): end the turn instead",
     "actual": "soft",
     "reason": "SOFT BLOCK: no-op command ('true' / ':') does nothing."
   },

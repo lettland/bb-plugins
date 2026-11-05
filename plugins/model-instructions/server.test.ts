@@ -163,7 +163,7 @@ describe("parseRules", () => {
     ['{"vars": {"a": "   "}, "rules": []}', "expected a non-blank string"],
     ['{"vars": {"a": ""}, "rules": []}', "expected a non-blank string"],
     // Upstream quirk (zod 4 z.record drops an own __proto__ key silently), learned in the
-    // vars review of 2026-11-02 (bb thread thr_varsreview); guards the loud rejection in parseRules.
+    // vars review of 2026-11-02 (local bb thread, id redacted); guards the loud rejection in parseRules.
     ['{"vars": {"__proto__": "x"}, "rules": []}', 'invalid variable name "__proto__" at vars'],
     ['{"vars": {"__proto__": "x", "a": "y"}, "rules": [{"instructions": "{{a}}"}]}', 'invalid variable name "__proto__" at vars'],
     ['{"vars": null, "rules": []}', "at vars"],

@@ -80,11 +80,11 @@ export function userQuestionOf(interaction: PendingInteraction): PendingUserQues
  * An `agentMessage` item no longer disqualifies on its own: the deny text
  * reads as a rejection until the steered review arrives, so preamble text in
  * the same response as the question is exactly the reaction this function
- * exists to wave through (thr_steerdemo1 seq 2059-2064, 2026-10-26: text and
- * question, one response). What does disqualify is a delivered steer — core
- * records it as a `provider/unhandled` row with `rawType: "sdk/user"`, and
- * once the steered user message is in the log the review has reached the
- * agent, so a question after it is not the deny's immediate reaction. An
+ * exists to wave through (local bb thread, id redacted, seq 2059-2064,
+ * 2026-10-26: text and question, one response). What does disqualify is a
+ * delivered steer — core records it as a `provider/unhandled` row with
+ * `rawType: "sdk/user"`, and once the steered user message is in the log the
+ * review has reached the agent, so a question after it is not the deny's immediate reaction. An
  * `sdk/user` row whose content is an array (replayed tool results) is not a
  * steer; one whose content path is missing or of no known shape fails closed
  * and counts as a steer. `provider/unhandled` rows of any other rawType are
@@ -117,7 +117,7 @@ export function isImmediateReactionToDeny(events: readonly ThreadEventRow[]): bo
 /** The `rawType` of a `provider/unhandled` row, read to tell a steered user message from every other unhandled event. */
 const UNHANDLED_RAW_TYPE = z.object({ rawType: z.string() });
 
-/** The path under `data` where a steered user row carries its content (thr_steerdemo1 seq 2069, 2026-10-26). */
+/** The path under `data` where a steered user row carries its content (local bb thread, id redacted, seq 2069, 2026-10-26). */
 const STEER_CONTENT = z.object({
   rawEvent: z.object({
     params: z.object({

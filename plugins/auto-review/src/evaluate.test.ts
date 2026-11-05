@@ -180,10 +180,10 @@ describe("evaluate", () => {
     expect(fire?.[1]).toMatchObject({ outcome: "stood-down", reason: "no-authorship" });
   });
 
-  // Regression origin thr_plangate01: the user's own uncommitted work sat in a
-  // shared checkout while a planning thread held it, and auto-review dispatched
-  // a code review over it mid-plan.
-  it("thr_plangate01: an armed native plan gate carries the idle's changes instead of dispatching a code review", async () => {
+  // Regression origin (local bb thread, id redacted, 2026-10-27): the user's
+  // own uncommitted work sat in a shared checkout while a planning thread held
+  // it, and auto-review dispatched a code review over it mid-plan.
+  it("an armed native plan gate carries the idle's changes instead of dispatching a code review", async () => {
     const { ctx, kvWrites, thread } = fakeBb({
       turnStart: { sinceSeq: 1 },
       planReviewArmedAt: Date.now() - 1_000,
@@ -201,7 +201,7 @@ describe("evaluate", () => {
     });
   });
 
-  it("thr_plangate01: an active PresentPlan arm holds too, whatever path it armed for", async () => {
+  it("an active PresentPlan arm holds too, whatever path it armed for", async () => {
     const { ctx, kvWrites, thread } = fakeBb({
       turnStart: { sinceSeq: 1 },
       presentPlanArmedAt: Date.now() - 1_000,
@@ -284,7 +284,7 @@ describe("evaluate", () => {
     expect(fire?.[1]).toMatchObject({ outcome: "deferred", reason: "plan-in-review" });
   });
 
-  it("thr_plangate01: the plan-in-review carry anchors its snapshot without a user-turn boundary", async () => {
+  it("the plan-in-review carry anchors its snapshot without a user-turn boundary", async () => {
     // The composed end-to-end exclusion (the user's uncommitted mid-hold edits
     // staying out of the post-approval dispatch) is covered by manual replay:
     // the detect mock hides it here.
