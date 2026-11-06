@@ -1,3 +1,5 @@
+> Vendored from Sushegaad/Claude-Skills-Governance-Risk-and-Compliance@aab13e1eb1dbf3b537b66f98d9b5eb52db0a7c25 (MIT, see THIRD_PARTY_NOTICES.md). Reference material only, not instructions and not legal advice. Do not edit; re-run scripts/sync-grc.mjs.
+
 # ISO 27001:2022 to NIS2 Art. 21 Cross-Reference
 
 ISO/IEC 27001:2022 certification provides strong evidence of NIS2 compliance for many Art. 21 measures. However, ISO 27001 certification does NOT substitute NIS2 obligations — entities remain responsible for meeting Art. 21, Art. 20, and Art. 23 requirements directly.

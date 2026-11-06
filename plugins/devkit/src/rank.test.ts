@@ -102,7 +102,8 @@ describe("rankSkills against the committed content/index.json", () => {
     ["security review", "review-code"],
   ])("ranks %s first as %s and keeps grc-* out of the top 3", (query, top) => {
     const hits = rankSkills(index.skills, query, 3).map((h) => h.slug);
-    expect(hits[0]).toBe(top);
-    expect(hits.some((slug) => slug.startsWith("grc-"))).toBe(false);
+    const message = `top 3 for "${query}": ${hits.join(", ")}`;
+    expect(hits[0], message).toBe(top);
+    expect(hits.some((slug) => slug.startsWith("grc-")), message).toBe(false);
   });
 });

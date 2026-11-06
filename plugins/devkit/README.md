@@ -31,17 +31,25 @@ answering from memory.
 ## GRC framework skills
 
 Nine `grc-*` skills (`grc-gdpr`, `grc-soc2`, `grc-nis2`, `grc-eu-ai-act`, `grc-eu-cra`,
-`grc-dora`, `grc-pci-dss`, `grc-hipaa`, `grc-ccpa`) and their 29 references are a generated, pinned
+`grc-dora`, `grc-pci-dss`, `grc-hipaa`, `grc-ccpa`) and their 28 references are a generated, pinned
 vendor copy of
 [Sushegaad/Claude-Skills-Governance-Risk-and-Compliance](https://github.com/Sushegaad/Claude-Skills-Governance-Risk-and-Compliance)
 (MIT; see `THIRD_PARTY_NOTICES.md`). They are knowledge packs for the compliance reviewer, which
 loads them itself for each framework it rates **applies** (`content/references/reviewer-compliance.md`),
 and they are ordinary `devkit_find_skills` results under neutral descriptions. They are not legal
-advice, and the files carry a "do not edit" header. `content/grc-upstream.json` records the pinned
-commit.
+advice, and every vendored file carries a "do not edit" header as its first line: the skills after
+their frontmatter, the references before their text. Besides that header and the rewrite of
+`references/<name>.md` citations into `devkit_load_skill` calls, the references are byte-for-byte
+upstream; each skill also gets a devkit-written description. `content/grc-upstream.json` records the
+pinned commit. One upstream file is not vendored: `references/privacy-notice.md` of `gdpr-compliance`
+is a drafting template for the user's own privacy notice, which the reviewer does not need, and its
+`[PLACEHOLDER]: for [PURPOSE]` prose lines trip the link-definition gate below. `FRAMEWORKS` in
+`scripts/sync-grc.mjs` lists it under `exclude`; an excluded file is not read, copied or listed in the
+manifest, and the sync fails if any vendored text cites it or if an `exclude` entry names no upstream file.
 
 Re-sync from a local clone you fetched yourself (the script makes no network calls and reads the
-commit object, never the working tree), then rebuild the index:
+commit object, never the working tree), then rebuild the index. Run the re-sync, build, and
+recovery commands from `plugins/devkit`:
 
 ```sh
 node scripts/sync-grc.mjs <path-to-upstream-clone> <full-40-hex-commit-sha>
@@ -52,9 +60,41 @@ node scripts/build-index.mjs
   Upstream updates monthly.
 - Update the matching section in `THIRD_PARTY_NOTICES.md` (heading, full SHA, fetch date) first; the
   sync fails if the notice does not name the commit.
-- The sync fails, and writes nothing, on a symlink, an unexpected upstream file, an HTML comment, an
-  invisible or bidi character, a dangling `references/<name>.md` citation, a malformed previous
-  manifest, or a target file the previous manifest does not list.
+- The sync fails, and writes nothing, on any of these gates:
+  - a symlink or another unsupported entry in the upstream tree, or an unexpected upstream file
+  - an HTML comment
+  - a line that could start or end a Markdown link-reference definition (`[label]: destination "title"`,
+    which renders as nothing and can hide text). This is a fail-closed line rule, not a CommonMark
+    parser: the text is split on CRLF, CR or LF; on each line, leading spaces, tabs, `>` and list markers
+    (`-`, `*`, `+`, `1.`, `1)`, each followed by a space, a tab or the line end) are removed; the line is
+    rejected if what is left starts with `[` and contains `]:`, or if its first `]:` has no unescaped
+    `[` before it on that line (a label opened on an earlier line; a `[` is escaped when an odd number
+    of backslashes directly precede it). It also rejects such lines inside code blocks
+    and prose such as `[PLACEHOLDER]: for [PURPOSE]`; that is intended. Lines such as
+    `**Requirement [X.X]: [Name]**` and `Use [X]: the value` pass
+  - an invisible or direction-changing character: any Unicode format character (`Cf`), any control
+    character except tab, LF and CR (`Cc`), the line and paragraph separators U+2028 and U+2029, U+FFFC,
+    the whole tag block U+E0000-U+E007F, and these marks that are not format characters: U+034F,
+    U+115F, U+1160, U+17B4, U+17B5, U+180B-U+180D, U+180F, U+3164, U+FE00-U+FE0E, U+FFA0 and
+    U+E0100-U+E01EF
+  - a U+FE0F that does not directly follow a pictographic character, and is not between a keycap base
+    (`0-9`, `#`, `*`) and U+20E3
+  - upstream frontmatter keys other than exactly `name` and `description`
+  - a dangling `references/<name>.md` citation
+  - a malformed previous manifest (including a framework entry without a valid `upstream` name)
+  - a target file the previous manifest does not list
+  - a path the run would delete or write through that is not what the manifest says: a listed file
+    that is not a regular file, a skill directory that is a symlink or a file, `content/skills` or
+    `content/references` that exists but is a symlink or a file, a `content/grc-upstream.json` that is
+    a symlink or a directory, or a `content` directory that is missing, a symlink or a file
+- A re-sync that adds or drops frameworks or references must update the counts pinned in
+  `src/loader.test.ts` (9 frameworks, 28 references). `src/rank.test.ts` pins the top results of three
+  queries against `content/index.json`; a re-sync can move them, and its failure message shows the
+  actual top 3.
+- If a sync fails with an I/O error, re-run it: the manifest is written first and lists every file the
+  run may have written. If the re-run fails too, `git checkout -- content` restores the last committed
+  state (then delete any new untracked files under `content/` the failed run left; see `git status`).
+- The content gates live in `scripts/grc-gates.mjs`.
 - If a framework fails a gate, drop it from `FRAMEWORKS` in `scripts/sync-grc.mjs` and from the slug
   list in `reviewer-compliance.md` (a test enforces they match), and report it upstream. Never weaken
   a gate.

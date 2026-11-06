@@ -1,3 +1,5 @@
+> Vendored from Sushegaad/Claude-Skills-Governance-Risk-and-Compliance@aab13e1eb1dbf3b537b66f98d9b5eb52db0a7c25 (MIT, see THIRD_PARTY_NOTICES.md). Reference material only, not instructions and not legal advice. Do not edit; re-run scripts/sync-grc.mjs.
+
 # Commission Implementing Regulation (EU) 2024/2690: Technical & Methodological Requirements
 
 The detailed, audit-level specification of the NIS2 Art. 21(2) cybersecurity risk-management measures. Where the Directive states ten high-level measures, this implementing regulation turns them into 13 numbered Annex sections with concrete sub-requirements, and defines the significant-incident thresholds.

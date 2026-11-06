@@ -1,3 +1,5 @@
+> Vendored from Sushegaad/Claude-Skills-Governance-Risk-and-Compliance@aab13e1eb1dbf3b537b66f98d9b5eb52db0a7c25 (MIT, see THIRD_PARTY_NOTICES.md). Reference material only, not instructions and not legal advice. Do not edit; re-run scripts/sync-grc.mjs.
+
 # CCPA/CPRA vs. GDPR — Side-by-Side Comparison
 
 For organisations subject to both laws (e.g., a US company with EU customers, or an EU company with California customers), understanding the differences and overlaps is essential to building an efficient dual-compliance programme.

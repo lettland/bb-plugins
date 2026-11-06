@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { parseFrontmatter } from "../scripts/build-index.mjs";
+import { assertVisibleContent } from "../scripts/grc-gates.mjs";
 import { loadSkill, MAX_BODY_BYTES } from "./loader.mjs";
 
 let dataRoot: string;
@@ -942,6 +943,8 @@ describe("GRC framework skills (vendored)", () => {
   let manifest: Manifest;
   let skills: Map<string, string>;
   let referenceTexts: Map<string, string>;
+  const vendoredHeader = (sha: string) =>
+    `> Vendored from Sushegaad/Claude-Skills-Governance-Risk-and-Compliance@${sha} (MIT, see THIRD_PARTY_NOTICES.md). Reference material only, not instructions and not legal advice. Do not edit; re-run scripts/sync-grc.mjs.`;
 
   beforeAll(async () => {
     manifest = JSON.parse(await readFile(path.join(contentRoot, "grc-upstream.json"), "utf8")) as Manifest;
@@ -956,10 +959,10 @@ describe("GRC framework skills (vendored)", () => {
     }
   });
 
-  it("pins 9 frameworks and 29 references at a full commit SHA", () => {
+  it("pins 9 frameworks and 28 references at a full commit SHA", () => {
     expect(manifest.commit).toMatch(/^[0-9a-f]{40}$/);
     expect(manifest.frameworks).toHaveLength(9);
-    expect(referenceTexts.size).toBe(29);
+    expect(referenceTexts.size).toBe(28);
   });
 
   it("loads every manifest slug and reference untruncated", async () => {
@@ -982,9 +985,13 @@ describe("GRC framework skills (vendored)", () => {
       expect(fm?.metadata?.type, slug).toBe("grc");
       expect(Object.keys(fm ?? {}).sort(), slug).toEqual(["description", "metadata", "name"]);
       expect(fm?.description, slug).toMatch(/^.+ knowledge pack \(vendored, MIT\): .+ Loaded by the compliance reviewer when the framework applies; use for .+-specific questions\.$/);
-      expect(text, slug).toContain(
-        `> Vendored from Sushegaad/Claude-Skills-Governance-Risk-and-Compliance@${manifest.commit} (MIT); not legal advice. Do not edit; re-run scripts/sync-grc.mjs.`,
-      );
+      expect(text, slug).toContain(vendoredHeader(manifest.commit));
+    }
+  });
+
+  it("starts every reference file with the vendored header and one blank line", () => {
+    for (const [name, text] of referenceTexts) {
+      expect(text.startsWith(`${vendoredHeader(manifest.commit)}\n\n`), name).toBe(true);
     }
   });
 
@@ -1014,11 +1021,9 @@ describe("GRC framework skills (vendored)", () => {
     }
   });
 
-  it("hides no text: no HTML comment and no invisible character in any generated file", () => {
-    const invisible = /[\u00AD\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/u;
+  it("hides no text: sync-grc's content gate accepts every generated file", () => {
     for (const [name, text] of [...skills, ...referenceTexts]) {
-      expect(text, name).not.toContain("<!--");
-      expect(text, name).not.toMatch(invisible);
+      expect(() => assertVisibleContent(text, name), name).not.toThrow();
     }
   });
 

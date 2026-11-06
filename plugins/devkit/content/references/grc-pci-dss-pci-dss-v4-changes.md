@@ -1,3 +1,5 @@
+> Vendored from Sushegaad/Claude-Skills-Governance-Risk-and-Compliance@aab13e1eb1dbf3b537b66f98d9b5eb52db0a7c25 (MIT, see THIRD_PARTY_NOTICES.md). Reference material only, not instructions and not legal advice. Do not edit; re-run scripts/sync-grc.mjs.
+
 # PCI DSS v3.2.1 → v4.0 / v4.0.1 Change Guide
 
 Source: PCI DSS Summary of Changes v3.2.1 to v4.0 (PCI SSC); PCI DSS v4.0.1 (June 2024)

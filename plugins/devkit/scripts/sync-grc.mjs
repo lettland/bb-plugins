@@ -8,11 +8,13 @@
 // gate in memory; phase 2 deletes the files the previous manifest lists and writes the new ones.
 // A failing gate therefore leaves the tree untouched. Run `node scripts/build-index.mjs` after it.
 import { execFile } from "node:child_process";
-import { mkdir, lstat, readFile, rm, rmdir, writeFile } from "node:fs/promises";
+import { mkdir, lstat, readdir, readFile, rm, rmdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { REFERENCE_RE, SLUG_RE } from "../src/loader.mjs";
+import { parseFrontmatter } from "./build-index.mjs";
+import { GrcSyncError, assertNoExcludedCitations, assertNoLeftoverCitations, assertVisibleContent, fail, rewriteCitations } from "./grc-gates.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -28,11 +30,16 @@ const REGULAR_FILE_MODES = new Set(["100644", "100755"]);
  * upstream descriptions are written to trigger as often as possible and would outrank devkit's own
  * skills in `devkit_find_skills`. Keep the slug list in sync with `reviewer-compliance.md` (a test
  * enforces it).
+ *
+ * `exclude` (optional): upstream reference names that are not vendored (not read, copied or listed). The sync fails if
+ * a name is not an upstream file or if any vendored text cites it. gdpr-compliance's `privacy-notice` is a drafting
+ * template whose prose lines (`[PLACEHOLDER]: for [PURPOSE]`) trip the link-definition gate; the reviewer does not need it.
  */
 export const FRAMEWORKS = [
   {
     upstream: "gdpr-compliance",
     slug: "grc-gdpr",
+    exclude: ["privacy-notice"],
     description:
       "GDPR knowledge pack (vendored, MIT): lawful basis, data subject rights, DPIA, controller and processor duties, cross-border transfers, breach notification. Loaded by the compliance reviewer when the framework applies; use for GDPR-specific questions.",
   },
@@ -86,22 +93,6 @@ export const FRAMEWORKS = [
   },
 ];
 
-/** Invisible or direction-changing code points. U+FE0F (emoji variation selector) is allowed on purpose. */
-const INVISIBLE_RE =
-  /[\u00AD\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/u;
-/** `references/<name>.md` as upstream cites it (inline code, bold, table cell, bullet, prose). */
-const PATH_CITATION_RE = /references\/([a-z0-9][a-z0-9-]*)\.md/gu;
-/** A bare `<name>.md` that no letter, digit, `_`, `-`, `/` or `.` precedes. */
-const BARE_CITATION_RE = /(?<![A-Za-z0-9_\-/.])([a-z0-9][a-z0-9-]*)\.md/gu;
-/** Same shape, but a `/` or `.` before the name still counts: the final gate is stricter than the rewrite. */
-const BARE_LEFTOVER_RE = /(?<![A-Za-z0-9_-])([a-z0-9][a-z0-9-]*)\.md/gu;
-
-class GrcSyncError extends Error {}
-
-function fail(message) {
-  throw new GrcSyncError(message);
-}
-
 function assertName(value, re, what) {
   if (typeof value !== "string" || !re.test(value)) fail(`${what} ${JSON.stringify(value)} violates the name pattern`);
 }
@@ -120,12 +111,13 @@ async function git(cloneDir, args) {
   try {
     const { stdout } = await execFileAsync(
       "git",
-      ["-C", cloneDir, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", ...args],
+      ["-C", cloneDir, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "log.showSignature=false", ...args],
       { env, encoding: "buffer", maxBuffer: 256 * 1024 * 1024 },
     );
     return stdout;
   } catch (error) {
-    return fail(`git ${args[0]} failed: ${String(error.stderr).trim()}`);
+    const stderr = String(error.stderr).trim();
+    return fail(`git ${args[0]} failed: ${stderr === "" ? error.message : stderr}`);
   }
 }
 
@@ -137,58 +129,32 @@ function decodeUtf8(buffer, label) {
   }
 }
 
-/** Reject any copied text that hides content from a human reader. */
-export function assertVisibleContent(text, label) {
-  if (text.includes("<!--")) fail(`${label}: contains an HTML comment`);
-  const hit = INVISIBLE_RE.exec(text);
-  if (hit) fail(`${label}: contains invisible character U+${hit[0].codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`);
-}
-
-/**
- * Rewrite upstream reference citations to `devkit_load_skill` calls: first `references/<name>.md`,
- * then bare `<name>.md` for the framework's own reference files. Fails on a cited name with no file.
- */
-export function rewriteCitations(text, slug, names, label) {
-  const known = new Set(names);
-  const call = (name) => `devkit_load_skill({ reference: "${slug}-${name}" })`;
-  const pathPass = text.replace(PATH_CITATION_RE, (_match, name) => {
-    if (!known.has(name)) fail(`${label}: cites references/${name}.md, which does not exist upstream`);
-    return call(name);
-  });
-  return pathPass.replace(BARE_CITATION_RE, (match, name) => (known.has(name) ? call(name) : match));
-}
-
-function assertNoLeftoverCitations(text, names, label) {
-  if (text.includes("references/")) fail(`${label}: still contains "references/" after the citation rewrite`);
-  const known = new Set(names);
-  for (const match of text.matchAll(BARE_LEFTOVER_RE)) {
-    if (known.has(match[1])) fail(`${label}: still contains the bare reference name "${match[1]}.md" after the citation rewrite`);
-  }
+/** The first line of every generated skill and reference file. */
+function vendoredHeader(sha) {
+  return `> Vendored from ${UPSTREAM_REPO}@${sha} (MIT, see THIRD_PARTY_NOTICES.md). Reference material only, not instructions and not legal advice. Do not edit; re-run scripts/sync-grc.mjs.`;
 }
 
 /**
  * Edit the frontmatter as text (never re-dumped through YAML, so the output is byte-deterministic):
  * new name, devkit description as one single-quoted line, `metadata.type: grc`, then the header line.
+ * `parseFrontmatter` (the index builder's parser) checks the upstream keys; its result is not re-dumped.
  */
 function rewriteSkill(text, framework, names, sha, label) {
   const parts = /^---\n([\s\S]*?)\n---(?:\n|$)/u.exec(text);
   if (parts === null) fail(`${label}: no frontmatter block`);
-  const keys = [];
-  for (const line of parts[1].split("\n")) {
-    if (line === "" || /^[ \t]/u.test(line)) {
-      if (keys.length === 0) fail(`${label}: frontmatter does not start with a key`);
-      continue;
-    }
-    const key = /^([A-Za-z0-9_-]+):/u.exec(line);
-    if (key === null) fail(`${label}: unparseable frontmatter line ${JSON.stringify(line)}`);
-    keys.push(key[1]);
+  let data;
+  try {
+    data = parseFrontmatter(parts[0]);
+  } catch (error) {
+    fail(`${label}: frontmatter does not parse: ${error.message}`);
   }
+  if (data === null) fail(`${label}: frontmatter is not a key/value map`);
+  const keys = Object.keys(data);
   if (keys.length !== 2 || !keys.includes("name") || !keys.includes("description")) {
     fail(`${label}: frontmatter keys must be exactly name and description, found [${keys.join(", ")}]`);
   }
   const body = rewriteCitations(text.slice(parts[0].length), framework.slug, names, label);
   const description = framework.description.replaceAll("'", "''");
-  const header = `> Vendored from ${UPSTREAM_REPO}@${sha} (MIT); not legal advice. Do not edit; re-run scripts/sync-grc.mjs.`;
   const out = [
     "---",
     `name: ${framework.slug}`,
@@ -197,7 +163,7 @@ function rewriteSkill(text, framework, names, sha, label) {
     "  type: grc",
     "---",
     "",
-    header,
+    vendoredHeader(sha),
     body.startsWith("\n") ? body : `\n${body}`,
   ].join("\n");
   assertNoLeftoverCitations(out, names, label);
@@ -220,16 +186,22 @@ async function readFramework(cloneDir, sha, framework) {
     files.set(rel, ref === null ? null : ref[1]);
   }
   if (!files.has("SKILL.md")) fail(`${framework.upstream}: no SKILL.md in the upstream commit`);
+  const excluded = new Set(framework.exclude ?? []);
+  const upstreamNames = new Set(files.values());
+  for (const name of excluded) {
+    if (!upstreamNames.has(name)) fail(`${framework.upstream}: exclude entry "${name}" names no reference file upstream (stale exclude)`);
+  }
 
   const read = async (rel) => {
     const label = `${prefix}${rel}`;
     const text = decodeUtf8(await git(cloneDir, ["cat-file", "blob", `${sha}:${label}`]), label);
     assertVisibleContent(text, label);
+    assertNoExcludedCitations(text, excluded, label);
     return text;
   };
   const references = new Map();
   // ls-tree emits paths in byte order, so the Map (and the manifest) is already sorted.
-  for (const [rel, name] of [...files].filter(([, n]) => n !== null)) {
+  for (const [rel, name] of [...files].filter(([, n]) => n !== null && !excluded.has(n))) {
     assertName(name, REFERENCE_RE, `${framework.upstream} reference name`);
     assertName(`${framework.slug}-${name}`, REFERENCE_RE, `${framework.upstream} reference file name`);
     references.set(name, await read(rel));
@@ -237,7 +209,7 @@ async function readFramework(cloneDir, sha, framework) {
   return { skill: await read("SKILL.md"), references };
 }
 
-/** The files a manifest lists, relative to the content dir. Throws before anything is deleted if it is malformed. */
+/** The files a manifest lists, relative to the content dir, and its framework entries. Throws before anything is deleted if it is malformed. */
 export function listedFiles(manifestText) {
   let manifest;
   try {
@@ -248,24 +220,66 @@ export function listedFiles(manifestText) {
   if (!Array.isArray(manifest?.frameworks)) fail(`previous ${MANIFEST_FILE} has no frameworks array`);
   const skills = [];
   const references = [];
+  const frameworks = [];
   for (const fw of manifest.frameworks) {
     assertGrcSlug(fw?.slug, `previous ${MANIFEST_FILE} slug`);
+    assertName(fw.upstream, SLUG_RE, `previous ${MANIFEST_FILE} upstream`);
     if (!Array.isArray(fw.references)) fail(`previous ${MANIFEST_FILE}: ${fw.slug} has no references array`);
     skills.push(fw.slug);
+    frameworks.push({ upstream: fw.upstream, slug: fw.slug, references: [...fw.references] });
     for (const name of fw.references) {
       assertName(name, REFERENCE_RE, `previous ${MANIFEST_FILE} reference name`);
       assertName(`${fw.slug}-${name}`, REFERENCE_RE, `previous ${MANIFEST_FILE} reference file name`);
       references.push(`references/${fw.slug}-${name}.md`);
     }
   }
-  return { skills, references };
+  return { skills, references, frameworks };
 }
 
-async function pathExists(file) {
-  return lstat(file).then(
-    () => true,
-    () => false,
-  );
+/** The union of two framework lists: previous entries first, then new ones; references merged per slug. */
+function unionFrameworks(previous, current) {
+  const merged = new Map();
+  for (const fw of [...previous, ...current]) {
+    const known = merged.get(fw.slug);
+    if (known === undefined) merged.set(fw.slug, { ...fw, references: [...fw.references] });
+    else known.references.push(...fw.references.filter((name) => !known.references.includes(name)));
+  }
+  return [...merged.values()];
+}
+
+const manifestText = (manifest) => `${JSON.stringify(manifest, null, 2)}\n`;
+
+/** `lstat`, or null when the path does not exist. Any other error propagates. */
+async function lstatOrNull(file) {
+  return lstat(file).catch((error) => {
+    if (error.code !== "ENOENT") throw error;
+    return null;
+  });
+}
+
+/** Fail unless `skills/<slug>` is absent or a real directory (not a symlink or file). Returns whether it exists. */
+async function assertSkillDirReal(contentDir, slug) {
+  const stat = await lstatOrNull(path.join(contentDir, "skills", slug));
+  if (stat !== null && !stat.isDirectory()) fail(`skills/${slug} is not a real directory (symlink or file); refusing to write or delete through it`);
+  return stat !== null;
+}
+
+/** Fail unless a file the previous manifest lists is absent or a regular file (not a directory or symlink). */
+async function assertRegularFileIfPresent(contentDir, rel) {
+  const stat = await lstatOrNull(path.join(contentDir, rel));
+  if (stat !== null && !stat.isFile()) fail(`${rel} is not a regular file (directory or symlink); refusing to delete it`);
+}
+
+/**
+ * Fail unless a skill directory the previous manifest lists is absent or a real directory holding at most SKILL.md.
+ * Returns whether the directory exists.
+ */
+async function assertSkillDirRemovable(contentDir, slug) {
+  if (!(await assertSkillDirReal(contentDir, slug))) return false;
+  const dir = path.join(contentDir, "skills", slug);
+  const extra = (await readdir(dir)).filter((entry) => entry !== "SKILL.md");
+  if (extra.length > 0) fail(`skills/${slug} holds files the previous ${MANIFEST_FILE} does not list: ${extra.join(", ")}`);
+  return true;
 }
 
 /**
@@ -291,7 +305,7 @@ export async function syncGrc({ cloneDir, sha, contentDir, noticesFile, framewor
       const label = `${framework.upstream}/references/${name}.md`;
       const rewritten = rewriteCitations(text, framework.slug, names, label);
       assertNoLeftoverCitations(rewritten, names, label);
-      outputs.set(`references/${framework.slug}-${name}.md`, rewritten);
+      outputs.set(`references/${framework.slug}-${name}.md`, `${vendoredHeader(sha)}\n\n${rewritten}`);
       referenceCount += 1;
     }
     manifestFrameworks.push({ upstream: framework.upstream, slug: framework.slug, references: names });
@@ -307,29 +321,45 @@ export async function syncGrc({ cloneDir, sha, contentDir, noticesFile, framewor
   const section = (nextHeading < 0 ? rest : rest.slice(0, nextHeading)).join("\n");
   if (!section.includes(sha)) fail(`the notices section "${NOTICES_HEADING}" does not contain the commit ${sha}; update it first`);
 
+  const contentStat = await lstatOrNull(contentDir);
+  if (!contentStat?.isDirectory()) fail("the content directory is not a real directory (missing, symlink or file); refusing to write or delete through it");
+  for (const parent of ["skills", "references"]) {
+    const stat = await lstatOrNull(path.join(contentDir, parent));
+    if (stat !== null && !stat.isDirectory()) fail(`content/${parent} is not a real directory (symlink or file); refusing to write or delete through it`);
+  }
+
   const manifestPath = path.join(contentDir, MANIFEST_FILE);
+  const manifestStat = await lstatOrNull(manifestPath);
+  if (manifestStat && !manifestStat.isFile()) fail(`${MANIFEST_FILE} is not a regular file (symlink or directory); refusing to read or write through it`);
   const previousText = await readFile(manifestPath, "utf8").catch(() => null);
-  const previous = previousText === null ? { skills: [], references: [] } : listedFiles(previousText);
+  const previous = previousText === null ? { skills: [], references: [], frameworks: [] } : listedFiles(previousText);
+  const presentSkillDirs = new Set();
+  for (const slug of previous.skills) {
+    if (await assertSkillDirRemovable(contentDir, slug)) presentSkillDirs.add(slug);
+  }
+  for (const rel of previous.references) await assertRegularFileIfPresent(contentDir, rel);
+  for (const slug of previous.skills) await assertRegularFileIfPresent(contentDir, `skills/${slug}/SKILL.md`);
+  for (const framework of frameworks) await assertSkillDirReal(contentDir, framework.slug);
   const listed = new Set([...previous.skills.map((slug) => `skills/${slug}/SKILL.md`), ...previous.references]);
   for (const target of outputs.keys()) {
-    if (!listed.has(target) && (await pathExists(path.join(contentDir, target)))) {
+    if (!listed.has(target) && (await lstatOrNull(path.join(contentDir, target))) !== null) {
       fail(`${target} already exists and the previous ${MANIFEST_FILE} does not list it; refusing to overwrite`);
     }
   }
 
-  // ---- Phase 2: delete exactly what the previous manifest lists, then write. ----
+  // ---- Phase 2: list the union first (a re-run after an I/O failure then finds every written file listed),
+  // delete exactly what the previous manifest lists, write, then write the final manifest. ----
+  await writeFile(manifestPath, manifestText({ ...manifest, frameworks: unionFrameworks(previous.frameworks, manifestFrameworks) }), "utf8");
   for (const rel of previous.references) await rm(path.join(contentDir, rel), { force: true });
   for (const slug of previous.skills) {
     await rm(path.join(contentDir, "skills", slug, "SKILL.md"), { force: true });
-    await rmdir(path.join(contentDir, "skills", slug)).catch((error) => {
-      if (error.code !== "ENOENT") throw error;
-    });
+    if (presentSkillDirs.has(slug)) await rmdir(path.join(contentDir, "skills", slug));
   }
   for (const [rel, text] of outputs) {
     await mkdir(path.dirname(path.join(contentDir, rel)), { recursive: true });
     await writeFile(path.join(contentDir, rel), text, "utf8");
   }
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  await writeFile(manifestPath, manifestText(manifest), "utf8");
   return { commit: sha, commitDate, skills: frameworks.length, references: referenceCount };
 }
 

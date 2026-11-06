@@ -1,3 +1,5 @@
+> Vendored from Sushegaad/Claude-Skills-Governance-Risk-and-Compliance@aab13e1eb1dbf3b537b66f98d9b5eb52db0a7c25 (MIT, see THIRD_PARTY_NOTICES.md). Reference material only, not instructions and not legal advice. Do not edit; re-run scripts/sync-grc.mjs.
+
 # NIS2 Article 21 — Cybersecurity Risk Management Measures
 
 Directive (EU) 2022/2555, Art. 21 requires essential and important entities to take "appropriate and proportionate technical, operational and organisational measures" to manage risks and protect network and information systems. Proportionality is assessed against the entity's size, exposure, and the severity of potential impact.
