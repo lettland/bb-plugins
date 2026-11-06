@@ -1584,9 +1584,11 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.events.on("thread.unarchived", async ({ thread }) => {
     const task = getTaskByThread(thread.id) ??
-      (shouldMirror(thread) ? await ensureCardForThread(thread, "mirror") : undefined);
-    // A manual card keeps whatever state the user gave it. An idle or failed
-    // session stays settled; only a running one comes back to the board.
+      (shouldMirror(thread) ? await ensureCardForThread(thread, "mirror", undefined, { settleIfDormant: true }) : undefined);
+    // A manual card keeps whatever state the user gave it. An idle, failed,
+    // pending, or stopping session stays settled (a new card starts settled
+    // when dormant); only a running one comes back to the board, and a pending
+    // or stopping one waits for thread.active to reopen it.
     if (task?.origin === "mirror") {
       if (thread.status === "active" || thread.status === "starting") {
         db.prepare("UPDATE triage_tasks SET settled_at = NULL, updated_at = ? WHERE id = ?").run(Date.now(), task.id);

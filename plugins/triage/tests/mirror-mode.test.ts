@@ -436,6 +436,13 @@ test("thread.unarchived creates a missing mirror card and reopens it only when t
   const { harness, cardOf, cards, emit, mirror } = await start();
   await emit("thread.unarchived", { thread: thr("u-new", { status: "active" }) });
   expect(cardOf("u-new")).toMatchObject({ origin: "mirror", settled_at: null });
+  // With no card yet, an idle or failed session gets one that starts settled.
+  await emit("thread.unarchived", { thread: thr("u-dormant", { status: "idle" }) });
+  expect(cardOf("u-dormant")).toMatchObject({ origin: "mirror" });
+  expect(cardOf("u-dormant").settled_at).toBeGreaterThan(0);
+  await emit("thread.unarchived", { thread: thr("u-crashed", { status: "error" }) });
+  expect(cardOf("u-crashed")).toMatchObject({ origin: "mirror" });
+  expect(cardOf("u-crashed").settled_at).toBeGreaterThan(0);
   await mirror(thr("u-old"));
   await emit("thread.archived", { thread: thr("u-old", { archivedAt: 9 }) });
   expect(cardOf("u-old").settled_at).toBeGreaterThan(0);
@@ -452,7 +459,7 @@ test("thread.unarchived creates a missing mirror card and reopens it only when t
   await emit("thread.unarchived", { thread: thr("u-own", { originPluginId: "triage" }) });
   await harness.behavior.setSettings({ autoCardThreads: false });
   await emit("thread.unarchived", { thread: thr("u-off") });
-  expect(cards().map((card) => card.thread_id)).toStrictEqual(["u-new", "u-old"]);
+  expect(cards().map((card) => card.thread_id)).toStrictEqual(["u-new", "u-dormant", "u-crashed", "u-old"]);
   // An existing mirror card still reopens with the knob off, once its session runs.
   await emit("thread.archived", { thread: thr("u-old", { archivedAt: 9 }) });
   await emit("thread.unarchived", { thread: thr("u-old", { status: "starting" }) });

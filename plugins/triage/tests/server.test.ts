@@ -1037,6 +1037,8 @@ test("the settle-piled-up-mirror-cards migration settles idle and failed mirror 
       insert.run("m-working", 903, "working mirror", "t-working", "working", "mirror", null);
       insert.run("m-manual", 904, "idle manual", "t-manual", "idle", "manual", null);
       insert.run("m-kept", 905, "settled mirror", "t-kept", "idle", "mirror", 7);
+      insert.run("m-completed", 906, "completed mirror", "t-completed", "completed", "mirror", null);
+      insert.run("m-stopped", 907, "stopped mirror", "t-stopped", "stopped", "mirror", null);
       // Rewind to the state before the migration ran: its ledger row is absent.
       db.prepare("DELETE FROM _bb_migrations WHERE id = (SELECT MAX(id) FROM _bb_migrations)").run();
     });
@@ -1050,6 +1052,8 @@ test("the settle-piled-up-mirror-cards migration settles idle and failed mirror 
     expect(settledOf("m-working")).toBe(null);
     expect(settledOf("m-manual")).toBe(null);
     expect(settledOf("m-kept")).toBe(7);
+    expect(settledOf("m-completed")).toBe(null);
+    expect(settledOf("m-stopped")).toBe(null);
   } finally { await harness.lifecycle.dispose(); }
 });
 
