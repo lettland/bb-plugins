@@ -46,6 +46,7 @@ is a drafting template for the user's own privacy notice, which the reviewer doe
 `[PLACEHOLDER]: for [PURPOSE]` prose lines trip the link-definition gate below. `FRAMEWORKS` in
 `scripts/sync-grc.mjs` lists it under `exclude`; an excluded file is not read, copied or listed in the
 manifest, and the sync fails if any vendored text cites it or if an `exclude` entry names no upstream file.
+The GDPR skill's Workflow 2 table still names a privacy-notice template that is not vendored.
 
 Re-sync from a local clone you fetched yourself (the script makes no network calls and reads the
 commit object, never the working tree), then rebuild the index. Run the re-sync, build, and
@@ -62,7 +63,21 @@ node scripts/build-index.mjs
   sync fails if the notice does not name the commit.
 - The sync fails, and writes nothing, on any of these gates:
   - a symlink or another unsupported entry in the upstream tree, or an unexpected upstream file
-  - an HTML comment
+  - raw HTML, fail closed: any `<` directly followed by an ASCII letter, `/`, `!` or `?` (tags, comments,
+    declarations, CDATA, processing instructions). `1 < 2`, `x <= y`, `<3` and `<-` pass; `a<b` does not
+  - an inline link or image title (`[a](url "t")`, `[a](url 't')`, `[a](url (t))`), which renders as
+    nothing, and an image with non-empty alt text (`![alt](x)`). A plain link and an image with empty
+    alt text (`![](x)`) pass
+  - an inline link or image whose `](…)` part does not close on its own line, fail closed: for every `](`,
+    a line ending (LF, CR or CRLF) or the end of the text before the closing `)` (parentheses balanced, a
+    backslash escapes the next character) is refused. A title can hide behind a container prefix on the next
+    line (`> [a](` then `> <)> "t")`, or `> [a](x` then `>"t")`), so the rule refuses the whole class instead of
+    modelling prefixes. `[a](x) and [b](y)` on one line passes; `[a](x` then `"t")` and a lone `[a](` do not
+  - an inline link or image destination in angle brackets, fail closed: any `](` followed by `<`, also with whitespace between `(` and `<`
+    (`[a](<x>)`, `[a]( <)> "t")`). A plain link (`[a](https://x)`) and `![](x.png)` pass
+  - a character reference, fail closed: a numeric one (`&#8203;`, `&#x200B;`) or a named one (`&shy;`,
+    `&amp;`), because it renders as another character and can hide an invisible one. `R&D`, `a & b`,
+    `AT&T` and `&;` pass
   - a line that could start or end a Markdown link-reference definition (`[label]: destination "title"`,
     which renders as nothing and can hide text). This is a fail-closed line rule, not a CommonMark
     parser: the text is split on CRLF, CR or LF; on each line, leading spaces, tabs, `>` and list markers
@@ -76,12 +91,16 @@ node scripts/build-index.mjs
     character except tab, LF and CR (`Cc`), the line and paragraph separators U+2028 and U+2029, U+FFFC,
     the whole tag block U+E0000-U+E007F, and these marks that are not format characters: U+034F,
     U+115F, U+1160, U+17B4, U+17B5, U+180B-U+180D, U+180F, U+3164, U+FE00-U+FE0E, U+FFA0 and
-    U+E0100-U+E01EF
+    U+E0100-U+E01EF; also every default-ignorable code point (except U+FE0F, which has its own rule
+    below), every private-use character (`Co`), every unassigned code point (`Cn`, including
+    noncharacters such as U+FFFE) and U+2800
   - a U+FE0F that does not directly follow a pictographic character, and is not between a keycap base
     (`0-9`, `#`, `*`) and U+20E3
-  - upstream frontmatter keys other than exactly `name` and `description`
+  - upstream frontmatter keys other than exactly `name` and `description`, and a frontmatter block that
+    holds a line starting with `---` (such as `---x: c`), which would hide later keys from that check
   - a dangling `references/<name>.md` citation
-  - a malformed previous manifest (including a framework entry without a valid `upstream` name)
+  - a malformed previous manifest (including a framework entry without a valid `upstream` name, a slug
+    listed twice, or a reference listed twice)
   - a target file the previous manifest does not list
   - a path the run would delete or write through that is not what the manifest says: a listed file
     that is not a regular file, a skill directory that is a symlink or a file, `content/skills` or
@@ -94,9 +113,11 @@ node scripts/build-index.mjs
 - If a sync fails with an I/O error, re-run it: the manifest is written first and lists every file the
   run may have written. If the re-run fails too, `git checkout -- content` restores the last committed
   state (then delete any new untracked files under `content/` the failed run left; see `git status`).
-- The content gates live in `scripts/grc-gates.mjs`.
-- If a framework fails a gate, drop it from `FRAMEWORKS` in `scripts/sync-grc.mjs` and from the slug
-  list in `reviewer-compliance.md` (a test enforces they match), and report it upstream. Never weaken
+- The content gates live in `scripts/grc-gates.mjs`. A gate error that names a line says `upstream line <n>`:
+  the line counts from the upstream file.
+- If only one reference file fails a gate and the reviewer does not need it, list it under that
+  framework's `exclude` in `FRAMEWORKS`; otherwise drop the framework from `FRAMEWORKS` and from the
+  slug list in `reviewer-compliance.md` (a test enforces they match). Report it upstream. Never weaken
   a gate.
 
 ## CLI

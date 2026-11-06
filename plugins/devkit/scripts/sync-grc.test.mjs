@@ -56,7 +56,7 @@ const ALPHA_SKILL_EXPECTED = [
   "",
 ].join("\n");
 
-const ALPHA_GUIDE = "# Guide\n\nSee `references/other-ref.md` and other-ref.md. Compare 1 < 2 and a<b.\n";
+const ALPHA_GUIDE = "# Guide\n\nSee `references/other-ref.md` and other-ref.md. Compare 1 < 2 and a < b.\n";
 const ALPHA_OTHER = "# Other\n\nPlain text ❤\uFE0F with an emoji variation selector (U+FE0F).\n";
 const BETA_SKILL = '---\nname: beta\ndescription: "Quote \\"d\\" desc"\n---\nBeta body `references/one.md` here.\n';
 const BETA_ONE = "# One\n";
@@ -185,7 +185,7 @@ describe("syncGrc happy path", () => {
     expect(await readFile(path.join(contentDir, "references/grc-alpha-guide.md"), "utf8")).toBe(
       withHeader(
         sha,
-        '# Guide\n\nSee `devkit_load_skill({ reference: "grc-alpha-other-ref" })` and devkit_load_skill({ reference: "grc-alpha-other-ref" }). Compare 1 < 2 and a<b.\n',
+        '# Guide\n\nSee `devkit_load_skill({ reference: "grc-alpha-other-ref" })` and devkit_load_skill({ reference: "grc-alpha-other-ref" }). Compare 1 < 2 and a < b.\n',
       ),
     );
     expect(await readFile(path.join(contentDir, "references/grc-alpha-other-ref.md"), "utf8")).toBe(withHeader(sha, ALPHA_OTHER));
@@ -282,8 +282,136 @@ describe("content gate", () => {
     expect(() => assertVisibleContent("a < b ❤\uFE0F", "x")).not.toThrow();
   });
 
-  it("rejects an HTML comment", async () => {
-    await expectFailure({ ...goodFiles(), ...tree("alpha", ALPHA_SKILL, { guide: "x <!-- hidden --> y\n", "other-ref": "o\n" }) }, /HTML comment/u);
+  it("rejects an HTML comment, and names the upstream line", async () => {
+    await expectFailure(
+      { ...goodFiles(), ...tree("alpha", ALPHA_SKILL, { guide: "ok\nx <!-- hidden --> y\n", "other-ref": "o\n" }) },
+      /alpha\/references\/guide\.md: upstream line 2 contains raw HTML or an HTML comment/u,
+    );
+  });
+
+  it.each([
+    ["an inline tag", "<span hidden>x</span>"],
+    ["a block tag", "<details>"],
+    ["a closing tag", "</div>"],
+    ["a processing instruction", "<?pi?>"],
+    ["a declaration", "<!X y>"],
+    ["a CDATA section", "<![CDATA[x]]>"],
+    ["a comment", "<!-- c -->"],
+    ["a tag glued to a word (fail closed)", "a<b"],
+  ])("rejects raw HTML: %s", (_label, text) => {
+    expect(() => assertVisibleContent(`ok\n${text}\n`, "x")).toThrow(/x: upstream line 2 contains raw HTML or an HTML comment/u);
+  });
+
+  it.each(["1 < 2", "x <= y", "a < b", "<3", "<-", "a <\nb", "x <"])("lets %j through (both directions of the raw HTML rule)", (text) => {
+    expect(() => assertVisibleContent(text, "x")).not.toThrow();
+  });
+
+  it.each([
+    ["a double-quoted title", '[a](url "t")'],
+    ["a single-quoted title", "[a](url 't')"],
+    ["a parenthesised title", "[a](url (t))"],
+    ["a title on an image", '![](x "t")'],
+    ["a title after a destination in angle brackets", '[a](<1> "t")'],
+    ["a title after a destination with nested parentheses", '[a](f(x) "t")'],
+    ["a title after an escaped parenthesis", '[a](x\\) "t")'],
+    ["a title after a tab", "[a](url\t't')"],
+    ["a title in the second link of a line", '[a](b) and [c](d "t")'],
+    ["a title in a link inside an unclosed link", '[a](x [c](d "t")'],
+  ])("rejects an inline link or image title: %s", (_label, text) => {
+    expect(() => assertVisibleContent(`ok\n${text}\n`, "x")).toThrow(/x: upstream line [23] has an inline link or image title/u);
+  });
+
+  it.each([
+    ["a destination that hides a closing parenthesis and a title", '[a](<)> "hidden")'],
+    ["a digit destination that hides a closing parenthesis and a title", '[a](<1)> "hidden")'],
+    ["a plain angle-bracket destination", "[a](<1>)"],
+    ["an image with an angle-bracket destination", "![](<1.png>)"],
+    ["a space before the angle bracket", '[a]( <)> "t")'],
+    ["a tab before the angle bracket", '[a](\t<)> "t")'],
+    ["a space before the angle bracket on an image", '![]( <)> "t")'],
+    ["a space before a digit destination with a title-like tail", "[a]( <1)> (t))"],
+  ])("rejects an inline link or image destination in angle brackets: %s", (_label, text) => {
+    expect(() => assertVisibleContent(`ok\n${text}\n`, "x")).toThrow(/x: upstream line 2 has an inline link or image destination in angle brackets/u);
+  });
+
+  it("rejects [a](<x>) (the raw HTML rule fires first: `<x` is a tag)", () => {
+    expect(() => assertVisibleContent("[a](<x>)", "x")).toThrow(/contains raw HTML/u);
+  });
+
+  it("lets a plain link and an image through the angle-bracket rule", () => {
+    expect(() => assertVisibleContent("[a](https://x) and ![](x.png)", "x")).not.toThrow();
+  });
+
+  it.each([
+    ["a hexadecimal reference for U+200B", "a&#x200B;b", "&#x200B;"],
+    ["an upper-case hexadecimal reference", "a&#X200b;b", "&#X200b;"],
+    ["a decimal reference for U+200B", "a&#8203;b", "&#8203;"],
+    ["a named reference for the soft hyphen", "a&shy;b", "&shy;"],
+    ["a named reference for an ampersand", "a&amp;b", "&amp;"],
+    ["a reference with digits in its name", "a&frac12;b", "&frac12;"],
+  ])("rejects a character reference: %s", (_label, text, reference) => {
+    expect(() => assertVisibleContent(`ok\n${text}\n`, "x")).toThrow(`x: upstream line 2 has the character reference ${reference}`);
+  });
+
+  it.each(["R&D", "a & b", "AT&T", "&;", "&#;", "&#x;", "&#xZ;", "&1;", "a &b c; d", "&shy"])("lets %j through the character-reference rule", (text) => {
+    expect(() => assertVisibleContent(text, "x")).not.toThrow();
+  });
+
+  const MULTILINE_MESSAGE = /x: upstream line 2: an inline link or image continues past the end of the line, which can hide a title; refusing it/u;
+
+  it.each([
+    ["a blockquote continuation with an angle-bracket tail", "> [a](\n> <)> \"t\")"],
+    ["a blockquote continuation without a space", "> [a](\n><)> \"t\")"],
+    ["a nested blockquote continuation", "> > [a](\n> > <)> \"t\")"],
+    ["a blockquote continuation with a title glued to the prefix", "> [a](x\n>\"t\")"],
+    ["a title on the next line (LF)", '[a](x\n"t")'],
+    ["a title on the next line (CRLF)", '[a](x\r\n"t")'],
+    ["a title on the next line (CR)", '[a](x\r"t")'],
+    ["a line break right after the opening parenthesis", "[a](\n<)> \"t\")"],
+    ["a line break after a backslash", "[a](x\\\n\"t\")"],
+    ["a carriage return after a backslash", "[a](x\\\r\"t\")"],
+    ["a backslash at the text end", "[a](x\\"],
+    ["an unclosed link", "[a](url"],
+    ["an opening at the text end", "[a]("],
+    ["a closing bracket and parenthesis at the text end", "x]("],
+  ])("rejects an inline link or image that continues past the end of the line: %s", (_label, text) => {
+    expect(() => assertVisibleContent(`ok\n${text}`, "x")).toThrow(MULTILINE_MESSAGE);
+  });
+
+  it("names the line where a multi-line link starts", () => {
+    expect(() => assertVisibleContent("a\r\nb\r[a](x\r\ny)", "doc")).toThrow("doc: upstream line 3: an inline link or image continues past the end of the line");
+  });
+
+  it("names the line of an inline title", () => {
+    expect(() => assertVisibleContent('a\r\nb\r[a](url "t")', "doc")).toThrow("doc: upstream line 3 has an inline link or image title");
+  });
+
+  it.each([
+    ["a plain link", "[a](url)"],
+    ["a link with padding", "[a]( url )"],
+    ["an empty-alt image", "![](x)"],
+    ["a link with nested parentheses", "[a](https://example.com/a_(b))"],
+    ["a link with an escaped parenthesis", "[a](x\\)y)"],
+    ["a link followed by a parenthetical", "[a](url) (see below), 'quoted' and \"quoted\""],
+    ["quotes and parentheses with no link", "word (aside) 'q' \"q\""],
+    ["two complete links on one line", "[a](x) and [b](y)"],
+    ["a complete link followed by a line break and text", "[a](x)\nnext line"],
+  ])("lets %s through (both directions of the title rule)", (_label, text) => {
+    expect(() => assertVisibleContent(text, "x")).not.toThrow();
+  });
+
+  it.each([
+    ["alt text", "![alt](x)"],
+    ["alt text with a space", "x ![a b](x)"],
+    ["alt text with a nested bracket", "![a [b] c](x)"],
+    ["alt text in a reference image", "![alt][ref]"],
+  ])("rejects an image with non-empty alt text: %s", (_label, text) => {
+    expect(() => assertVisibleContent(`ok\n${text}\n`, "x")).toThrow(/x: upstream line 2 has an image with alt text/u);
+  });
+
+  it("rejects raw HTML, a title and alt text end to end and leaves the output untouched", async () => {
+    await expectFailure({ ...goodFiles(), ...tree("alpha", ALPHA_SKILL, { guide: "g\n[a](u 't')\n", "other-ref": "o\n" }) }, /guide\.md: upstream line 2 has an inline link/u);
+    await expectFailure({ ...goodFiles(), ...tree("alpha", ALPHA_SKILL, { guide: "g\n![alt](u)\n", "other-ref": "o\n" }) }, /guide\.md: upstream line 2 has an image/u);
   });
 
   it.each([
@@ -380,15 +508,15 @@ describe("content gate", () => {
   });
 
   it("reports the 1-based number of the first rejected line, whatever the line break", () => {
-    expect(() => assertVisibleContent("ok\n\n> [x]: #\n", "doc")).toThrow("doc: line 3 looks like");
-    expect(() => assertVisibleContent("ok\r\nok\r[x]: #", "doc")).toThrow("doc: line 3 looks like");
-    expect(() => assertVisibleContent("[a\nb]: #\n", "doc")).toThrow("doc: line 2 looks like");
+    expect(() => assertVisibleContent("ok\n\n> [x]: #\n", "doc")).toThrow("doc: upstream line 3 looks like");
+    expect(() => assertVisibleContent("ok\r\nok\r[x]: #", "doc")).toThrow("doc: upstream line 3 looks like");
+    expect(() => assertVisibleContent("[a\nb]: #\n", "doc")).toThrow("doc: upstream line 2 looks like");
   });
 
   it("rejects a definition end to end and leaves the output untouched", async () => {
     await expectFailure(
       { ...goodFiles(), ...tree("alpha", ALPHA_SKILL, { guide: "ok\n[x]: https://example.com\n", "other-ref": "o\n" }) },
-      /alpha\/references\/guide\.md: line 2 looks like a Markdown link-reference definition/u,
+      /alpha\/references\/guide\.md: upstream line 2 looks like a Markdown link-reference definition/u,
     );
   });
 
@@ -407,11 +535,19 @@ describe("content gate", () => {
     expect(() => assertVisibleContent(text, "x")).not.toThrow();
   });
 
-  it("runs in linear time: 20,000 lines of `[a`, and a 20,000-deep container prefix", () => {
+  it("guards against quadratic time: 20,000 lines of `[a`, a 20,000-deep container prefix, and long runs of link and reference openers", () => {
     const start = performance.now();
     expect(() => assertVisibleContent("[a\n".repeat(20_000), "x")).not.toThrow();
     expect(() => assertVisibleContent(`${"> ".repeat(20_000)}[x]: #`, "x")).toThrow(DEFINITION_MESSAGE);
-    expect(performance.now() - start).toBeLessThan(1000);
+    expect(() => assertVisibleContent("](".repeat(20_000), "x")).toThrow(/continues past the end of the line/u);
+    expect(() => assertVisibleContent("[a](b) ".repeat(20_000), "x")).not.toThrow();
+    expect(() => assertVisibleContent(`${"[a](".repeat(20_000)} "t")`, "x")).toThrow(/inline link or image title/u);
+    expect(() => assertVisibleContent("]( ".repeat(20_000), "x")).toThrow(/continues past the end of the line/u);
+    expect(() => assertVisibleContent(("](" + " ".repeat(500)).repeat(400), "x")).toThrow(/continues past the end of the line/u);
+    expect(() => assertVisibleContent("&a".repeat(20_000), "x")).not.toThrow();
+    expect(() => assertVisibleContent("&#x".repeat(20_000), "x")).not.toThrow();
+    expect(() => assertVisibleContent(`${"&a".repeat(20_000)};`, "x")).toThrow(/character reference/u);
+    expect(performance.now() - start).toBeLessThan(5000);
   });
 
   it("rejects an invisible character in SKILL.md", async () => {
@@ -444,6 +580,32 @@ describe("content gate", () => {
       { ...goodFiles(), ...tree("alpha", ALPHA_SKILL, { guide: "ok ❤\uFE0F\uFE0F ok\n", "other-ref": "o\n" }) },
       /invisible character U\+FE0F/u,
     );
+  });
+
+  // The unassigned (\p{Cn}) rows below depend on the Unicode data of the Node that runs them. A code point that a later
+  // Node assigns can fail its row: that is fail-closed and expected, not a bug in the gate (move the row then).
+  it.each([
+    ["U+2065 (unassigned, default-ignorable)", 0x2065],
+    ["U+FFF0 (unassigned, default-ignorable)", 0xfff0],
+    ["U+E0080 (unassigned, in the tag range)", 0xe0080],
+    ["U+E01F0 (unassigned, default-ignorable)", 0xe01f0],
+    ["U+E000 (private use)", 0xe000],
+    ["U+F8FF (private use)", 0xf8ff],
+    ["U+F0000 (private use, plane 15)", 0xf0000],
+    ["U+0378 (unassigned)", 0x0378],
+    ["U+FFFE (noncharacter)", 0xfffe],
+    ["U+FFFF (noncharacter)", 0xffff],
+    ["U+2800 (Braille blank)", 0x2800],
+  ])("rejects %s (characters built at runtime)", (label, codePoint) => {
+    const char = String.fromCodePoint(codePoint);
+    const hex = codePoint.toString(16).toUpperCase().padStart(4, "0");
+    expect(() => assertVisibleContent(`ok${char}ok`, "x")).toThrow(new RegExp(`invisible character U\\+${hex}`, "u"));
+    expect(label).toContain(`U+${hex}`);
+  });
+
+  it("lets ordinary visible text through (both directions of the added invisible-character classes)", () => {
+    const visible = [0x00e9, 0x2713, 0x2192, 0x65e5, 0x2764, 0x2801, 0x1f600, 0x20ac].map((cp) => String.fromCodePoint(cp)).join(" ");
+    expect(() => assertVisibleContent(`${visible}\n`, "x")).not.toThrow();
   });
 
   it("pads short code points to four hex digits", () => {
@@ -568,6 +730,20 @@ describe("failures leave the output tree unchanged", () => {
     await expectFailure({ ...goodFiles(), ...tree("alpha", ALPHA_SKILL, { [`a${"b".repeat(60)}`]: "x\n" }) }, /reference file name/u);
   });
 
+  it("rejects two frameworks that produce the same output file", async () => {
+    const skill = "---\nname: x\ndescription: x\n---\n";
+    await expectFailure(
+      { ...goodFiles(), ...tree("xa", skill, { "a-b": "one\n" }), ...tree("xb", skill, { b: "two\n" }) },
+      /two frameworks produce the same output file references\/grc-x-a-b\.md/u,
+      {
+        frameworks: [
+          { upstream: "xa", slug: "grc-x", description: "X pack (vendored): first." },
+          { upstream: "xb", slug: "grc-x-a", description: "X pack (vendored): second." },
+        ],
+      },
+    );
+  });
+
   it.each([
     ["Bad_Slug", /slug "Bad_Slug" violates/u],
     ["alpha-pack", /must start with "grc-"/u],
@@ -587,6 +763,9 @@ describe("failures leave the output tree unchanged", () => {
     ["an extra key", "---\nname: alpha\ndescription: x\nlicense: MIT\n---\nbody\n", /exactly name and description/u],
     ["a missing description", "---\nname: alpha\nlicense: MIT\n---\nbody\n", /exactly name and description/u],
     ["a repeated key", "---\nname: alpha\nname: beta\ndescription: x\n---\nbody\n", /frontmatter does not parse/u],
+    ["a ---x line that hides a later key", "---\nname: a\ndescription: b\n---x: c\nlicense: MIT\n---\nbody\n", /frontmatter block holds a line that starts with "---"/u],
+    ["a bare-CR ---x line that hides a later key", "---\nname: a\ndescription: b\r---x: c\nlicense: MIT\n---\nbody\n", /frontmatter block holds a line that starts with "---"/u],
+    ["a ---x first line", "---\n---x\nname: a\ndescription: b\n---\nbody\n", /frontmatter block holds a line that starts with "---"/u],
   ])("rejects SKILL.md with %s", async (_label, skill, matcher) => {
     await expectFailure({ ...goodFiles(), ...tree("alpha", skill, { guide: "g\n", "other-ref": "o\n" }) }, matcher);
   });
@@ -969,7 +1148,7 @@ describe("excluded references", () => {
   });
 
   it("fails when the same file is not excluded (the gate is real)", async () => {
-    await expectFailure(tree("alpha", SKILL, { guide: "# Guide\n", draft: DRAFT_WITH_PLACEHOLDERS }), /alpha\/references\/draft\.md: line 2 looks like/u, {
+    await expectFailure(tree("alpha", SKILL, { guide: "# Guide\n", draft: DRAFT_WITH_PLACEHOLDERS }), /alpha\/references\/draft\.md: upstream line 2 looks like/u, {
       frameworks: [ALPHA],
     });
   });
@@ -1006,11 +1185,34 @@ describe("rewriteCitations and listedFiles", () => {
   });
 });
 
+describe("listedFiles rejects duplicates", () => {
+  it("rejects a slug listed twice", () => {
+    const fw = '{"upstream":"x","slug":"grc-x","references":["a"]}';
+    expect(() => listedFiles(`{"frameworks":[${fw},${fw}]}`)).toThrow(/lists the slug grc-x twice/u);
+  });
+
+  it("rejects a reference listed twice", () => {
+    expect(() => listedFiles('{"frameworks":[{"upstream":"x","slug":"grc-x","references":["a","b","a"]}]}')).toThrow(
+      /grc-x lists the reference a twice/u,
+    );
+  });
+
+  it("rejects two entries that write the same reference file", () => {
+    const manifest =
+      '{"frameworks":[{"upstream":"x","slug":"grc-x","references":["a-b"]},{"upstream":"y","slug":"grc-x-a","references":["b"]}]}';
+    expect(() => listedFiles(manifest)).toThrow(/grc-x-a reference b collides with another entry at references\/grc-x-a-b\.md/u);
+  });
+
+  it("lets the same reference name sit under two slugs", () => {
+    const manifest = '{"frameworks":[{"upstream":"x","slug":"grc-x","references":["a"]},{"upstream":"y","slug":"grc-y","references":["a"]}]}';
+    expect(listedFiles(manifest).references).toEqual(["references/grc-x-a.md", "references/grc-y-a.md"]);
+  });
+});
+
 describe("default allowlist", () => {
   it("excludes only gdpr-compliance's privacy-notice drafting template", () => {
     expect(FRAMEWORKS.filter((f) => f.exclude !== undefined).map((f) => [f.upstream, f.exclude])).toEqual([["gdpr-compliance", ["privacy-notice"]]]);
   });
-
 
   it("has 9 unique grc-* slugs and descriptions that fit the 1024-char limit and the vendored pattern", () => {
     expect(FRAMEWORKS.map((f) => f.slug)).toEqual([

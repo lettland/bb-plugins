@@ -142,6 +142,10 @@ function vendoredHeader(sha) {
 function rewriteSkill(text, framework, names, sha, label) {
   const parts = /^---\n([\s\S]*?)\n---(?:\n|$)/u.exec(text);
   if (parts === null) fail(`${label}: no frontmatter block`);
+  // `parseFrontmatter` stops at the first `\n---` even when text follows it on that line, so a line such as `---x: c`
+  // would hide the keys after it from the check below. With no line that starts with `---` inside the block, the first
+  // `\n---` is the real closing delimiter and the key check reads exactly the block cut above.
+  if (/(?:^|[\r\n])---/u.test(parts[1])) fail(`${label}: the frontmatter block holds a line that starts with "---"`);
   let data;
   try {
     data = parseFrontmatter(parts[0]);
@@ -221,16 +225,28 @@ export function listedFiles(manifestText) {
   const skills = [];
   const references = [];
   const frameworks = [];
+  const seenSlugs = new Set();
+  // The final relative paths: `skills/<slug>/SKILL.md` depends on the slug alone (the slug check covers it), but
+  // `references/<slug>-<name>.md` can repeat across slugs (`grc-x` + `a-b` and `grc-x-a` + `b`).
+  const seenReferencePaths = new Set();
   for (const fw of manifest.frameworks) {
     assertGrcSlug(fw?.slug, `previous ${MANIFEST_FILE} slug`);
+    if (seenSlugs.has(fw.slug)) fail(`previous ${MANIFEST_FILE} lists the slug ${fw.slug} twice`);
+    seenSlugs.add(fw.slug);
     assertName(fw.upstream, SLUG_RE, `previous ${MANIFEST_FILE} upstream`);
     if (!Array.isArray(fw.references)) fail(`previous ${MANIFEST_FILE}: ${fw.slug} has no references array`);
     skills.push(fw.slug);
     frameworks.push({ upstream: fw.upstream, slug: fw.slug, references: [...fw.references] });
+    const seenNames = new Set();
     for (const name of fw.references) {
       assertName(name, REFERENCE_RE, `previous ${MANIFEST_FILE} reference name`);
+      if (seenNames.has(name)) fail(`previous ${MANIFEST_FILE}: ${fw.slug} lists the reference ${name} twice`);
+      seenNames.add(name);
       assertName(`${fw.slug}-${name}`, REFERENCE_RE, `previous ${MANIFEST_FILE} reference file name`);
-      references.push(`references/${fw.slug}-${name}.md`);
+      const referencePath = `references/${fw.slug}-${name}.md`;
+      if (seenReferencePaths.has(referencePath)) fail(`previous ${MANIFEST_FILE}: ${fw.slug} reference ${name} collides with another entry at ${referencePath}`);
+      seenReferencePaths.add(referencePath);
+      references.push(referencePath);
     }
   }
   return { skills, references, frameworks };
@@ -282,6 +298,12 @@ async function assertSkillDirRemovable(contentDir, slug) {
   return true;
 }
 
+/** Record one output file; two frameworks that produce the same path must not silently overwrite each other. */
+function setOutput(outputs, rel, text) {
+  if (outputs.has(rel)) fail(`two frameworks produce the same output file ${rel}`);
+  outputs.set(rel, text);
+}
+
 /**
  * Vendor the allowlisted frameworks from `cloneDir` at `sha` into `contentDir`.
  * @param {{ cloneDir: string, sha: string, contentDir: string, noticesFile: string, frameworks?: typeof FRAMEWORKS }} options
@@ -300,12 +322,12 @@ export async function syncGrc({ cloneDir, sha, contentDir, noticesFile, framewor
     assertGrcSlug(framework.slug, `framework ${framework.upstream} slug`);
     const { skill, references } = await readFramework(cloneDir, sha, framework);
     const names = [...references.keys()];
-    outputs.set(`skills/${framework.slug}/SKILL.md`, rewriteSkill(skill, framework, names, sha, `${framework.upstream}/SKILL.md`));
+    setOutput(outputs, `skills/${framework.slug}/SKILL.md`, rewriteSkill(skill, framework, names, sha, `${framework.upstream}/SKILL.md`));
     for (const [name, text] of references) {
       const label = `${framework.upstream}/references/${name}.md`;
       const rewritten = rewriteCitations(text, framework.slug, names, label);
       assertNoLeftoverCitations(rewritten, names, label);
-      outputs.set(`references/${framework.slug}-${name}.md`, `${vendoredHeader(sha)}\n\n${rewritten}`);
+      setOutput(outputs, `references/${framework.slug}-${name}.md`, `${vendoredHeader(sha)}\n\n${rewritten}`);
       referenceCount += 1;
     }
     manifestFrameworks.push({ upstream: framework.upstream, slug: framework.slug, references: names });

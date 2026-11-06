@@ -17,10 +17,15 @@ export function fail(message) {
  * character class is read as one glyph with its neighbour): U+034F, the Khmer vowels U+17B4 and U+17B5, the
  * Mongolian free variation selectors U+180B-U+180D and U+180F, the variation selectors U+FE00-U+FE0E and the
  * variation selector supplement U+E0100-U+E01EF.
- * U+FE0F (emoji variation selector) is checked separately by STRAY_VS16_RE.
+ * The explicit list above is kept for readability: \p{Default_Ignorable_Code_Point} already covers most of it.
+ * The expression also rejects every Default_Ignorable_Code_Point (renders as nothing), every private-use character (\p{Co}), every
+ * unassigned code point (\p{Cn}, which includes the noncharacters such as U+FFFE and U+FFFF) and the Braille blank
+ * U+2800. A code point that a newer Unicode version assigns is rejected until Node's Unicode data knows it: that is
+ * intended (fail closed).
+ * U+FE0F (emoji variation selector) is a Default_Ignorable_Code_Point but is excluded here: STRAY_VS16_RE checks it.
  */
 export const INVISIBLE_RE =
-  /\p{Cf}|(?![\t\n\r])\p{Cc}|[\p{Zl}\p{Zp}\uFFFC\u115F\u1160\u3164\uFFA0\u{E0000}-\u{E007F}]|\u034F|[\u17B4-\u17B5]|[\u180B-\u180D]|\u180F|[\uFE00-\uFE0E]|[\u{E0100}-\u{E01EF}]/u;
+  /\p{Cf}|(?![\t\n\r])\p{Cc}|(?!\uFE0F)\p{Default_Ignorable_Code_Point}|\p{Co}|\p{Cn}|[\p{Zl}\p{Zp}\u2800\uFFFC\u115F\u1160\u3164\uFFA0\u{E0000}-\u{E007F}]|\u034F|[\u17B4-\u17B5]|[\u180B-\u180D]|\u180F|[\uFE00-\uFE0E]|[\u{E0100}-\u{E01EF}]/u;
 /**
  * U+FE0F is allowed only directly after a pictographic code point, or in a keycap sequence (`[0-9#*]`, U+FE0F,
  * U+20E3). Anywhere else (after a space or a letter, doubled, at a line start) it hides nothing visible.
@@ -69,13 +74,79 @@ function linkDefinitionLine(text) {
   return 0;
 }
 
+/** Raw HTML, fail closed: a `<` directly followed by an ASCII letter, `/`, `!` or `?` (tag, closing tag, comment, declaration, CDATA, processing instruction). */
+const RAW_HTML_RE = /<[A-Za-z/!?]/u;
+/** An image with non-empty alt text: `![` not directly followed by `]`. Alt text is invisible when the image does not load. */
+const IMAGE_ALT_RE = /!\[(?!\])/u;
+/** An inline link or image destination in angle brackets (`](` followed by `<`, with optional whitespace or a line break between `(` and `<`): a `)` or whitespace inside it does not end the destination, so the title rule cannot follow it. Rejected whole, fail closed. Matched on the whole text, so a line break before `<` is covered. */
+const ANGLE_DESTINATION_RE = /\]\(\s*</u;
+/** A character reference, numeric (`&#8203;`, `&#x200B;`) or named (`&shy;`, `&amp;`): it renders as another character, so it can hide an invisible one. Fail closed on every one. */
+const CHARACTER_REFERENCE_RE = /&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);/u;
+const WHITESPACE_RE = /\s/u;
+/** The characters that open an inline link or image title after whitespace: `"`, `'` and `(`. */
+const TITLE_OPENERS = new Set(['"', "'", "("]);
+
+/** The 1-based line number of the character at `index` (line breaks: CRLF, CR or LF). */
+function lineOf(text, index) {
+  return text.slice(0, index).split(LINE_BREAK_RE).length;
+}
+
+/** LF and CR (CRLF is both): a character that ends a line. */
+function isLineEnd(char) {
+  return char === "\n" || char === "\r";
+}
+
+/**
+ * A fail-closed rule for inline links and images (`[a](url "t")`, `[a](url 't')`, `[a](url (t))`): a title is not
+ * rendered as text, so it can hide text. For each `](`, the span up to its closing `)` (parentheses balanced, a
+ * backslash escapes the next character) is read from left to right, and the first of these rejects it:
+ * - a line ending (LF, CR or CRLF, also right after a backslash) or the end of the text before the closing `)`:
+ *   a link that continues past its line can hide a title behind a container prefix (`> `, `>`, a list indent) that a
+ *   line rule cannot model, so the whole class is refused (kind `"multiline"`, at the `](`);
+ * - whitespace followed by `"`, `'` or `(` (kind `"title"`, at the whitespace).
+ * A span that opens inside another span closes inside it too, so the scan resumes after the outer span: each
+ * character is read once (linear time).
+ * Returns `{ index, kind }` for the first rejection, or null.
+ */
+function inlineLinkProblem(text) {
+  let from = text.indexOf("](");
+  while (from >= 0) {
+    let depth = 1;
+    let index = from + 2;
+    while (depth > 0) {
+      if (index >= text.length) return { index: from, kind: "multiline" };
+      const char = text[index];
+      if (isLineEnd(char)) return { index: from, kind: "multiline" };
+      if (char === "\\") {
+        index += 1;
+        if (isLineEnd(text[index])) return { index: from, kind: "multiline" };
+      } else if (char === "(") depth += 1;
+      else if (char === ")") depth -= 1;
+      else if (WHITESPACE_RE.test(char) && TITLE_OPENERS.has(text[index + 1])) return { index, kind: "title" };
+      index += 1;
+    }
+    from = text.indexOf("](", index);
+  }
+  return null;
+}
+
 /** Reject any copied text that hides content from a human reader. */
 export function assertVisibleContent(text, label) {
-  if (text.includes("<!--")) fail(`${label}: contains an HTML comment`);
+  const html = RAW_HTML_RE.exec(text);
+  if (html) fail(`${label}: upstream line ${lineOf(text, html.index)} contains raw HTML or an HTML comment (\`<\` followed by a letter, \`/\`, \`!\` or \`?\`), which can hide text; refusing it`);
   const definitionLine = linkDefinitionLine(text);
   if (definitionLine > 0) {
-    fail(`${label}: line ${definitionLine} looks like a Markdown link-reference definition (\`[label]:\`), which can hide text; refusing it`);
+    fail(`${label}: upstream line ${definitionLine} looks like a Markdown link-reference definition (\`[label]:\`), which can hide text; refusing it`);
   }
+  const link = inlineLinkProblem(text);
+  if (link?.kind === "title") fail(`${label}: upstream line ${lineOf(text, link.index)} has an inline link or image title, which can hide text; refusing it`);
+  if (link) fail(`${label}: upstream line ${lineOf(text, link.index)}: an inline link or image continues past the end of the line, which can hide a title; refusing it`);
+  const angle = ANGLE_DESTINATION_RE.exec(text);
+  if (angle) fail(`${label}: upstream line ${lineOf(text, angle.index)} has an inline link or image destination in angle brackets (\`](\` followed by \`<\`), which can hide text; refusing it`);
+  const image = IMAGE_ALT_RE.exec(text);
+  if (image) fail(`${label}: upstream line ${lineOf(text, image.index)} has an image with alt text, which can hide text; refusing it`);
+  const reference = CHARACTER_REFERENCE_RE.exec(text);
+  if (reference) fail(`${label}: upstream line ${lineOf(text, reference.index)} has the character reference ${reference[0]}, which can hide a character; refusing it`);
   const hit = INVISIBLE_RE.exec(text) ?? STRAY_VS16_RE.exec(text);
   if (hit) fail(`${label}: contains invisible character U+${hit[0].codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`);
 }
