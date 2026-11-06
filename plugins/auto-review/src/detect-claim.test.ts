@@ -436,7 +436,16 @@ describe("classifyRows", () => {
 
     // Learned from thr_jv4bm4x2cv, plugin.log 2026-11-06 13:39:50 (tool bb:change_size): timeline rows
     // name bridge and Chrome tools as `server:tool`, which read as writers and turned the park filter off.
-    it.each(["bb:change_size", "bb:typesafe_decide", "bb:advisor_review", "bb:devkit_load_skill", "claude-in-chrome:tabs_context_mcp"])(
+    it.each([
+      "bb:change_size",
+      "bb:typesafe_decide",
+      "bb:advisor_review",
+      "bb:devkit_load_skill",
+      "claude-in-chrome:tabs_context_mcp",
+      "claude-in-chrome:read_page",
+      "claude-in-chrome:get_page_text",
+      "claude-in-chrome:find",
+    ])(
       "takes %s, as a timeline row names it, for read-only",
       (toolName) => {
         expect(isReadOnlyTool(toolName)).toBe(true);
@@ -444,7 +453,15 @@ describe("classifyRows", () => {
     );
 
     // thr_jv4bm4x2cv, plugin.log 2026-11-06 13:39:50 (tool bb:change_size)
-    it.each(["bb:bb_enter_worktree", "bb:some_unknown_tool", "bb:Read", "claude-in-chrome:computer", "claude-in-chrome:javascript_tool", "other-server:change_size"])(
+    it.each([
+      "bb:bb_enter_worktree",
+      "bb:some_unknown_tool",
+      "bb:Read",
+      "bb:mcp__bb-bridge__advisor_review",
+      "claude-in-chrome:computer",
+      "claude-in-chrome:javascript_tool",
+      "other-server:change_size",
+    ])(
       "does not take %s for read-only",
       (toolName) => {
         expect(isReadOnlyTool(toolName)).toBe(false);

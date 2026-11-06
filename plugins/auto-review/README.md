@@ -169,25 +169,27 @@ It ships enabled (opt-out).
   - **Tool rows**: a tool on the read-only list claims nothing. That list is closed: `Read`,
     `fetch`, `Grep`, `Glob`, `ToolSearch`, `Skill`, `WebSearch`, `WebFetch`, the bookkeeping
     tools `TodoWrite`, `Task*`, `SendMessage`, `ListAgents`, `Cron*`, `PushNotification`, the
-    read-only Chrome tools, and these bridge tools by exact name, bare, as `bb:<name>`, or as `mcp__bb-bridge__<name>`:
-    `advisor_review`, `devkit_find_skills`, `devkit_load_skill`, `devkit_docs`,
-    `agent_checklist_get`, `agent_checklist_update`, `progressive_skill_list`,
+    read-only Chrome tools, and these bridge tools by exact name, bare, as `bb:<name>`, or as
+    `mcp__bb-bridge__<name>`: `advisor_review`, `devkit_find_skills`, `devkit_load_skill`,
+    `devkit_docs`, `agent_checklist_get`, `agent_checklist_update`, `progressive_skill_list`,
     `progressive_skill_used`, `runtime_search`, `runtime_thread`, `runtime_skill_resource`
     (and their `platform_*` aliases), `ReportReview`, `PresentPlan`,
-    `update_environment_directory`, `bb_keep_checkout`, `change_size`, `typesafe_decide`. The tools that run commands or git
-    (`runtime_container`, `runtime_git`, `runtime_ops`) and `Monitor` are not on it. The
-    read-only Chrome tools also match in their `claude-in-chrome:<name>` form. Any other
-    `server:` prefix is not matched, so such a tool counts as a writer. Any other
-    tool claims the changed paths its argument strings name exactly (or as the end of an absolute
-    path), and a string it is given as a `command`, `cmd`, `script` or `code` field (an array of words is
-    joined into one line) is classified as shell as above. Any other string with whitespace is
-    prose or content, unless it opens with a program that is opaque by name (a package manager
-    not running a check, `npx`, `node`, `python`, `make`, a shell, a formatter or other rewriter), which
-    makes the tool opaque; so does file content that happens to open that way. It is opaque when it has no argument string,
-    and the turn is a sweep, naming the tool, when it names no changed path and has no command
-    field read as shell (an `edit_symbol {symbol: "Foo.bar"}` or a prompt "fix the imports" may
-    have written anything). Work rows of other kinds (web search and fetch, images viewed, plan
-    steps, questions) are inert; image generation, extensions and workflows are opaque.
+    `update_environment_directory`, `bb_keep_checkout`, `change_size`, `typesafe_decide`. The
+    tools that run commands or git (`runtime_container`, `runtime_git`, `runtime_ops`) and
+    `Monitor` are not on it. The read-only Chrome tools also match in their
+    `claude-in-chrome:<name>` form. A tool with any other `server:` prefix is not matched and
+    counts as a writer. A tool that is not on the list claims the changed paths its argument
+    strings name exactly (or as the end of an absolute path), and a string it is given as a
+    `command`, `cmd`, `script` or `code` field (an array of words is joined into one line) is
+    classified as shell as above. Any other string with whitespace is prose or content, unless it
+    opens with a program that is opaque by name (a package manager not running a check, `npx`,
+    `node`, `python`, `make`, a shell, a formatter or other rewriter), which makes the tool
+    opaque; so does file content that happens to open that way. It is opaque when it has no
+    argument string, and the turn is a sweep, naming the tool, when it names no changed path and
+    has no command field read as shell (an `edit_symbol {symbol: "Foo.bar"}` or a prompt "fix the
+    imports" may have written anything). Work rows of other kinds (web search and fetch, images
+    viewed, plan steps, questions) are inert; image generation, extensions and workflows are
+    opaque.
   - **Open rows from before the turn**: an opaque row that began before the turn and was still
     pending or unended at its idle (a background `npm run dev`) does not force a sweep. It is
     logged, and writes it makes are not claimed in exact mode.
@@ -461,18 +463,18 @@ It ships enabled (opt-out).
   usually go stale. A full review with reviewer threads often runs past 15 minutes, so a turn
   parked behind one often goes stale. To keep its work under review, message the thread before
   the cutoff: the parked work then becomes carried work. After a `stale-park` stand-down nothing
-  reviews the work automatically: ask the agent to review the commits `lastFire.skippedCommits` lists and to commit the files in `lastFire.scopePaths`, as below. A stale turn leaves behind: its commits are not reviewed and not
+  reviews the work automatically. A stale turn leaves behind: its commits are not reviewed and not
   secret-scanned before you push; a feature branch it would have merged into a personal
   mainline stays unmerged; and its uncommitted edits stay in the tree, where no later review
   counts them because the next turn's snapshot already contains them, so ask the agent to
   commit them, or touch them in a new turn. The stand-down record names the commits it skipped:
-  `bb auto-review status` lists them under `lastFire.skippedCommits` (and says `merge skipped` when a
-  merge was), `lastFire.scopePaths` lists the turn's files, uncommitted ones included, and
-  `lastFire.merge` is true when a merge was skipped; the agent can be asked in a new turn to review or
-  merge them. An already-pushed turn leaves behind commits that
-  are already public and are not reviewed or scanned afterwards. A question you send while the
-  turn is parked does not fire it: the parked work becomes carried work, and the next turn that
-  changes something reviews it.
+  `bb auto-review status` lists them under `lastFire.skippedCommits` (and says `merge skipped`
+  when a merge was); in `bb auto-review status --json`, `lastFire.scopePaths` lists the turn's
+  files, uncommitted ones included, and `lastFire.merge` is true when a merge was skipped;
+  the agent can be asked in a new turn to review or merge them. An already-pushed turn leaves
+  behind commits that are already public and are not reviewed or scanned afterwards. A question
+  you send while the turn is parked does not fire it: the parked work becomes carried work, and
+  the next turn that changes something reviews it.
   When nothing disables it, a released turn leaves out what changed while it was parked (see
   `changed-while-parked` above).
 - Never fires alongside a message you queued. If a user message is waiting when the turn ends, or
