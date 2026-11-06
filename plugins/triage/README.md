@@ -90,7 +90,7 @@ bb triage stages
 Every session appears on the board automatically as a view-only card — including
 sessions bb hides from the sidebar, such as plugin-spawned workers. Mirror cards
 never notify, never change sidebar visibility, and are removed when their
-session is deleted. Turn this off in Settings → Triage ("Automatically card
+session is deleted. A mirror card settles when its session goes idle or fails and reopens when the session becomes active again. Turn this off in Settings → Triage ("Automatically card
 every session"); existing mirror cards then stay until deleted individually.
 The first run numbers every session, so card numbers jump by the count of
 existing sessions; sessions that are idle or failed start settled and live under

@@ -746,6 +746,7 @@ test("thread events move cards through the board", async () => {
     snapshot = await rpc("snapshot");
     expect(snapshot.tasks[0].runState).toBe("idle");
     expect(snapshot.tasks[0].readAt).toBe(null);
+    expect(snapshot.tasks[0].settledAt).toBe(null);
     const waiting = lastSignal(harness);
     expect(waiting.payload.notification.action).toBe("Waiting for you");
     // An idle card in a user stage stays quiet.
@@ -776,6 +777,7 @@ test("thread events move cards through the board", async () => {
     expect(snapshot.tasks[0].stageId).toBe("stage-completed");
     expect(snapshot.tasks[0].runState).toBe("failed");
     expect(snapshot.tasks[0].attentionReason).toBe("Provider crashed");
+    expect(snapshot.tasks[0].settledAt).toBe(null);
     expect(lastSignal(harness).payload.notification).toBeUndefined();
     // Deleting the linked thread detaches the card and keeps it on the board.
     await harness.behavior.emitThreadEvent("thread.deleted", { thread: makeThreadResponse({ id: "unrelated" }) });

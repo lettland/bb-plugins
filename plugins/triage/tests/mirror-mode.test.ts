@@ -502,7 +502,7 @@ test("the sidebar setting sweeps manual cards' sessions only", async () => {
   expect(harness.inspection.sdk.callsTo("threads.update").some(([args]: any) => args.threadId === "v-mirror")).toBe(false);
 });
 
-test("an idle turn on a mirror card changes its run state and nothing else", async () => {
+test("an idle turn on a mirror card settles it and changes nothing else", async () => {
   const { cardOf, notifications, eventsOf, emit, mirror, rpc } = await start();
   const card = await mirror(thr("i-1", { status: "active" }));
   await rpc("setTaskRead", { number: card.number, read: true });
@@ -510,6 +510,7 @@ test("an idle turn on a mirror card changes its run state and nothing else", asy
   expect(readAt).toBeGreaterThan(0);
   await emit("thread.idle", { thread: thr("i-1"), lastAssistantText: "Done" });
   expect(cardOf("i-1")).toMatchObject({ run_state: "idle", read_at: readAt });
+  expect(cardOf("i-1").settled_at).toBeGreaterThan(0);
   expect(notifications()).toStrictEqual([]);
   expect(eventsOf(card.id)).toStrictEqual([{ actor: "bb", event: "mirrored" }]);
   // A mirror card the user moved to the done stage keeps its completed state.
@@ -517,6 +518,26 @@ test("an idle turn on a mirror card changes its run state and nothing else", asy
   await emit("thread.idle", { thread: thr("i-1"), lastAssistantText: "Done" });
   expect(cardOf("i-1")).toMatchObject({ run_state: "completed" });
   expect(notifications()).toStrictEqual([]);
+});
+
+test("an idle mirror card keeps its first settled time, and reopens when its session is active again", async () => {
+  const { db, cardOf, emit, mirror } = await start();
+  await mirror(thr("r-1", { status: "active" }));
+  await emit("thread.active", { thread: thr("r-1") });
+  expect(cardOf("r-1")).toMatchObject({ stage_id: "stage-progress", settled_at: null });
+  await emit("thread.idle", { thread: thr("r-1"), lastAssistantText: "Done" });
+  const settledAt = cardOf("r-1").settled_at;
+  expect(settledAt).toBeGreaterThan(0);
+  // COALESCE: a second idle turn does not move the settled time.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await emit("thread.idle", { thread: thr("r-1"), lastAssistantText: "Done" });
+  expect(cardOf("r-1").settled_at).toBe(settledAt);
+  await emit("thread.active", { thread: thr("r-1") });
+  expect(cardOf("r-1")).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+  // A failure on an already settled card keeps the earlier settled time as well.
+  db.prepare("UPDATE triage_tasks SET settled_at = 42 WHERE thread_id = ?").run("r-1");
+  await emit("thread.failed", { thread: thr("r-1"), error: "boom" });
+  expect(cardOf("r-1")).toMatchObject({ run_state: "failed", settled_at: 42 });
 });
 
 test("an active turn refreshes a mirror card's title, provider and machine without history or notices", async () => {
@@ -547,6 +568,7 @@ test("a failed turn retains a card's stage and history without an attention noti
   const card = await mirror(thr("f-1", { status: "active" }));
   await emit("thread.failed", { thread: thr("f-1"), error: "  Provider crashed  " });
   expect(cardOf("f-1")).toMatchObject({ stage_id: "stage-progress", run_state: "failed", attention_reason: "Provider crashed" });
+  expect(cardOf("f-1").settled_at).toBeGreaterThan(0);
   expect(notifications()).toStrictEqual([]);
   expect(eventsOf(card.id)).toStrictEqual([
     { actor: "bb", event: "mirrored" },

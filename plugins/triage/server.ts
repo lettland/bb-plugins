@@ -1522,7 +1522,10 @@ export default async function plugin(bb: BbPluginApi) {
     }
     if (mirrored) {
       // A view stays quiet: no read marker change, no notification, no history row.
-      db.prepare("UPDATE triage_tasks SET run_state = 'idle', updated_at = ? WHERE id = ?").run(Date.now(), task.id);
+      // It still settles, so an idle session leaves In Progress; thread.active reopens it.
+      const now = Date.now();
+      db.prepare("UPDATE triage_tasks SET run_state = 'idle', settled_at = COALESCE(settled_at, ?), updated_at = ? WHERE id = ?")
+        .run(now, now, task.id);
       republish();
       return;
     }
@@ -1548,11 +1551,13 @@ export default async function plugin(bb: BbPluginApi) {
     const task = getTaskByThread(thread.id);
     if (!task) return;
     const reason = error?.trim() || "The assigned BB thread failed.";
+    const now = Date.now();
+    const mirrored = task.origin === "mirror";
     db.prepare(
-      "UPDATE triage_tasks SET run_state = 'failed', attention_reason = ?, updated_at = ? WHERE id = ?",
-    ).run(reason, Date.now(), task.id);
+      `UPDATE triage_tasks SET run_state = 'failed', attention_reason = ?, ${mirrored ? "settled_at = COALESCE(settled_at, ?), " : ""}updated_at = ? WHERE id = ?`,
+    ).run(...(mirrored ? [reason, now, now, task.id] : [reason, now, task.id]));
     addEvent(task.id, "bb", "agent failed", reason);
-    if (task.origin === "mirror") {
+    if (mirrored) {
       publishSoon();
       return;
     }
