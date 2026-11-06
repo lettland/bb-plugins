@@ -432,23 +432,30 @@ test("thread.archived settles a mirror card and leaves manual cards and unknown 
   expect(cardOf("a-idle").settled_at).toBeGreaterThan(0);
 });
 
-test("thread.unarchived creates a missing mirror card and reopens a settled one", async () => {
+test("thread.unarchived creates a missing mirror card and reopens it only when the session is running", async () => {
   const { harness, cardOf, cards, emit, mirror } = await start();
   await emit("thread.unarchived", { thread: thr("u-new", { status: "active" }) });
   expect(cardOf("u-new")).toMatchObject({ origin: "mirror", settled_at: null });
   await mirror(thr("u-old"));
   await emit("thread.archived", { thread: thr("u-old", { archivedAt: 9 }) });
   expect(cardOf("u-old").settled_at).toBeGreaterThan(0);
-  await emit("thread.unarchived", { thread: thr("u-old") });
+  // An idle session that is unarchived stays settled.
+  await emit("thread.unarchived", { thread: thr("u-old", { status: "idle" }) });
+  expect(cardOf("u-old").settled_at).toBeGreaterThan(0);
+  // A failed session stays settled too.
+  await emit("thread.unarchived", { thread: thr("u-old", { status: "error" }) });
+  expect(cardOf("u-old").settled_at).toBeGreaterThan(0);
+  // An active session that is unarchived comes back to the board.
+  await emit("thread.unarchived", { thread: thr("u-old", { status: "active" }) });
   expect(cardOf("u-old").settled_at).toBe(null);
   // Sessions Triage spawned itself, and any session while the knob is off, get no new card.
   await emit("thread.unarchived", { thread: thr("u-own", { originPluginId: "triage" }) });
   await harness.behavior.setSettings({ autoCardThreads: false });
   await emit("thread.unarchived", { thread: thr("u-off") });
   expect(cards().map((card) => card.thread_id)).toStrictEqual(["u-new", "u-old"]);
-  // An existing mirror card still reopens with the knob off.
+  // An existing mirror card still reopens with the knob off, once its session runs.
   await emit("thread.archived", { thread: thr("u-old", { archivedAt: 9 }) });
-  await emit("thread.unarchived", { thread: thr("u-old") });
+  await emit("thread.unarchived", { thread: thr("u-old", { status: "starting" }) });
   expect(cardOf("u-old").settled_at).toBe(null);
 });
 
@@ -515,8 +522,10 @@ test("an idle turn on a mirror card settles it and changes nothing else", async 
   expect(eventsOf(card.id)).toStrictEqual([{ actor: "bb", event: "mirrored" }]);
   // A mirror card the user moved to the done stage keeps its completed state.
   await rpc("moveTask", { number: card.number, stageId: "stage-completed" });
+  // It stays visible in the done column: the early return does not settle it.
+  await rpc("setTaskSettled", { number: card.number, settled: false });
   await emit("thread.idle", { thread: thr("i-1"), lastAssistantText: "Done" });
-  expect(cardOf("i-1")).toMatchObject({ run_state: "completed" });
+  expect(cardOf("i-1")).toMatchObject({ run_state: "completed", settled_at: null });
   expect(notifications()).toStrictEqual([]);
 });
 
@@ -526,12 +535,11 @@ test("an idle mirror card keeps its first settled time, and reopens when its ses
   await emit("thread.active", { thread: thr("r-1") });
   expect(cardOf("r-1")).toMatchObject({ stage_id: "stage-progress", settled_at: null });
   await emit("thread.idle", { thread: thr("r-1"), lastAssistantText: "Done" });
-  const settledAt = cardOf("r-1").settled_at;
-  expect(settledAt).toBeGreaterThan(0);
+  expect(cardOf("r-1").settled_at).toBeGreaterThan(0);
   // COALESCE: a second idle turn does not move the settled time.
-  await new Promise((resolve) => setTimeout(resolve, 5));
+  db.prepare("UPDATE triage_tasks SET settled_at = 41 WHERE thread_id = ?").run("r-1");
   await emit("thread.idle", { thread: thr("r-1"), lastAssistantText: "Done" });
-  expect(cardOf("r-1").settled_at).toBe(settledAt);
+  expect(cardOf("r-1").settled_at).toBe(41);
   await emit("thread.active", { thread: thr("r-1") });
   expect(cardOf("r-1")).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
   // A failure on an already settled card keeps the earlier settled time as well.

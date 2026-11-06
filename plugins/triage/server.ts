@@ -398,6 +398,8 @@ const migrations = [
     thread_id TEXT PRIMARY KEY,
     created_at INTEGER NOT NULL
   )`,
+  // Mirror cards from before the idle/failed settle fix stayed unsettled; settle them once.
+  `UPDATE triage_tasks SET settled_at = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE origin = 'mirror' AND settled_at IS NULL AND run_state IN ('idle','failed')`,
 ];
 
 function toStage(row: StageRow) {
@@ -1553,9 +1555,15 @@ export default async function plugin(bb: BbPluginApi) {
     const reason = error?.trim() || "The assigned BB thread failed.";
     const now = Date.now();
     const mirrored = task.origin === "mirror";
-    db.prepare(
-      `UPDATE triage_tasks SET run_state = 'failed', attention_reason = ?, ${mirrored ? "settled_at = COALESCE(settled_at, ?), " : ""}updated_at = ? WHERE id = ?`,
-    ).run(...(mirrored ? [reason, now, now, task.id] : [reason, now, task.id]));
+    if (mirrored) {
+      db.prepare(
+        "UPDATE triage_tasks SET run_state = 'failed', attention_reason = ?, settled_at = COALESCE(settled_at, ?), updated_at = ? WHERE id = ?",
+      ).run(reason, now, now, task.id);
+    } else {
+      db.prepare(
+        "UPDATE triage_tasks SET run_state = 'failed', attention_reason = ?, updated_at = ? WHERE id = ?",
+      ).run(reason, now, task.id);
+    }
     addEvent(task.id, "bb", "agent failed", reason);
     if (mirrored) {
       publishSoon();
@@ -1577,9 +1585,12 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.unarchived", async ({ thread }) => {
     const task = getTaskByThread(thread.id) ??
       (shouldMirror(thread) ? await ensureCardForThread(thread, "mirror") : undefined);
-    // A manual card keeps whatever state the user gave it.
+    // A manual card keeps whatever state the user gave it. An idle or failed
+    // session stays settled; only a running one comes back to the board.
     if (task?.origin === "mirror") {
-      db.prepare("UPDATE triage_tasks SET settled_at = NULL, updated_at = ? WHERE id = ?").run(Date.now(), task.id);
+      if (thread.status === "active" || thread.status === "starting") {
+        db.prepare("UPDATE triage_tasks SET settled_at = NULL, updated_at = ? WHERE id = ?").run(Date.now(), task.id);
+      }
       publishSoon();
     }
   });

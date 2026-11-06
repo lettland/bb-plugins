@@ -1023,6 +1023,36 @@ test("legacy notification rows recover their action phrase from the title", asyn
   } finally { await harness.lifecycle.dispose(); }
 });
 
+test("the settle-piled-up-mirror-cards migration settles idle and failed mirror cards once", async () => {
+  let harness: any = (await setup()).harness;
+  try {
+    harness = await withRawDatabase(harness, (db) => {
+      const insert = db.prepare(
+        `INSERT INTO triage_tasks (id, number, title, stage_id, project_id, project_name, machine_name, provider_id, model,
+          request_json, thread_id, run_state, origin, settled_at, created_at, updated_at)
+         VALUES (?, ?, ?, 'stage-todo', 'project-1', 'Project', 'Machine', 'codex', 'm', 'null', ?, ?, ?, ?, 1, 1)`,
+      );
+      insert.run("m-idle", 901, "idle mirror", "t-idle", "idle", "mirror", null);
+      insert.run("m-failed", 902, "failed mirror", "t-failed", "failed", "mirror", null);
+      insert.run("m-working", 903, "working mirror", "t-working", "working", "mirror", null);
+      insert.run("m-manual", 904, "idle manual", "t-manual", "idle", "manual", null);
+      insert.run("m-kept", 905, "settled mirror", "t-kept", "idle", "mirror", 7);
+      // Rewind to the state before the migration ran: its ledger row is absent.
+      db.prepare("DELETE FROM _bb_migrations WHERE id = (SELECT MAX(id) FROM _bb_migrations)").run();
+    });
+    const settled = new Map<string, number | null>();
+    harness = await withRawDatabase(harness, (db) => {
+      for (const row of db.prepare("SELECT id, settled_at FROM triage_tasks").all() as any[]) settled.set(row.id, row.settled_at);
+    });
+    const settledOf = (id: string) => settled.get(id);
+    expect(settledOf("m-idle")).toBeGreaterThan(1_000_000_000_000);
+    expect(settledOf("m-failed")).toBeGreaterThan(1_000_000_000_000);
+    expect(settledOf("m-working")).toBe(null);
+    expect(settledOf("m-manual")).toBe(null);
+    expect(settledOf("m-kept")).toBe(7);
+  } finally { await harness.lifecycle.dispose(); }
+});
+
 test("a missing task counter explains itself instead of corrupting numbers", async () => {
   let harness: any = (await setup()).harness;
   try {
