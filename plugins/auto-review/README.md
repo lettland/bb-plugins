@@ -169,13 +169,15 @@ It ships enabled (opt-out).
   - **Tool rows**: a tool on the read-only list claims nothing. That list is closed: `Read`,
     `fetch`, `Grep`, `Glob`, `ToolSearch`, `Skill`, `WebSearch`, `WebFetch`, the bookkeeping
     tools `TodoWrite`, `Task*`, `SendMessage`, `ListAgents`, `Cron*`, `PushNotification`, the
-    read-only Chrome tools, and these bridge tools by exact name, bare or as `mcp__bb-bridge__<name>`:
+    read-only Chrome tools, and these bridge tools by exact name, bare, as `bb:<name>`, or as `mcp__bb-bridge__<name>`:
     `advisor_review`, `devkit_find_skills`, `devkit_load_skill`, `devkit_docs`,
     `agent_checklist_get`, `agent_checklist_update`, `progressive_skill_list`,
     `progressive_skill_used`, `runtime_search`, `runtime_thread`, `runtime_skill_resource`
     (and their `platform_*` aliases), `ReportReview`, `PresentPlan`,
-    `update_environment_directory`, `bb_keep_checkout`. The tools that run commands or git
-    (`runtime_container`, `runtime_git`, `runtime_ops`) and `Monitor` are not on it. Any other
+    `update_environment_directory`, `bb_keep_checkout`, `change_size`, `typesafe_decide`. The tools that run commands or git
+    (`runtime_container`, `runtime_git`, `runtime_ops`) and `Monitor` are not on it. The
+    read-only Chrome tools also match in their `claude-in-chrome:<name>` form. Any other
+    `server:` prefix is not matched, so such a tool counts as a writer. Any other
     tool claims the changed paths its argument strings name exactly (or as the end of an absolute
     path), and a string it is given as a `command`, `cmd`, `script` or `code` field (an array of words is
     joined into one line) is classified as shell as above. Any other string with whitespace is
@@ -224,7 +226,7 @@ It ships enabled (opt-out).
   `lastFire` and the log name the commits and up to five example paths. Something you commit
   while a turn waits is not reviewed by that turn: ask in a later turn to have it reviewed.
   A turn released from a provider park that nothing ran on since stands down as `stale-park` when
-  it waited 30 minutes or more since its last park, and as `already-pushed` when its HEAD is on
+  it waited 15 minutes or more since its last park, and as `already-pushed` when its HEAD is on
   `origin/<branch>`, none of its own paths is dirty again and no local merge would run (see
   "Runs one review at a time per provider" below).
   Nothing is left out after any activity of the thread or its children since the park (checked
@@ -450,13 +452,16 @@ It ships enabled (opt-out).
 - Runs one review at a time per provider across all projects, since those reviews share
   the provider's usage limits. A turn ending behind another review is deferred and fires
   when the blocking review ends, unless it has gone stale or its work is already pushed.
-  It stands down as `stale-park` if it waited 30 minutes or more since it was last parked
+  It stands down as `stale-park` if it waited 15 minutes or more since it was last parked
   (a release that loses a race re-parks it and restarts the clock). It stands down as
   `already-pushed` if its HEAD is on `origin/<branch>`, nothing of its own is uncommitted, and
   no local merge would run. Both apply only to a released provider park that nothing ran on
   since it was parked: a turn you, a wake-up or a message started meanwhile is reviewed as
   before. A turn behind a long review hold (child reviewers can hold up to 2 hours) will
-  usually go stale. A stale turn leaves behind: its commits are not reviewed and not
+  usually go stale. A full review with reviewer threads often runs past 15 minutes, so a turn
+  parked behind one often goes stale. To keep its work under review, message the thread before
+  the cutoff: the parked work then becomes carried work. After a `stale-park` stand-down nothing
+  reviews the work automatically: ask the agent to review the commits `lastFire.skippedCommits` lists and to commit the files in `lastFire.scopePaths`, as below. A stale turn leaves behind: its commits are not reviewed and not
   secret-scanned before you push; a feature branch it would have merged into a personal
   mainline stays unmerged; and its uncommitted edits stay in the tree, where no later review
   counts them because the next turn's snapshot already contains them, so ask the agent to

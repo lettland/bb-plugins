@@ -559,6 +559,21 @@ describe("a turn released from a park", () => {
       expect(result.parkedCommits).toEqual(["c1"]);
     });
 
+    // Learned from thr_jv4bm4x2cv, plugin.log 2026-11-06 13:39:50 (tool bb:change_size): a `server:tool` name
+    // of a read-only bridge tool must not read as work that kept writing.
+    it("leaves the filter on for a `bb:` bridge tool that is known to be read-only", async () => {
+      const size = rowAt({ workKind: "tool", approvalStatus: null, toolName: "bb:change_size", toolArgs: { path: "x" } }, 11_000);
+      const { result, infos } = await released({ ...sweepOnly, ...afterPark, timelines: { self: [opaque, size] } });
+      expect(result.parkedCommits).toEqual(["c1"]);
+      expect(infos.join("\n")).not.toContain(stillWrites);
+    });
+
+    // thr_jv4bm4x2cv, plugin.log 2026-11-06 13:39:50 (tool bb:change_size)
+    it("turns the filter off for a `bb:` tool that is not known to be read-only", async () => {
+      const unknown = rowAt({ workKind: "tool", approvalStatus: null, toolName: "bb:some_unknown_tool", toolArgs: { path: "x" } }, 11_000);
+      await unfiltered({ ...afterPark, timelines: { self: [opaque, unknown] } }, `${stillWrites} (tool bb:some_unknown_tool)`);
+    });
+
     it("when the family started something while the files were hashed", async () => {
       // Reads of the thread's timeline: the turn's own, the first quiet check, the second.
       await unfiltered(

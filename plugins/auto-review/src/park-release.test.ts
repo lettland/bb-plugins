@@ -102,8 +102,8 @@ describe("staleRelease", () => {
   const park = { startedAt: 1_000_000, tree };
 
   it.each([
-    ["29 minutes 59 seconds", 1_000_000 + 30 * 60_000 - 1_000, false],
-    ["exactly 30 minutes", 1_000_000 + 30 * 60_000, true],
+    ["14 minutes 59 seconds", 1_000_000 + 15 * 60_000 - 1_000, false],
+    ["exactly 15 minutes", 1_000_000 + 15 * 60_000, true],
   ])("is judged on a park that waited %s", (_name, now, expected) => {
     expect(staleRelease(park, now)).toBe(expected);
   });

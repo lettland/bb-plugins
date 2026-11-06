@@ -32,7 +32,7 @@ describe("lastParkedLine", () => {
 
   it("says a past-the-window park may stand down", () => {
     const line = lastParkedLine(Date.now() - 45 * 60_000);
-    expect(line).toContain("45 min ago (past 30 min: may stand down when released)");
+    expect(line).toContain("45 min ago (past 15 min: may stand down when released)");
   });
 });
 

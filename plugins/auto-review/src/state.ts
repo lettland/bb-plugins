@@ -24,7 +24,7 @@ export const STALE_WINDOW_MS = 30 * 60 * 1_000;
  * `STALE_WINDOW_MS` on purpose: that one bounds a review already dispatched,
  * this one bounds a turn still waiting for its turn in the queue.
  */
-export const STALE_PARK_MS = 30 * 60 * 1_000;
+export const STALE_PARK_MS = 15 * 60 * 1_000;
 
 /** How long a review waiting on its children or their wake-ups may hold the latch before it ends anyway. */
 export const REVIEW_CONTINUATION_CAP_MS = 2 * 60 * 60 * 1_000;

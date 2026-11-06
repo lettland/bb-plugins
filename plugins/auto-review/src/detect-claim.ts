@@ -29,7 +29,7 @@ const BRIDGE_READ_ONLY_TOOLS: readonly string[] = [
   "advisor_review", "devkit_find_skills", "devkit_load_skill", "devkit_docs", "agent_checklist_get", "agent_checklist_update",
   "progressive_skill_list", "progressive_skill_used", "runtime_search", "runtime_thread", "runtime_skill_resource",
   "platform_search", "platform_thread", "platform_plugin_resource", "ReportReview", "PresentPlan",
-  "update_environment_directory", "bb_keep_checkout",
+  "update_environment_directory", "bb_keep_checkout", "change_size", "typesafe_decide",
 ];
 const BRIDGE_PREFIX = "mcp__bb-bridge__";
 /** Tools that only read, look things up or keep their own state, by name as real timelines carry them. */
@@ -79,8 +79,17 @@ export interface FamilyClaims {
   stale: string[];
 }
 
-export const isReadOnlyTool = (toolName: string) =>
-  READ_ONLY_TOOLS.has(toolName) || READ_ONLY_PREFIXES.some((prefix) => toolName.startsWith(prefix));
+/** Timeline rows name a bridge or Chrome tool as `server:tool`; the allowlists carry the bare and `mcp__` forms. */
+const BB_ROW_PREFIX = "bb:";
+const CHROME_ROW_PREFIX = "claude-in-chrome:";
+
+export const isReadOnlyTool = (toolName: string) => {
+  if (toolName.startsWith(BB_ROW_PREFIX)) {
+    return BRIDGE_READ_ONLY_TOOLS.includes(toolName.slice(BB_ROW_PREFIX.length));
+  }
+  const name = toolName.startsWith(CHROME_ROW_PREFIX) ? `mcp__claude-in-chrome__${toolName.slice(CHROME_ROW_PREFIX.length)}` : toolName;
+  return READ_ONLY_TOOLS.has(name) || READ_ONLY_PREFIXES.some((prefix) => name.startsWith(prefix));
+};
 
 /** Whether a row had begun before the turn and had recorded no end by its idle. */
 function isStale(row: WorkRow, startedAt: number): boolean {

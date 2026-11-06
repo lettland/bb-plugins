@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyRows, resolveClaims, strayCommitReason } from "./detect-claim.js";
+import { classifyRows, isReadOnlyTool, resolveClaims, strayCommitReason } from "./detect-claim.js";
 import type { RowWrite } from "./detect-claim.js";
 import { FAMILY_LOOKBACK_MS } from "./detect-timeline.js";
 import { classifyText } from "./detect-claim-shell.js";
@@ -433,6 +433,31 @@ describe("classifyRows", () => {
         }
       },
     );
+
+    // Learned from thr_jv4bm4x2cv, plugin.log 2026-11-06 13:39:50 (tool bb:change_size): timeline rows
+    // name bridge and Chrome tools as `server:tool`, which read as writers and turned the park filter off.
+    it.each(["bb:change_size", "bb:typesafe_decide", "bb:advisor_review", "bb:devkit_load_skill", "claude-in-chrome:tabs_context_mcp"])(
+      "takes %s, as a timeline row names it, for read-only",
+      (toolName) => {
+        expect(isReadOnlyTool(toolName)).toBe(true);
+      },
+    );
+
+    // thr_jv4bm4x2cv, plugin.log 2026-11-06 13:39:50 (tool bb:change_size)
+    it.each(["bb:bb_enter_worktree", "bb:some_unknown_tool", "bb:Read", "claude-in-chrome:computer", "claude-in-chrome:javascript_tool", "other-server:change_size"])(
+      "does not take %s for read-only",
+      (toolName) => {
+        expect(isReadOnlyTool(toolName)).toBe(false);
+      },
+    );
+
+    // thr_jv4bm4x2cv, plugin.log 2026-11-06 13:39:50 (tool bb:change_size)
+    it("does not sweep the turn for a `bb:` bridge tool that is read-only, and does for an unknown one", () => {
+      expect(classify(tool({ thread: "thr_x" }, { toolName: "bb:agent_checklist_get" }))).toMatchObject({ opaque: undefined, tools: [], names: [], writes: [] });
+      expect(classify(tool({ thread: "thr_x" }, { toolName: "bb:some_unknown_tool" })).tools).toEqual([
+        { tool: "bb:some_unknown_tool", names: ["thread", "thr_x"], shell: false },
+      ]);
+    });
 
     it.each(["runtime_container", "runtime_git", "runtime_ops", "platform_container", "some_new_tool"])(
       "does not take %s for read-only, bare or by its bridge name: it is read through what it is given",

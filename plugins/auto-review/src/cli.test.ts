@@ -973,10 +973,10 @@ describe("auto-review cli: status", () => {
       });
       const text = await host.run(["status", THREAD_ID]);
       expect(text.stdout).toContain(
-        "last parked: 12 min ago (may stand down if released 30+ min after)\nlastFire: never\n",
+        "last parked: 12 min ago (may stand down if released 15+ min after)\nlastFire: never\n",
       );
       expect(text.stdout).toContain(
-        "It fires when that review ends, but may stand down instead if 30 or more minutes have passed since it was last parked or its work is already pushed.",
+        "It fires when that review ends, but may stand down instead if 15 or more minutes have passed since it was last parked or its work is already pushed.",
       );
       expect(text.stdout).not.toContain("as soon as that review ends");
 
@@ -993,7 +993,7 @@ describe("auto-review cli: status", () => {
         lastIdle: { sinceSeq: 5, startedAt: Date.now() - 45 * 60_000 - 5_000, tree: parkTree },
       });
       const text = await host.run(["status", THREAD_ID]);
-      expect(text.stdout).toContain("last parked: 45 min ago (past 30 min: may stand down when released)\n");
+      expect(text.stdout).toContain("last parked: 45 min ago (past 15 min: may stand down when released)\n");
     });
   });
 
