@@ -91,8 +91,8 @@ Every session appears on the board automatically as a view-only card — includi
 sessions bb hides from the sidebar, such as plugin-spawned workers. Mirror cards
 never notify, never change sidebar visibility, and are removed when their
 session is deleted. A mirror card settles (moves to the Settled view) when its
-session goes idle or fails, unless it sits in the done column, and reopens when
-the session becomes active again.
+session goes idle (unless the card sits in the done column) or fails, and
+reopens when the session becomes active again.
 Reopening a mirror card by hand lasts until its session's next idle or failed
 turn; to keep a session on the board, move it to Triage instead. Turn this off
 in Settings → Triage ("Automatically card every session"); existing mirror

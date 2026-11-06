@@ -533,6 +533,9 @@ test("an idle turn on a mirror card settles it and changes nothing else", async 
   await rpc("setTaskSettled", { number: card.number, settled: false });
   await emit("thread.idle", { thread: thr("i-1"), lastAssistantText: "Done" });
   expect(cardOf("i-1")).toMatchObject({ run_state: "completed", settled_at: null });
+  // A failure has no done-stage exception: the card still settles.
+  await emit("thread.failed", { thread: thr("i-1"), error: "boom" });
+  expect(cardOf("i-1").settled_at).toBeGreaterThan(0);
   expect(notifications()).toStrictEqual([]);
 });
 
