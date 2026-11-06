@@ -80,6 +80,7 @@ Rules:
   `tooling-shell-fish` is for fish, not bash or POSIX sh. Generic picks such as
   `testing-strategy` are unaffected.
 - A reviewer with no qualifying skill gets `none`.
+- `grc-*` slugs are never routed as stack skills to any reviewer; the compliance reviewer loads them itself.
 
 ## Step 4 — Pass to reviewers
 

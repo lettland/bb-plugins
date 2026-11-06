@@ -1,0 +1,90 @@
+{
+  "repo": "Sushegaad/Claude-Skills-Governance-Risk-and-Compliance",
+  "commit": "aab13e1eb1dbf3b537b66f98d9b5eb52db0a7c25",
+  "commitDate": "2026-10-09T23:09:44-04:00",
+  "frameworks": [
+    {
+      "upstream": "gdpr-compliance",
+      "slug": "grc-gdpr",
+      "references": [
+        "documents",
+        "dpa-template",
+        "privacy-notice",
+        "updates-2025"
+      ]
+    },
+    {
+      "upstream": "soc2",
+      "slug": "grc-soc2",
+      "references": [
+        "controls",
+        "evidence",
+        "policies",
+        "vendor"
+      ]
+    },
+    {
+      "upstream": "nis2",
+      "slug": "grc-nis2",
+      "references": [
+        "article-21-measures",
+        "implementing-reg-2024-2690",
+        "iso27001-nis2-mapping"
+      ]
+    },
+    {
+      "upstream": "eu-ai-act",
+      "slug": "grc-eu-ai-act",
+      "references": [
+        "gpai-governance",
+        "obligations-high-risk",
+        "risk-classification"
+      ]
+    },
+    {
+      "upstream": "eu-cra",
+      "slug": "grc-eu-cra",
+      "references": [
+        "conformity-assessment",
+        "essential-requirements"
+      ]
+    },
+    {
+      "upstream": "dora",
+      "slug": "grc-dora",
+      "references": [
+        "article-reference",
+        "incident-classification",
+        "rts-its-guide",
+        "third-party-risk"
+      ]
+    },
+    {
+      "upstream": "pci-compliance",
+      "slug": "grc-pci-dss",
+      "references": [
+        "pci-dss-requirements",
+        "pci-dss-saq-guide",
+        "pci-dss-v4-changes"
+      ]
+    },
+    {
+      "upstream": "hipaa-compliance",
+      "slug": "grc-hipaa",
+      "references": [
+        "breach-notification",
+        "privacy-rule",
+        "security-rule",
+        "templates"
+      ]
+    },
+    {
+      "upstream": "ccpa",
+      "slug": "grc-ccpa",
+      "references": [
+        "ccpa-gdpr-comparison",
+        "consumer-rights-workflows"
+      ]
+    }
+  ]
+}

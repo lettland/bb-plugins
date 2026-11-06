@@ -28,6 +28,37 @@ answering from memory.
   library at build time and surfaced as native skills, except in side-chat forks. The list
   is `ESSENTIALS` in `src/select-skills.mjs`.
 
+## GRC framework skills
+
+Nine `grc-*` skills (`grc-gdpr`, `grc-soc2`, `grc-nis2`, `grc-eu-ai-act`, `grc-eu-cra`,
+`grc-dora`, `grc-pci-dss`, `grc-hipaa`, `grc-ccpa`) and their 29 references are a generated, pinned
+vendor copy of
+[Sushegaad/Claude-Skills-Governance-Risk-and-Compliance](https://github.com/Sushegaad/Claude-Skills-Governance-Risk-and-Compliance)
+(MIT; see `THIRD_PARTY_NOTICES.md`). They are knowledge packs for the compliance reviewer, which
+loads them itself for each framework it rates **applies** (`content/references/reviewer-compliance.md`),
+and they are ordinary `devkit_find_skills` results under neutral descriptions. They are not legal
+advice, and the files carry a "do not edit" header. `content/grc-upstream.json` records the pinned
+commit.
+
+Re-sync from a local clone you fetched yourself (the script makes no network calls and reads the
+commit object, never the working tree), then rebuild the index:
+
+```sh
+node scripts/sync-grc.mjs <path-to-upstream-clone> <full-40-hex-commit-sha>
+node scripts/build-index.mjs
+```
+
+- Before bumping the SHA, a human reads the upstream diff between the old and the new commit.
+  Upstream updates monthly.
+- Update the matching section in `THIRD_PARTY_NOTICES.md` (heading, full SHA, fetch date) first; the
+  sync fails if the notice does not name the commit.
+- The sync fails, and writes nothing, on a symlink, an unexpected upstream file, an HTML comment, an
+  invisible or bidi character, a dangling `references/<name>.md` citation, a malformed previous
+  manifest, or a target file the previous manifest does not list.
+- If a framework fails a gate, drop it from `FRAMEWORKS` in `scripts/sync-grc.mjs` and from the slug
+  list in `reviewer-compliance.md` (a test enforces they match), and report it upstream. Never weaken
+  a gate.
+
 ## CLI
 
 | Command | What it does |

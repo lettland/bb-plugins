@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { clampLimit, rankSkills } from "./rank.mjs";
 import { tokenize } from "./text.mjs";
@@ -84,5 +86,23 @@ describe("clampLimit", () => {
     expect(clampLimit(-4)).toBe(8);
     expect(clampLimit(Number.NaN)).toBe(8);
     expect(clampLimit(undefined)).toBe(8);
+  });
+});
+
+describe("rankSkills against the committed content/index.json", () => {
+  const index = JSON.parse(
+    readFileSync(path.join(import.meta.dirname, "..", "content", "index.json"), "utf8"),
+  ) as { skills: SkillIndexEntry[] };
+
+  // The vendored grc-* skills carry neutral descriptions so they cannot displace devkit's own
+  // skills on generic queries. If one starts to, report it; do not tune a description alone.
+  it.each([
+    ["encryption", "secrets-kms"],
+    ["audit logging", "cmd-audit"],
+    ["security review", "review-code"],
+  ])("ranks %s first as %s and keeps grc-* out of the top 3", (query, top) => {
+    const hits = rankSkills(index.skills, query, 3).map((h) => h.slug);
+    expect(hits[0]).toBe(top);
+    expect(hits.some((slug) => slug.startsWith("grc-"))).toBe(false);
   });
 });

@@ -8,7 +8,7 @@ import { ESSENTIALS } from "../src/select-skills.mjs";
 
 const MAX_DESCRIPTION = 1024;
 
-function parseFrontmatter(text) {
+export function parseFrontmatter(text) {
   const trimmed = text.trimStart();
   if (!trimmed.startsWith("---")) return null;
   const end = trimmed.indexOf("\n---", 3);
