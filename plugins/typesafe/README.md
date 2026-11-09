@@ -16,7 +16,10 @@ model. The plugin ships two things:
 
 Everything is advisory: explicit user or brief requirements, and repository
 rules, always win over a TypeSafe answer. The hook always lets the message
-proceed — a slow or failed call changes nothing but the missing advice.
+proceed — a slow or failed call changes nothing but the missing advice. One
+exception: the `planApproval` RPC (below) feeds auto-review's missing-plan
+gate, so its answer can lift that gate. It only lifts it; no answer, or an
+answer below auto-review's threshold, leaves the gate as it was.
 
 ## What is sent to api.typesafe.ai
 
@@ -24,6 +27,9 @@ proceed — a slow or failed call changes nothing but the missing advice.
   characters) and the two fixed triage questions.
 - For `typesafe_decide`: the agent-supplied `state` text or JSON object
   (serialized, at most 16000 characters) and its questions.
+- For the `planApproval` RPC: the text of a user's typed reply after a plan was
+  presented (redacted, truncated to 4000 characters) and one fixed question.
+  auto-review caches each verdict, so a given reply is sent at most once.
 
 Both go through one redaction pass first: common token shapes (GitHub, Slack,
 AWS, OpenAI-style `sk-` tokens, `Bearer` headers, PEM key blocks, URL
@@ -39,7 +45,18 @@ service is hosted and processed in the United States; and Input is not
 disclosed to third parties other than service providers. Each call is billed:
 input tokens are billable, output tokens are currently free. The triage call
 fires once per top-level thread; tool calls fire only when an agent chooses to
-ask.
+ask; the `planApproval` call fires at most once per typed reply that follows a
+presented plan.
+
+## The `planApproval` RPC
+
+`planApproval({ projectId, text })` returns `{ approves: number | null }`: the
+Noul probability that `text` approves the plan the agent just presented.
+auto-review calls it to credit an approval typed in chat. `approves` is `null`
+when TypeSafe gives no answer (no key, an HTTP error, a timeout, a bad
+response) and for a project matched by `skipProjects`, in which case nothing
+is sent. Any installed plugin can call this RPC, and every call spends your
+TypeSafe key.
 
 ## Settings
 

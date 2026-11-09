@@ -1,7 +1,7 @@
 import type { BbPluginApi, MessageDispatchHookContext } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { decide } from "./src/client.js";
-import { registerChangeSizeRpc } from "./src/rpc.js";
+import { registerChangeSizeRpc, registerPlanApprovalRpc } from "./src/rpc.js";
 import { registerChangeSizeTool, registerDecideTool } from "./src/tool.js";
 import {
   TriageStore,
@@ -130,6 +130,21 @@ export default async function plugin(bb: BbPluginApi) {
 
   const skipped = (projectName: string) =>
     config.skipProjects.some((glob) => globToRegExp(glob).test(projectName));
+
+  registerPlanApprovalRpc(bb, {
+    getApiKey: effectiveApiKey,
+    getModel: () => config.model,
+    // With no skip globs the project name is never needed; with some, a project that cannot be resolved counts as skipped, so nothing is sent.
+    async isProjectSkipped(projectId) {
+      if (config.skipProjects.length === 0) return false;
+      try {
+        return skipped((await bb.sdk.projects.get({ projectId })).name);
+      } catch {
+        return true;
+      }
+    },
+    log,
+  });
 
   bb.agents.configure((ctx) => ({
     tools: ctx.origin.kind === "fork" || skipped(ctx.project.name) ? [] : ["typesafe_decide", "change_size"],

@@ -11,6 +11,7 @@ import { parseSkipProjects, skipProjectsSettingSchema } from "./server.js";
 import { TOOL_INSTRUCTIONS, decideParamsSchema } from "./src/tool.js";
 import { TriageStore, TRIAGE_STORE_CAP, buildTriageEntry, type TriageKind } from "./src/triage.js";
 import { CHANGE_SIZE_QUESTION, TRIVIAL_CHANGE } from "./src/size.js";
+import { PLAN_APPROVAL_QUESTION, PLAN_APPROVAL_TEXT_MAX_CHARS, PLAN_APPROVAL_TIMEOUT_MS } from "./src/rpc.js";
 
 // Assembled from fragments so no secret-shaped literal appears in source.
 const TEST_KEY = ["test", "key"].join("-");
@@ -796,6 +797,146 @@ describe("changeSize RPC", () => {
     const host = createHost({ apiKey: TEST_KEY });
     await plugin(host.bb);
     await expect(host.harness.behavior.callRpc("changeSize", { threadId: "" })).rejects.toThrow();
+    await host.harness.dispose();
+  });
+});
+
+describe("planApproval RPC", () => {
+  // Regression: thr_w7c3pt43uv, 2026-11-09 — a typed "approvee" after PresentPlan was never judged; auto-review now asks this RPC.
+  const approvalResponse = (noul: number) => ({
+    model: "jev-1.14.0",
+    answers: { approves: { type: "noul", noul } },
+    usage: { input_tokens: 90, output_tokens: 3 },
+  });
+  const planApproval = (host: FakePluginHost, text = "approvee", projectId = "project-1") =>
+    host.harness.behavior.callRpc("planApproval", { projectId, text });
+  const hostWithProject = (
+    settings: Record<string, string | boolean>,
+    get: (args: { projectId: string }) => Promise<{ name: string }>,
+  ) =>
+    createFakePluginHost({
+      pluginId: "typesafe",
+      settings,
+      sdk: { threads: { timeline: async () => ({ rows: [], maxSeq: 7 }) }, projects: { get } },
+    });
+
+  it("returns the answer's noul and sends one fixed noul question with the reply as state", async () => {
+    const host = createHost({ apiKey: TEST_KEY, model: "jev-pinned" });
+    await plugin(host.bb);
+    fetchMock.mockResolvedValue(okResponse(approvalResponse(0.93)));
+    expect(await planApproval(host)).toEqual({ approves: 0.93 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+    expect(body.model).toBe("jev-pinned");
+    expect(body.state).toBe("approvee");
+    expect(body.questions).toEqual({ approves: PLAN_APPROVAL_QUESTION });
+    expect(PLAN_APPROVAL_QUESTION).toEqual({
+      type: "noul",
+      instructions:
+        "Does this message approve the plan the agent just presented, so the agent may implement it? A question, a requested change, a refusal or an unrelated message is not approval.",
+    });
+    await host.harness.dispose();
+  });
+
+  it("fits inside the host's default 30 s callRpc deadline", () => {
+    expect(PLAN_APPROVAL_TIMEOUT_MS).toBeLessThan(30_000);
+  });
+
+  it("returns null with no key and never fetches", async () => {
+    const host = createHost();
+    await plugin(host.bb);
+    expect(await planApproval(host)).toEqual({ approves: null });
+    expect(fetchMock).not.toHaveBeenCalled();
+    await host.harness.dispose();
+  });
+
+  it("returns null on an HTTP error", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    fetchMock.mockResolvedValue({ ok: false, status: 503 } as unknown as Response);
+    expect(await planApproval(host)).toEqual({ approves: null });
+    await host.harness.dispose();
+  });
+
+  it("returns null on a bad answer: an answer missing, or not a noul", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    fetchMock.mockResolvedValueOnce(
+      okResponse({ model: "jev-1.14.0", answers: {}, usage: { input_tokens: 1, output_tokens: 1 } }),
+    );
+    expect(await planApproval(host)).toEqual({ approves: null });
+    fetchMock.mockResolvedValueOnce(
+      okResponse({
+        model: "jev-1.14.0",
+        answers: { approves: { type: "score", score: 5, confidence: 0.5, probabilities: { a: 1 }, legend: { a: "a" } } },
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
+    expect(await planApproval(host)).toEqual({ approves: null });
+    fetchMock.mockResolvedValueOnce(okResponse({ nope: true }));
+    expect(await planApproval(host)).toEqual({ approves: null });
+    await host.harness.dispose();
+  });
+
+  it("redacts the reply and truncates it to 4000 characters instead of rejecting it", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    fetchMock.mockResolvedValue(okResponse(approvalResponse(0.7)));
+    const token = ["ghp", "a".repeat(36)].join("_");
+    expect(await planApproval(host, `go ahead ${token} ${"x".repeat(PLAN_APPROVAL_TEXT_MAX_CHARS + 500)}`)).toEqual({
+      approves: 0.7,
+    });
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+    expect(body.state).not.toContain(token);
+    expect(body.state.startsWith("go ahead REDACTED ")).toBe(true);
+    expect(body.state).toHaveLength(PLAN_APPROVAL_TEXT_MAX_CHARS);
+    await host.harness.dispose();
+  });
+
+  it("rejects input outside the contract", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    await expect(planApproval(host, "ok", "")).rejects.toThrow();
+    await expect(host.harness.behavior.callRpc("planApproval", { projectId: "project-1" })).rejects.toThrow();
+    await host.harness.dispose();
+  });
+
+  it("returns null and sends nothing for a project in skipProjects", async () => {
+    const get = vi.fn(async () => ({ name: "sandbox-one" }));
+    const host = hostWithProject({ apiKey: TEST_KEY, skipProjects: '["sandbox-*"]' }, get);
+    await plugin(host.bb);
+    expect(await planApproval(host)).toEqual({ approves: null });
+    expect(get).toHaveBeenCalledWith({ projectId: "project-1" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    await host.harness.dispose();
+  });
+
+  it("judges a project that skipProjects does not match", async () => {
+    const get = vi.fn(async () => ({ name: "bb-plugins" }));
+    const host = hostWithProject({ apiKey: TEST_KEY, skipProjects: '["sandbox-*"]' }, get);
+    await plugin(host.bb);
+    fetchMock.mockResolvedValue(okResponse(approvalResponse(0.8)));
+    expect(await planApproval(host)).toEqual({ approves: 0.8 });
+    await host.harness.dispose();
+  });
+
+  it("returns null and sends nothing when the project cannot be resolved and skipProjects is set", async () => {
+    const host = hostWithProject({ apiKey: TEST_KEY, skipProjects: '["sandbox-*"]' }, async () => {
+      throw new Error("gone");
+    });
+    await plugin(host.bb);
+    expect(await planApproval(host)).toEqual({ approves: null });
+    expect(fetchMock).not.toHaveBeenCalled();
+    await host.harness.dispose();
+  });
+
+  it("does not look the project up when skipProjects is empty", async () => {
+    const get = vi.fn(async () => ({ name: "never" }));
+    const host = hostWithProject({ apiKey: TEST_KEY }, get);
+    await plugin(host.bb);
+    fetchMock.mockResolvedValue(okResponse(approvalResponse(0.6)));
+    expect(await planApproval(host)).toEqual({ approves: 0.6 });
+    expect(get).not.toHaveBeenCalled();
     await host.harness.dispose();
   });
 });
