@@ -28,7 +28,7 @@ import {
   PRESENT_PLAN_FORM_OPEN_MESSAGE,
   PRESENT_PLAN_FORM_UNREADABLE_MESSAGE,
 } from "./prompt.js";
-import { LATCH_KEYS, PLAN_GATE_KEYS, PRESENT_PLAN_KEYS } from "./state.js";
+import { LATCH_KEYS, PLAN_GATE_KEYS, PRESENT_PLAN_CHAT_KEYS, PRESENT_PLAN_KEYS } from "./state.js";
 
 const THREAD_ID = "thr_1";
 const CTX = { threadId: THREAD_ID, projectId: "project-1" };
@@ -1048,6 +1048,95 @@ describe("PresentPlan's auto-approve credit", () => {
   it("keeps the stored form mode outside every key set `bb auto-review reset` clears too", () => {
     for (const keys of [LATCH_KEYS, PLAN_GATE_KEYS, PRESENT_PLAN_KEYS]) {
       expect(keys).not.toContain("presentPlanFormMode");
+    }
+  });
+});
+
+describe("PresentPlan's chat approval cursor", () => {
+  // Regression: thr_w7c3pt43uv, 2026-11-09 — a plan released to a chat approval left nothing for the missing-plan gate to count a typed reply from.
+  const reviewWork = { seq: 78, type: "item/completed", scope: { kind: "turn", turnId: "turn-1" }, data: { item: { type: "toolCall", tool: "Read" } } };
+
+  it.each([
+    ["self", "reviewed", PRESENT_PLAN_REVIEWED_MESSAGE],
+    ["devkit", "incomplete", PRESENT_PLAN_INCOMPLETE_MESSAGE],
+  ] as const)("writes the release cursor for the %s (%s) chat text", async (reviewMode, _name, text) => {
+    await withFormHost({ form: false, reviewMode }, async ({ call, metadata, faults }) => {
+      faults.maxSeq = 90;
+      expect(await call()).toBe(text);
+      expect(metadata.presentPlanChatReleasedSeq).toBe(90);
+    });
+  });
+
+  it("writes no cursor for a form release", async () => {
+    await withFormHost({ form: true }, async ({ settle, metadata }) => {
+      expect(await settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+      expect(metadata.presentPlanChatReleasedSeq).toBeUndefined();
+    });
+  });
+
+  it("writes no cursor for an auto-approval", async () => {
+    await withFormHost({ form: false }, async ({ host, call, rows, metadata }) => {
+      await writeProjectConfig(host.bb, CTX.projectId, { autoApprovePlans: true });
+      rows.push(reviewWork);
+      expect(await call()).toBe(PRESENT_PLAN_APPROVED_MESSAGE);
+      expect(metadata.presentPlanChatReleasedSeq).toBeUndefined();
+    });
+  });
+
+  it("warns, naming the missing-plan consequence, and writes nothing when the cursor cannot be read", async () => {
+    await withFormHost({ form: false }, async ({ call, metadata, faults, warns }) => {
+      faults.timelineDown = true;
+      expect(await call()).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+      expect(metadata.presentPlanChatReleasedSeq).toBeUndefined();
+      expect(warns().some((line) => line.includes("the plan released to chat") && line.includes("will not count a typed approval"))).toBe(true);
+    });
+  });
+
+  it("is deleted by the first arm of a new plan, with the verdicts cached under it", async () => {
+    await withHost(async (host, metadata) => {
+      Object.assign(metadata, { presentPlanChatReleasedSeq: 5, presentPlanChatVerdicts: { "6": 0.9 } });
+      await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX);
+      expect(metadata.presentPlanChatReleasedSeq).toBeUndefined();
+      expect(metadata.presentPlanChatVerdicts).toBeUndefined();
+    });
+  });
+
+  it("is deleted by the first arm when its own cursor cannot be read", async () => {
+    await withHost(async (host, metadata, _review, dropTimeline) => {
+      Object.assign(metadata, { presentPlanChatReleasedSeq: 5, presentPlanChatVerdicts: { "6": 0.9 } });
+      dropTimeline();
+      await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX);
+      expect(metadata.presentPlanChatReleasedSeq).toBeUndefined();
+      expect(metadata.presentPlanChatVerdicts).toBeUndefined();
+    });
+  });
+
+  it("is deleted by the redo arm", async () => {
+    await withHost(async (host, metadata) => {
+      await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX);
+      Object.assign(metadata, { presentPlanChatReleasedSeq: 5, presentPlanChatVerdicts: { "6": 0.9 } });
+      expect(await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX)).toBe(presentPlanRedoMessage("devkit"));
+      expect(metadata.presentPlanChatReleasedSeq).toBeUndefined();
+      expect(metadata.presentPlanChatVerdicts).toBeUndefined();
+    });
+  });
+
+  it("is deleted by the redo arm when its own cursor cannot be read", async () => {
+    await withHost(async (host, metadata, _review, dropTimeline) => {
+      await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX);
+      Object.assign(metadata, { presentPlanChatReleasedSeq: 5, presentPlanChatVerdicts: { "6": 0.9 } });
+      dropTimeline();
+      await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX);
+      expect(metadata.presentPlanChatReleasedSeq).toBeUndefined();
+      expect(metadata.presentPlanChatVerdicts).toBeUndefined();
+    });
+  });
+
+  it("is outside every key set `bb auto-review reset` clears, so a reset keeps it", () => {
+    for (const keys of [LATCH_KEYS, PLAN_GATE_KEYS, PRESENT_PLAN_KEYS]) {
+      for (const key of PRESENT_PLAN_CHAT_KEYS) {
+        expect(keys).not.toContain(key);
+      }
     }
   });
 });

@@ -48,6 +48,7 @@ import {
 import { REPORT_REVIEW_TOOL_NAME, registerReportTool } from "./report-tool.js";
 import {
   presentPlanArmed,
+  PRESENT_PLAN_CHAT_KEYS,
   PRESENT_PLAN_KEYS,
   readState,
   withThreadLock,
@@ -129,7 +130,7 @@ async function releasePlan(
         presentPlanLight: light,
         ...(redoSeq === undefined ? {} : { presentPlanArmedSeq: redoSeq }),
       },
-      redoSeq === undefined ? ["presentPlanArmedSeq"] : undefined,
+      redoSeq === undefined ? ["presentPlanArmedSeq", ...PRESENT_PLAN_CHAT_KEYS] : [...PRESENT_PLAN_CHAT_KEYS],
     );
     await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-review-redo");
     await clearPlanBaseline(bb, ctx.threadId, planFilePath);
@@ -198,6 +199,15 @@ async function releasePlan(
   await recordFire(review, ctx.projectId, ctx.threadId, "stood-down", planReleaseReason(check), tallyExtras);
   const text = check === "missing" ? PRESENT_PLAN_INCOMPLETE_MESSAGE : PRESENT_PLAN_REVIEWED_MESSAGE;
   if (!formMode) {
+    // The text tells the agent to wait for approval in chat; the cursor is what the missing-plan gate counts typed replies from.
+    const releasedSeq = await tryCaptureSinceSeq(
+      bb,
+      ctx.threadId,
+      `the plan released to chat in ${ctx.threadId}; the missing-plan check will not count a typed approval`,
+    );
+    if (releasedSeq !== undefined) {
+      await writeState(bb, ctx.threadId, { presentPlanChatReleasedSeq: releasedSeq });
+    }
     return text;
   }
   return { form: { planFilePath, reviewed: check !== "missing" }, openedAt };
@@ -243,8 +253,10 @@ async function presentPlan(
         presentPlanLight: light,
         ...(armedSeq === undefined ? {} : { presentPlanArmedSeq: armedSeq }),
       },
-      // A redo flag left by an expired arm must not skip this plan's redo.
-      armedSeq === undefined ? ["presentPlanRedone", "presentPlanArmedSeq"] : ["presentPlanRedone"],
+      // A redo flag left by an expired arm must not skip this plan's redo; an earlier plan's chat approval must not carry over.
+      armedSeq === undefined
+        ? ["presentPlanRedone", "presentPlanArmedSeq", ...PRESENT_PLAN_CHAT_KEYS]
+        : ["presentPlanRedone", ...PRESENT_PLAN_CHAT_KEYS],
     );
     await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-review");
     const prompt = buildPresentPlanReviewPrompt({

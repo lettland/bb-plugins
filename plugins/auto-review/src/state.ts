@@ -202,6 +202,8 @@ export const threadStateSchema = z.object({
   /** `planReviewLight` for the `PresentPlan` arm: computed from the plan file at arm time, read back at release. */
   presentPlanLight: z.boolean().optional(),
   presentPlanAutoApprovedSeq: z.number().int().nonnegative().optional(), // Auto-approval cursor the missing-plan gate reads; outside PRESENT_PLAN_KEYS and the latch keys on purpose, so a reset keeps it.
+  presentPlanChatReleasedSeq: z.number().int().nonnegative().optional(), // The timeline cursor when `PresentPlan` released a plan to a chat approval (no form, not auto-approved), which the missing-plan gate counts typed replies from. Outside PRESENT_PLAN_KEYS and the latch keys on purpose, so a reset keeps it. Unlike `presentPlanAutoApprovedSeq`, which survives a new arm, a chat approval does not: both arms delete it (`PRESENT_PLAN_CHAT_KEYS`), so a new plan needs a new approval.
+  presentPlanChatVerdicts: z.record(z.string(), z.number()).optional(), // TypeSafe's numeric `approves` value per candidate reply seq, so a reply is judged once (a null answer is never stored); deleted with the cursor above.
   presentPlanFormMode: z.boolean().optional(), // Whether the thread's instructions describe the approval form, written once at its first configure; outside PRESENT_PLAN_KEYS and the latch keys on purpose, so a reset keeps it: it must match the instructions the thread was started with.
   presentPlanFormOpenAt: z.number().int().nonnegative().optional(), // Ms time the thread's one plan approval form opened; outside PRESENT_PLAN_KEYS on purpose; the form's own finally clears it (only if it still holds this form's time), and a release that finds no pending form replaces a stale one.
   /**
@@ -315,6 +317,9 @@ export const PRESENT_PLAN_KEYS: readonly string[] = [
   "presentPlanRedone",
   "presentPlanLight",
 ];
+
+/** The chat approval's keys, deleted whenever `PresentPlan` arms: a new plan needs a new approval. Not in `PRESENT_PLAN_KEYS`, so `bb auto-review reset` keeps them. */
+export const PRESENT_PLAN_CHAT_KEYS: readonly string[] = ["presentPlanChatReleasedSeq", "presentPlanChatVerdicts"];
 
 /** How long a `user_question` can still count as the agent's reaction to a plan deny. */
 export const PLAN_DENY_ANSWER_WINDOW_MS = 120_000;

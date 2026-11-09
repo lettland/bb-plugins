@@ -564,6 +564,27 @@ plans automatically; it writes the same storage as `bb auto-review auto-approve`
 Global setting, off by default. With it off, `PresentPlan` behaves as described above: after
 the review it tells the agent to wait for the user's approval in chat.
 
+**Chat approval.** With the form off, the missing-plan Blocker of the code review counts a
+reply you typed after the plan was released, when TypeSafe judges that reply as approving the
+plan. The release records a timeline cursor; the reply must start its own turn after the
+release turn ended, so a steer or a reply queued during that turn is not a candidate, and the
+advisor's and other plugins' messages and a child thread's `bb thread tell` are skipped. Each
+candidate is judged oldest first through the typesafe plugin's `planApproval` RPC, which sends
+the reply text (redacted, at most 4000 characters) to api.typesafe.ai once per reply, since a
+numeric verdict is cached in the thread's state (a reply TypeSafe gave no answer for is judged
+again at the next review). The oldest candidate whose `approves` is at least 0.6 is credited,
+unless a later denial supersedes it; a candidate scoring lower is skipped and the next one is
+judged. How a reply scores depends on its wording, so a terse or misspelled reply can fall below
+0.6 and leave the Blocker; the question asks TypeSafe to read typos and short forms as the word
+meant. Nothing counts after the first file change or
+shell write that follows the release, and a truncated or failed read of the thread gives no
+credit. A reply that is not judged as approval, or an unavailable TypeSafe, leaves the Blocker;
+the plugin log says so (`your reply after the plan was not judged as approval (or TypeSafe was
+unavailable); ask the agent to present the plan again`) and the agent presents the plan again.
+A chat approval never counts without a TypeSafe key, with the typesafe plugin off, or in a
+project the typesafe plugin skips (`skipProjects`). A new plan (a new `PresentPlan` arm)
+needs a new approval; `bb auto-review reset` keeps the record.
+
 With it on, `PresentPlan` opens an approval form once the review is done, on providers other
 than Claude Code. The form shows the plan path and whether the review completed, with Approve,
 Request changes (which needs feedback) and Cancel. The agent's turn stays blocked until you
@@ -591,7 +612,7 @@ setting off. If Approve is never accepted (the agent reports the form did not wo
 `experimental_requireAppAnswer`: rebuild bb. On a bb without the hold, the form detaches from the
 turn; the plugin then returns a "form unavailable" text whatever you clicked (the plan is not
 approved; the agent tells you the form did not work), and the missing-plan Blocker does not count
-it (it fails closed, as with the setting off). A toggle applies to threads started after it; a
+it (it fails closed, and a typed reply is not judged either: the chat approval above applies only with the form off). A toggle applies to threads started after it; a
 thread keeps the mode it started with. The agent's instructions are fixed when the thread starts,
 so auto-review stores the mode in the thread's metadata at its first configure and `PresentPlan`
 follows that stored mode, not the live setting.
@@ -618,6 +639,10 @@ deterrent, not a security boundary. Native ExitPlanMode approvals are not covere
 self-approvable through `bb thread interactions approve --self`. Another plugin cannot forge the
 approval: the host sets the form's origin plugin, and the missing-plan check also requires the
 form to have been held in the turn.
+
+Known gap in chat mode: a `bb thread tell` from the CLI looks the same as a message you typed,
+so a process that can run it can send an approving reply. TypeSafe still has to judge the text
+as approval, which is a hurdle, not a boundary.
 
 ## CLI
 

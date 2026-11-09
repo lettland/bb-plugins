@@ -1,9 +1,13 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { z } from "zod";
 
+import { classifyText } from "./detect-claim-shell.js";
 import { EVENT_PAGE_MAX, eventsSince, type EventOf } from "./detect-event-log.js";
 import { planFormResolution } from "./detect-plan-form.js";
+import { shellText, walkRows } from "./detect-rows.js";
+import { turnTimeline } from "./detect-timeline.js";
 import { AUTO_REVIEW_MARKER, CODE_REVIEW_OPENING } from "./prompt.js";
-import { readState } from "./state.js";
+import { readState, writeState } from "./state.js";
 
 export async function captureSinceSeq(
   bb: BbPluginApi,
@@ -100,6 +104,25 @@ function isUserRequest(data: TurnRequestData): boolean {
 }
 
 /**
+ * A user request typed in chat: the user's own (`isUserRequest`) and not sent on
+ * their behalf by a plugin (`originPluginId`, e.g. the advisor's queue message)
+ * or another thread (`senderThreadId`, i.e. a child's `bb thread tell`). A
+ * missing field and a null one mean the same. `originPluginId` is on the event
+ * row at runtime — `events.list` returns the stored row as the server serves it
+ * (`originPluginId: "advisor"` at seq 239 of thr_w7c3pt43uv) — but the SDK's
+ * event type declares only `senderThreadId`.
+ */
+function isTypedUserRequest(data: TurnRequestData): boolean {
+  const { originPluginId } = data as TurnRequestData & { originPluginId?: string | null };
+  return isUserRequest(data) && originPluginId == null && data.senderThreadId == null;
+}
+
+/** Whether a request steered: it names an expected turn and landed in that turn, which is read from the turn that accepted it. */
+function steersTurn(target: TurnRequestData["target"], turnId: string): boolean {
+  return "expectedTurnId" in target && target.expectedTurnId === turnId;
+}
+
+/**
  * Whether the request carries the code-review prompt's opening text, so the
  * turn it was accepted into is the review's own: auto-review delivered the
  * prompt as a turn request (steered into a running turn or starting one), and
@@ -182,7 +205,9 @@ function planDecisionOf(event: EventOf<"system/interaction/lifecycle">): "approv
  * thread state counts as an approval at that seq) all count as approvals, and a
  * denied plan — the user's, a changes-requested form, or auto-review's own
  * hold — cancels an earlier approval until a later approval. At the same seq a
- * denial wins. A thread with no decision at all is not approved. A failed read,
+ * denial wins. A plan released to a chat approval counts as approved by the
+ * typed reply TypeSafe judges as approval (`chatApprovalSeq`), when no
+ * approval above settled it. A thread with no decision at all is not approved. A failed read,
  * including the page cap on a long walk, throws, so the caller fails closed.
  */
 export async function planLatestDecisionApproves(bb: BbPluginApi, threadId: string): Promise<boolean> {
@@ -201,8 +226,139 @@ export async function planLatestDecisionApproves(bb: BbPluginApi, threadId: stri
     // The auto-approval cursor can only move an approval later: the answer is already settled.
     return true;
   }
-  const { presentPlanAutoApprovedSeq: autoSeq } = await readState(bb, threadId);
-  return autoSeq !== undefined && autoSeq > deniedSeq;
+  const state = await readState(bb, threadId);
+  if (state.presentPlanAutoApprovedSeq !== undefined && state.presentPlanAutoApprovedSeq > deniedSeq) {
+    return true;
+  }
+  if (state.presentPlanChatReleasedSeq === undefined) {
+    return false;
+  }
+  return (await chatApprovalSeq(bb, threadId, state.presentPlanChatReleasedSeq, deniedSeq, state.presentPlanChatVerdicts ?? {})) !== null;
+}
+
+/** TypeSafe's `approves` at or above this credits a typed reply as the approval of the plan. */
+export const CHAT_APPROVAL_THRESHOLD = 0.6;
+
+const planApprovalSchema = z.object({ approves: z.number().nullable() });
+
+/** Whether shell text writes: a file it names outside scratch space, git that writes history, or a command whose writes cannot be listed. */
+function shellWrites(text: string): boolean {
+  const claims = classifyText(text);
+  return claims.writes.length > 0 || claims.opaque !== undefined || claims.history;
+}
+
+/**
+ * The seq of the first file change or shell write after the cursor, or null
+ * when there is none. Throws when the timeline back to the cursor cannot be
+ * read in full, so the caller fails closed.
+ */
+async function firstWriteSince(bb: BbPluginApi, threadId: string, sinceSeq: number): Promise<number | null> {
+  const { rows, truncated } = await turnTimeline(bb, threadId, sinceSeq);
+  if (truncated) {
+    throw new Error("the thread's timeline since the plan was released is truncated");
+  }
+  let first: number | null = null;
+  for (const row of walkRows(rows)) {
+    if (row.kind !== "work" || row.sourceSeqStart <= sinceSeq) {
+      continue;
+    }
+    const text = shellText(row);
+    if ((row.workKind === "file-change" || (text !== null && shellWrites(text))) && (first === null || row.sourceSeqStart < first)) {
+      first = row.sourceSeqStart;
+    }
+  }
+  return first;
+}
+
+/** The text of a typed request, or "" when it has none to judge. */
+const requestText = (data: TurnRequestData): string =>
+  data.input.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n").trim();
+
+/**
+ * The seq of the typed reply that approves the plan `PresentPlan` released to
+ * a chat approval at `releasedSeq`, or null when none does. A candidate is a
+ * typed request (`isTypedUserRequest`) that began its own turn after the
+ * release turn ended: a steer, a reply queued during the release turn and a
+ * request that was never accepted into a turn are skipped, not the end of the
+ * search. The walk ends at the first file change or shell write after the
+ * release, so a reply after work started never counts. Candidates are judged
+ * oldest first through the typesafe plugin's `planApproval`; the first with
+ * `approves` at or above `CHAT_APPROVAL_THRESHOLD` wins. A reply at or before
+ * `deniedSeq`, the newest denial, cannot count against it, so it is not sent.
+ * A numeric verdict is cached in the thread state by candidate seq (`cached`
+ * holds the ones so far), so a reply is sent once. A null answer means TypeSafe
+ * gave none (no key, an outage), so it is not cached and the reply is judged
+ * again on the next call. A null answer, a failed call and an unreadable
+ * timeline give no credit; none of them throws.
+ */
+async function chatApprovalSeq(
+  bb: BbPluginApi,
+  threadId: string,
+  releasedSeq: number,
+  deniedSeq: number,
+  cached: Readonly<Record<string, number>>,
+): Promise<number | null> {
+  const approves: Array<number | null> = [];
+  const noCredit = (cause: string): null => {
+    bb.log.info(
+      `auto-review: your reply after the plan was not judged as approval (or TypeSafe was unavailable); ask the agent to present the plan again (thread ${threadId}: ${cause}; approves ${JSON.stringify(approves)})`,
+    );
+    return null;
+  };
+  try {
+    const { value: released } = await eventsSince(bb, threadId, releasedSeq, "turn/completed").next();
+    if (released === undefined) {
+      return noCredit("the turn that released the plan has not ended");
+    }
+    const stopSeq = await firstWriteSince(bb, threadId, releasedSeq);
+    const landed = new Map<string, string>();
+    for await (const { scope, data } of eventsSince(bb, threadId, released.seq, "turn/input/accepted")) {
+      if (scope.kind === "turn") {
+        landed.set(data.clientRequestId, scope.turnId);
+      }
+    }
+    const verdicts = { ...cached };
+    let projectId: string | undefined;
+    for await (const { seq, data } of eventsSince(bb, threadId, released.seq, "client/turn/requested")) {
+      if (stopSeq !== null && seq > stopSeq) {
+        break;
+      }
+      const turnId = landed.get(data.requestId);
+      const text = requestText(data);
+      if (seq <= deniedSeq || !isTypedUserRequest(data) || turnId === undefined || steersTurn(data.target, turnId) || text === "") {
+        continue;
+      }
+      const key = String(seq);
+      let value: number | null | undefined = verdicts[key];
+      if (value === undefined) {
+        projectId ??= (await bb.sdk.threads.get({ threadId })).projectId;
+        try {
+          value = (
+            await bb.sdk.plugins.callRpc({
+              pluginId: "typesafe",
+              method: "planApproval",
+              input: { projectId, text },
+              outputSchema: planApprovalSchema,
+            })
+          ).approves;
+        } catch (error) {
+          return noCredit(`the typesafe planApproval call failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        if (value !== null) {
+          verdicts[key] = value;
+          await writeState(bb, threadId, { presentPlanChatVerdicts: verdicts });
+        }
+      }
+      approves.push(value);
+      if (value !== null && value >= CHAT_APPROVAL_THRESHOLD) {
+        bb.log.info(`auto-review: the reply at seq ${seq} in ${threadId} was judged as approval of the plan (approves ${value}), so the missing-plan check counts it`);
+        return seq;
+      }
+    }
+    return noCredit(approves.length === 0 ? "no typed reply to judge between the release and the first change" : "no reply judged as approval");
+  } catch (error) {
+    return noCredit(`the reply could not be read: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /**
@@ -333,9 +489,7 @@ export async function endedTurn(
       if (request === undefined) {
         throw new Error(`no turn request ${data.clientRequestId} for the input accepted into turn ${turnId}`);
       }
-      const { target } = request;
-      const steers = "expectedTurnId" in target && target.expectedTurnId === turnId;
-      users ||= !steers && isUserRequest(request);
+      users ||= !steersTurn(request.target, turnId) && isUserRequest(request);
       // Steered or not: a review prompt steered into a running turn makes that turn the review's own.
       reviewTurn ||= isCodeReviewRequest(request);
     }

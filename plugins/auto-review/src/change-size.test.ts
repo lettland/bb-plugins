@@ -395,3 +395,46 @@ describe("reviewSize's plan credits", () => {
     expect(warnings[0]).toContain("state down");
   });
 });
+
+describe("reviewSize's chat plan approval", () => {
+  // Regression: thr_w7c3pt43uv, 2026-11-09 — a typed approval after PresentPlan never cleared the blocker.
+  const over = workspace([file("a.ts", 30, 30)]);
+  const rows: Row[] = [
+    { seq: 20, type: "turn/completed", scope: { kind: "turn", turnId: "turn-1" }, data: {} },
+    {
+      seq: 30,
+      type: "client/turn/requested",
+      scope: { kind: "thread" },
+      data: { requestId: "creq-2", initiator: "user", target: { kind: "new-turn" }, input: [{ type: "text", text: "approvee" }], originPluginId: null, senderThreadId: null },
+    },
+    { seq: 31, type: "turn/input/accepted", scope: { kind: "turn", turnId: "turn-2" }, data: { clientRequestId: "creq-2" } },
+  ];
+
+  function chatBb(approves: number | null) {
+    const metadata: Record<string, unknown> = { presentPlanChatReleasedSeq: 15 };
+    const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, rows, metadata);
+    const sdk = bb.sdk as unknown as { threads: Record<string, unknown>; plugins: { callRpc: (args: { method: string }) => Promise<unknown> } };
+    sdk.plugins.callRpc = async (args) => (args.method === "planApproval" ? { approves } : { verdict: "non_trivial", messageSeq: 10 });
+    sdk.threads.get = async () => ({ projectId: "proj-1" });
+    sdk.threads.timeline = async () => ({ rows: [], maxSeq: 99, timelinePage: { olderCursor: null } });
+    sdk.threads.updatePluginMetadata = async (args: { set: Record<string, unknown> }) => Object.assign(metadata, args.set);
+    (bb as unknown as { log: Record<string, unknown> }).log.info = () => undefined;
+    return bb;
+  }
+
+  it("a typed reply TypeSafe approves clears the missing-plan blocker", async () => {
+    expect(await reviewSize(chatBb(0.9), "thr_1", ["a.ts"], over, 0)).toEqual({ trivial: false, blocker: false });
+  });
+
+  it.each([
+    ["a reply TypeSafe does not approve", 0.2],
+    ["a reply TypeSafe gave no answer for", null],
+  ])("%s leaves the blocker", async (_name, approves) => {
+    expect(await reviewSize(chatBb(approves), "thr_1", ["a.ts"], over, 0)).toEqual({ trivial: false, blocker: true });
+  });
+
+  it("no release cursor leaves the blocker whatever was typed", async () => {
+    const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, rows);
+    expect(await reviewSize(bb, "thr_1", ["a.ts"], over, 0)).toEqual({ trivial: false, blocker: true });
+  });
+});
