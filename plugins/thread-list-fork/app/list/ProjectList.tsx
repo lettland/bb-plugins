@@ -133,6 +133,7 @@ import {
   resolveProjectGroupReorder,
   sortProjectGroupLayout,
 } from "../model/project-groups.js";
+import { useProjectOrderSync } from "./useProjectOrderSync.js";
 import { useSidebarModeSectionOrder } from "./useSidebarModeSectionOrder.js";
 import { useReadStatusGrouping } from "./useReadStatusGrouping.js";
 import { haveSameOrder } from "../model/stored-order.js";
@@ -537,9 +538,33 @@ interface ProjectModeSectionsProps
   threadsSection: Omit<BuiltInSidebarSectionOptions, "content">;
 }
 
+function layoutProjectSectionOrder(
+  order: SidebarSectionId[],
+  projectGroups: readonly ProjectGroup[],
+  projectSortRowsBySectionId: ReadonlyMap<SidebarSectionId, ProjectSortInput>,
+  projectComparator: ReturnType<typeof getProjectComparator> | null,
+) {
+  if (projectComparator === null) {
+    return layoutProjectGroups(order, projectGroups);
+  }
+  return sortProjectGroupLayout(
+    layoutProjectGroups(
+      sortProjectSectionIds(
+        order,
+        projectSortRowsBySectionId,
+        projectComparator,
+      ),
+      projectGroups,
+    ),
+    projectSortRowsBySectionId,
+    projectComparator,
+  );
+}
+
 function useSortedProjectSectionOrder(
   projectRows: readonly ProjectListRowModel[],
   storedSectionOrder: SidebarSectionId[],
+  persistedSectionOrder: SidebarSectionId[],
   projectGroups: readonly ProjectGroup[],
   collapsedProjectGroupIds: ReadonlySet<string>,
 ) {
@@ -563,28 +588,36 @@ function useSortedProjectSectionOrder(
     }
     return rows;
   }, [projectRows]);
-  const layout = useMemo(() => {
-    if (projectComparator === null) {
-      return layoutProjectGroups(storedSectionOrder, projectGroups);
-    }
-    return sortProjectGroupLayout(
-      layoutProjectGroups(
-        sortProjectSectionIds(
-          storedSectionOrder,
-          projectSortRowsBySectionId,
-          projectComparator,
-        ),
+  const layout = useMemo(
+    () =>
+      layoutProjectSectionOrder(
+        storedSectionOrder,
         projectGroups,
+        projectSortRowsBySectionId,
+        projectComparator,
       ),
-      projectSortRowsBySectionId,
+    [
       projectComparator,
-    );
-  }, [
-    projectComparator,
-    projectGroups,
-    projectSortRowsBySectionId,
-    storedSectionOrder,
-  ]);
+      projectGroups,
+      projectSortRowsBySectionId,
+      storedSectionOrder,
+    ],
+  );
+  const persistedLayout = useMemo(
+    () =>
+      layoutProjectSectionOrder(
+        persistedSectionOrder,
+        projectGroups,
+        projectSortRowsBySectionId,
+        projectComparator,
+      ),
+    [
+      persistedSectionOrder,
+      projectComparator,
+      projectGroups,
+      projectSortRowsBySectionId,
+    ],
+  );
   const order = useMemo(
     () => flattenProjectGroupLayout(layout, collapsedProjectGroupIds),
     [collapsedProjectGroupIds, layout],
@@ -592,6 +625,7 @@ function useSortedProjectSectionOrder(
   return {
     layout,
     order,
+    persistedLayout,
     projectReorderDisabled: order.length < 2 || projectComparator !== null,
   };
 }
@@ -673,6 +707,7 @@ function ProjectModeSections({
     return grouped;
   }, [effectivePinnedThreadIds, threads]);
   const showEmptyProjects = useAtomValue(sidebarShowEmptyProjectsAtom);
+  const projectSort = useAtomValue(sidebarProjectSortAtom);
   const projectRows = useMemo<ProjectListRowModel[]>(
     () =>
       projects
@@ -724,13 +759,15 @@ function ProjectModeSections({
     hasThreadsSection: personalThreads.length > 0 || projectRows.length === 0,
     showPinnedSection,
   });
-  const { layout, order, projectReorderDisabled } =
+  const { layout, order, persistedLayout, projectReorderDisabled } =
     useSortedProjectSectionOrder(
       projectRows,
       storedSectionOrder,
+      persistedOrder,
       sidebarProjectGroups,
       collapsedProjectGroupIds,
     );
+  useProjectOrderSync({ layout: persistedLayout, projects, projectSort });
   const onGroupedOrderChange = useCallback(
     (nextOrder: SidebarSectionId[]) =>
       onOrderChange(

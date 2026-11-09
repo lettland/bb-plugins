@@ -15,4 +15,6 @@ The sidebar thread list, as a plugin.
 
 The plugin reads bb's live thread view through the plugin SDK and stores your layout choices (organization, sort, section order, project groups, collapsed groups) in its own storage, synced to every open window. Sections and thread moves go through bb's public API, so `bb thread section` and this list always agree.
 
+The sidebar's project order (groups, custom or alphabetical sort) is also written to bb's project order, so Settings → Projects, the project pickers and `bb project list` follow it. Activity sort is not written.
+
 Disable the plugin to hide the list; another thread-list plugin can take its place under Settings → Appearance.

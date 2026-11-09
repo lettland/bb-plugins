@@ -46,9 +46,15 @@ export function getErrorCode(error: unknown): string | null {
     : null;
 }
 
-function isHttpError(error: unknown): boolean {
+export function getErrorStatus(error: unknown): number | null {
   const record = toRecord(error);
-  return record !== null && typeof record.status === "number";
+  return record !== null && typeof record.status === "number"
+    ? record.status
+    : null;
+}
+
+function isHttpError(error: unknown): boolean {
+  return getErrorStatus(error) !== null;
 }
 
 function isNetworkTransportError(error: unknown): boolean {
