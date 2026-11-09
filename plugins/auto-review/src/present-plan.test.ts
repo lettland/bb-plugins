@@ -28,7 +28,8 @@ import {
   PRESENT_PLAN_FORM_OPEN_MESSAGE,
   PRESENT_PLAN_FORM_UNREADABLE_MESSAGE,
 } from "./prompt.js";
-import { LATCH_KEYS, PLAN_GATE_KEYS, PRESENT_PLAN_CHAT_KEYS, PRESENT_PLAN_KEYS } from "./state.js";
+import { PRESENT_PLAN_CHAT_KEYS } from "./chat-approval-state.js";
+import { LATCH_KEYS, PLAN_GATE_KEYS, PRESENT_PLAN_KEYS } from "./state.js";
 
 const THREAD_ID = "thr_1";
 const CTX = { threadId: THREAD_ID, projectId: "project-1" };
@@ -1094,41 +1095,45 @@ describe("PresentPlan's chat approval cursor", () => {
 
   it("is deleted by the first arm of a new plan, with the verdicts cached under it", async () => {
     await withHost(async (host, metadata) => {
-      Object.assign(metadata, { presentPlanChatReleasedSeq: 5, presentPlanChatVerdicts: { "6": 0.9 } });
+      Object.assign(metadata, { presentPlanChatReleasedSeq: 5, presentPlanChatVerdicts: { "6": 0.9 }, presentPlanChatApprovedSeq: 6 });
       await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX);
       expect(metadata.presentPlanChatReleasedSeq).toBeUndefined();
       expect(metadata.presentPlanChatVerdicts).toBeUndefined();
+      expect(metadata.presentPlanChatApprovedSeq).toBeUndefined();
     });
   });
 
   it("is deleted by the first arm when its own cursor cannot be read", async () => {
     await withHost(async (host, metadata, _review, dropTimeline) => {
-      Object.assign(metadata, { presentPlanChatReleasedSeq: 5, presentPlanChatVerdicts: { "6": 0.9 } });
+      Object.assign(metadata, { presentPlanChatReleasedSeq: 5, presentPlanChatVerdicts: { "6": 0.9 }, presentPlanChatApprovedSeq: 6 });
       dropTimeline();
       await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX);
       expect(metadata.presentPlanChatReleasedSeq).toBeUndefined();
       expect(metadata.presentPlanChatVerdicts).toBeUndefined();
+      expect(metadata.presentPlanChatApprovedSeq).toBeUndefined();
     });
   });
 
   it("is deleted by the redo arm", async () => {
     await withHost(async (host, metadata) => {
       await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX);
-      Object.assign(metadata, { presentPlanChatReleasedSeq: 5, presentPlanChatVerdicts: { "6": 0.9 } });
+      Object.assign(metadata, { presentPlanChatReleasedSeq: 5, presentPlanChatVerdicts: { "6": 0.9 }, presentPlanChatApprovedSeq: 6 });
       expect(await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX)).toBe(presentPlanRedoMessage("devkit"));
       expect(metadata.presentPlanChatReleasedSeq).toBeUndefined();
       expect(metadata.presentPlanChatVerdicts).toBeUndefined();
+      expect(metadata.presentPlanChatApprovedSeq).toBeUndefined();
     });
   });
 
   it("is deleted by the redo arm when its own cursor cannot be read", async () => {
     await withHost(async (host, metadata, _review, dropTimeline) => {
       await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX);
-      Object.assign(metadata, { presentPlanChatReleasedSeq: 5, presentPlanChatVerdicts: { "6": 0.9 } });
+      Object.assign(metadata, { presentPlanChatReleasedSeq: 5, presentPlanChatVerdicts: { "6": 0.9 }, presentPlanChatApprovedSeq: 6 });
       dropTimeline();
       await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX);
       expect(metadata.presentPlanChatReleasedSeq).toBeUndefined();
       expect(metadata.presentPlanChatVerdicts).toBeUndefined();
+      expect(metadata.presentPlanChatApprovedSeq).toBeUndefined();
     });
   });
 

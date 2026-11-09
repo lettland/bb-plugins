@@ -7,6 +7,7 @@ import type {
   PluginAgentToolResult,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { PRESENT_PLAN_CHAT_KEYS } from "./chat-approval-state.js";
 import { clearPlanBaseline, planScope, settlePlanBaseline, stagePlanPending } from "./baseline-store.js";
 import { effectiveConfig, readProjectConfig } from "./config.js";
 import { recordFire, type EffectiveConfig, type ReviewContext } from "./context.js";
@@ -48,7 +49,6 @@ import {
 import { REPORT_REVIEW_TOOL_NAME, registerReportTool } from "./report-tool.js";
 import {
   presentPlanArmed,
-  PRESENT_PLAN_CHAT_KEYS,
   PRESENT_PLAN_KEYS,
   readState,
   withThreadLock,
