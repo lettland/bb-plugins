@@ -420,6 +420,12 @@ It ships enabled (opt-out).
   reply says remains, then finish it or merge the branch yourself. With a devkit older than this
   check, whose review has no `Done:` step, the check does not apply and the reply says devkit needs
   an update.
+- Commits on request. Where the branch policy commits, a commit you type in your own message
+  (during a review or after it reports an open Blocker) is carried out: the agent commits the work you
+  name, with the secret scan and checks still applying and the merge still held. A commit made
+  past an open Blocker leaves that Blocker open in the findings, and the reply and summary
+  say so. Where the branch policy does not commit (a root outside the eligible list, such as `main` on a
+  non-feature branch), a typed "commit" stays held by that policy.
 - Holds the turn while any child it spawned, in any turn, is still running (directly or
   transitively): bb wakes it with a new turn each time one ends, but only the turn after
   the last one ends reviews its work — an earlier wake-up with another child still running

@@ -412,6 +412,8 @@ Run `enable`, `disable`, `auto-approve` and `reset` only when the user explicitl
 
 A feature branch is one whose name contains a `/` (`fix/oh-1/x`, `OH-2/y`, bb's own `bb/<slug>` worktree branches). A top-level branch — no `/`, such as `develop`, `dev`, `sandbox` — is never merged into the mainline. A feature branch merges into an eligible mainline (e.g. `master`) whether it runs in a dedicated worktree or the primary checkout. On an eligible mainline auto-review commits anywhere; on a non-eligible mainline (protected, e.g. `main`) it commits only on a feature branch — in a dedicated worktree or the primary checkout alike — and never on the mainline itself (even when its name contains a `/`), a top-level branch, or a detached HEAD. Merge is local only — auto-review never pushes.
 
+A commit typed in the user's own message is carried out where this policy commits: the work the user names is committed even while a review is open, and a commit with an open Blocker still shows that Blocker as open (the summary starts `Committed at the user's request with open Blocker:`). The secret scan and the checks still stop it, and the merge stays held. Where this policy does not commit (a root outside the eligible list), a typed "commit" stays held by policy.
+
 ## One review per provider
 
 A thread this thread spawned as a child (`bb thread spawn --parent-self`), in any turn,
