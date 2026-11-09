@@ -536,7 +536,7 @@ describe("dispatchReview sizes the change before it dispatches", () => {
     );
   });
 
-  it("reports the blocker for a stale trivial verdict over the floor when no plan was approved since the window start", async () => {
+  it("reports the blocker for a stale trivial verdict over the floor when no plan was approved in the thread", async () => {
     await withDispatch(
       {
         reviewMode: "auto",
@@ -608,7 +608,9 @@ describe("dispatchReview sizes the change before it dispatches", () => {
     );
   });
 
-  it("reports the blocker when the only approval predates the verdict, an older plan for a follow-up request", async () => {
+  // thr_ztxgu84xib (11-09): the old window put an approval before a follow-up's verdict out of reach, so the Blocker
+  // fired on every follow-up under an approved plan. The thread's latest plan decision decides.
+  it("drops the blocker when the only approval predates the verdict: a follow-up under an approved plan", async () => {
     await withDispatch(
       {
         reviewMode: "auto",
@@ -619,6 +621,21 @@ describe("dispatchReview sizes the change before it dispatches", () => {
       },
       async (_calls, _bb, sent) => {
         expect(sent[0]).toContain(lensesStep);
+        expect(sent[0]).not.toContain(BLOCKER_LINE);
+      },
+    );
+  });
+
+  it("reports the blocker when a denied plan came after the approval", async () => {
+    await withDispatch(
+      {
+        reviewMode: "auto",
+        plugins: [],
+        environments: inFloor,
+        callRpc: { verdict: "non_trivial", messageSeq: 10 },
+        events: [lifecycle(8), lifecycle(9, "deny")],
+      },
+      async (_calls, _bb, sent) => {
         expect(sent[0]).toContain(BLOCKER_LINE);
       },
     );

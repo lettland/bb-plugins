@@ -234,12 +234,12 @@ function allowedSha(sha: string | null | undefined): string | null {
 }
 
 /**
- * Added when the change was sized non-trivial and no plan for it was approved
- * in the window: the plan rule is enforced by the review even when the
+ * Added when the change was sized non-trivial and the thread's latest plan
+ * decision is not an approval (or could not be read): the plan rule is enforced by the review even when the
  * self-review fallback runs.
  */
 const MISSING_PLAN_BLOCKER =
-  "This change was sized non-trivial, and no plan for it was approved in this thread — by the user, or automatically by auto-review — at or after the message that asked for the work. Whatever else step 1 finds, record one open blocker-severity finding for it in the ReportReview call and in your final reply: report Blocker: implemented without an approved plan; do not merge.";
+  "This change was sized non-trivial, and the thread's latest plan decision is not an approval, or could not be read. Whatever else step 1 finds, record one open blocker-severity finding for it in the ReportReview call and in your final reply: report Blocker: implemented without an approved plan; do not merge.";
 
 /** The step 6 and step 8 wording that lets the missing-plan Blocker hold only the merge, never the commit. */
 const MISSING_PLAN_EXCEPTION = {

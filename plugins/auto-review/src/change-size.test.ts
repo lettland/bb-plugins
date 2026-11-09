@@ -165,7 +165,7 @@ describe("reviewSize", () => {
       trivial: false,
       blocker: true,
     });
-    expect(walkStarts).toEqual(["5"]);
+    expect(walkStarts).toEqual(["0"]);
   });
 
   it("a plan approved after a fresh trivial verdict's messageSeq keeps the over-floor review unblocked", async () => {
@@ -176,15 +176,15 @@ describe("reviewSize", () => {
     });
   });
 
-  it("anchors a fresh verdict at its messageSeq, not the window start", async () => {
-    // The plan at seq 8 predates the verdict's messageSeq 10: anchoring at the
-    // window start 0 would wrongly find it and drop the blocker.
+  // thr_ztxgu84xib (11-09): a follow-up request moved the plan window past the approval, so the Blocker fired
+  // on follow-ups under an approved plan. The thread's latest plan decision decides, whatever the verdict's seq.
+  it("keeps an approval that predates a fresh verdict's messageSeq: a follow-up under an approved plan is not blocked", async () => {
     const { bb, walkStarts } = bbOf({ verdict: "trivial", messageSeq: 10 }, [lifecycle(8)]);
     expect(await reviewSize(bb, "thr_1", ["a.ts"], workspace([file("a.ts", 6, 5)]), 0)).toEqual({
       trivial: false,
-      blocker: true,
+      blocker: false,
     });
-    expect(walkStarts).toEqual(["10"]);
+    expect(walkStarts).toEqual(["0"]);
   });
 
   it("loses the verdict, warns, and walks nothing when the rpc fails, whatever the error", async () => {
@@ -199,9 +199,9 @@ describe("reviewSize", () => {
     expect(walkStarts).toEqual([]);
   });
 
-  it("walks from the window start when a lost verdict sits over the floor", async () => {
+  it("walks the whole thread when a lost verdict sits over the floor", async () => {
     const { bb, walkStarts } = bbOf("throws");
-    expect(await reviewSize(bb, "thr_1", ["a.ts"], workspace([file("a.ts", 30, 30)]), 0)).toEqual({
+    expect(await reviewSize(bb, "thr_1", ["a.ts"], workspace([file("a.ts", 30, 30)]), 7)).toEqual({
       trivial: false,
       blocker: true,
     });
@@ -230,12 +230,28 @@ describe("reviewSize", () => {
     expect(walkStarts).toEqual([]);
   });
 
-  it("reports the blocker for a fresh non_trivial verdict only when no plan follows it", async () => {
-    const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, [lifecycle(8)]);
+  it("reports the blocker for a fresh non_trivial verdict only when no plan was approved", async () => {
+    // thr_27zu8ukmfg (11-07): no approval anywhere in the thread still fires it.
+    const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, []);
     expect(await reviewSize(bb, "thr_1", ["a.ts"], workspace([file("a.ts", 3, 2)]), 0)).toEqual({
       trivial: false,
       blocker: true,
     });
+  });
+
+  it("waives the blocker for a fresh non_trivial verdict under an earlier approved plan (thr_ztxgu84xib)", async () => {
+    const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, [lifecycle(8)]);
+    expect(await reviewSize(bb, "thr_1", ["a.ts"], workspace([file("a.ts", 3, 2)]), 0)).toEqual({
+      trivial: false,
+      blocker: false,
+    });
+  });
+
+  it("reports the blocker when a denied plan came after the approval, and clears it again on a later approval", async () => {
+    const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, [lifecycle(8), lifecycle(9, "deny")]);
+    expect(await reviewSize(bb, "thr_1", ["a.ts"], workspace([file("a.ts", 3, 2)]), 0)).toEqual({ trivial: false, blocker: true });
+    const again = bbOf({ verdict: "non_trivial", messageSeq: 10 }, [lifecycle(8), lifecycle(9, "deny"), lifecycle(12)]);
+    expect(await reviewSize(again.bb, "thr_1", ["a.ts"], workspace([file("a.ts", 3, 2)]), 0)).toEqual({ trivial: false, blocker: false });
   });
 
   it("neither walks nor blocks when a verdict carries no messageSeq", async () => {
@@ -265,7 +281,7 @@ describe("reviewSize", () => {
       blocker: true,
     });
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain("plan window");
+    expect(warnings[0]).toContain("plan decisions");
     expect(warnings[0]).toContain("blocker fires");
     expect(warnings[0]).toContain("events down");
   });
@@ -276,7 +292,7 @@ describe("reviewSize", () => {
       trivial: false,
       blocker: true,
     });
-    // Both the sizing loss and the unreadable plan window warn.
+    // Both the sizing loss and the unreadable plan decisions warn.
     expect(warnings[0]).toContain("failed closed");
     expect(warnings[1]).toContain("blocker fires");
   });
@@ -329,13 +345,17 @@ describe("reviewSize", () => {
 describe("reviewSize's plan credits", () => {
   const over = workspace([file("a.ts", 30, 30)]);
 
-  it("a held form approval after the anchor clears the missing-plan blocker", async () => {
+  it("a held form approval clears the missing-plan blocker", async () => {
     const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, [approvalForm(12)]);
     expect(await reviewSize(bb, "thr_1", ["a.ts"], over, 0)).toEqual({ trivial: false, blocker: false });
   });
 
+  it("a held form approval from before the verdict clears it too: a follow-up keeps the plan's approval (thr_ztxgu84xib)", async () => {
+    const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, [approvalForm(8)]);
+    expect(await reviewSize(bb, "thr_1", ["a.ts"], over, 0)).toEqual({ trivial: false, blocker: false });
+  });
+
   it.each([
-    ["before the anchor", [approvalForm(8)]],
     ["missing", []],
     ["detached (thread-scoped)", [approvalForm(12, { kind: "thread" })]],
     // thr_w92i8w56wb: only an app answer is credited (bb core `answeredVia`); plugin fixtures, not core.
@@ -347,14 +367,20 @@ describe("reviewSize's plan credits", () => {
     expect(await reviewSize(bb, "thr_1", ["a.ts"], over, 0)).toEqual({ trivial: false, blocker: true });
   });
 
-  it("an auto-approval recorded after the anchor clears the blocker", async () => {
+  it("an auto-approval recorded after the verdict clears the blocker", async () => {
     const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, [], { presentPlanAutoApprovedSeq: 11 });
     expect(await reviewSize(bb, "thr_1", ["a.ts"], over, 0)).toEqual({ trivial: false, blocker: false });
   });
 
   it.each([
-    ["at the anchor", { presentPlanAutoApprovedSeq: 10 }],
-    ["before the anchor", { presentPlanAutoApprovedSeq: 4 }],
+    ["at the verdict", { presentPlanAutoApprovedSeq: 10 }],
+    ["before the verdict", { presentPlanAutoApprovedSeq: 4 }],
+  ])("an auto-approval %s clears the blocker", async (_name, metadata) => {
+    const { bb } = bbOf({ verdict: "non_trivial", messageSeq: 10 }, [], metadata);
+    expect(await reviewSize(bb, "thr_1", ["a.ts"], over, 0)).toEqual({ trivial: false, blocker: false });
+  });
+
+  it.each([
     ["missing", {}],
     ["unparseable state", { phase: "bogus", presentPlanAutoApprovedSeq: 99 }],
   ])("an auto-approval %s leaves the blocker", async (_name, metadata) => {

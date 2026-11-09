@@ -2,11 +2,11 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { describe, expect, it } from "vitest";
 import { AUTO_REVIEW_MARKER, CODE_REVIEW_OPENING } from "./prompt.js";
 import {
-  approvedPlanSince,
   endedTurn,
   EVENT_PAGE_MAX,
   firstUserTurnSince,
   NoTurnCompletedError,
+  planLatestDecisionApproves,
   quietSincePark,
   tryCaptureSinceSeq,
   UnreadTurnError,
@@ -322,8 +322,8 @@ describe("endedTurn", () => {
   });
 });
 
-describe("approvedPlanSince", () => {
-  it("finds a plan approved at or after the window's start, across turns", async () => {
+describe("planLatestDecisionApproves", () => {
+  it("finds a plan approved, across turns", async () => {
     const { bb } = logOf([
       request(3, "creq-1", "user"),
       accepted(4, "turn-1", "creq-1"),
@@ -331,12 +331,14 @@ describe("approvedPlanSince", () => {
       lifecycle(20, "turn-1", "pending", null),
       lifecycle(21, "turn-2", "resolved"),
     ]);
-    expect(await approvedPlanSince(bb, "thr", 10)).toEqual({ id: "pint-1", seq: 21, requestedSeq: undefined });
+    expect(await planLatestDecisionApproves(bb, "thr")).toBe(true);
   });
 
-  it("does not find an approval that predates the window", async () => {
-    const { bb } = logOf([lifecycle(8, "turn-1", "resolved")]);
-    expect(await approvedPlanSince(bb, "thr", 10)).toBeNull();
+  // thr_ztxgu84xib (11-09): a follow-up request moved the old window past the plan's approval, so the
+  // missing-plan Blocker fired on every follow-up under an approved plan. An earlier approval still counts.
+  it("still counts an approval from an earlier turn, however many requests came after it", async () => {
+    const { bb } = logOf([lifecycle(8, "turn-1", "resolved"), request(30, "creq-9", "user"), request(40, "creq-10", "user")]);
+    expect(await planLatestDecisionApproves(bb, "thr")).toBe(true);
   });
 
   it("counts neither a deny nor a non-plan approval", async () => {
@@ -344,11 +346,11 @@ describe("approvedPlanSince", () => {
       lifecycle(6, "turn-1", "resolved", { decision: "deny" }),
       lifecycle(7, "turn-1", "resolved", { decision: "allow_once" }, { kind: "command", itemId: "i" }),
     ]);
-    expect(await approvedPlanSince(bb, "thr", 0)).toBeNull();
+    expect(await planLatestDecisionApproves(bb, "thr")).toBe(false);
   });
 
   it("finds nothing on a thread with no lifecycle events", async () => {
-    expect(await approvedPlanSince(logOf([]).bb, "thr", 0)).toBeNull();
+    expect(await planLatestDecisionApproves(logOf([]).bb, "thr")).toBe(false);
   });
 });
 
@@ -358,7 +360,7 @@ describe("a held plan approval form", () => {
 
   it("counts as a plan approval in the walk, with the form's interaction id", async () => {
     const { bb } = logOf([form(12, held)]);
-    expect(await approvedPlanSince(bb, "thr", 10)).toEqual({ id: "pint-form", seq: 12, requestedSeq: undefined });
+    expect(await planLatestDecisionApproves(bb, "thr")).toBe(true);
   });
 
   it.each([
@@ -377,7 +379,7 @@ describe("a held plan approval form", () => {
     ["resolved with another kind", form(12, held, { resolution: { kind: "user_answer" } })],
   ])("does not count when %s", async (_name, row) => {
     const { bb } = logOf([row]);
-    expect(await approvedPlanSince(bb, "thr", 10)).toBeNull();
+    expect(await planLatestDecisionApproves(bb, "thr")).toBe(false);
   });
 
   const answered = (answer: Record<string, unknown>) =>
@@ -388,13 +390,13 @@ describe("a held plan approval form", () => {
     ["api", { answeredVia: "api" }],
     ["unexpected (desktop)", { answeredVia: "desktop" }],
   ])("does not count an approval whose answeredVia is %s, in the walk or in a turn's approved plans", async (_name, answer) => {
-    expect(await approvedPlanSince(logOf([answered(answer)]).bb, "thr", 10)).toBeNull();
+    expect(await planLatestDecisionApproves(logOf([answered(answer)]).bb, "thr")).toBe(false);
     expect((await endedTurn(logOf([completed(15, "turn-1"), answered(answer)]).bb, "thr", 0)).approvedPlans).toEqual([]);
   });
 
   it("counts an approval whose answeredVia is app, in the walk and in a turn's approved plans", async () => {
     const app = answered({ answeredVia: "app" });
-    expect(await approvedPlanSince(logOf([app]).bb, "thr", 10)).toEqual({ id: "pint-form", seq: 12, requestedSeq: undefined });
+    expect(await planLatestDecisionApproves(logOf([app]).bb, "thr")).toBe(true);
     expect((await endedTurn(logOf([completed(15, "turn-1"), app]).bb, "thr", 0)).approvedPlans).toEqual([
       { id: "pint-form", seq: 12, requestedSeq: undefined },
     ]);
@@ -447,33 +449,109 @@ describe("planFormResolutionSince", () => {
   });
 });
 
-describe("approvedPlanSince's auto-approve fallback", () => {
-  it("credits an auto-approval recorded after the window's start", async () => {
+describe("planLatestDecisionApproves's auto-approve fallback", () => {
+  it("credits a recorded auto-approval", async () => {
     const { bb } = logOf([], { presentPlanAutoApprovedSeq: 11 });
-    expect(await approvedPlanSince(bb, "thr", 10)).toEqual({ id: "present-plan-auto-11", seq: 11, requestedSeq: undefined });
+    expect(await planLatestDecisionApproves(bb, "thr")).toBe(true);
   });
 
-  it.each([
-    ["at the window's start", { presentPlanAutoApprovedSeq: 10 }],
-    ["before the window", { presentPlanAutoApprovedSeq: 9 }],
-    ["missing", {}],
-  ])("does not credit an auto-approval %s", async (_name, metadata) => {
-    expect(await approvedPlanSince(logOf([], metadata).bb, "thr", 10)).toBeNull();
+  it("credits an auto-approval at any seq: there is no window start", async () => {
+    expect(await planLatestDecisionApproves(logOf([], { presentPlanAutoApprovedSeq: 0 }).bb, "thr")).toBe(true);
+  });
+
+  it("credits nothing when no auto-approval was recorded", async () => {
+    expect(await planLatestDecisionApproves(logOf([], {}).bb, "thr")).toBe(false);
   });
 
   it("reads unparseable state as idle: nothing is credited, and it warns", async () => {
     const { bb, warnings } = logOf([], { phase: "bogus", presentPlanAutoApprovedSeq: 99 });
-    expect(await approvedPlanSince(bb, "thr", 10)).toBeNull();
+    expect(await planLatestDecisionApproves(bb, "thr")).toBe(false);
     expect(warnings[0]).toContain("unparseable thread state");
   });
 
   it("throws when the state read fails, so the gate fails closed", async () => {
-    await expect(approvedPlanSince(logOf([], new Error("state down")).bb, "thr", 10)).rejects.toThrow("state down");
+    await expect(planLatestDecisionApproves(logOf([], new Error("state down")).bb, "thr")).rejects.toThrow("state down");
   });
 
-  it("prefers a lifecycle approval and never reads the state when the walk finds one", async () => {
+  it("never reads the state when the walk's latest decision is an approval", async () => {
     const { bb } = logOf([lifecycle(21, "turn-1", "resolved")], new Error("state down"));
-    expect(await approvedPlanSince(bb, "thr", 10)).toEqual({ id: "pint-1", seq: 21, requestedSeq: undefined });
+    expect(await planLatestDecisionApproves(bb, "thr")).toBe(true);
+  });
+
+  it("reads the state, and fails the read when it fails, when the walk's latest decision is not an approval", async () => {
+    const { bb } = logOf([lifecycle(5, "turn-1", "resolved"), lifecycle(9, "turn-1", "resolved", { decision: "deny" })], new Error("state down"));
+    await expect(planLatestDecisionApproves(bb, "thr")).rejects.toThrow("state down");
+  });
+});
+
+// The thread's latest plan decision decides, not the newest approval after a window. thr_ztxgu84xib (11-09):
+// the false missing-plan Blocker on follow-ups; thr_27zu8ukmfg (11-07): no approval at all, which must still fire it.
+describe("planLatestDecisionApproves's latest decision", () => {
+  const held = { kind: "turn", turnId: "turn-1" } as const;
+  const approval = (seq: number) => lifecycle(seq, "turn-1", "resolved");
+  const denial = (seq: number) => lifecycle(seq, "turn-1", "resolved", { decision: "deny" });
+  const changesRequested = (seq: number, scope: Row["scope"] = held) =>
+    form(seq, scope, { resolution: { kind: "plugin_submitted", description: { title: "Changes requested", payload: { approved: false } }, answeredVia: "app" } });
+  const approves = async (rows: Row[], metadata: unknown = {}) => planLatestDecisionApproves(logOf(rows, metadata).bb, "thr");
+
+  it.each([
+    ["a native allow_once", approval(5), true],
+    ["a native allow_for_session", lifecycle(5, "turn-1", "resolved", { decision: "allow_for_session" }), true],
+    ["a credited form approval", form(5), true],
+    ["a native deny", denial(5), false],
+    ["a held changes-requested form", changesRequested(5), false],
+    ["a thread-scoped changes-requested form", changesRequested(5, { kind: "thread" }), false],
+    ["an uncredited form approval (detached)", form(5, { kind: "thread" }), false],
+    ["an uncredited form approval (answered via api)", form(5, held, { resolution: { kind: "plugin_submitted", description: { payload: { approved: true } }, answeredVia: "api" } }), false],
+    ["a resolving row", lifecycle(5, "turn-1", "resolving", null), false],
+    ["a resolving row already carrying a deny", lifecycle(5, "turn-1", "resolving", { decision: "deny" }), false],
+    ["a non-plan approval", lifecycle(5, "turn-1", "resolved", { decision: "allow_once" }, { kind: "command", itemId: "i" }), false],
+    ["a non-plan deny", lifecycle(5, "turn-1", "resolved", { decision: "deny" }, { kind: "command", itemId: "i" }), false],
+  ])("counts %s alone", async (_name, row, expected) => {
+    expect(await approves([row])).toBe(expected);
+  });
+
+  it.each([
+    ["a native deny", denial(9)],
+    ["a held changes-requested form", changesRequested(9)],
+    ["a thread-scoped changes-requested form", changesRequested(9, { kind: "thread" })],
+  ])("%s after an approval cancels it", async (_name, later) => {
+    expect(await approves([approval(5), later])).toBe(false);
+  });
+
+  it.each([
+    ["an uncredited form approval", form(9, { kind: "thread" })],
+    ["a resolving row", lifecycle(9, "turn-1", "resolving", { decision: "deny" })],
+    ["a non-plan deny", lifecycle(9, "turn-1", "resolved", { decision: "deny" }, { kind: "command", itemId: "i" })],
+  ])("%s after an approval leaves it standing", async (_name, later) => {
+    expect(await approves([approval(5), later])).toBe(true);
+  });
+
+  it("a later approval clears an earlier denial, and an earlier denial does not cancel a later approval", async () => {
+    expect(await approves([approval(3), denial(5), approval(9)])).toBe(true);
+    expect(await approves([denial(5), approval(9)])).toBe(true);
+  });
+
+  it("the auto-approval cursor counts as an approval at its seq, against the denials around it", async () => {
+    expect(await approves([denial(5)], { presentPlanAutoApprovedSeq: 9 })).toBe(true);
+    expect(await approves([denial(12)], { presentPlanAutoApprovedSeq: 9 })).toBe(false);
+  });
+
+  it("a denial at the same seq as the auto-approval wins", async () => {
+    expect(await approves([denial(9)], { presentPlanAutoApprovedSeq: 9 })).toBe(false);
+  });
+
+  it("a denial and an approval at the same seq: the denial wins", async () => {
+    expect(await approves([approval(9), denial(9)])).toBe(false);
+  });
+
+  it("is not approved on a thread with no plan decision at all (thr_27zu8ukmfg)", async () => {
+    expect(await approves([])).toBe(false);
+  });
+
+  it("fails the read when the page cap is hit, so the caller fails closed", async () => {
+    const rows = Array.from({ length: 50 * EVENT_PAGE_MAX + 1 }, (_value, i) => lifecycle(i + 1, "turn-1", "resolving", null));
+    await expect(approves(rows)).rejects.toThrow("more than");
   });
 });
 
@@ -503,7 +581,7 @@ describe("regression ledger (thr_w92i8w56wb)", () => {
       ...(answeredVia === undefined ? {} : { answeredVia }),
     });
     const credited = async (answeredVia?: string) =>
-      (await approvedPlanSince(logOf([form(12, { kind: "turn", turnId: "turn-1" }, { resolution: resolution(answeredVia) })]).bb, "thr", 0)) !== null;
+      (await planLatestDecisionApproves(logOf([form(12, { kind: "turn", turnId: "turn-1" }, { resolution: resolution(answeredVia) })]).bb, "thr")) ;
     expect(await credited("app")).toBe(true);
     expect(await credited()).toBe(false);
     expect(await credited("api")).toBe(false);
@@ -513,8 +591,8 @@ describe("regression ledger (thr_w92i8w56wb)", () => {
   it("a held form's lifecycle event is turn-scoped and a detached one thread-scoped; only the first is credited", async () => {
     // bb core `apps/server/src/services/interactions/pending-interaction-timeline.ts`
     // `interactionScope`: `turnId === null ? threadScope() : turnScope(turnId)`.
-    expect(await approvedPlanSince(logOf([form(12, { kind: "turn", turnId: "turn-1" })]).bb, "thr", 0)).not.toBeNull();
-    expect(await approvedPlanSince(logOf([form(12, { kind: "thread" })]).bb, "thr", 0)).toBeNull();
+    expect(await planLatestDecisionApproves(logOf([form(12, { kind: "turn", turnId: "turn-1" })]).bb, "thr")).toBe(true);
+    expect(await planLatestDecisionApproves(logOf([form(12, { kind: "thread" })]).bb, "thr")).toBe(false);
   });
 
   it("the detached delivery text carries no `[bb ` prefix, so it cannot be told from the user's own words", async () => {

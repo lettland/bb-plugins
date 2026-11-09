@@ -1,7 +1,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
-import { approvedPlanSince } from "./detect-events.js";
+import { planLatestDecisionApproves } from "./detect-events.js";
 import type { AvailableWorkspace } from "./detect-workspace.js";
 
 /** The most changed lines a trivial verdict still self-reviews. */
@@ -17,9 +17,9 @@ const changeSizeSchema = z.object({
  * trivial, fresh for this window, and the diff is within the floor: the change
  * gets the focused self-review instead of the reviewer lenses. `blocker` is
  * whether the review must report the missing plan: the diff is over the floor,
- * or the verdict is non_trivial for this window, and no plan was approved
- * after the window's anchor. A trivial change structurally never gets the
- * blocker.
+ * or the verdict is non_trivial for this window, and the thread's latest plan
+ * decision is not an approval (or could not be read). A trivial change
+ * structurally never gets the blocker.
  */
 export interface ReviewSize {
   trivial: boolean;
@@ -57,13 +57,14 @@ function withinDiffFloor(scope: readonly string[], workspace: AvailableWorkspace
 /**
  * The size gate a review arms with: the typesafe plugin's `changeSize` verdict
  * for this thread (`TRIVIAL_CHANGE` in `size-definition.ts`), judged against
- * the diff floor and the plan window. `windowStartSeq` is the cursor the
- * previous code review captured before its send: a verdict whose messageSeq
- * sits at or before it sized an earlier request, so it is stale — it earns no
- * self-review and cannot anchor the window; the reviewed window starts there
- * instead. Every failure — the RPC missing, the events walk failing — fails
- * closed: the verdict is lost, so the review runs unsized (today's tier), and
- * a plan-window read failure keeps the missing-plan blocker, never waives it.
+ * the diff floor and the thread's latest plan decision. `windowStartSeq` is the
+ * cursor the previous code review captured before its send: a verdict whose
+ * messageSeq sits at or before it sized an earlier request, so it is stale and
+ * earns no self-review. A plan approved earlier in the thread still waives the
+ * blocker for a follow-up, until a later denied plan cancels it. Every failure
+ * — the RPC missing, the events walk failing — fails closed: the verdict is
+ * lost, so the review runs unsized (today's tier), and a plan-decision read
+ * failure keeps the missing-plan blocker, never waives it.
  */
 export async function reviewSize(
   bb: BbPluginApi,
@@ -97,14 +98,13 @@ export async function reviewSize(
   if (!overFloor && !(verdict?.verdict === "non_trivial" && fresh)) {
     return { trivial: false, blocker: false };
   }
-  const anchor = fresh ? messageSeq : windowStartSeq;
   try {
-    return { trivial: false, blocker: (await approvedPlanSince(bb, threadId, anchor)) === null };
+    return { trivial: false, blocker: !(await planLatestDecisionApproves(bb, threadId)) };
   } catch (error) {
     // The blocker's condition already holds here; the walk was only to check
     // whether a plan waives it, so a read failure must not waive it either.
     bb.log.warn(
-      `auto-review: could not read the plan window for ${threadId}, so the missing-plan blocker fires: ${
+      `auto-review: could not read the plan decisions for ${threadId}, so the missing-plan blocker fires: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );

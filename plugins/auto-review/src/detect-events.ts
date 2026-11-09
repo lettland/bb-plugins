@@ -147,26 +147,62 @@ function approvedPlanOf(
 }
 
 /**
- * A plan approved after `sinceSeq` in this thread, across turns — the window a
- * change sized non-trivial needs a plan in — or null when none is. User and
- * auto-approve resolutions both count (see `approvedPlanOf`); the request time
- * is not read here, so `requestedSeq` stays undefined. `PresentPlan`'s own
- * auto-approval leaves no interaction, so when the walk finds none the cursor
- * it recorded in the thread state is read. Both are strict: an approval at
- * `sinceSeq` itself is before the window. A failed read throws, so the caller
- * fails closed.
+ * What a lifecycle event says about plan approval: `approved` for an approval
+ * `approvedPlanOf` credits, `denied` for a resolved native `deny` of a plan or a
+ * resolved plan-approval form answered `approved: false` (held or detached: a
+ * request for changes is a request whoever was shown it), and null for
+ * everything else — a `resolving` row, even one already carrying a deny, an
+ * approval the gate does not credit (a detached form, one answered through
+ * `api`), and anything that is not a plan.
  */
-export async function approvedPlanSince(
-  bb: BbPluginApi,
-  threadId: string,
-  sinceSeq: number,
-): Promise<ApprovedPlan | null> {
-  for await (const event of eventsSince(bb, threadId, sinceSeq, "system/interaction/lifecycle")) {
-    const approval = approvedPlanOf(event, undefined);
-    if (approval !== null) return approval;
+function planDecisionOf(event: EventOf<"system/interaction/lifecycle">): "approved" | "denied" | null {
+  if (approvedPlanOf(event, undefined) !== null) {
+    return "approved";
   }
-  const { presentPlanAutoApprovedSeq: seq } = await readState(bb, threadId);
-  return seq !== undefined && seq > sinceSeq ? { id: `present-plan-auto-${seq}`, seq, requestedSeq: undefined } : null;
+  const { interaction } = event.data;
+  const form = planFormResolution(event);
+  if (form !== null) {
+    return form.approved ? null : "denied";
+  }
+  const { resolution } = interaction;
+  return interaction.payload.kind === "approval" &&
+    interaction.payload.subject.kind === "plan" &&
+    interaction.status === "resolved" &&
+    resolution !== null &&
+    "decision" in resolution &&
+    resolution.decision === "deny"
+    ? "denied"
+    : null;
+}
+
+/**
+ * Whether the thread's latest plan decision is an approval, across every turn:
+ * the user's, an auto-approve resolution's and `PresentPlan`'s own
+ * auto-approval (which leaves no interaction, so the cursor it recorded in the
+ * thread state counts as an approval at that seq) all count as approvals, and a
+ * denied plan — the user's, a changes-requested form, or auto-review's own
+ * hold — cancels an earlier approval until a later approval. At the same seq a
+ * denial wins. A thread with no decision at all is not approved. A failed read,
+ * including the page cap on a long walk, throws, so the caller fails closed.
+ */
+export async function planLatestDecisionApproves(bb: BbPluginApi, threadId: string): Promise<boolean> {
+  // The latest decision is an approval iff the newest approval is strictly newer than the newest denial.
+  let approvedSeq = -1;
+  let deniedSeq = -1;
+  for await (const event of eventsSince(bb, threadId, 0, "system/interaction/lifecycle")) {
+    const decision = planDecisionOf(event);
+    if (decision === "approved") {
+      approvedSeq = Math.max(approvedSeq, event.seq);
+    } else if (decision === "denied") {
+      deniedSeq = Math.max(deniedSeq, event.seq);
+    }
+  }
+  if (approvedSeq > deniedSeq) {
+    // The auto-approval cursor can only move an approval later: the answer is already settled.
+    return true;
+  }
+  const { presentPlanAutoApprovedSeq: autoSeq } = await readState(bb, threadId);
+  return autoSeq !== undefined && autoSeq > deniedSeq;
 }
 
 /**
