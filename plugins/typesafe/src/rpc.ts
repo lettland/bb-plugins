@@ -29,7 +29,7 @@ export const PLAN_APPROVAL_TEXT_MAX_CHARS = 4000;
 export const PLAN_APPROVAL_QUESTION: Question = {
   type: "noul",
   instructions:
-    "Does this message approve the plan the agent just presented, so the agent may implement it? A question, a requested change, a refusal or an unrelated message is not approval.",
+    "Does this message approve the plan the agent just presented, so the agent may implement it? Read typos and short forms as the word the user meant (for example \"approvee\" means approve, \"ok\" means yes). A question, a requested change, a refusal or an unrelated message is not approval.",
 };
 
 export const planApprovalRpcContract = {

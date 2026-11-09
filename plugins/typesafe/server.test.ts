@@ -833,7 +833,7 @@ describe("planApproval RPC", () => {
     expect(PLAN_APPROVAL_QUESTION).toEqual({
       type: "noul",
       instructions:
-        "Does this message approve the plan the agent just presented, so the agent may implement it? A question, a requested change, a refusal or an unrelated message is not approval.",
+        "Does this message approve the plan the agent just presented, so the agent may implement it? Read typos and short forms as the word the user meant (for example \"approvee\" means approve, \"ok\" means yes). A question, a requested change, a refusal or an unrelated message is not approval.",
     });
     await host.harness.dispose();
   });
