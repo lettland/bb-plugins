@@ -1984,6 +1984,18 @@ describe("what the prompts say about the user's messages while reviewers run", (
     expect(text).not.toContain("Committed at the user's request:");
   });
 
+  it("words the later separate review as the case without a request only after the commit-now text", () => {
+    const without = "Without such a request, auto-review reviews that work separately once this review ends.";
+    const plain = "auto-review reviews that work separately once this review ends.";
+    const committing = code({ commit: true, merge: false });
+    expect(committing).toContain(`may not get a review of its own. ${without}`);
+    expect(committing.split(plain)).toHaveLength(2);
+    for (const text of [code({ commit: false, merge: false }), code({ commit: true, merge: false }, overflowPaths)]) {
+      expect(text).toContain(`${plain} If that work edited a file on the list above`);
+      expect(text).not.toContain(without);
+    }
+  });
+
   it("skips the merge when such work is uncommitted or was committed during the review, only where there is a merge step", () => {
     const skip = "If such work is uncommitted in the tree, or you committed it during this review, skip the merge step and say why.";
     expect(code({ commit: true, merge: true })).toContain(skip);
