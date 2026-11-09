@@ -55,7 +55,12 @@ export function useProjectOrderSync({
   sdkRef.current = sdk;
   const active = useWindowActive();
   const [busy, setBusy] = useState(false);
+  const [staleRetries, setStaleRetries] = useState(0);
   const attemptedPlanRef = useRef<string | null>(null);
+  const staleRetryRef = useRef<{ plan: string | null; used: boolean }>({
+    plan: null,
+    used: false,
+  });
   const moves = useMemo(() => {
     const serverProjectIds = projects
       .filter((project) => !project.isPersonal)
@@ -71,11 +76,15 @@ export function useProjectOrderSync({
   useEffect(() => {
     if (moves.length === 0) {
       attemptedPlanRef.current = null;
+      staleRetryRef.current = { plan: null, used: false };
       return;
     }
     if (!enabled || busy || attemptedPlanRef.current === plan) return;
     const timer = setTimeout(() => {
       attemptedPlanRef.current = plan;
+      if (staleRetryRef.current.plan !== plan) {
+        staleRetryRef.current = { plan, used: false };
+      }
       setBusy(true);
       void (async () => {
         let projectId = "";
@@ -91,6 +100,10 @@ export function useProjectOrderSync({
               projectId,
               describeErrorKind(error),
             );
+          } else if (!staleRetryRef.current.used) {
+            staleRetryRef.current.used = true;
+            attemptedPlanRef.current = null;
+            setStaleRetries((count) => count + 1);
           }
         } finally {
           setBusy(false);
@@ -98,5 +111,5 @@ export function useProjectOrderSync({
       })();
     }, SYNC_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [busy, enabled, moves, plan]);
+  }, [busy, enabled, moves, plan, staleRetries]);
 }

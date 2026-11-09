@@ -39,22 +39,26 @@ function layoutOf(...projectIds: string[]): ProjectGroupLayoutEntry[] {
   }));
 }
 
+const DEFAULT_PROPS: ProbeProps = {
+  layout: layoutOf("c", "a", "b"),
+  projectIds: ["a", "b", "c"],
+  projectSort: "custom",
+};
+
 function mount(
   props: Partial<ProbeProps>,
   reorder: (args: unknown) => Promise<never[]> = async () => [],
 ) {
   const reorderSpy = vi.fn(reorder);
-  renderSlot(
+  const slot = renderSlot(
     { component: Probe },
-    {
-      layout: layoutOf("c", "a", "b"),
-      projectIds: ["a", "b", "c"],
-      projectSort: "custom",
-      ...props,
-    },
+    { ...DEFAULT_PROPS, ...props },
     { sdk: { projects: { reorder: reorderSpy } } },
   );
-  return reorderSpy;
+  return Object.assign(reorderSpy, {
+    update: (next: Partial<ProbeProps>) =>
+      slot.rerender(<Probe {...DEFAULT_PROPS} {...next} />),
+  });
 }
 
 function httpError(status: number) {
@@ -172,7 +176,7 @@ describe("useProjectOrderSync", () => {
     expect(reorder).not.toHaveBeenCalled();
   });
 
-  it("stops the batch on a 409 without logging", async () => {
+  it("stops the batch on each 409 without logging", async () => {
     const reorder = mount(
       { layout: layoutOf("a", "b", "c"), projectIds: ["c", "b", "a"] },
       async () => {
@@ -181,8 +185,44 @@ describe("useProjectOrderSync", () => {
     );
     await elapse(1000);
     await elapse(5000);
-    expect(reorder).toHaveBeenCalledTimes(1);
+    expect(reorder).toHaveBeenCalledTimes(2);
+    expect(reorder.mock.calls[1]).toEqual(reorder.mock.calls[0]);
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("retries a 409 once after the debounce and then stops", async () => {
+    const reorder = mount({}, async () => {
+      throw httpError(409);
+    });
+    await elapse(1000);
+    expect(reorder).toHaveBeenCalledTimes(1);
+    await elapse(999);
+    expect(reorder).toHaveBeenCalledTimes(1);
+    await elapse(1);
+    expect(reorder).toHaveBeenCalledTimes(2);
+    await elapse(10000);
+    expect(reorder).toHaveBeenCalledTimes(2);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("runs a new plan after a 409 and gives it its own retry", async () => {
+    const reorder = mount({}, async () => {
+      throw httpError(409);
+    });
+    await elapse(1000);
+    expect(reorder).toHaveBeenCalledTimes(1);
+    reorder.update({ layout: layoutOf("b", "a", "c") });
+    await elapse(1000);
+    expect(reorder).toHaveBeenCalledTimes(2);
+    expect(reorder).toHaveBeenLastCalledWith({
+      projectId: "b",
+      previousProjectId: null,
+      nextProjectId: "a",
+    });
+    await elapse(1000);
+    expect(reorder).toHaveBeenCalledTimes(3);
+    await elapse(10000);
+    expect(reorder).toHaveBeenCalledTimes(3);
   });
 
   it("logs another HTTP error once, stops the batch, and does not retry", async () => {
