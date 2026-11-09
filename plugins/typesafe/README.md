@@ -29,7 +29,9 @@ answer below auto-review's threshold, leaves the gate as it was.
   (serialized, at most 16000 characters) and its questions.
 - For the `planApproval` RPC: the text of a user's typed reply after a plan was
   presented (redacted, truncated to 4000 characters) and one fixed question.
-  auto-review caches each verdict, so a given reply is sent at most once.
+  The call is made once per reply that TypeSafe answers; a reply it gave no
+  answer for (timeout, HTTP error, bad response) is sent again at the next
+  review.
 
 Both go through one redaction pass first: common token shapes (GitHub, Slack,
 AWS, OpenAI-style `sk-` tokens, `Bearer` headers, PEM key blocks, URL
@@ -45,8 +47,9 @@ service is hosted and processed in the United States; and Input is not
 disclosed to third parties other than service providers. Each call is billed:
 input tokens are billable, output tokens are currently free. The triage call
 fires once per top-level thread; tool calls fire only when an agent chooses to
-ask; the `planApproval` call fires at most once per typed reply that follows a
-presented plan.
+ask; the `planApproval` call fires once per reply that TypeSafe answers; a reply
+it gave no answer for (timeout, HTTP error, bad response) is sent again at the
+next review.
 
 ## The `planApproval` RPC
 

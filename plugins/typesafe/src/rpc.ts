@@ -25,6 +25,11 @@ export function registerChangeSizeRpc(bb: BbPluginApi, store: TriageStore): void
 /** Within the 30 s default deadline the host gives a `callRpc` caller. */
 export const PLAN_APPROVAL_TIMEOUT_MS = 10_000;
 export const PLAN_APPROVAL_TEXT_MAX_CHARS = 4000;
+/**
+ * The most text the RPC accepts at all; longer is rejected at the boundary, and what is accepted is redacted, then cut to 4000.
+ * `redact` is quadratic on one long run of word characters (about 90 ms at 8000, 5.7 s at 65536), so the cap bounds it.
+ */
+export const PLAN_APPROVAL_INPUT_MAX_CHARS = 8000;
 
 export const PLAN_APPROVAL_QUESTION: Question = {
   type: "noul",
@@ -34,7 +39,7 @@ export const PLAN_APPROVAL_QUESTION: Question = {
 
 export const planApprovalRpcContract = {
   planApproval: {
-    input: z.object({ projectId: z.string().min(1).max(128), text: z.string() }),
+    input: z.object({ projectId: z.string().min(1).max(128), text: z.string().max(PLAN_APPROVAL_INPUT_MAX_CHARS) }),
     output: z.object({ approves: z.number().nullable() }),
   },
 } satisfies PluginRpcContract;

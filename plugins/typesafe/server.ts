@@ -139,7 +139,10 @@ export default async function plugin(bb: BbPluginApi) {
       if (config.skipProjects.length === 0) return false;
       try {
         return skipped((await bb.sdk.projects.get({ projectId })).name);
-      } catch {
+      } catch (error) {
+        log(
+          `planApproval: project ${projectId} could not be resolved (${error instanceof Error ? error.message : String(error)}), so it counts as skipped and nothing is sent`,
+        );
         return true;
       }
     },

@@ -11,7 +11,7 @@ import { parseSkipProjects, skipProjectsSettingSchema } from "./server.js";
 import { TOOL_INSTRUCTIONS, decideParamsSchema } from "./src/tool.js";
 import { TriageStore, TRIAGE_STORE_CAP, buildTriageEntry, type TriageKind } from "./src/triage.js";
 import { CHANGE_SIZE_QUESTION, TRIVIAL_CHANGE } from "./src/size.js";
-import { PLAN_APPROVAL_QUESTION, PLAN_APPROVAL_TEXT_MAX_CHARS, PLAN_APPROVAL_TIMEOUT_MS } from "./src/rpc.js";
+import { PLAN_APPROVAL_INPUT_MAX_CHARS, PLAN_APPROVAL_QUESTION, PLAN_APPROVAL_TEXT_MAX_CHARS, PLAN_APPROVAL_TIMEOUT_MS } from "./src/rpc.js";
 
 // Assembled from fragments so no secret-shaped literal appears in source.
 const TEST_KEY = ["test", "key"].join("-");
@@ -898,6 +898,8 @@ describe("planApproval RPC", () => {
     await plugin(host.bb);
     await expect(planApproval(host, "ok", "")).rejects.toThrow();
     await expect(host.harness.behavior.callRpc("planApproval", { projectId: "project-1" })).rejects.toThrow();
+    await expect(planApproval(host, "x".repeat(PLAN_APPROVAL_INPUT_MAX_CHARS + 1))).rejects.toThrow();
+    expect(fetchMock).not.toHaveBeenCalled();
     await host.harness.dispose();
   });
 
@@ -920,13 +922,40 @@ describe("planApproval RPC", () => {
     await host.harness.dispose();
   });
 
+  it("accepts text at the input cap and cuts it to 4000 characters", async () => {
+    const host = createHost({ apiKey: TEST_KEY });
+    await plugin(host.bb);
+    fetchMock.mockResolvedValue(okResponse(approvalResponse(0.7)));
+    // Spaced words: one 65k run of word characters makes `redact`'s KEY_VALUE_PATTERN backtrack quadratically (about 16 s).
+    // One unbroken word at the cap: redact's worst case stays bounded.
+    expect(await planApproval(host, "x".repeat(PLAN_APPROVAL_INPUT_MAX_CHARS))).toEqual({ approves: 0.7 });
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body)).state).toHaveLength(PLAN_APPROVAL_TEXT_MAX_CHARS);
+    await host.harness.dispose();
+  });
+
   it("returns null and sends nothing when the project cannot be resolved and skipProjects is set", async () => {
     const host = hostWithProject({ apiKey: TEST_KEY, skipProjects: '["sandbox-*"]' }, async () => {
       throw new Error("gone");
     });
     await plugin(host.bb);
-    expect(await planApproval(host)).toEqual({ approves: null });
+    expect(await planApproval(host, "my private reply")).toEqual({ approves: null });
     expect(fetchMock).not.toHaveBeenCalled();
+    const logged = host.harness.logEntries.map((entry) => entry.message).filter((message) => message.startsWith("planApproval:"));
+    expect(logged).toEqual([
+      "planApproval: project project-1 could not be resolved (gone), so it counts as skipped and nothing is sent",
+    ]);
+    await host.harness.dispose();
+  });
+
+  it("logs a project lookup that throws a non-Error, without the reply text", async () => {
+    const host = hostWithProject({ apiKey: TEST_KEY, skipProjects: '["sandbox-*"]' }, async () => {
+      throw "offline";
+    });
+    await plugin(host.bb);
+    expect(await planApproval(host, "my private reply")).toEqual({ approves: null });
+    const logged = host.harness.logEntries.map((entry) => entry.message).join("\n");
+    expect(logged).toContain("(offline)");
+    expect(logged).not.toContain("my private reply");
     await host.harness.dispose();
   });
 
