@@ -7,6 +7,11 @@ const RULE = "1px solid color-mix(in oklch, var(--ink) 11%, var(--canvas))";
 const PROFILE_NOTE = "Claude profile — edit in ~/.bb/dir-skills/scopes.json";
 const IGNORED_NOTE =
   "will be ignored: a scope with a Claude profile can only be changed in ~/.bb/dir-skills/scopes.json";
+// Limits of the RPC contract (rpc-contract.ts); the form stops the user before the host's generic validation error.
+const MAX_SCOPES = 32;
+const MAX_PATHS = 16;
+const MAX_NAME = 128;
+const MAX_PATH = 1024;
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -38,8 +43,21 @@ function sameCards(left: Card[], right: Card[]): boolean {
   return JSON.stringify(toPayload(left)) === JSON.stringify(toPayload(right));
 }
 
-function SectionNote(props: { children: string }) {
-  return <div style={{ fontSize: 12, color: SOFT_INK }}>{props.children}</div>;
+/** Any difference a user made, including empty rows and spaces; keys are not compared. */
+function sameRawCards(left: Card[], right: Card[]): boolean {
+  const raw = (cards: Card[]) =>
+    JSON.stringify(
+      cards.map(({ name, paths, picked, patterns }) => ({ name, paths, picked, patterns })),
+    );
+  return raw(left) === raw(right);
+}
+
+function SectionNote(props: { children: string; id?: string }) {
+  return (
+    <div id={props.id} style={{ fontSize: 12, color: SOFT_INK }}>
+      {props.children}
+    </div>
+  );
 }
 
 function FileScopes(props: { scopes: FileScope[] }) {
@@ -76,6 +94,14 @@ function ScopeCard(props: {
   const label = card.name.trim() === "" ? `New scope ${position}` : card.name.trim();
   const fileScope = snapshot.fileScopes.find((file) => file.name === card.name.trim());
   const ignored = fileScope?.hasProfile === true || snapshot.skipped.includes(card.name.trim());
+  const noteId = `${base}-note`;
+  const hintId = `${base}-hint`;
+  const patternsHintId = `${base}-patterns-hint`;
+  const note = ignored
+    ? IGNORED_NOTE
+    : fileScope === undefined
+      ? null
+      : `replaces file scope ${fileScope.name}`;
   const toggle = (skill: string, checked: boolean) =>
     onChange({
       picked: checked ? [...card.picked, skill] : card.picked.filter((name) => name !== skill),
@@ -91,15 +117,12 @@ function ScopeCard(props: {
             data-focus={`name:${card.key}`}
             type="text"
             value={card.name}
-            maxLength={128}
+            maxLength={MAX_NAME}
+            aria-describedby={note === null ? undefined : noteId}
             onChange={(event) => onChange({ name: event.target.value })}
           />
         </div>
-        {ignored ? (
-          <SectionNote>{IGNORED_NOTE}</SectionNote>
-        ) : fileScope === undefined ? null : (
-          <SectionNote>{`replaces file scope ${fileScope.name}`}</SectionNote>
-        )}
+        {note === null ? null : <SectionNote id={noteId}>{note}</SectionNote>}
         <div>
           {card.paths.map((value, index) => (
             <div key={index} style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -109,7 +132,8 @@ function ScopeCard(props: {
                 data-focus={`dir:${card.key}:${index}`}
                 type="text"
                 value={value}
-                maxLength={1024}
+                maxLength={MAX_PATH}
+                aria-describedby={hintId}
                 onChange={(event) =>
                   onChange({
                     paths: card.paths.map((path, at) => (at === index ? event.target.value : path)),
@@ -125,15 +149,20 @@ function ScopeCard(props: {
               </button>
             </div>
           ))}
-          <SectionNote>Absolute or ~/…</SectionNote>
-          <button type="button" data-focus={`add-dir:${card.key}`} onClick={onAddPath}>
+          <SectionNote id={hintId}>Absolute or ~/…</SectionNote>
+          <button
+            type="button"
+            data-focus={`add-dir:${card.key}`}
+            disabled={card.paths.length >= MAX_PATHS}
+            onClick={onAddPath}
+          >
             Add directory
           </button>
         </div>
         <fieldset style={{ margin: 0, padding: 8, border: RULE, borderRadius: 6 }}>
           <legend>Skills</legend>
-          {snapshot.skills.map((skill) => {
-            const id = `${base}-skill-${skill.name}`;
+          {snapshot.skills.map((skill, index) => {
+            const id = `${base}-skill-${index}`;
             return (
               <div key={skill.name}>
                 <input
@@ -154,9 +183,10 @@ function ScopeCard(props: {
             id={`${base}-patterns`}
             type="text"
             value={card.patterns}
+            aria-describedby={patternsHintId}
             onChange={(event) => onChange({ patterns: event.target.value })}
           />
-          <SectionNote>Globs such as docs-*, comma-separated</SectionNote>
+          <SectionNote id={patternsHintId}>Globs such as docs-*, comma-separated</SectionNote>
         </fieldset>
         <div>
           <button type="button" aria-label={`Remove scope ${label}`} onClick={onRemove}>
@@ -193,24 +223,33 @@ function DirectoryScopes() {
   const focusRef = useRef<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const dirty = !sameCards(cards, loaded);
-  const dirtyRef = useRef(dirty);
+  // Any edit, even an empty row: this gates reloads, so Add directory is not undone by a window focus.
+  const edited = !sameRawCards(cards, loaded);
+  const editedRef = useRef(edited);
+  const cardsRef = useRef(cards);
 
   useEffect(() => {
-    dirtyRef.current = dirty;
-  }, [dirty]);
+    editedRef.current = edited;
+    cardsRef.current = cards;
+  }, [edited, cards]);
 
   useEffect(() => {
     const target = focusRef.current;
     if (target === null) return;
     focusRef.current = null;
-    rootRef.current?.querySelector<HTMLElement>(`[data-focus="${target}"]`)?.focus();
+    const root = rootRef.current;
+    const wanted = root?.querySelector<HTMLElement>(`[data-focus="${target}"]`);
+    // A disabled target (Add scope at the limit) cannot take focus: fall back to the first card.
+    if (wanted != null && !wanted.matches(":disabled")) wanted.focus();
+    else root?.querySelector<HTMLElement>('[data-focus^="name:"]')?.focus();
   });
 
   /** Skill names that are in the plugin's skills/ dir go to checkboxes, every other entry to the patterns. */
   const apply = useCallback((result: ScopesSnapshot) => {
     const known = new Set(result.skills.map((skill) => skill.name));
-    const next = result.uiScopes.map((scope) => ({
-      key: nextKeyRef.current++,
+    // The card at index i keeps its key, so a load or save does not remount the cards and drop focus.
+    const next = result.uiScopes.map((scope, index) => ({
+      key: cardsRef.current[index]?.key ?? nextKeyRef.current++,
       name: scope.name,
       paths: scope.paths,
       picked: scope.skills.filter((skill) => known.has(skill)),
@@ -226,7 +265,7 @@ function DirectoryScopes() {
     try {
       const result = await rpc.call("getScopes", null);
       // A newer load or a save supersedes this one; unsaved edits are never replaced.
-      if (revision !== revisionRef.current || dirtyRef.current) return;
+      if (revision !== revisionRef.current || editedRef.current) return;
       apply(result);
       setLoadError(null);
     } catch (error) {
@@ -238,7 +277,7 @@ function DirectoryScopes() {
   useEffect(() => {
     void load();
     const onFocus = () => {
-      if (!dirtyRef.current) void load();
+      if (!editedRef.current) void load();
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
@@ -251,6 +290,9 @@ function DirectoryScopes() {
     setSaved(false);
     try {
       const result = await rpc.call("saveScopes", { scopes: toPayload(cards) });
+      // The save supersedes a load that started while it ran.
+      revisionRef.current++;
+      focusRef.current = "add-scope";
       apply(result);
       setSaved(true);
     } catch (error) {
@@ -299,7 +341,7 @@ function DirectoryScopes() {
       {loadError === null ? null : <LoadError error={loadError} onRetry={() => void load()} />}
       {snapshot.settingError === null ? null : (
         <p style={{ color: "var(--destructive-text)" }}>
-          Saved scopes could not be read and are ignored: {snapshot.settingError}
+          {`Saved scopes could not be read and are ignored: ${snapshot.settingError}. Save to replace them.`}
         </p>
       )}
       <section aria-label="From files">
@@ -327,16 +369,26 @@ function DirectoryScopes() {
             </div>
           )}
           <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" data-focus="add-scope" onClick={addScope}>
+            <button
+              type="button"
+              data-focus="add-scope"
+              disabled={cards.length >= MAX_SCOPES}
+              onClick={addScope}
+            >
               Add scope
             </button>
-            <button type="button" disabled={!dirty || saving} onClick={() => void save()}>
+            <button
+              type="button"
+              disabled={(!dirty && snapshot.settingError === null) || saving}
+              onClick={() => void save()}
+            >
               Save
             </button>
             <button
               type="button"
-              disabled={!dirty || saving}
+              disabled={!edited || saving}
               onClick={() => {
+                focusRef.current = "add-scope";
                 setCards(loaded);
                 setSaveError(null);
               }}

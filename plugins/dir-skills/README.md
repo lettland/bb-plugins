@@ -69,10 +69,12 @@ form for scopes that live in bb and not in a file.
   as `docs-*`, comma-separated. A stored entry that equals a skill name shows
   as a checked box; every other entry goes to Extra patterns. A scope needs at
   least one checked skill or pattern.
-- **Save** is disabled until something changes. A validation or store error
-  shows above the buttons, your edits stay, and nothing is stored. **Discard
-  changes** restores the loaded state. The form reloads when the window gets
-  focus only while it has no unsaved changes.
+- **Save** is disabled until something changes. It is also enabled while a
+  stored value could not be read, so saving with no scopes clears it. A
+  validation or store error shows above the buttons, your edits stay, and
+  nothing is stored. **Discard changes** is enabled after any edit, including
+  an empty directory row, and restores the loaded state. The form reloads when
+  the window gets focus only while it has no unsaved changes.
 
 Rules and limits:
 
@@ -109,6 +111,10 @@ Changes from v0.2.5, which had a **Scopes** JSON setting:
   best-effort import: when no scopes are stored yet, the plugin reads the old
   value once at startup, and if it is valid it is stored and one line is
   logged. If bb no longer returns the removed key, the import does nothing.
+  The import accepts only scopes that have a name and only the keys `name`,
+  `paths` and `skills`. A v0.2.5 value with an unnamed scope or another key is
+  not imported. While the old value is invalid and nothing is stored yet, the
+  warning is logged at every start, until the first Save.
 - `bb dir-skills status --json` no longer has `settingReloadError`. The
   `settingScopes`, `settingError` and `settingSkipped` keys stay.
 - Rolling back to v0.2.5 ignores the scopes saved by the form, because they

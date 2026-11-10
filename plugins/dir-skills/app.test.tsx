@@ -597,3 +597,294 @@ describe("reload on focus", () => {
     expect(calls(view, "getScopes")).toHaveLength(1);
   });
 });
+
+describe("an unsaved empty row", () => {
+  it("survives a window focus, and Save stays disabled for it", async () => {
+    const view = render(snapshot({ uiScopes: [uiScope()] }));
+    const group = await screen.findByRole("group", { name: "docs" });
+    fireEvent.click(within(group).getByRole("button", { name: "Add directory" }));
+    expect(save().disabled).toBe(true);
+    window.dispatchEvent(new Event("focus"));
+    await act(async () => {});
+    expect(calls(view, "getScopes")).toHaveLength(1);
+    expect(within(group).getByLabelText("Directory 2")).toBeTruthy();
+    expect(save().disabled).toBe(true);
+  });
+
+  it("survives a window focus for added spaces too", async () => {
+    const view = render(snapshot({ uiScopes: [uiScope()] }));
+    const group = await screen.findByRole("group", { name: "docs" });
+    type(within(group).getByLabelText("Name"), "docs ");
+    expect(save().disabled).toBe(true);
+    window.dispatchEvent(new Event("focus"));
+    await act(async () => {});
+    expect(calls(view, "getScopes")).toHaveLength(1);
+    expect((within(group).getByLabelText("Name") as HTMLInputElement).value).toBe("docs ");
+  });
+
+  it("reloads again after the empty row is removed", async () => {
+    const view = render(snapshot({ uiScopes: [uiScope()] }));
+    const group = await screen.findByRole("group", { name: "docs" });
+    fireEvent.click(within(group).getByRole("button", { name: "Add directory" }));
+    fireEvent.click(within(group).getByRole("button", { name: "Remove directory 2 from docs" }));
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() => expect(calls(view, "getScopes")).toHaveLength(2));
+  });
+});
+
+describe("stable cards and focus after Save and Discard", () => {
+  const scopes = (count: number) =>
+    Array.from({ length: count }, (_, index) => uiScope({ name: `s${index}` }));
+
+  it("keeps the same input element, and the focus, across a reload with the same data", async () => {
+    const view = render(snapshot({ uiScopes: [uiScope()] }), {
+      getScopes: () => snapshot({ uiScopes: [uiScope()] }),
+    });
+    const input = within(await screen.findByRole("group", { name: "docs" })).getByLabelText("Name");
+    (input as HTMLInputElement).focus();
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() => expect(calls(view, "getScopes")).toHaveLength(2));
+    await act(async () => {});
+    expect(input.isConnected).toBe(true);
+    expect(within(card("docs")).getByLabelText("Name")).toBe(input);
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("moves focus to Add scope after a successful save", async () => {
+    render(snapshot({ uiScopes: [uiScope()] }));
+    const group = await screen.findByRole("group", { name: "docs" });
+    type(within(group).getByLabelText("Name"), "docs2");
+    within(group).getByLabelText("Name").focus();
+    fireEvent.click(save());
+    await screen.findByText("Saved");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add scope" }));
+  });
+
+  it("keeps the focus where it is when the save fails", async () => {
+    render(snapshot({ uiScopes: [uiScope()] }), {
+      saveScopes: () => { throw new Error("nope"); },
+    });
+    const group = await screen.findByRole("group", { name: "docs" });
+    const name = within(group).getByLabelText("Name");
+    type(name, "docs2");
+    name.focus();
+    fireEvent.click(save());
+    await screen.findByRole("alert");
+    expect(document.activeElement).toBe(name);
+  });
+
+  it("focuses the first card's Name when Add scope is disabled at 32 scopes", async () => {
+    render(snapshot({ uiScopes: scopes(32) }));
+    await screen.findByRole("group", { name: "s0" });
+    type(within(card("s5")).getByLabelText("Name"), "renamed");
+    fireEvent.click(save());
+    await screen.findByText("Saved");
+    expect(document.activeElement).toBe(within(card("s0")).getByLabelText("Name"));
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("focuses Add scope after a save below 32 scopes", async () => {
+    render(snapshot({ uiScopes: scopes(31) }));
+    await screen.findByRole("group", { name: "s0" });
+    type(within(card("s5")).getByLabelText("Name"), "renamed");
+    fireEvent.click(save());
+    await screen.findByText("Saved");
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add scope" }));
+  });
+
+  it("focuses the first card's Name after Discard at 32 scopes", async () => {
+    render(snapshot({ uiScopes: scopes(32) }));
+    await screen.findByRole("group", { name: "s0" });
+    type(within(card("s5")).getByLabelText("Name"), "renamed");
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(document.activeElement).toBe(within(card("s0")).getByLabelText("Name"));
+  });
+
+  it("does nothing for focus when there is no card to fall back to", async () => {
+    render(snapshot());
+    const add = await screen.findByRole("button", { name: "Add scope" });
+    fireEvent.click(add);
+    fireEvent.click(screen.getByRole("button", { name: "Remove scope New scope 1" }));
+    expect(document.activeElement).toBe(add);
+  });
+
+  it("moves focus to Add scope after Discard", async () => {
+    render(snapshot({ uiScopes: [uiScope()] }));
+    const group = await screen.findByRole("group", { name: "docs" });
+    type(within(group).getByLabelText("Name"), "docs2");
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Add scope" }));
+  });
+});
+
+describe("Discard after any edit", () => {
+  it("is enabled for an empty directory row that Save ignores, and removes the row", async () => {
+    render(snapshot({ uiScopes: [uiScope()] }));
+    const group = await screen.findByRole("group", { name: "docs" });
+    const discard = screen.getByRole("button", { name: "Discard changes" }) as HTMLButtonElement;
+    expect(discard.disabled).toBe(true);
+    fireEvent.click(within(group).getByRole("button", { name: "Add directory" }));
+    expect(discard.disabled).toBe(false);
+    expect(save().disabled).toBe(true);
+    fireEvent.click(discard);
+    expect(within(card("docs")).queryByLabelText("Directory 2")).toBeNull();
+    expect(discard.disabled).toBe(true);
+  });
+
+  it("stays disabled while a save runs", async () => {
+    let done!: (value: ScopesSnapshot) => void;
+    render(snapshot({ uiScopes: [uiScope()] }), {
+      saveScopes: () => new Promise((resolve) => { done = resolve; }),
+    });
+    const group = await screen.findByRole("group", { name: "docs" });
+    type(within(group).getByLabelText("Name"), "docs2");
+    fireEvent.click(save());
+    expect((screen.getByRole("button", { name: "Discard changes" }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => { done(snapshot({ uiScopes: [uiScope({ name: "docs2" })] })); });
+  });
+});
+
+describe("a save supersedes loads in flight", () => {
+  it("ignores a getScopes response that started during the save and resolves after it", async () => {
+    const loads: Array<(value: ScopesSnapshot) => void> = [];
+    let first = true;
+    let finishSave!: (value: ScopesSnapshot) => void;
+    const broken = () => snapshot({ settingError: "old banner" });
+    render(broken(), {
+      getScopes: () => {
+        if (first) {
+          first = false;
+          return broken();
+        }
+        return new Promise((resolve) => { loads.push(resolve); });
+      },
+      saveScopes: () => new Promise((resolve) => { finishSave = resolve; }),
+    });
+    await screen.findByText(/old banner/);
+    // The form is clean (Save is enabled for the setting error), so a window focus starts a load mid-save.
+    fireEvent.click(save());
+    window.dispatchEvent(new Event("focus"));
+    await act(async () => {});
+    expect(loads).toHaveLength(1);
+    await act(async () => { finishSave(snapshot({ uiScopes: [uiScope({ name: "saved" })] })); });
+    await screen.findByText("Saved");
+    await act(async () => { loads[0]!(broken()); });
+    expect(screen.queryByText(/old banner/)).toBeNull();
+    expect(screen.getByRole("group", { name: "saved" })).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toBe("Saved");
+  });
+});
+
+describe("saved scopes that could not be read", () => {
+  const broken = () => snapshot({ settingError: "scope 1 needs a name" });
+
+  it("words the banner and enables Save on a clean form, Discard stays disabled", async () => {
+    render(broken());
+    expect(
+      await screen.findByText("Saved scopes could not be read and are ignored: scope 1 needs a name. Save to replace them."),
+    ).toBeTruthy();
+    expect(save().disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Discard changes" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("saves an empty list to replace the stored value, then the banner goes and Save is disabled", async () => {
+    const view = render(broken(), { saveScopes: () => snapshot({ settingError: null }) });
+    await screen.findByText(/Saved scopes could not be read/);
+    fireEvent.click(save());
+    await screen.findByText("Saved");
+    expect(calls(view, "saveScopes")).toEqual([{ method: "saveScopes", input: { scopes: [] } }]);
+    expect(screen.queryByText(/Saved scopes could not be read/)).toBeNull();
+    expect(save().disabled).toBe(true);
+  });
+
+  it("keeps Save disabled on a clean form with no setting error", async () => {
+    render(snapshot());
+    await screen.findByRole("button", { name: "Add scope" });
+    expect(save().disabled).toBe(true);
+  });
+});
+
+describe("accessible notes and hints", () => {
+  const described = (element: HTMLElement) =>
+    (element.getAttribute("aria-describedby") ?? "")
+      .split(" ")
+      .filter((id) => id !== "")
+      .map((id) => document.getElementById(id));
+
+  it("points the Name input at the note while one shows, and at nothing otherwise", async () => {
+    render(snapshot({ fileScopes: [fileScope(), fileScope({ name: "corp", hasProfile: true })] }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add scope" }));
+    const name = within(card("New scope 1")).getByLabelText("Name");
+    expect(name.hasAttribute("aria-describedby")).toBe(false);
+    type(name, "work");
+    expect(described(name).map((node) => node?.textContent)).toEqual(["replaces file scope work"]);
+    type(name, "corp");
+    expect(described(name).map((node) => node?.textContent)).toEqual([IGNORED_NOTE]);
+    type(name, "other");
+    expect(name.hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("points the Name input at the server's skipped note", async () => {
+    render(snapshot({ uiScopes: [uiScope()], skipped: ["docs"] }));
+    const name = within(await screen.findByRole("group", { name: "docs" })).getByLabelText("Name");
+    expect(described(name).map((node) => node?.textContent)).toEqual([IGNORED_NOTE]);
+  });
+
+  it("points every directory input at the hint", async () => {
+    render(snapshot({ uiScopes: [uiScope({ paths: ["/a", "/b"] })] }));
+    const group = await screen.findByRole("group", { name: "docs" });
+    for (const label of ["Directory 1", "Directory 2"]) {
+      expect(described(within(group).getByLabelText(label)).map((node) => node?.textContent)).toEqual([
+        "Absolute or ~/…",
+      ]);
+    }
+  });
+
+  it("points Extra patterns at its hint", async () => {
+    render(snapshot({ uiScopes: [uiScope()] }));
+    const patterns = within(await screen.findByRole("group", { name: "docs" })).getByLabelText("Extra patterns");
+    expect(described(patterns).map((node) => node?.textContent)).toEqual([
+      "Globs such as docs-*, comma-separated",
+    ]);
+  });
+
+  it("builds checkbox ids from the position, not from the skill name", async () => {
+    render(snapshot({ uiScopes: [uiScope()], skills: [{ name: "we ird:name", description: "d" }] }));
+    const box = within(await screen.findByRole("group", { name: "docs" })).getByRole("checkbox");
+    expect(box.id).toMatch(/-skill-0$/);
+    expect(box.id).not.toContain("we ird");
+  });
+});
+
+describe("size limits", () => {
+  const scopes = (count: number) =>
+    Array.from({ length: count }, (_, index) => uiScope({ name: `s${index}` }));
+
+  it("disables Add scope at 32 scopes and enables it below", async () => {
+    render(snapshot({ uiScopes: scopes(31) }));
+    const add = (await screen.findByRole("button", { name: "Add scope" })) as HTMLButtonElement;
+    expect(add.disabled).toBe(false);
+    fireEvent.click(add);
+    expect(add.disabled).toBe(true);
+  });
+
+  it("disables Add directory at 16 rows and enables it below", async () => {
+    render(snapshot({ uiScopes: [uiScope({ paths: Array.from({ length: 15 }, (_, i) => `/p${i}`) })] }));
+    const group = await screen.findByRole("group", { name: "docs" });
+    const add = within(group).getByRole("button", { name: "Add directory" }) as HTMLButtonElement;
+    expect(add.disabled).toBe(false);
+    fireEvent.click(add);
+    expect(add.disabled).toBe(true);
+    fireEvent.click(within(group).getByRole("button", { name: "Remove directory 16 from docs" }));
+    expect(add.disabled).toBe(false);
+  });
+
+  it("limits the name to 128 and each directory to 1024 characters", async () => {
+    render(snapshot({ uiScopes: [uiScope({ paths: ["/a", "/b"] })] }));
+    const group = await screen.findByRole("group", { name: "docs" });
+    expect(within(group).getByLabelText("Name").getAttribute("maxlength")).toBe("128");
+    expect(within(group).getByLabelText("Directory 1").getAttribute("maxlength")).toBe("1024");
+    expect(within(group).getByLabelText("Directory 2").getAttribute("maxlength")).toBe("1024");
+    expect(within(group).getByLabelText("Extra patterns").hasAttribute("maxlength")).toBe(false);
+  });
+});
