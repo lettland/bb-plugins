@@ -158,13 +158,15 @@ export function parseScopesText(
 
 /**
  * Shipped neutral scopes.json, then the private per-user file, then the already-parsed UI setting scopes.
- * A later layer replaces a scope of the same name; a setting scope keeps the replaced scope's claudeConfigDir.
+ * A later layer replaces a scope of the same name, except that a setting scope never replaces a scope
+ * that sets claudeConfigDir: it is skipped and its name is passed to `onSettingSkipped`.
  */
 export function loadScopes(
   root: string,
   userFile: string,
   home: string = homedir(),
   settingScopes: Scope[] = [],
+  onSettingSkipped?: (name: string) => void,
 ): Scope[] {
   const merged = new Map<string, Scope>();
   for (const scope of parseScopes(path.join(root, "scopes.json"), home))
@@ -172,11 +174,11 @@ export function loadScopes(
   if (existsSync(userFile))
     for (const scope of parseScopes(userFile, home)) merged.set(scope.name, scope);
   for (const scope of settingScopes) {
-    const earlier = merged.get(scope.name);
-    merged.set(
-      scope.name,
-      earlier ? { ...scope, claudeConfigDir: earlier.claudeConfigDir } : scope,
-    );
+    if (merged.get(scope.name)?.claudeConfigDir != null) {
+      onSettingSkipped?.(scope.name);
+      continue;
+    }
+    merged.set(scope.name, scope);
   }
   return [...merged.values()];
 }

@@ -345,8 +345,33 @@ describe("loadScopes", () => {
       return root;
     };
 
-    it("replaces a file scope of the same name and keeps its claudeConfigDir", () => {
-      const root = layers("setting-replace");
+    it("ignores a setting scope named like a file scope with a profile and reports the name", () => {
+      const root = layers("setting-profiled");
+      const userFile = scopesFile([
+        {
+          name: "work",
+          paths: ["/mine"],
+          skills: ["work-*"],
+          claudeConfigDir: "/opt/claude",
+        },
+      ]);
+      const skipped: string[] = [];
+      const scopes = loadScopes(
+        root,
+        userFile,
+        undefined,
+        settingScopes(settingEntry()),
+        (name) => skipped.push(name),
+      );
+      expect(skipped).toEqual(["work"]);
+      expect(scopes).toHaveLength(1);
+      expect(scopes[0].paths).toEqual(["/mine"]);
+      expect(scopes[0].patternSources).toEqual(["work-*"]);
+      expect(scopes[0].claudeConfigDir).toBe("/opt/claude");
+    });
+
+    it("ignores a profiled scope silently when no callback is given", () => {
+      const root = layers("setting-profiled-silent");
       const userFile = scopesFile([
         {
           name: "work",
@@ -356,20 +381,42 @@ describe("loadScopes", () => {
         },
       ]);
       const scopes = loadScopes(root, userFile, undefined, settingScopes(settingEntry()));
+      expect(scopes.map((s) => [s.paths, s.claudeConfigDir])).toEqual([
+        [["/mine"], "/opt/claude"],
+      ]);
+    });
+
+    it("replaces a file scope that has no profile", () => {
+      const root = layers("setting-file-plain");
+      const userFile = scopesFile([
+        { name: "work", paths: ["/mine"], skills: ["work-*"] },
+      ]);
+      const skipped: string[] = [];
+      const scopes = loadScopes(
+        root,
+        userFile,
+        undefined,
+        settingScopes(settingEntry()),
+        (name) => skipped.push(name),
+      );
+      expect(skipped).toEqual([]);
       expect(scopes).toHaveLength(1);
       expect(scopes[0].paths).toEqual(["/from-setting"]);
       expect(scopes[0].patternSources).toEqual(["ui-*"]);
-      expect(scopes[0].claudeConfigDir).toBe("/opt/claude");
+      expect(scopes[0].claudeConfigDir).toBeNull();
     });
 
-    it("replaces a shipped scope and has no profile when the earlier scope had none", () => {
+    it("replaces a shipped scope that has no profile", () => {
       const root = layers("setting-shipped");
+      const skipped: string[] = [];
       const scopes = loadScopes(
         root,
         path.join(tmp, "absent.json"),
         undefined,
         settingScopes(settingEntry()),
+        (name) => skipped.push(name),
       );
+      expect(skipped).toEqual([]);
       expect(scopes.map((s) => [s.name, s.paths, s.claudeConfigDir])).toEqual([
         ["work", ["/from-setting"], null],
       ]);

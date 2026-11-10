@@ -63,14 +63,18 @@ same `{ "scopes": [...] }` JSON as `scopes.json`. Empty means no UI scopes.
 - bb checks the value when you save it and rejects invalid JSON or an invalid
   scope. A stored value that no longer parses is ignored with a warning, and
   the other two layers stay active. `bb dir-skills status` shows the number of
-  UI scopes, or why the setting is ignored (`ui scopes: ignored — …`).
+  UI scopes, or why the setting is ignored (`ui scopes: ignored — …`). When a
+  settings change cannot apply (for example, the file is broken), status shows
+  `ui scopes: not applied — …`. Fix the file, then run
+  `bb plugin reload dir-skills`.
 - `claudeConfigDir` is file-only. The setting rejects it, and every `paths`
-  entry in the setting must be absolute or start with `~/`. A UI scope that
-  replaces a scope from a file keeps that scope's `claudeConfigDir`, so editing
-  the `work` scope in the UI does not drop its Claude profile.
+  entry in the setting must be absolute or start with `~/`. A UI scope cannot
+  replace a scope that sets `claudeConfigDir`; it is ignored with a warning,
+  and `bb dir-skills status` lists it. Edit that scope in
+  `~/.bb/dir-skills/scopes.json`.
 - Anything that can run `bb plugin config dir-skills set scopes …` can write the
-  setting without file access. This is why the setting cannot choose a Claude
-  profile.
+  setting without file access. This is why the setting cannot set a Claude
+  profile or change where a profile applies.
 - Auto-setup (see below) only checks whether `~/.bb/dir-skills/scopes.json`
   exists. On install it can add a file scope next to scopes that exist only in
   the UI.

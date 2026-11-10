@@ -104,7 +104,7 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Scopes",
       description:
-        'JSON in the same format as ~/.bb/dir-skills/scopes.json: { "scopes": [{ "name": string, "paths": string[], "skills": string[] }] }. "paths" entries must be absolute or start with "~/"; "skills" are name patterns. Precedence: the shipped scopes.json, then ~/.bb/dir-skills/scopes.json, then this setting; a scope replaces an earlier scope with the same name and keeps its Claude profile. "claudeConfigDir" is not allowed here: set it in ~/.bb/dir-skills/scopes.json.',
+        'JSON in the same format as ~/.bb/dir-skills/scopes.json: { "scopes": [{ "name": string, "paths": string[], "skills": string[] }] }. "paths" entries must be absolute or start with "~/"; "skills" are name patterns. Precedence: the shipped scopes.json, then ~/.bb/dir-skills/scopes.json, then this setting; a scope replaces an earlier scope with the same name, except a scope that sets claudeConfigDir, which only the file can change. "claudeConfigDir" is not allowed here: set it in ~/.bb/dir-skills/scopes.json. Example: {"scopes":[{"name":"docs","paths":["~/src/docs"],"skills":["docs-*"]}]}',
       experimental_multiline: true,
       experimental_schema: scopesSettingSchema,
       default: "",
@@ -128,9 +128,27 @@ export default async function plugin(bb: BbPluginApi) {
   }
   settingScopes = loadSetting((await settings.get()).scopes);
 
+  let settingSkipped: string[] = [];
+  let settingReloadError: string | null = null;
   function loadState(): void {
-    state.scopes = loadScopes(root, userScopesFile(), homedir(), settingScopes);
-    state.skills = loadSkills(root, state.scopes);
+    const skipped: string[] = [];
+    const scopes = loadScopes(
+      root,
+      userScopesFile(),
+      homedir(),
+      settingScopes,
+      (name) => skipped.push(name),
+    );
+    const skills = loadSkills(root, scopes);
+    state.scopes = scopes;
+    state.skills = skills;
+    settingSkipped = skipped;
+    settingReloadError = null;
+    for (const name of skipped) {
+      bb.log.warn(
+        `Scopes setting: scope "${name}" ignored: a scope with a Claude profile can only be changed in ~/.bb/dir-skills/scopes.json`,
+      );
+    }
     bb.log.info(
       `loaded ${state.skills.length} skill(s), ${state.scopes.length} scope(s): ` +
         state.scopes.map((s) => `${s.name} -> ${s.paths.join(", ")}`).join("; "),
@@ -153,8 +171,9 @@ export default async function plugin(bb: BbPluginApi) {
     } catch (error) {
       settingScopes = previous.scopes;
       settingError = previous.error;
+      settingReloadError = (error as Error).message;
       bb.log.warn(
-        `scopes reload failed, keeping the previous scopes: ${(error as Error).message}`,
+        `scopes reload failed, keeping the previous scopes: ${settingReloadError}; fix the file, then run bb plugin reload dir-skills`,
       );
     }
   });
@@ -295,6 +314,8 @@ export default async function plugin(bb: BbPluginApi) {
           userScopesLoaded: existsSync(userScopesFile()),
           settingScopes: settingScopes.length,
           settingError,
+          settingSkipped,
+          settingReloadError,
           autoSetup: (await bb.storage.kv.get<SetupRecord>(SETUP_RECORD_KEY)) ?? null,
           scopes: state.scopes.map((s) => ({
             name: s.name,
@@ -312,12 +333,17 @@ export default async function plugin(bb: BbPluginApi) {
         const lines = [
           `plugin root: ${root}`,
           `user scopes: ${payload.userScopesFile}${payload.userScopesLoaded ? "" : " (absent)"}`,
-          settingError === null
-            ? `ui scopes: ${settingScopes.length} (Scopes setting)`
-            : `ui scopes: ignored — ${settingError}`,
-          "",
-          "scopes:",
+          settingReloadError !== null
+            ? `ui scopes: not applied — ${settingReloadError}; fix the file, then run bb plugin reload dir-skills`
+            : settingError === null
+              ? `ui scopes: ${settingScopes.length} (Scopes setting)`
+              : `ui scopes: ignored — ${settingError}`,
         ];
+        if (settingSkipped.length > 0)
+          lines.push(
+            `ui scopes skipped (profile scopes are file-only): ${settingSkipped.join(", ")}`,
+          );
+        lines.push("", "scopes:");
         for (const s of state.scopes)
           lines.push(
             `  ${s.name}: ${s.paths.join(", ")}  ->  ${s.patternSources.join(", ")}` +
