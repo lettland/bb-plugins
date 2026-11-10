@@ -18,6 +18,8 @@ import {
 import {
   loadScopes,
   normalizeDir,
+  parseScopesText,
+  scopesSettingSchema,
   selectSkills,
   type Scope,
   type SkillInfo,
@@ -97,8 +99,37 @@ export default async function plugin(bb: BbPluginApi) {
     scopes: [],
     skills: [],
   };
+  const settings = bb.settings.define({
+    scopes: {
+      type: "string",
+      label: "Scopes",
+      description:
+        'JSON in the same format as ~/.bb/dir-skills/scopes.json: { "scopes": [{ "name": string, "paths": string[], "skills": string[] }] }. "paths" entries must be absolute or start with "~/"; "skills" are name patterns. Precedence: the shipped scopes.json, then ~/.bb/dir-skills/scopes.json, then this setting; a scope replaces an earlier scope with the same name and keeps its Claude profile. "claudeConfigDir" is not allowed here: set it in ~/.bb/dir-skills/scopes.json.',
+      experimental_multiline: true,
+      experimental_schema: scopesSettingSchema,
+      default: "",
+    },
+  });
+
+  let settingScopes: Scope[] = [];
+  let settingError: string | null = null;
+  function loadSetting(text: string): Scope[] {
+    try {
+      const scopes = parseScopesText(text, "Scopes setting", homedir(), {
+        settingLayer: true,
+      });
+      settingError = null;
+      return scopes;
+    } catch (error) {
+      settingError = (error as Error).message;
+      bb.log.warn(`Scopes setting ignored: ${settingError}`);
+      return [];
+    }
+  }
+  settingScopes = loadSetting((await settings.get()).scopes);
+
   function loadState(): void {
-    state.scopes = loadScopes(root, userScopesFile());
+    state.scopes = loadScopes(root, userScopesFile(), homedir(), settingScopes);
     state.skills = loadSkills(root, state.scopes);
     bb.log.info(
       `loaded ${state.skills.length} skill(s), ${state.scopes.length} scope(s): ` +
@@ -114,6 +145,19 @@ export default async function plugin(bb: BbPluginApi) {
     warnMissingConfigDirs(state.scopes, bb.log);
   }
   loadState();
+  settings.onChange((next) => {
+    const previous = { scopes: settingScopes, error: settingError };
+    settingScopes = loadSetting(next.scopes);
+    try {
+      loadState();
+    } catch (error) {
+      settingScopes = previous.scopes;
+      settingError = previous.error;
+      bb.log.warn(
+        `scopes reload failed, keeping the previous scopes: ${(error as Error).message}`,
+      );
+    }
+  });
 
   const setupDeps: SetupDeps = {
     home: homedir(),
@@ -249,6 +293,8 @@ export default async function plugin(bb: BbPluginApi) {
           root,
           userScopesFile: userScopesFile(),
           userScopesLoaded: existsSync(userScopesFile()),
+          settingScopes: settingScopes.length,
+          settingError,
           autoSetup: (await bb.storage.kv.get<SetupRecord>(SETUP_RECORD_KEY)) ?? null,
           scopes: state.scopes.map((s) => ({
             name: s.name,
@@ -266,6 +312,9 @@ export default async function plugin(bb: BbPluginApi) {
         const lines = [
           `plugin root: ${root}`,
           `user scopes: ${payload.userScopesFile}${payload.userScopesLoaded ? "" : " (absent)"}`,
+          settingError === null
+            ? `ui scopes: ${settingScopes.length} (Scopes setting)`
+            : `ui scopes: ignored — ${settingError}`,
           "",
           "scopes:",
         ];

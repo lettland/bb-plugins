@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { z } from "zod";
 
 export interface Scope {
   name: string;
@@ -50,14 +51,35 @@ export function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${escaped}$`);
 }
 
+export interface ParseScopesOptions {
+  /** Extra rules for the UI setting: no claudeConfigDir, and only absolute or ~/ paths. Blank text parses to no scopes. */
+  settingLayer?: boolean;
+}
+
 export function parseScopes(file: string, home: string = homedir()): Scope[] {
-  const raw = JSON.parse(readFileSync(file, "utf8")) as unknown;
+  return parseScopesText(readFileSync(file, "utf8"), file, home);
+}
+
+/** Parses `{ "scopes": [...] }` text; every error message starts with `label`. */
+export function parseScopesText(
+  text: string,
+  label: string,
+  home: string = homedir(),
+  opts: ParseScopesOptions = {},
+): Scope[] {
+  if (opts.settingLayer && text.trim() === "") return [];
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error(`${label}: not valid JSON`);
+  }
   if (
     !raw ||
     typeof raw !== "object" ||
     !Array.isArray((raw as { scopes?: unknown }).scopes)
   ) {
-    throw new Error(`${file}: expected { "scopes": [...] }`);
+    throw new Error(`${label}: expected { "scopes": [...] }`);
   }
   const scopes: Scope[] = [];
   const entries = (raw as { scopes: unknown[] }).scopes;
@@ -78,7 +100,7 @@ export function parseScopes(file: string, home: string = homedir()): Scope[] {
       !e.paths.every((p) => typeof p === "string" && p.trim() !== "")
     ) {
       throw new Error(
-        `${file}: scope "${name}" needs a non-empty "paths" array of strings`,
+        `${label}: scope "${name}" needs a non-empty "paths" array of strings`,
       );
     }
     if (
@@ -87,8 +109,24 @@ export function parseScopes(file: string, home: string = homedir()): Scope[] {
       !e.skills.every((s) => typeof s === "string" && s.trim() !== "")
     ) {
       throw new Error(
-        `${file}: scope "${name}" needs a non-empty "skills" array of name patterns`,
+        `${label}: scope "${name}" needs a non-empty "skills" array of name patterns`,
       );
+    }
+    if (opts.settingLayer) {
+      if (e.claudeConfigDir !== undefined) {
+        throw new Error(
+          `${label}: scope "${name}": "claudeConfigDir" can only be set in ~/.bb/dir-skills/scopes.json`,
+        );
+      }
+      if (
+        !(e.paths as string[]).every(
+          (p) => p.startsWith("~/") || path.isAbsolute(p),
+        )
+      ) {
+        throw new Error(
+          `${label}: scope "${name}": every "paths" entry must be absolute or start with "~/"`,
+        );
+      }
     }
     let claudeConfigDir: string | null = null;
     if (e.claudeConfigDir !== undefined) {
@@ -96,13 +134,13 @@ export function parseScopes(file: string, home: string = homedir()): Scope[] {
         typeof e.claudeConfigDir === "string" ? e.claudeConfigDir.trim() : "";
       if (dir === "" || !(dir.startsWith("~/") || path.isAbsolute(dir))) {
         throw new Error(
-          `${file}: scope "${name}" "claudeConfigDir" must be an absolute path or start with "~/"`,
+          `${label}: scope "${name}" "claudeConfigDir" must be an absolute path or start with "~/"`,
         );
       }
       claudeConfigDir = path.resolve(expandHome(dir, home));
       if (isWithin(claudeConfigDir, home)) {
         throw new Error(
-          `${file}: scope "${name}" "claudeConfigDir" must not be your home directory or one of its parents`,
+          `${label}: scope "${name}" "claudeConfigDir" must not be your home directory or one of its parents`,
         );
       }
     }
@@ -118,19 +156,39 @@ export function parseScopes(file: string, home: string = homedir()): Scope[] {
   return scopes;
 }
 
-/** Shipped neutral scopes.json plus the private per-user file; a user scope replaces a shipped one of the same name. */
+/**
+ * Shipped neutral scopes.json, then the private per-user file, then the already-parsed UI setting scopes.
+ * A later layer replaces a scope of the same name; a setting scope keeps the replaced scope's claudeConfigDir.
+ */
 export function loadScopes(
   root: string,
   userFile: string,
   home: string = homedir(),
+  settingScopes: Scope[] = [],
 ): Scope[] {
   const merged = new Map<string, Scope>();
   for (const scope of parseScopes(path.join(root, "scopes.json"), home))
     merged.set(scope.name, scope);
   if (existsSync(userFile))
     for (const scope of parseScopes(userFile, home)) merged.set(scope.name, scope);
+  for (const scope of settingScopes) {
+    const earlier = merged.get(scope.name);
+    merged.set(
+      scope.name,
+      earlier ? { ...scope, claudeConfigDir: earlier.claudeConfigDir } : scope,
+    );
+  }
   return [...merged.values()];
 }
+
+/** Validates the Scopes setting on write so a broken value never gets stored. */
+export const scopesSettingSchema = z.string().superRefine((text, ctx) => {
+  try {
+    parseScopesText(text, "Scopes setting", homedir(), { settingLayer: true });
+  } catch (error) {
+    ctx.addIssue({ code: "custom", message: (error as Error).message });
+  }
+});
 
 /** Scopes with a path that contains any of the candidate paths. */
 export function activeScopes(
