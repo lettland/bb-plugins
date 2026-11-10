@@ -629,8 +629,9 @@ test("a failed snapshot lookup rejects instead of hiding cards from the failed b
         .filter((session) => archivedIds.has(session.id) === Boolean(args.archived))
         .map((session) => (session.id === "b-7" ? { ...session, visibility: "visible" } : session));
     }
+    // Hidden sessions get no card, so the paged backfill sees them as visible.
     const offset = args.offset ?? 0;
-    return sessions.slice(offset, offset + 200);
+    return sessions.slice(offset, offset + 200).map((session) => ({ ...session, visibility: "visible" }));
   };
   const { harness, cards, rpc } = await start({ list: handler });
   await until(() => cards().length === 250);
@@ -792,4 +793,394 @@ test("a manual Move to Triage clears an old opt-out, creates or promotes the man
   await until(() => harness.inspection.sdk.callsTo("threads.list").length >= callsBefore + 2);
   await flush();
   expect(cards().map((card) => [card.thread_id, card.origin])).toStrictEqual([["fresh", "manual"], ["stale", "manual"]]);
+});
+
+// --- Stale and sub-thread cards stay out of To-do -------------------------------------------
+
+const eventCount = (db: any, taskId: string) =>
+  (db.prepare("SELECT COUNT(*) AS count FROM triage_events WHERE task_id = ?").get(taskId) as any).count as number;
+
+// A host that knows `threads`: by-id lookups answer the half asked for, and a paged list answers the live threads once.
+const worldOf = (threads: any[]) => {
+  const map = new Map<string, any>(threads.map((thread) => [thread.id, thread]));
+  const handler: ListHandler = (args) => {
+    const all = [...map.values()];
+    if (args.threadIds) {
+      return all.filter((thread) => args.threadIds!.includes(thread.id) && (thread.archivedAt !== null) === Boolean(args.archived));
+    }
+    return (args.offset ?? 0) === 0 ? all.filter((thread) => thread.archivedAt === null) : [];
+  };
+  return { map, handler };
+};
+
+// Run one backfill pass (knob off, then on) and wait until it has made `expectedCalls` list calls and settled.
+async function runPass(context: Setup, expectedCalls: number) {
+  const { harness } = context;
+  // Reconcile only judges cards created before the pass began, so let the clock move on.
+  await new Promise((resolve) => setTimeout(resolve, 3));
+  const before = harness.inspection.sdk.callsTo("threads.list").length;
+  await harness.behavior.setSettings({ autoCardThreads: false });
+  await harness.behavior.setSettings({ autoCardThreads: true });
+  await until(() => harness.inspection.sdk.callsTo("threads.list").length >= before + expectedCalls);
+  await flush();
+  await flush();
+}
+
+const idLookups = (context: Setup) =>
+  (context.harness.inspection.sdk.callsTo("threads.list") as [ListArgs][]).map(([args]) => args).filter((args) => args.threadIds);
+
+// A project lookup that blocks until released, so a card creation stays in flight.
+function gateProjects(context: Setup) {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  context.harness.inspection.sdk.stub("projects.get", async (args: { projectId: string }) => {
+    await gate;
+    return { id: args.projectId, name: `Project ${args.projectId}` };
+  });
+  return release;
+}
+
+test("a failure that arrives while the card is still being created settles the card and marks it failed", async () => {
+  const context = await start();
+  const { cardOf, emit } = context;
+  const release = gateProjects(context);
+  await emit("thread.created", { thread: thr("race-failed", { status: "pending" }) });
+  const failing = emit("thread.failed", { thread: thr("race-failed"), error: "boom" });
+  await flush();
+  expect(cardOf("race-failed")).toBeUndefined();
+  release();
+  await failing;
+  expect(cardOf("race-failed")).toMatchObject({ origin: "mirror", run_state: "failed", attention_reason: "boom" });
+  expect(cardOf("race-failed").settled_at).toBeGreaterThan(0);
+});
+
+test("a deletion that arrives while the card is still being created leaves no card", async () => {
+  const context = await start();
+  const { cardOf, cards, emit } = context;
+  const release = gateProjects(context);
+  await emit("thread.created", { thread: thr("race-deleted", { status: "pending" }) });
+  const deleting = emit("thread.deleted", { thread: thr("race-deleted") });
+  await flush();
+  release();
+  await deleting;
+  await flush();
+  expect(cardOf("race-deleted")).toBeUndefined();
+  expect(cards()).toStrictEqual([]);
+});
+
+test("active, idle, archived and unarchived events wait for the card creation in flight, then apply", async () => {
+  const context = await start();
+  const { cardOf, cards, emit } = context;
+  const cases = [
+    { event: "thread.active", extra: {}, check: (card: any) => expect(card).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null }) },
+    { event: "thread.idle", extra: { lastAssistantText: "Done" }, check: (card: any) => { expect(card.run_state).toBe("idle"); expect(card.settled_at).toBeGreaterThan(0); } },
+    { event: "thread.archived", extra: {}, check: (card: any) => expect(card.settled_at).toBeGreaterThan(0) },
+    { event: "thread.unarchived", extra: {}, check: (card: any) => expect(card.origin).toBe("mirror") },
+  ];
+  for (const { event, extra, check } of cases) {
+    const id = `wait-${event}`;
+    const release = gateProjects(context);
+    await emit("thread.created", { thread: thr(id, { status: "pending" }) });
+    const later = emit(event, { thread: thr(id, { status: "pending" }), ...extra });
+    await flush();
+    expect(cardOf(id)).toBeUndefined();
+    release();
+    await later;
+    check(cardOf(id));
+    expect(cards().filter((card) => card.thread_id === id).length).toBe(1);
+  }
+});
+
+test("a second creation announcement keeps later events waiting until the newer creation ends", async () => {
+  const { harness, cardOf, emit } = await start();
+  const releases: (() => void)[] = [];
+  harness.inspection.sdk.stub("projects.get", async (args: { projectId: string }) => {
+    await new Promise<void>((resolve) => { releases.push(resolve); });
+    return { id: args.projectId, name: args.projectId };
+  });
+  await emit("thread.created", { thread: thr("twice", { status: "pending" }) });
+  await until(() => releases.length === 1);
+  await emit("thread.created", { thread: thr("twice", { status: "pending" }) });
+  await until(() => releases.length === 2);
+  const failing = emit("thread.failed", { thread: thr("twice"), error: "boom" });
+  // The first creation ends and writes the card; the newer one is still in flight.
+  releases[0]!();
+  await until(() => cardOf("twice") !== undefined);
+  await flush();
+  expect(cardOf("twice").run_state).toBe("idle");
+  releases[1]!();
+  await failing;
+  expect(cardOf("twice")).toMatchObject({ run_state: "failed", attention_reason: "boom" });
+});
+
+test("a failed unarchive creation still rejects its own handler, and later events do not wait on it", async () => {
+  const { db, cardOf, emit } = await start();
+  db.prepare("DELETE FROM triage_stages WHERE system_role = 'intake'").run();
+  const result = await emit("thread.unarchived", { thread: thr("ua-fail") });
+  expect(result.errors.length).toBe(1);
+  expect(cardOf("ua-fail")).toBeUndefined();
+  expect((await emit("thread.idle", { thread: thr("ua-fail") })).errors).toStrictEqual([]);
+});
+
+test("events for a thread with no creation in flight are handled synchronously", async () => {
+  const { cardOf, emit, mirror } = await start();
+  await mirror(thr("sync-1", { status: "active" }));
+  await flush();
+  void emit("thread.idle", { thread: thr("sync-1"), lastAssistantText: "Done" });
+  // No await between the emit and the check: the handler did not defer.
+  expect(cardOf("sync-1")).toMatchObject({ run_state: "idle" });
+  expect(cardOf("sync-1").settled_at).toBeGreaterThan(0);
+  void emit("thread.failed", { thread: thr("sync-1"), error: "late" });
+  expect(cardOf("sync-1")).toMatchObject({ run_state: "failed", attention_reason: "late" });
+});
+
+test("child and hidden threads get no card from thread.created or thread.unarchived, and the backfill skips them", async () => {
+  const context = await start();
+  const { cards, emit, ctx, harness } = context;
+  await emit("thread.created", { thread: thr("kid", { parentThreadId: "parent-1" }) });
+  await emit("thread.created", { thread: thr("worker", { visibility: "hidden" }) });
+  await emit("thread.unarchived", { thread: thr("kid", { parentThreadId: "parent-1" }) });
+  await emit("thread.unarchived", { thread: thr("worker", { visibility: "hidden" }) });
+  await flush();
+  expect(cards()).toStrictEqual([]);
+  const { handler } = worldOf([
+    thr("kid", { createdAt: 1, parentThreadId: "parent-1" }),
+    thr("worker", { createdAt: 2, visibility: "hidden" }),
+    thr("top", { createdAt: 3 }),
+  ]);
+  ctx.list = handler;
+  await runPass(context, 2);
+  expect(cards().map((card) => card.thread_id)).toStrictEqual(["top"]);
+  expect(harness.inspection.sdk.callsTo("threads.list").length).toBeGreaterThan(0);
+});
+
+test("reconcile repairs open intake cards: a gone thread loses its card, others follow their thread's state", async () => {
+  const context = await start();
+  const { db, cardOf, cards, eventsOf, mirror } = context;
+  const ids = ["rc-gone", "rc-error", "rc-idle", "rc-archived", "rc-active", "rc-starting"];
+  for (const id of ids) await mirror(thr(id, { status: "pending" }));
+  const goneId = cardOf("rc-gone").id;
+  expect(eventsOf(goneId).length).toBe(1);
+  const { handler } = worldOf([
+    thr("rc-error", { status: "error" }),
+    thr("rc-idle", { status: "idle" }),
+    thr("rc-archived", { status: "idle", archivedAt: 9 }),
+    thr("rc-active", { status: "active" }),
+    thr("rc-starting", { status: "starting" }),
+  ]);
+  context.ctx.list = handler;
+  await runPass(context, 4);
+  expect(cardOf("rc-gone")).toBeUndefined();
+  expect(eventCount(db, goneId)).toBe(0);
+  expect(tombstones(db)).toStrictEqual([]);
+  expect(cardOf("rc-error")).toMatchObject({ run_state: "failed", attention_reason: "The assigned BB thread failed.", stage_id: "stage-todo" });
+  expect(cardOf("rc-error").settled_at).toBeGreaterThan(0);
+  expect(cardOf("rc-idle")).toMatchObject({ run_state: "idle", stage_id: "stage-todo" });
+  expect(cardOf("rc-idle").settled_at).toBeGreaterThan(0);
+  expect(cardOf("rc-archived")).toMatchObject({ run_state: "idle", stage_id: "stage-todo" });
+  expect(cardOf("rc-archived").settled_at).toBeGreaterThan(0);
+  for (const id of ["rc-active", "rc-starting"]) {
+    expect(cardOf(id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", attention_reason: null, settled_at: null });
+  }
+  expect(cards().length).toBe(5);
+});
+
+test("reconcile settles an open sub-thread or hidden-thread card in any stage, and a later thread.active does not reopen it", async () => {
+  const context = await start();
+  const { cardOf, emit, mirror, rpc } = context;
+  const intake = await mirror(thr("sub-intake", { status: "pending" }));
+  await mirror(thr("sub-progress", { status: "active" }));
+  const done = await mirror(thr("sub-done", { status: "pending" }));
+  await rpc("moveTask", { number: done.number, stageId: "stage-completed" });
+  await rpc("setTaskSettled", { number: done.number, settled: false });
+  expect(intake.settled_at).toBe(null);
+  const { handler } = worldOf([
+    thr("sub-intake", { parentThreadId: "parent-1" }),
+    thr("sub-progress", { visibility: "hidden", status: "active" }),
+    thr("sub-done", { parentThreadId: "parent-1" }),
+  ]);
+  context.ctx.list = handler;
+  await runPass(context, 4);
+  for (const id of ["sub-intake", "sub-progress", "sub-done"]) {
+    expect(cardOf(id).settled_at).toBeGreaterThan(0);
+    expect(cardOf(id).run_state).not.toBe("working");
+  }
+  expect(cardOf("sub-progress").stage_id).toBe("stage-progress");
+  expect(cardOf("sub-done").stage_id).toBe("stage-completed");
+  const before = { ...cardOf("sub-progress") };
+  await emit("thread.active", { thread: thr("sub-progress", { visibility: "hidden", status: "active", title: "Changed" }) });
+  await emit("thread.active", { thread: thr("sub-intake", { parentThreadId: "parent-1", status: "active" }) });
+  expect(cardOf("sub-progress")).toStrictEqual(before);
+  expect(cardOf("sub-intake").settled_at).toBeGreaterThan(0);
+});
+
+test("reconcile looks threads up in chunks of 200 with both halves and hidden threads included", async () => {
+  const context = await start();
+  const { cards, cardOf } = context;
+  const sessions = Array.from({ length: 250 }, (_, index) => thr(`big-${index + 1}`, { createdAt: index + 1, status: "pending" }));
+  const { handler } = worldOf(sessions);
+  context.ctx.list = handler;
+  // First pass cards them (no candidates yet: 250 cards are created after it began).
+  await runPass(context, 2);
+  expect(cards().length).toBe(250);
+  expect(idLookups(context)).toStrictEqual([]);
+  await runPass(context, 6);
+  const lookups = idLookups(context);
+  expect(lookups.map((args) => args.threadIds!.length).sort((left, right) => left - right)).toStrictEqual([50, 50, 200, 200]);
+  expect(lookups.filter((args) => args.archived === true).length).toBe(2);
+  for (const args of lookups) expect(args).toMatchObject({ includeHidden: true, limit: 200 });
+  expect(cardOf("big-1")).toMatchObject({ stage_id: "stage-todo", settled_at: null });
+  expect(cards().length).toBe(250);
+});
+
+test("reconcile leaves a card created after the pass began alone", async () => {
+  const context = await start();
+  const { harness, cardOf, mirror } = context;
+  await mirror(thr("old-gone", { status: "pending" }));
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const { handler } = worldOf([]);
+  context.ctx.list = async (args) => {
+    if (!args.threadIds && (args.offset ?? 0) === 0) await gate;
+    return handler(args) as any;
+  };
+  await new Promise((resolve) => setTimeout(resolve, 3));
+  await harness.behavior.setSettings({ autoCardThreads: false });
+  await harness.behavior.setSettings({ autoCardThreads: true });
+  await until(() => harness.inspection.sdk.callsTo("threads.list").length >= 1);
+  // Born while the pass is paging; the host does not list it, so it would look gone.
+  await new Promise((resolve) => setTimeout(resolve, 3));
+  await mirror(thr("born-during", { status: "pending" }));
+  release();
+  await until(() => cardOf("old-gone") === undefined);
+  expect(cardOf("born-during")).toMatchObject({ origin: "mirror", settled_at: null });
+});
+
+test("a failed by-id lookup changes nothing and warns", async () => {
+  const context = await start();
+  const { harness, cardOf, mirror } = context;
+  await mirror(thr("lk-gone", { status: "pending" }));
+  await mirror(thr("lk-idle", { status: "pending" }));
+  const before = { gone: { ...cardOf("lk-gone") }, idle: { ...cardOf("lk-idle") } };
+  const { handler } = worldOf([thr("lk-idle", { status: "idle" })]);
+  context.ctx.list = (args) => {
+    if (args.threadIds && !args.archived) throw new Error("Lookup down");
+    return handler(args);
+  };
+  await runPass(context, 4);
+  expect(harness.logEntries.some((entry: any) => entry.level === "warn" && entry.message.includes("Lookup down"))).toBe(true);
+  expect(cardOf("lk-gone")).toStrictEqual(before.gone);
+  expect(cardOf("lk-idle")).toStrictEqual(before.idle);
+});
+
+test("a pass that ended on a failed page does not reconcile", async () => {
+  const context = await start();
+  const { harness, cardOf, mirror } = context;
+  await mirror(thr("pg-gone", { status: "pending" }));
+  context.ctx.list = (args) => {
+    if (args.offset === 0) return [thr("pg-a", { createdAt: 1 })];
+    throw new Error("Host busy");
+  };
+  await runPass(context, 2);
+  await until(() => harness.logEntries.some((entry: any) => entry.level === "warn" && entry.message.includes("Host busy")));
+  await flush();
+  expect(idLookups(context)).toStrictEqual([]);
+  expect(cardOf("pg-gone")).toMatchObject({ settled_at: null });
+});
+
+test("turning the knob off during the pass, in the page or in the lookup, stops reconcile before any write", async () => {
+  const context = await start();
+  const { harness, cardOf, mirror } = context;
+  await mirror(thr("ko-gone", { status: "pending" }));
+  // Off while the page is fetched: the pass ends without a lookup.
+  context.ctx.list = async (args) => {
+    if (args.offset === 0) await harness.behavior.setSettings({ autoCardThreads: false });
+    return [];
+  };
+  await new Promise((resolve) => setTimeout(resolve, 3));
+  await harness.behavior.setSettings({ autoCardThreads: false });
+  await harness.behavior.setSettings({ autoCardThreads: true });
+  await until(() => harness.inspection.sdk.callsTo("threads.list").length >= 1);
+  await flush();
+  expect(idLookups(context)).toStrictEqual([]);
+  expect(cardOf("ko-gone")).toBeDefined();
+  // Off while the by-id lookup runs: the lookup happened, but nothing is written.
+  context.ctx.list = async (args) => {
+    if (args.threadIds && !args.archived) await harness.behavior.setSettings({ autoCardThreads: false });
+    return [];
+  };
+  await harness.behavior.setSettings({ autoCardThreads: false });
+  await runPass(context, 3);
+  expect(idLookups(context).length).toBe(2);
+  expect(cardOf("ko-gone")).toMatchObject({ origin: "mirror", settled_at: null });
+});
+
+test("reconcile leaves a card alone when an event changed it after it was read", async () => {
+  const context = await start();
+  const { db, cardOf, mirror } = context;
+  await mirror(thr("cas-gone", { status: "pending" }));
+  await mirror(thr("cas-idle", { status: "pending" }));
+  const { handler } = worldOf([thr("cas-idle", { status: "idle" })]);
+  context.ctx.list = (args) => {
+    // An event lands between the read of the candidates and the writes.
+    if (args.threadIds && !args.archived) db.prepare("UPDATE triage_tasks SET updated_at = updated_at + 1").run();
+    return handler(args);
+  };
+  const before = { gone: { ...cardOf("cas-gone") }, idle: { ...cardOf("cas-idle") } };
+  await runPass(context, 4);
+  expect(cardOf("cas-gone")).toStrictEqual({ ...before.gone, updated_at: before.gone.updated_at + 1 });
+  expect(cardOf("cas-idle")).toStrictEqual({ ...before.idle, updated_at: before.idle.updated_at + 1 });
+  expect(eventCount(db, before.gone.id)).toBe(1);
+});
+
+test("reconcile keeps the stage of a mirror card the user moved out of intake", async () => {
+  const context = await start();
+  const { cardOf, mirror, rpc } = context;
+  for (const id of ["mv-idle", "mv-error", "mv-active"]) {
+    const card = await mirror(thr(id, { status: "pending" }));
+    await rpc("moveTask", { number: card.number, stageId: "stage-progress" });
+  }
+  const before = ["mv-idle", "mv-error", "mv-active"].map((id) => ({ ...cardOf(id) }));
+  const { handler } = worldOf([
+    thr("mv-idle", { status: "idle" }),
+    thr("mv-error", { status: "error" }),
+    thr("mv-active", { status: "active" }),
+  ]);
+  context.ctx.list = handler;
+  await runPass(context, 4);
+  expect(["mv-idle", "mv-error", "mv-active"].map((id) => cardOf(id))).toStrictEqual(before);
+});
+
+test("reconcile never touches manual cards, queued, scheduled or imported", async () => {
+  const context = await start();
+  const { cardOf, cards, mirror, importManual, rpc } = context;
+  const request = {
+    projectId: "project-1", providerId: "codex", model: "test-model", reasoningLevel: "none",
+    permissionMode: "auto", executionInputSources: {},
+    environment: { type: "reuse", environmentId: "environment-1" },
+    input: [{ type: "text", text: "Do work" }],
+  };
+  await rpc("createTask", { title: "Queued", description: "Do work", stageId: "stage-todo", scheduledAt: null, runNow: false, request });
+  await rpc("createTask", { title: "Scheduled", description: "Do work", stageId: "stage-todo", scheduledAt: Date.now() + 3_600_000, runNow: false, request });
+  await importManual(thr("man-gone", { status: "idle" }));
+  await mirror(thr("man-mirror-gone", { status: "pending" }));
+  const manualBefore = cards().filter((card) => card.origin === "manual").map((card) => ({ ...card }));
+  expect(manualBefore.length).toBe(3);
+  const { handler } = worldOf([]);
+  context.ctx.list = handler;
+  await runPass(context, 3);
+  expect(cardOf("man-mirror-gone")).toBeUndefined();
+  expect(cards().filter((card) => card.origin === "manual")).toStrictEqual(manualBefore);
+});
+
+test("reconcile leaves the card of a pending or stopping thread alone", async () => {
+  const context = await start();
+  const { cardOf, mirror } = context;
+  await mirror(thr("ps-pending", { status: "pending" }));
+  await mirror(thr("ps-stopping", { status: "pending" }));
+  const before = [{ ...cardOf("ps-pending") }, { ...cardOf("ps-stopping") }];
+  const { handler } = worldOf([thr("ps-pending", { status: "pending" }), thr("ps-stopping", { status: "stopping" })]);
+  context.ctx.list = handler;
+  await runPass(context, 4);
+  expect([cardOf("ps-pending"), cardOf("ps-stopping")]).toStrictEqual(before);
 });

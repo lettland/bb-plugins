@@ -1030,8 +1030,10 @@ test("the settle-piled-up-mirror-cards migration settles idle and failed mirror 
       const insert = db.prepare(
         `INSERT INTO triage_tasks (id, number, title, stage_id, project_id, project_name, machine_name, provider_id, model,
           request_json, thread_id, run_state, origin, settled_at, created_at, updated_at)
-         VALUES (?, ?, ?, 'stage-todo', 'project-1', 'Project', 'Machine', 'codex', 'm', 'null', ?, ?, ?, ?, 1, 1)`,
+         VALUES (?, ?, ?, 'stage-todo', 'project-1', 'Project', 'Machine', 'codex', 'm', 'null', ?, ?, ?, ?, 9999999999999, 1)`,
       );
+      // created_at lies past any backfill pass, so the reconcile step (which deletes
+      // mirror cards whose session the host no longer lists) leaves these seeded cards alone.
       insert.run("m-idle", 901, "idle mirror", "t-idle", "idle", "mirror", null);
       insert.run("m-failed", 902, "failed mirror", "t-failed", "failed", "mirror", null);
       insert.run("m-working", 903, "working mirror", "t-working", "working", "mirror", null);
