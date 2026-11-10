@@ -1039,8 +1039,9 @@ export default async function plugin(bb: BbPluginApi) {
    * Repair open mirror cards whose thread events never arrived (a creation that
    * raced its events, a thread deleted while the plugin was unloaded, a child
    * deleted with its parent). Each card is judged against a fresh lookup by id
-   * and written only if no event touched it since it was read. If the lookup
-   * fails nothing is changed. The caller publishes afterwards.
+   * and written only if no event touched it since it was read. If the list
+   * lookup fails nothing is changed; a card whose thread threads.get cannot
+   * confirm is settled, never deleted. The caller publishes afterwards.
    */
   const reconcileMirrorCards = async (passStart: number) => {
     const candidates = db
@@ -1059,7 +1060,7 @@ export default async function plugin(bb: BbPluginApi) {
       batches.push(bb.sdk.threads.list({ threadIds: chunk, includeHidden: true, limit: THREAD_LIST_BATCH }));
       batches.push(bb.sdk.threads.list({ threadIds: chunk, archived: true, includeHidden: true, limit: THREAD_LIST_BATCH }));
     }
-    const found = new Map<string, ThreadListItem>();
+    const found = new Map<string, Pick<CardThread, "status" | "archivedAt" | "deletedAt" | "parentThreadId" | "visibility">>();
     try {
       for (const batch of await Promise.all(batches)) {
         for (const listed of batch) found.set(listed.id, listed);
@@ -1068,12 +1069,24 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`Triage could not look up sessions to reconcile: ${errorMessage(error)}`);
       return;
     }
+    // A successful list can still leave a live thread out, so absence alone never
+    // deletes a card: threads.get must show the thread deleted. A thread it
+    // returns live is judged like a listed one; one it cannot answer for is
+    // unconfirmed, and its card is settled instead.
+    const missing = [...new Set(threadIds.filter((threadId) => !found.has(threadId)))];
+    const answers = await Promise.allSettled(missing.map((threadId) => bb.sdk.threads.get({ threadId })));
+    answers.forEach((answer, index) => {
+      if (answer.status === "fulfilled" && answer.value) found.set(missing[index], answer.value);
+      else if (answer.status === "rejected") {
+        bb.log.warn(`Triage could not confirm session ${missing[index]}; settling its card: ${errorMessage(answer.reason)}`);
+      }
+    });
     // The writes below run without an await, so this check covers every one of them.
     if (!mirroringWanted()) return;
     const intake = db.prepare("SELECT id FROM triage_stages WHERE system_role = 'intake'").get() as { id: string } | undefined;
     for (const card of candidates) {
       const thread = found.get(card.thread_id);
-      if (!thread) {
+      if (thread && thread.deletedAt !== null) {
         deleteMirrorCard(card.id, card.updated_at);
         continue;
       }
@@ -1083,7 +1096,9 @@ export default async function plugin(bb: BbPluginApi) {
         set: "settled_at = ?, run_state = CASE WHEN run_state = 'working' THEN 'idle' ELSE run_state END",
         values: [now],
       };
-      if (!isMirrorable(thread)) {
+      if (!thread) {
+        update = settle;
+      } else if (!isMirrorable(thread)) {
         update = settle;
       } else if (card.stage_id === intake?.id) {
         if (thread.archivedAt !== null) update = settle;
@@ -1101,6 +1116,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
       if (!update) continue;
+      // `set` is always one of the literal fragments above; values stay bound parameters.
       db.prepare(`UPDATE triage_tasks SET ${update.set}, updated_at = ? WHERE id = ? AND updated_at = ?`)
         .run(...update.values, now, card.id, card.updated_at);
     }
@@ -1714,9 +1730,9 @@ export default async function plugin(bb: BbPluginApi) {
     // A manual card keeps whatever state the user gave it. A new mirror card
     // starts settled only when its session is idle or failed. An existing one
     // reopens only for a running session; otherwise it keeps its settled state
-    // until thread.active reopens it.
+    // until thread.active reopens it. A sub-thread or hidden session's card stays settled.
     if (task?.origin === "mirror") {
-      if (thread.status === "active" || thread.status === "starting") {
+      if (isMirrorable(thread) && (thread.status === "active" || thread.status === "starting")) {
         db.prepare("UPDATE triage_tasks SET settled_at = NULL, updated_at = ? WHERE id = ?").run(Date.now(), task.id);
       }
       publishSoon();

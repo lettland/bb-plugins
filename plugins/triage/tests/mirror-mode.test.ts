@@ -954,14 +954,27 @@ test("child and hidden threads get no card from thread.created or thread.unarchi
   expect(harness.inspection.sdk.callsTo("threads.list").length).toBeGreaterThan(0);
 });
 
-test("reconcile repairs open intake cards: a gone thread loses its card, others follow their thread's state", async () => {
+test("reconcile repairs open intake cards: a confirmed-deleted thread loses its card, others follow their thread's state", async () => {
   const context = await start();
-  const { db, cardOf, cards, eventsOf, mirror } = context;
-  const ids = ["rc-gone", "rc-error", "rc-idle", "rc-archived", "rc-active", "rc-starting"];
+  const { db, cardOf, cards, eventsOf, harness, known, mirror } = context;
+  const ids = ["rc-gone", "rc-softdeleted", "rc-unanswered", "rc-getfails", "rc-omitted", "rc-error", "rc-idle", "rc-archived", "rc-active", "rc-starting"];
   for (const id of ids) await mirror(thr(id, { status: "pending" }));
   const goneId = cardOf("rc-gone").id;
+  const unansweredId = cardOf("rc-unanswered").id;
   expect(eventsOf(goneId).length).toBe(1);
+  // The list leaves out rc-gone, rc-unanswered, rc-getfails and rc-omitted;
+  // threads.get then answers: rc-gone deleted, rc-omitted live and active,
+  // rc-unanswered with nothing, rc-getfails with an error.
+  known.set("rc-gone", thr("rc-gone", { deletedAt: 9 }));
+  known.set("rc-omitted", thr("rc-omitted", { status: "active" }));
+  known.delete("rc-unanswered");
+  const realGet = known.get.bind(known);
+  harness.inspection.sdk.stub("threads.get", async (args: { threadId: string }) => {
+    if (args.threadId === "rc-getfails") throw new Error("Host unavailable");
+    return realGet(args.threadId);
+  });
   const { handler } = worldOf([
+    thr("rc-softdeleted", { status: "idle", deletedAt: 9 }),
     thr("rc-error", { status: "error" }),
     thr("rc-idle", { status: "idle" }),
     thr("rc-archived", { status: "idle", archivedAt: 9 }),
@@ -970,19 +983,31 @@ test("reconcile repairs open intake cards: a gone thread loses its card, others 
   ]);
   context.ctx.list = handler;
   await runPass(context, 4);
+  expect((harness.inspection.sdk.callsTo("threads.get") as [{ threadId: string }][]).map(([args]) => args.threadId).sort())
+    .toStrictEqual(["rc-getfails", "rc-gone", "rc-omitted", "rc-unanswered"]);
   expect(cardOf("rc-gone")).toBeUndefined();
   expect(eventCount(db, goneId)).toBe(0);
+  expect(cardOf("rc-softdeleted")).toBeUndefined();
   expect(tombstones(db)).toStrictEqual([]);
+  // Not confirmed deleted: the card and its history stay, settled off the board.
+  for (const id of ["rc-unanswered", "rc-getfails"]) {
+    expect(cardOf(id)).toMatchObject({ stage_id: "stage-todo", run_state: "idle" });
+    expect(cardOf(id).settled_at).toBeGreaterThan(0);
+  }
+  expect(eventCount(db, unansweredId)).toBe(1);
+  expect(harness.logEntries.some((entry: any) =>
+    entry.level === "warn" && entry.message.includes("could not confirm session rc-getfails"))).toBe(true);
+  expect(harness.logEntries.some((entry: any) => entry.message.includes("could not confirm session rc-unanswered"))).toBe(false);
   expect(cardOf("rc-error")).toMatchObject({ run_state: "failed", attention_reason: "The assigned BB thread failed.", stage_id: "stage-todo" });
   expect(cardOf("rc-error").settled_at).toBeGreaterThan(0);
   expect(cardOf("rc-idle")).toMatchObject({ run_state: "idle", stage_id: "stage-todo" });
   expect(cardOf("rc-idle").settled_at).toBeGreaterThan(0);
   expect(cardOf("rc-archived")).toMatchObject({ run_state: "idle", stage_id: "stage-todo" });
   expect(cardOf("rc-archived").settled_at).toBeGreaterThan(0);
-  for (const id of ["rc-active", "rc-starting"]) {
+  for (const id of ["rc-active", "rc-starting", "rc-omitted"]) {
     expect(cardOf(id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", attention_reason: null, settled_at: null });
   }
-  expect(cards().length).toBe(5);
+  expect(cards().length).toBe(8);
 });
 
 test("reconcile settles an open sub-thread or hidden-thread card in any stage, and a later thread.active does not reopen it", async () => {
@@ -1012,6 +1037,11 @@ test("reconcile settles an open sub-thread or hidden-thread card in any stage, a
   await emit("thread.active", { thread: thr("sub-intake", { parentThreadId: "parent-1", status: "active" }) });
   expect(cardOf("sub-progress")).toStrictEqual(before);
   expect(cardOf("sub-intake").settled_at).toBeGreaterThan(0);
+  // thread.unarchived does not reopen it either.
+  await emit("thread.unarchived", { thread: thr("sub-intake", { parentThreadId: "parent-1", status: "active" }) });
+  await emit("thread.unarchived", { thread: thr("sub-progress", { visibility: "hidden", status: "active" }) });
+  expect(cardOf("sub-intake").settled_at).toBeGreaterThan(0);
+  expect(cardOf("sub-progress")).toStrictEqual(before);
 });
 
 test("reconcile looks threads up in chunks of 200 with both halves and hidden threads included", async () => {
@@ -1035,8 +1065,9 @@ test("reconcile looks threads up in chunks of 200 with both halves and hidden th
 
 test("reconcile leaves a card created after the pass began alone", async () => {
   const context = await start();
-  const { harness, cardOf, mirror } = context;
+  const { harness, cardOf, known, mirror } = context;
   await mirror(thr("old-gone", { status: "pending" }));
+  known.set("old-gone", thr("old-gone", { deletedAt: 9 }));
   let release: () => void = () => {};
   const gate = new Promise<void>((resolve) => { release = resolve; });
   const { handler } = worldOf([]);
@@ -1060,6 +1091,7 @@ test("a failed by-id lookup changes nothing and warns", async () => {
   const context = await start();
   const { harness, cardOf, mirror } = context;
   await mirror(thr("lk-gone", { status: "pending" }));
+  context.known.set("lk-gone", thr("lk-gone", { deletedAt: 9 }));
   await mirror(thr("lk-idle", { status: "pending" }));
   const before = { gone: { ...cardOf("lk-gone") }, idle: { ...cardOf("lk-idle") } };
   const { handler } = worldOf([thr("lk-idle", { status: "idle" })]);
@@ -1077,6 +1109,7 @@ test("a pass that ended on a failed page does not reconcile", async () => {
   const context = await start();
   const { harness, cardOf, mirror } = context;
   await mirror(thr("pg-gone", { status: "pending" }));
+  context.known.set("pg-gone", thr("pg-gone", { deletedAt: 9 }));
   context.ctx.list = (args) => {
     if (args.offset === 0) return [thr("pg-a", { createdAt: 1 })];
     throw new Error("Host busy");
@@ -1092,6 +1125,7 @@ test("turning the knob off during the pass, in the page or in the lookup, stops 
   const context = await start();
   const { harness, cardOf, mirror } = context;
   await mirror(thr("ko-gone", { status: "pending" }));
+  context.known.set("ko-gone", thr("ko-gone", { deletedAt: 9 }));
   // Off while the page is fetched: the pass ends without a lookup.
   context.ctx.list = async (args) => {
     if (args.offset === 0) await harness.behavior.setSettings({ autoCardThreads: false });
@@ -1119,6 +1153,7 @@ test("reconcile leaves a card alone when an event changed it after it was read",
   const context = await start();
   const { db, cardOf, mirror } = context;
   await mirror(thr("cas-gone", { status: "pending" }));
+  context.known.set("cas-gone", thr("cas-gone", { deletedAt: 9 }));
   await mirror(thr("cas-idle", { status: "pending" }));
   const { handler } = worldOf([thr("cas-idle", { status: "idle" })]);
   context.ctx.list = (args) => {
@@ -1153,7 +1188,7 @@ test("reconcile keeps the stage of a mirror card the user moved out of intake", 
 
 test("reconcile never touches manual cards, queued, scheduled or imported", async () => {
   const context = await start();
-  const { cardOf, cards, mirror, importManual, rpc } = context;
+  const { cardOf, cards, known, mirror, importManual, rpc } = context;
   const request = {
     projectId: "project-1", providerId: "codex", model: "test-model", reasoningLevel: "none",
     permissionMode: "auto", executionInputSources: {},
@@ -1164,6 +1199,7 @@ test("reconcile never touches manual cards, queued, scheduled or imported", asyn
   await rpc("createTask", { title: "Scheduled", description: "Do work", stageId: "stage-todo", scheduledAt: Date.now() + 3_600_000, runNow: false, request });
   await importManual(thr("man-gone", { status: "idle" }));
   await mirror(thr("man-mirror-gone", { status: "pending" }));
+  known.set("man-mirror-gone", thr("man-mirror-gone", { deletedAt: 9 }));
   const manualBefore = cards().filter((card) => card.origin === "manual").map((card) => ({ ...card }));
   expect(manualBefore.length).toBe(3);
   const { handler } = worldOf([]);
