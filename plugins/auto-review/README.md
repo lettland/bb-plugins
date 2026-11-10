@@ -102,38 +102,65 @@ It ships enabled (opt-out).
 
     A sweep does leave out an uncommitted path that **only a sibling's command changed**, when
     all of this holds. Any missing or incomplete evidence keeps the path with this thread:
-    1. The path's local `lstat` change time (ctime) falls inside the window of an opaque command
-       of a sibling thread that was read in full. An opaque command makes that sibling's own turn
+    1. The path's local `lstat` change time (ctime) and modification time (mtime) both fall inside
+       a window of an opaque command of a sibling thread that was read in full (a `chmod` moves
+       only the ctime, and `touch` can set the mtime to anything). An opaque command makes that sibling's own turn
        a sweep, so its own review still claims the path. The sibling, or the root of its family,
        must be reviewable (top-level, visible, not archived, not from a plugin, with an
        environment), and the sibling must be in that root's family (an attached thread is not).
        The window is the command's start and end, one second wider on each side (git's author
        date has whole seconds); a command with no recorded end gives no window, even while it still
-       runs, since until it ends nothing of the sibling's own review covers its write.
-    2. The change time falls outside every window of a row of this thread's family that could
+       runs, since until it ends nothing of the sibling's own review covers its write. A done
+       `tool` or `file-change` row of a sibling records no end (the SDK's `file-change` row has no
+       `completedAt`, and a tool row's can be null), so it ends when the next row of its thread
+       began; a sibling row with no next row gives no window. This bound only narrows the
+       evidence. A sibling row of another turn than its newest work row's (work rows carry a
+       `turnId`) is stale and gives no window, since its own review claims nothing from it; when
+       no row has a turn id, a row that began before its newest turn row is stale, and with no
+       turn row either, one that began before this thread's own turn.
+    2. Neither time falls inside any window of a row of this thread's family that could
        write (an opaque command, a targeted write, a tool that is not read-only, a file-change
        row), each one second wider again on both sides, two in total. A row with no recorded end
-       runs until now. Read-only rows (`Read`, `Grep`, `bb thread wait`) do not count. The family's
+       runs until now. That includes a done `tool` row whose `completedAt` is null: a parallel row can
+       start before its work is over, so it is not ended by the next row. Only a `file-change`
+       row, which records no end at all, ends when the next row of its thread began (and runs
+       until now when there is none). Read-only rows (`Read`, `Grep`, `bb thread wait`) do not count. The family's
        timelines are read back to 30 minutes before the turn.
     3. The evidence is complete: the turn start is known, the family's timelines and the
        sibling's were read in full, this thread's turn rows are not truncated, the checkout path
        is known, and every family row that could write has a window.
     4. The file is a regular file below the checkout root (its directory resolves under the real
-       root), not a symlink, and the sha256 of its bytes (16 hex characters) equals the hash of
+       root), not a symlink (it is opened without following links, and the open handle must be a
+       regular file), and the sha256 of its bytes (16 hex characters) equals the hash of
        the content the working tree shows (the read the turn-start snapshot makes). A deleted,
        binary, unreadable or changed-since file keeps the path. A directory entry is expanded to
-       its files (at most 200), and is left out only if every file passes. At most 200 paths are
-       checked; the rest stay.
+       its files, and is left out only if every file passes; the walk stops, and the path stays,
+       after 200 entries (files and directories alike) or at more than 32 levels of directories
+       below the entry. At most 200 paths are checked; the rest stay. Where the platform has no
+       `O_NOFOLLOW`, nothing is read and the path stays.
 
     A path left out this way is `unclaimed`, and the log says so with paths only:
     `auto-review: left out of the sweep, changed only while another thread's command ran: <paths>`
-    (at most five, then a count). Residuals: a write that lands while a family command that can
-    write and a sibling's command both run is kept. A later writer moves a file's ctime (an
-    editor's format on save, a sibling's `git checkout`), and the file then follows that
-    writer's window. A hand edit is kept unless it happens during a sibling's command. A detached
-    write of this thread's own family (a forked child, `run_in_background`, a hook) is kept from
-    escaping only because a reviewable sibling's window must cover it; then the sibling reviews it,
-    not this thread.
+    (at most five, then a count). Residuals and known gaps:
+    - A write that lands while a family command that can write and a sibling's command both run
+      is kept.
+    - Only the last change to a file is seen. A file this thread wrote and a sibling's command
+      rewrote later goes to the sibling, whose review covers the whole diff. A later writer moves
+      a file's times in general (an editor's format on save, a sibling's `git checkout`), and the
+      file then follows that writer's window.
+    - A time inside a sibling's window cannot tell the sibling's write from an outside writer's
+      (a hand edit, a formatter) that landed during the same command: it is left to the sibling.
+      A hand edit outside every sibling window is kept.
+    - A deletion is always kept, so a sibling script's deletion of a file nothing names still
+      triggers this thread.
+    - `O_NOFOLLOW` guards only the last path component. A directory swapped for a link between
+      `realpath` and `open` is followed, so this is a race for someone who can already write the
+      checkout.
+    - A repo where the `diffFile` content is not byte-identical to the file on disk (a CRLF
+      conversion, a `.gitattributes` filter) keeps every path.
+    - A detached write of this thread's own family (a forked child, `run_in_background`, a hook)
+      stays with this thread unless a reviewable sibling's opaque command window covers it; if one
+      does, the sibling reviews it, not this thread.
 
   What the family ran is classified from the text of its commands, looking through `bash -c`,
   `env`, `timeout`, subshells, `$( )` and the other wrappers listed under the family side below:
@@ -146,10 +173,11 @@ It ships enabled (opt-out).
     `fetch`, `branch` with no argument or with `--show-current`, `-a`, `-v`, `--list`,
     `config --get`, `stash list`, `remote -v`) and git that only touches the index, the history or
     a remote (`add`, `commit`, `push`, `tag`, `reset` without `--hard`, `rm --cached`); `gh pr|issue|run
-    view|list|diff|checks`; `bb status|guide`, `bb thread show|log|output|wait|list|tell|spawn|archive|unarchive|stop|update`
-    and `bb thread interactions list` (they change bb's state, never a file in the checkout;
-    `bb thread spawn --promote` is opaque, since bb then switches the checkout's branch),
-    `bb memory search|get`, `bb project list|show`, `bb devkit commands` and
+    view|list|diff|checks`; `bb status|guide`, `bb thread show|log|output|wait|list|tell|archive|unarchive|stop`
+    and `bb thread interactions list` (they change bb's state, never a file in the checkout),
+    `bb thread spawn` only with `--parent-self` and neither `--parent-thread` nor `--promote`
+    (the child is then this thread's own; any other spawn makes a thread that no review of this
+    one covers, and `--promote` switches the checkout's branch), `bb memory search|get`, `bb project list|show`, `bb devkit commands` and
     `bb devkit skills list|find|show`, `bb auto-review status|show`; `ripwire` in a read mode (`--for`, `--grep`, `--expand`,
     `--callers`, `--impact`, `--uses`, `--exemplar`, `--pack-task`, `--plan-lanes`, `--from-trace`,
     `--quality-delta`); and check runs with no fix, update, output or report flag (`npm test`,
@@ -259,14 +287,25 @@ It ships enabled (opt-out).
   child is attached when its lifecycle owner is not in the family, its earliest ownership change
   has no previous parent, and its latest one names its current parent. A read that fails or is
   partial (including the page cap) keeps the child in the family; so does a child that was
-  spawned, moved away and back, or spawned, detached and attached elsewhere. What hangs below an
+  spawned, moved away and back, or spawned, detached and attached elsewhere. So does a child that
+  moved itself: if the child, or a thread below it, has a work row that runs `bb thread update`
+  (read as a command, never as text; global options before the subcommand do not hide it, and a
+  shell string nested past the depth cap counts as running it) from 30 minutes before the latest
+  ownership change on (or earlier, when that row was still running at the change), or a row that
+  can write (opaque, or a tool that is not read-only: a script or a tool can run the update with
+  no `bb` in its text) that was running at the moment of that change, it stays in the family.
+  Only the timeline pages read back to 30 minutes before the change are seen. An opaque row that ran
+  only before or after that moment does not count, so a daemon started after the attach leaves
+  the child attached. The subtree is walked through the thread list (`parentThreadId`, hidden
+  threads included, any environment) up to 200 threads; a row, a list or a subtree that cannot
+  be read in full counts as a yes. What hangs below an
   attached child is not family either, unless a family member owns it too. An attached thread
   adds nothing to the family's commands, windows or completeness, and it does not hold this
   thread's turn; only the files its own tool edits (`file-change` rows) changed are still
   claimed here. Its script and shell writes that no row names are reviewed by neither thread,
   since an attached child is not top-level and gets no review of its own, and a turn can end
-  while it still edits. The log has one line per attached child (parent, child, seq) and one per
-  failed read (child, error class).
+  while it still edits. The log has a line for each attached child found (parent, child, seq; the
+  line can repeat across walks in one evaluation) and one per failed read (child, error class).
 
   When changes exist and none were claimed, the turn stands down with the reason
   `unclaimed-changes` (`no-authorship` still means nothing changed), and `bb auto-review status`

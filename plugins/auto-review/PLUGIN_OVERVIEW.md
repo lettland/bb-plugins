@@ -29,12 +29,14 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   reviewed).
 - Claims only the thread's own changes (itself plus its bb children and owned threads; a
   thread created top-level and later attached under it, by an `ownership_change` event, is
-  not one of them, and adds only its own tool edits). In
+  not one of them, and adds only its own tool edits; a child that ran `bb thread update` itself
+  stays in). In
   exact mode, when everything the family ran was read-only or named every file it wrote, only
   the files it named count and the rest stands down as `unclaimed-changes`; when it ran
   something whose writes cannot be listed (a build, codegen, a script, an unknown command) the
   turn is a sweep, as described next (`bb` commands that change only bb's state, such as
-  `bb thread spawn`, are not such things). A sweep leaves out a path that changed only while a
+  `bb thread spawn --parent-self`, are not such things; `bb thread update` is, since it can change
+  who reviews a thread). A sweep leaves out a path that changed only while a
   reviewable sibling's opaque command ran and none of the family's commands that can write
   did, with the file's content checked on disk; any missing evidence keeps the path, and the
   README lists the rule. A sweep keeps every commit that is not a sibling's or

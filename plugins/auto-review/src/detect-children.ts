@@ -1,6 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
-import { createOwnershipReader, isAttachedChild } from "./detect-attached.js";
+import { createOwnershipReader, isAttachedChild, subtreeIds } from "./detect-attached.js";
 import type { ThreadListEntry } from "./detect-workspace.js";
 
 /**
@@ -36,7 +36,8 @@ async function spawnedDescendants(
         // Defence if the list filter is ever ignored: a row that isn't
         // actually this parent's child must not be walked as one.
         child.parentThreadId !== parentId ||
-        (await isAttachedChild(bb, ownership, child, visited))
+        // This walk follows `parentThreadId` links only: a child whose lifecycle owner is family only through a lifecycle link can be attached here and family in `threadMembership`.
+        (await isAttachedChild(bb, ownership, child, visited, () => subtreeIds(bb, child.id)))
       ) {
         continue;
       }

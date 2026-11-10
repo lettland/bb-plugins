@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyText, opaqueProgram } from "./detect-claim-shell.js";
+import { classifyText, opaqueProgram, runsBbThreadUpdate } from "./detect-claim-shell.js";
 
 describe("classifyText: lookups and wrappers", () => {
   it("a command lookup runs nothing", () => {
@@ -142,5 +142,46 @@ describe("classifyText: a git command with only options", () => {
     const claims = classifyText("git -C");
     expect(claims.opaque).toBe("git");
     expect(claims.writes).toEqual([]);
+  });
+});
+
+describe("runsBbThreadUpdate: bb thread update, read as a command", () => {
+  it.each([
+    "bb thread update --self --parent-thread thr_1",
+    "bb --json thread update thr_1 --title x",
+    "vbb thread update --self --clear-parent-thread",
+    '"$BB_CLI" thread update --self --visibility hidden',
+    "timeout 5 bb thread update --self --title x",
+    "cd /w && npm test && bb thread update --self --parent-thread thr_1",
+    "sh -c 'bb thread update --self --parent-thread thr_1'",
+    "sh -c \"sh -c 'bb thread update --self'\"",
+    "bb --profile work thread update --self --parent-thread thr_1",
+    "bb --json --profile x thread update thr_1",
+  ])("%s", (text) => {
+    expect(runsBbThreadUpdate(text)).toBe(true);
+  });
+
+  it.each([
+    "bb thread show thr_1",
+    "bb thread updates thr_1",
+    "bb status",
+    "echo bb thread update",
+    "grep 'bb thread update' notes.md",
+    "git update",
+    "other thread update",
+    "FOO=1",
+    "",
+  ])("%s is not one", (text) => {
+    expect(runsBbThreadUpdate(text)).toBe(false);
+  });
+
+  it("counts a text too long to read as one", () => {
+    expect(runsBbThreadUpdate(`echo ${"x".repeat(70_000)}`)).toBe(true);
+  });
+
+  it("fails closed at the shell depth cap: a string it cannot read in full counts as running it", () => {
+    const harmless = "sh -c 'echo hi'";
+    expect(runsBbThreadUpdate(harmless, 7)).toBe(false);
+    expect(runsBbThreadUpdate(harmless, 8)).toBe(true);
   });
 });

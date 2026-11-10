@@ -410,3 +410,34 @@ export function classifyText(text: string): TextClaims {
   readText(text, reading, 0);
   return { ...reading.claims, left: reading.steps.filter(({ lasting }) => lasting) };
 }
+
+/** The names `bb` runs under: its command, the daemon's own name for it, and the variable that holds its path. */
+const BB_PROGRAMS: ReadonlySet<string> = new Set(["bb", "vbb", "$BB_CLI", "${BB_CLI}"]);
+
+/**
+ * Whether a shell text runs `bb thread update`, which can change a thread's
+ * parent or visibility. It is read as commands: wrappers and the strings a
+ * shell runs with its `-c` option are looked through, and the subcommand is the
+ * words of the `bb` command (`thread` followed by `update`), never a match on
+ * the text. A text over the limit, or a shell string past the depth cap, cannot
+ * be read and counts as running it.
+ */
+export function runsBbThreadUpdate(text: string, depth = 0): boolean {
+  if (text.length > CLAIM_TEXT_LIMIT) {
+    return true;
+  }
+  return lexText(text, CLAIM_TEXT_LIMIT).commands.some((command) => {
+    const parsed = unwrap(command.words)?.parsed;
+    if (parsed === undefined) {
+      return false;
+    }
+    const script = shellScript(parsed);
+    if (script !== null) {
+      // Past the depth cap the string cannot be read in full, so it counts as running the update.
+      return depth >= MAX_SHELL_DEPTH || runsBbThreadUpdate(script, depth + 1);
+    }
+    // Global options can come before the subcommand (`bb --profile x thread update`): `thread` followed by `update` anywhere counts.
+    const words = positional(parsed.args);
+    return BB_PROGRAMS.has(parsed.name) && words.some((word, at) => word === "thread" && words[at + 1] === "update");
+  });
+}

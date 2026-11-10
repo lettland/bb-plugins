@@ -252,15 +252,17 @@ function isPackageCheck(name: string, args: readonly Word[]): boolean {
 const GH_READS: ReadonlySet<string> = new Set(["view", "list", "diff", "checks"]);
 const GH_TOPICS: ReadonlySet<string> = new Set(["pr", "issue", "run"]);
 /**
- * `bb` subcommands that change only bb's own state, never a file in the checkout.
- * Each was checked against its `--help` and `bb guide` text: `thread archive`
- * retires the thread's environment and a managed worktree is removed from
- * disk, but a checkout environment never retires, and nothing is merged into
- * the checkout; `thread spawn` starts another thread (see `bbReads` for its
- * `--promote` flag).
+ * `bb` subcommands that change only bb's own state, never a file in the checkout,
+ * and never who reviews a thread. Each was checked against its `--help` and
+ * `bb guide` text: `thread archive` retires the thread's environment and a
+ * managed worktree is removed from disk, but a checkout environment never
+ * retires, and nothing is merged into the checkout. `thread update` is left out
+ * (`--parent-thread`, `--clear-parent-thread` and `--visibility` change who
+ * reviews a thread), and `thread spawn` is read-only only in the one shape
+ * `bbReads` allows.
  */
 const BB_READS: Readonly<Record<string, ReadonlySet<string>>> = {
-  thread: new Set(["show", "log", "output", "wait", "list", "tell", "spawn", "archive", "unarchive", "stop", "update"]),
+  thread: new Set(["show", "log", "output", "wait", "list", "tell", "archive", "unarchive", "stop"]),
   "auto-review": new Set(["status", "show"]),
   memory: new Set(["search", "get"]),
   project: new Set(["list", "show"]),
@@ -316,10 +318,27 @@ export function ghReads({ args }: Parsed): boolean {
   return GH_TOPICS.has(topic ?? "") && GH_READS.has(action ?? "");
 }
 
+/** Whether a flag is the long option `name`, bare or with `=value`. */
+const isOption = (flag: string, name: string) => flag === name || flag.startsWith(`${name}=`);
+
 /**
- * Whether a `bb` command writes no file in the checkout: it shows or lists, or
- * changes only bb's own state. `thread spawn --promote` is not one: bb then
- * switches the shared checkout's branch before the new thread's first change.
+ * Whether a `bb thread spawn` leaves the checkout and the reviews alone: the
+ * child is parented to the spawning thread (`--parent-self`), so this thread's
+ * family covers it, and no other parent (`--parent-thread`) or checkout branch
+ * switch (`--promote`) is asked for. Any other spawn makes a thread that no
+ * review of this one covers, or switches the checkout's branch.
+ */
+function spawnKeepsOwnership(flags: readonly string[]): boolean {
+  return (
+    flags.some((flag) => flag === "--parent-self") &&
+    !flags.some((flag) => isOption(flag, "--parent-thread") || isOption(flag, "--promote"))
+  );
+}
+
+/**
+ * Whether a `bb` command writes no file in the checkout and changes no
+ * thread's reviewer: it shows or lists, or changes only bb's own state, with
+ * `thread spawn` read-only only in the shape `spawnKeepsOwnership` allows.
  */
 export function bbReads({ args }: Parsed): boolean {
   const [topic, action, sub] = positional(args);
@@ -330,8 +349,8 @@ export function bbReads({ args }: Parsed): boolean {
   if (nested !== undefined) {
     return nested.has(sub ?? "");
   }
-  if (topic === "thread" && action === "spawn" && flagsOf(args).some((flag) => flag === "--promote" || flag.startsWith("--promote="))) {
-    return false;
+  if (topic === "thread" && action === "spawn") {
+    return spawnKeepsOwnership(flagsOf(args));
   }
   const reads = BB_READS[topic ?? ""];
   return reads !== undefined && reads.has(action ?? "");

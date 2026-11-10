@@ -562,21 +562,32 @@ thread, so the turn's review and commit are never dropped by it.
     `auto-review: left out of the sweep, changed only while another thread's command ran: <paths>`.
     This needs complete evidence (the turn start, every related timeline, this thread's turn rows,
     the checkout path) and a file on disk that is a regular file under the checkout root, not a
-    symlink, whose bytes hash to the content the working tree shows; otherwise the path stays
-    with this thread. A detached write of this thread's own family (a forked child,
-    `run_in_background`, a hook) stays with this thread only because a reviewable sibling's
-    window must cover it; then the sibling reviews it and `bb auto-review status` counts it as
-    not made by this thread's family.
+    symlink, whose change time and modification time both lie in the sibling's window and whose
+    bytes hash to the content the working tree shows; otherwise the path stays with this thread.
+    Known gaps: only the last change to a file is seen, so a file this thread wrote and a sibling's
+    command rewrote later goes to the sibling, whose review covers the whole diff; a time inside
+    the sibling's window cannot tell its write from an outside writer's (a hand edit, a formatter)
+    during the same command; a deletion is always kept, so a sibling script's deletion of a file
+    nothing names still triggers this thread; a repo whose `diffFile` content is not
+    byte-identical to the file on disk (CRLF conversion, a `.gitattributes` filter) keeps every
+    path. A detached write of this thread's own family stays with this thread unless a reviewable
+    sibling's opaque command window covers it; if one does, the sibling reviews it, not this
+    thread, and `bb auto-review status` counts it as not made by this thread's family.
 
   A thread attached under this one after it was created top-level (an `ownership_change` event
   with no previous parent, latest parent this thread, lifecycle owner outside the family) is not
   family: its commands neither force a sweep nor hold the turn, and only its own tool edits are
-  claimed here. A failed or partial read of its events keeps it in the family. The log names each
-  attached child (`auto-review: thread <child> was attached under <parent> at seq <n>; …`). Its
+  claimed here. A failed or partial read of its events keeps it in the family, and so does a child
+  that, or a thread below it, ran `bb thread update` or had an opaque row running when the
+  ownership changed (it may have moved itself; an opaque row that ran only before or after does
+  not count, and a subtree over 200 threads or a read that fails counts as a yes). The log names each
+  attached child found (`auto-review: thread <child> was attached under <parent> at seq <n>; …`). Its
   script and shell writes that no row names are reviewed by neither thread.
-  `bb` commands that change only bb's own state (`bb thread spawn|archive|unarchive|stop|update`,
+  `bb` commands that change only bb's own state (`bb thread archive|unarchive|stop`,
   `bb thread interactions list`, `bb memory search|get`, `bb project list|show`, `bb devkit`
-  reads) are not opaque; `bb thread spawn --promote` is.
+  reads) are not opaque, and neither is `bb thread spawn --parent-self` with no `--parent-thread`
+  and no `--promote`; any other spawn is, and so is `bb thread update`, since it can change the
+  parent or the visibility and so who reviews a thread.
 - `no-authorship` — the turn changed no files: no tool edit, and nothing in the working
   tree (a new, rewritten or deleted path, or one in a commit the turn made — on a branch or
   straight onto the mainline) changed since the turn started. Edits made through shell commands count. Untracked

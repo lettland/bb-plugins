@@ -152,16 +152,18 @@ describe("bbReads: subcommands that change only bb's own state", () => {
   // Learned from `bb <topic> <action> --help` and `bb guide thread-lifecycle` / `bb guide environments`:
   // none of these writes a file in the checkout. Archiving retires the thread's environment, a managed
   // worktree is removed once the grace window passes, a checkout environment never retires, and nothing
-  // is merged into the checkout. Reported in thr_8rryqyy9me: a thread that only spawned a sibling and
-  // waited was swept, because `bb thread spawn` was opaque.
+  // is merged into the checkout. Reported in thr_8rryqyy9me: a thread that only spawned a child and
+  // waited was swept, because `bb thread spawn` was opaque. A spawn is read-only only with `--parent-self`
+  // and no other parent or `--promote`: a child with another parent is covered by no review. `thread update`
+  // can change the parent or the visibility, so it is opaque.
   const reads = (...words: string[]) => bbReads({ args: words.map((text) => word(text)) } as never);
 
   it.each([
     ["thread", "spawn", "--parent-self", "--title", "x"],
+    ["thread", "spawn", "--parent-self", "--model", "m", "--prompt-file", "-"],
     ["thread", "archive", "thr_1"],
     ["thread", "unarchive", "thr_1"],
     ["thread", "stop", "--self"],
-    ["thread", "update", "thr_1", "--parent-thread", "thr_2"],
     ["thread", "interactions", "list", "thr_1"],
     ["memory", "search", "a", "b"],
     ["memory", "get", "mem_1"],
@@ -183,8 +185,21 @@ describe("bbReads: subcommands that change only bb's own state", () => {
     ["thread", "interactions", "approve", "pint_1"],
     ["thread", "interactions"],
     ["thread", "restore-environment", "thr_1"],
+    // Spawns that no review of this thread covers, or that switch the checkout's branch.
+    ["thread", "spawn", "--title", "x"],
+    ["thread", "spawn"],
+    ["thread", "spawn", "--parent-thread", "thr_x"],
+    ["thread", "spawn", "--parent-thread=thr_x"],
+    ["thread", "spawn", "--parent-self", "--parent-thread", "thr_x"],
+    ["thread", "spawn", "--parent-self", "--parent-thread=thr_x"],
+    ["thread", "spawn", "--parent-self", "--promote", "branch"],
+    ["thread", "spawn", "--parent-self", "--promote=branch"],
     ["thread", "spawn", "--promote", "branch"],
-    ["thread", "spawn", "--promote=branch"],
+    // `update` changes the parent or the visibility, which changes who reviews a thread.
+    ["thread", "update", "thr_1", "--parent-thread", "thr_2"],
+    ["thread", "update", "--self", "--clear-parent-thread"],
+    ["thread", "update", "thr_1", "--visibility", "hidden"],
+    ["thread", "update", "thr_1", "--title", "x"],
     ["memory", "add", "x"],
     ["project", "delete", "prj_1"],
     ["project", "create"],

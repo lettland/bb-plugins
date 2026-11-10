@@ -463,7 +463,7 @@ describe("an attached thread is not family", () => {
   // it claim a file another thread wrote. Reported in thr_8rryqyy9me.
   const listed = { originPluginId: null, archivedAt: null };
   const attachedKid = entry("att", { parentThreadId: "self", status: "active", ...listed });
-  const attach = { seq: 7, type: "system/operation", data: { operation: "ownership_change", operationId: "o", status: "completed", message: "m", metadata: { action: "assign", previousParentThreadId: null, nextParentThreadId: "self" } } };
+  const attach = { seq: 7, createdAt: 20_000, type: "system/operation", data: { operation: "ownership_change", operationId: "o", status: "completed", message: "m", metadata: { action: "assign", previousParentThreadId: null, nextParentThreadId: "self" } } };
   const daemon = (startedAt: number) => at("(some-daemon --port 1 &)", startedAt);
   const kidRows = one(daemon(12_000), daemon(30_000));
   // Another thread's script writes `generated.md` without naming it.
