@@ -676,6 +676,16 @@ describe("Plan approval form", () => {
     ]);
   });
 
+  it("styles every action as a button with a pointer, not bare text", () => {
+    renderForm();
+    for (const name of ["Approve", "Request changes", "Cancel"]) {
+      const classes = screen.getByRole("button", { name }).className.split(" ");
+      expect(classes).toEqual(expect.arrayContaining(["cursor-pointer", "rounded-md", "h-8"]));
+    }
+    expect(screen.getByRole("button", { name: "Approve" }).className).toContain("bg-foreground");
+    expect(screen.getByRole("button", { name: "Request changes" }).className).toContain("border-input");
+  });
+
   it("says when the review could not be confirmed", () => {
     renderForm({ planFilePath: "/w/p.md", reviewed: false });
     expect(screen.getByText("auto-review could not confirm that its review of this plan completed.")).toBeTruthy();

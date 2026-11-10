@@ -15,6 +15,11 @@ import {
 import type { AutoReviewRpcContract, ProjectSetting, ThreadReview } from "./src/rpc-contract.js";
 
 const SOFT_INK = "color-mix(in oklch, var(--ink) 68%, var(--canvas))";
+const BUTTON_BASE =
+  "inline-flex h-8 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
+const PRIMARY_BUTTON = `${BUTTON_BASE} bg-foreground text-background hover:bg-foreground/90`;
+const OUTLINE_BUTTON = `${BUTTON_BASE} border border-input bg-transparent hover:bg-state-hover hover:text-foreground`;
+const GHOST_BUTTON = `${BUTTON_BASE} hover:bg-state-hover hover:text-foreground`;
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -545,11 +550,12 @@ function PlanApproval(props: PluginPendingInteractionProps) {
       <div style={{ display: "flex", gap: 8 }}>
         {payload.success ? (
           <>
-            <button type="button" disabled={busy} onClick={() => void run(() => submit({ approved: true }))}>
+            <button type="button" className={PRIMARY_BUTTON} disabled={busy} onClick={() => void run(() => submit({ approved: true }))}>
               Approve
             </button>
             <button
               type="button"
+              className={OUTLINE_BUTTON}
               disabled={busy || feedback.trim() === ""}
               onClick={() => void run(() => submit({ approved: false, feedback }))}
             >
@@ -557,7 +563,7 @@ function PlanApproval(props: PluginPendingInteractionProps) {
             </button>
           </>
         ) : null}
-        <button type="button" disabled={busy} onClick={() => void run(cancel)}>
+        <button type="button" className={GHOST_BUTTON} disabled={busy} onClick={() => void run(cancel)}>
           Cancel
         </button>
       </div>
