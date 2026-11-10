@@ -27,11 +27,17 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   a file cannot be seen.
   Carried work that was pushed meanwhile drops out of scope (only dirty or ahead paths are
   reviewed).
-- Claims only the thread's own changes (itself plus its bb children and owned threads). In
+- Claims only the thread's own changes (itself plus its bb children and owned threads; a
+  thread created top-level and later attached under it, by an `ownership_change` event, is
+  not one of them, and adds only its own tool edits). In
   exact mode, when everything the family ran was read-only or named every file it wrote, only
   the files it named count and the rest stands down as `unclaimed-changes`; when it ran
   something whose writes cannot be listed (a build, codegen, a script, an unknown command) the
-  turn is a sweep, as described next. A sweep keeps every commit that is not a sibling's or
+  turn is a sweep, as described next (`bb` commands that change only bb's state, such as
+  `bb thread spawn`, are not such things). A sweep leaves out a path that changed only while a
+  reviewable sibling's opaque command ran and none of the family's commands that can write
+  did, with the file's content checked on disk; any missing evidence keeps the path, and the
+  README lists the rule. A sweep keeps every commit that is not a sibling's or
   upstream (pulled from the remote base or from the checkout branch's own remote-tracking
   ref); only exact mode drops one nothing of the family could have made. A thread's shell
   keeps its directory between rows, and a relative path whose directory is a guess claims
@@ -61,7 +67,8 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   count too, as do commits the turn made — on a branch ahead of its base, or straight onto
   the mainline (read back from the turn-start head); the review then covers the committed
   range and records its fixes as new commits. A path another thread in the same
-  checkout changed through its own tools during the turn is left to that thread; files
+  checkout changed through its own tools during the turn, or only while its opaque command ran,
+  is left to that thread; files
   already dirty and left untouched are never claimed; untracked files appearing under
   harness state dirs (`.claude/`, `.codex/`, `.bb/` — edit backups, logs) are harness
   output, not the turn's work. A commit a sibling thread made with git from its shell

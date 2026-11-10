@@ -1,5 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
+import { createOwnershipReader, isAttachedChild } from "./detect-attached.js";
 import type { ThreadListEntry } from "./detect-workspace.js";
 
 /**
@@ -7,7 +8,9 @@ import type { ThreadListEntry } from "./detect-workspace.js";
  * helpers (the advisor and similar): those send no wake-up and must never
  * hold a turn. Only `parentThreadId` links are walked — a thread merely
  * `lifecycleOwnerThreadId`-owned gets no wake-up either. A visited set makes
- * the walk cycle-safe. Archived children are walked through, since archiving
+ * the walk cycle-safe. An attached child (see `isAttachedChild`) is skipped
+ * with everything below it: its work is not this thread's, so it never holds
+ * this thread's turn. Archived children are walked through, since archiving
  * does not reliably take their children along; deleted ones never come back
  * from `threads.list`, so a grandchild under a deleted child is not seen. One
  * list call per descendant, archived ones included.
@@ -18,6 +21,7 @@ async function spawnedDescendants(
 ): Promise<ThreadListEntry[]> {
   const descendants: ThreadListEntry[] = [];
   const visited = new Set<string>([threadId]);
+  const ownership = createOwnershipReader(bb);
   const queue: string[] = [threadId];
   for (let index = 0; index < queue.length; index += 1) {
     const parentId = queue[index];
@@ -31,7 +35,8 @@ async function spawnedDescendants(
         child.originPluginId !== null ||
         // Defence if the list filter is ever ignored: a row that isn't
         // actually this parent's child must not be walked as one.
-        child.parentThreadId !== parentId
+        child.parentThreadId !== parentId ||
+        (await isAttachedChild(bb, ownership, child, visited))
       ) {
         continue;
       }

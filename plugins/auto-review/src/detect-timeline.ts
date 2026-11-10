@@ -1,5 +1,6 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
+import { threadMembership } from "./detect-attached.js";
 import { rowTexts, rowWindow, shellText, walkRows } from "./detect-rows.js";
 import type { OpenRowEnds, RowText, TimeWindow, WorkRow } from "./detect-rows.js";
 import { isHistoryWritingGit, mayMoveRemoteRef } from "./detect-shell.js";
@@ -109,29 +110,6 @@ export async function recentTimelineRows(
   return { rows, truncated: true };
 }
 
-/** This thread plus every thread it spawned or owns, transitively. */
-function ownThreadIds(
-  entries: readonly ThreadListEntry[],
-  selfThreadId: string,
-): Set<string> {
-  const own = new Set([selfThreadId]);
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const entry of entries) {
-      if (own.has(entry.id)) {
-        continue;
-      }
-      const owners = [entry.parentThreadId, entry.lifecycleOwnerThreadId];
-      if (owners.some((owner) => owner !== null && own.has(owner))) {
-        own.add(entry.id);
-        grew = true;
-      }
-    }
-  }
-  return own;
-}
-
 function oldestCreatedAt(rows: readonly TimelineRow[]): number | null {
   let oldest: number | null = null;
   for (const row of rows) {
@@ -220,6 +198,8 @@ export interface SiblingEvidence {
   texts: Array<RowText & { threadId: string }>;
   /** Per sibling, whether its timeline was read in full; a sibling that was not credits nothing. */
   complete: Map<string, boolean>;
+  /** The rows of each sibling that was read, for the commands it ran to be told apart later. */
+  rows: Map<string, TimelineRow[]>;
 }
 
 /**
@@ -227,7 +207,9 @@ export interface SiblingEvidence {
  * they changed through their own tools, when they ran git that writes
  * history, and the shell text of the rows that ran. A thread that has been
  * idle and untouched since before the turn began cannot have done any of it,
- * so its timeline is not read.
+ * so its timeline is not read. An attached thread (see `threadMembership`) is
+ * read for its commands and git, but the paths of its own tools are left out:
+ * they are the family's to claim.
  */
 export async function siblingAuthoredPaths(
   bb: BbPluginApi,
@@ -235,7 +217,7 @@ export async function siblingAuthoredPaths(
   selfThreadId: string,
   startedAt: number,
 ): Promise<SiblingEvidence> {
-  const own = ownThreadIds(entries, selfThreadId);
+  const { family: own, attached } = await threadMembership(bb, entries, selfThreadId);
   const siblings = entries.filter(
     (entry) =>
       !own.has(entry.id) &&
@@ -247,6 +229,7 @@ export async function siblingAuthoredPaths(
   const commitWindows: SiblingWindow[] = [];
   const texts: SiblingEvidence["texts"] = [];
   const complete = new Map<string, boolean>();
+  const siblingRows = new Map<string, TimelineRow[]>();
   for (const sibling of siblings) {
     let rows: TimelineRow[];
     try {
@@ -258,7 +241,10 @@ export async function siblingAuthoredPaths(
       complete.set(sibling.id, false);
       continue;
     }
-    addChangedPaths(rows, (row) => row.createdAt >= startedAt, paths);
+    siblingRows.set(sibling.id, rows);
+    if (!attached.has(sibling.id)) {
+      addChangedPaths(rows, (row) => row.createdAt >= startedAt, paths);
+    }
     // A pending row of an idle thread is left over from a crash or a restart.
     const open = { pending: sibling.status === "idle" ? null : now, unended: null };
     for (const window of overlappingWindows(rows, startedAt, open, runsHistoryGit)) {
@@ -268,7 +254,7 @@ export async function siblingAuthoredPaths(
       texts.push({ threadId: sibling.id, ...text });
     }
   }
-  return { paths, commitWindows, texts, complete };
+  return { paths, commitWindows, texts, complete, rows: siblingRows };
 }
 
 /** How far before the turn a family timeline is paged, so a row that began earlier and still runs is seen. */
@@ -290,7 +276,10 @@ export interface KinEvidence {
 
 /**
  * What this thread's bb children and owned threads, transitively, did since
- * `startedAt`. Deleted ones are read too: their work is this thread's.
+ * `startedAt`. Deleted ones are read too: their work is this thread's. An
+ * attached thread (see `threadMembership`) adds only the paths of its own tool
+ * edits: nothing it ran is the family's, and a read of it that fails changes
+ * nothing.
  */
 export async function kinEvidence(
   bb: BbPluginApi,
@@ -299,13 +288,9 @@ export async function kinEvidence(
   startedAt: number,
   now: number,
 ): Promise<KinEvidence> {
-  const own = ownThreadIds(entries, selfThreadId);
-  const kin = entries.filter(
-    (entry) =>
-      entry.id !== selfThreadId &&
-      own.has(entry.id) &&
-      (entry.status !== "idle" || entry.updatedAt >= startedAt),
-  );
+  const { family: own, attached } = await threadMembership(bb, entries, selfThreadId);
+  const active = (entry: ThreadListEntry) => entry.status !== "idle" || entry.updatedAt >= startedAt;
+  const kin = entries.filter((entry) => entry.id !== selfThreadId && own.has(entry.id) && active(entry));
   const evidence: KinEvidence = { paths: new Set(), windows: [], texts: [], threads: [], threadIds: [], complete: true };
   for (const thread of kin) {
     try {
@@ -324,6 +309,14 @@ export async function kinEvidence(
       );
     } catch {
       evidence.complete = false;
+    }
+  }
+  for (const thread of entries.filter((entry) => attached.has(entry.id) && active(entry))) {
+    try {
+      const { rows } = await recentTimelineRows(bb, thread.id, pageInTurn(startedAt));
+      addChangedPaths(rows, (row) => row.createdAt >= startedAt, evidence.paths);
+    } catch {
+      // Its tool edits are left unclaimed here: they were never certain to be the family's.
     }
   }
   return evidence;

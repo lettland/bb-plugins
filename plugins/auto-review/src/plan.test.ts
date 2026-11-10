@@ -696,6 +696,8 @@ function tallyBb(entries: ReturnType<typeof childEntry>[]) {
     log: { warn: (message: string) => warnings.push(message) },
     sdk: {
       threads: {
+        // No thread has changed its ownership.
+        events: { list: async () => [] },
         list: async () => entries,
       },
     },

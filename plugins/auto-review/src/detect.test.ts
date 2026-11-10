@@ -323,6 +323,8 @@ describe("treeChangedPaths and siblingAuthoredPaths", () => {
           }),
         },
         threads: {
+          // No thread has changed its ownership.
+          events: { list: async () => [] },
           timeline: async ({ threadId }: { threadId: string }) => {
             timelineCalls.push(threadId);
             return {
@@ -476,6 +478,8 @@ describe("workspace capture edge cases", () => {
             env.diffPatch?.(args) ?? { outcome: "unavailable" },
         },
         threads: {
+          // No thread has changed its ownership.
+          events: { list: async () => [] },
           timeline: async (args: Record<string, unknown>) => {
             timelineCalls.push(args);
             if (env.timeline === undefined) {
@@ -2519,6 +2523,8 @@ describe("runningChildIds", () => {
     const bb = {
       sdk: {
         threads: {
+          // No thread has changed its ownership.
+          events: { list: async () => [] },
           list: async (args: { parentThreadId?: string }) => {
             listCalls.push(args.parentThreadId);
             return entries
@@ -2585,6 +2591,8 @@ describe("runningChildIds", () => {
     const bb = {
       sdk: {
         threads: {
+          // No thread has changed its ownership.
+          events: { list: async () => [] },
           // Ignores the parentThreadId filter entirely, as a buggy list call might.
           list: async () =>
             entries.map((entry) => ({
@@ -2605,6 +2613,8 @@ describe("spawnedDescendantEntries", () => {
     const bb = {
       sdk: {
         threads: {
+          // No thread has changed its ownership.
+          events: { list: async () => [] },
           list: async (args: { parentThreadId?: string }) =>
             entries.filter((entry) => entry.parentThreadId === args.parentThreadId),
         },

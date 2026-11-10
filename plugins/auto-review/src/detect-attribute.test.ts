@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { turnChangedPaths } from "./detect.js";
+import { runningChildIds, turnChangedPaths } from "./detect.js";
 
 const STARTED_AT = 10_000;
 const LEAK = "leak-token-9a14";
@@ -66,6 +66,8 @@ interface Options {
   root?: string | null | Error;
   commits?: Array<{ sha: string; paths: string[] | null; authoredAt: number | null }>;
   turnStart?: Record<string, unknown>;
+  /** The `system/operation` events each thread's log holds; none by default. */
+  events?: Record<string, unknown[]>;
 }
 
 async function attribute(options: Options = {}) {
@@ -92,6 +94,9 @@ async function attribute(options: Options = {}) {
         },
       },
       threads: {
+        events: { list: async ({ threadId }: { threadId: string }) => options.events?.[threadId] ?? [] },
+        list: async ({ parentThreadId }: { parentThreadId?: string }) =>
+          ((options.entries ?? [self, kid, sibling]) as Array<Record<string, unknown>>).filter((candidate) => candidate.parentThreadId === parentThreadId),
         timeline: async ({ threadId, beforeAnchorId }: { threadId: string; beforeAnchorId?: string }) => {
           const call = calls.get(threadId) ?? 0;
           calls.set(threadId, call + 1);
@@ -123,7 +128,7 @@ async function attribute(options: Options = {}) {
     } as never,
     threadEntries: (options.entries ?? [self, kid, sibling]) as never,
   });
-  return { result, infos };
+  return { result, infos, bb };
 }
 
 const claims = (lines: string[]) => lines.filter((line) => line.includes("by sweep") || line.includes("left out of the review: the"));
@@ -449,5 +454,74 @@ describe("a path a sibling changed through its own tools", () => {
   it("is still claimed when no sibling changed it", async () => {
     const { result } = await attribute({ uncommitted, timelines: { self: one(tool({ path: "src/b.ts" })), "sib-1": one(edit("src/other.ts")) } });
     expect(result.paths).toEqual(["src/b.ts"]);
+  });
+});
+
+describe("an attached thread is not family", () => {
+  // Learned from thr_jyuay4qg8s: a grouping thread that ran nothing had a thread attached under it
+  // that ran a detached daemon, which forced the grouping thread into a sweep, held its turn, and made
+  // it claim a file another thread wrote. Reported in thr_8rryqyy9me.
+  const listed = { originPluginId: null, archivedAt: null };
+  const attachedKid = entry("att", { parentThreadId: "self", status: "active", ...listed });
+  const attach = { seq: 7, type: "system/operation", data: { operation: "ownership_change", operationId: "o", status: "completed", message: "m", metadata: { action: "assign", previousParentThreadId: null, nextParentThreadId: "self" } } };
+  const daemon = (startedAt: number) => at("(some-daemon --port 1 &)", startedAt);
+  const kidRows = one(daemon(12_000), daemon(30_000));
+  // Another thread's script writes `generated.md` without naming it.
+  const siblingScript = { "sib-1": one(at("node gen.js", 25_000)) };
+
+  it("stands down without a park when the attached child ran the daemon and a sibling wrote the file", async () => {
+    const { result, infos, bb } = await attribute({
+      uncommitted: ["generated.md"],
+      entries: [self, attachedKid, sibling],
+      events: { att: [attach] },
+      timelines: { att: kidRows, ...siblingScript },
+    });
+    expect(result).toMatchObject({ mode: "exact", paths: [], unclaimed: ["generated.md"] });
+    expect(claims(infos)).toEqual([]);
+    expect(infos).toContain("auto-review: thread att was attached under self at seq 7; it is not part of that thread's family");
+    expect(await runningChildIds(bb, "self")).toEqual([]);
+  });
+
+  it("still sweeps and holds the turn when the same child was spawned", async () => {
+    const { result, bb } = await attribute({
+      uncommitted: ["generated.md"],
+      entries: [self, attachedKid, sibling],
+      timelines: { att: kidRows, ...siblingScript },
+    });
+    expect(result.mode).toBe("sweep");
+    expect(await runningChildIds(bb, "self")).toEqual(["att"]);
+  });
+
+  it("still claims the attached child's own tool edits, and leaves what no tool of its named", async () => {
+    const { result } = await attribute({
+      uncommitted: ["lib/att.ts", "lib/ide.ts"],
+      entries: [self, attachedKid, sibling],
+      events: { att: [attach] },
+      timelines: { att: one(edit("lib/att.ts"), daemon(30_000)) },
+    });
+    expect(result).toMatchObject({ mode: "exact", paths: ["lib/att.ts"], unclaimed: ["lib/ide.ts"] });
+  });
+
+  it("leaves a grandchild under the attached child out of the family too", async () => {
+    const grand = entry("grand", { parentThreadId: "att", status: "active", ...listed });
+    const { result, bb } = await attribute({
+      uncommitted: ["generated.md"],
+      entries: [self, attachedKid, grand, sibling],
+      events: { att: [attach] },
+      timelines: { grand: kidRows, ...siblingScript },
+    });
+    expect(result).toMatchObject({ mode: "exact", paths: [], unclaimed: ["generated.md"] });
+    expect(await runningChildIds(bb, "self")).toEqual([]);
+  });
+
+  it("keeps a child whose ownership changes cannot be read in the family", async () => {
+    const { result, infos } = await attribute({
+      uncommitted: ["generated.md"],
+      entries: [self, attachedKid, sibling],
+      events: { att: [{ ...attach, data: { operation: "ownership_change" } }] },
+      timelines: { att: kidRows, ...siblingScript },
+    });
+    expect(result.mode).toBe("sweep");
+    expect(infos).toContain("auto-review: could not read the ownership changes of thread att: TypeError");
   });
 });

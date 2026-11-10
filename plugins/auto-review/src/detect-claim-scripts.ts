@@ -251,9 +251,25 @@ function isPackageCheck(name: string, args: readonly Word[]): boolean {
 
 const GH_READS: ReadonlySet<string> = new Set(["view", "list", "diff", "checks"]);
 const GH_TOPICS: ReadonlySet<string> = new Set(["pr", "issue", "run"]);
+/**
+ * `bb` subcommands that change only bb's own state, never a file in the checkout.
+ * Each was checked against its `--help` and `bb guide` text: `thread archive`
+ * retires the thread's environment and a managed worktree is removed from
+ * disk, but a checkout environment never retires, and nothing is merged into
+ * the checkout; `thread spawn` starts another thread (see `bbReads` for its
+ * `--promote` flag).
+ */
 const BB_READS: Readonly<Record<string, ReadonlySet<string>>> = {
-  thread: new Set(["show", "log", "output", "wait", "list", "tell"]),
+  thread: new Set(["show", "log", "output", "wait", "list", "tell", "spawn", "archive", "unarchive", "stop", "update"]),
   "auto-review": new Set(["status", "show"]),
+  memory: new Set(["search", "get"]),
+  project: new Set(["list", "show"]),
+  devkit: new Set(["commands"]),
+};
+/** Read subcommands one level deeper, keyed by `topic action`. */
+const BB_NESTED_READS: Readonly<Record<string, ReadonlySet<string>>> = {
+  "thread interactions": new Set(["list"]),
+  "devkit skills": new Set(["list", "find", "show"]),
 };
 const BB_TOP_LEVEL: ReadonlySet<string> = new Set(["status", "guide"]);
 const RIPWIRE_READS: ReadonlySet<string> = new Set([
@@ -300,9 +316,23 @@ export function ghReads({ args }: Parsed): boolean {
   return GH_TOPICS.has(topic ?? "") && GH_READS.has(action ?? "");
 }
 
-/** Whether a `bb` command only shows or lists. */
+/**
+ * Whether a `bb` command writes no file in the checkout: it shows or lists, or
+ * changes only bb's own state. `thread spawn --promote` is not one: bb then
+ * switches the shared checkout's branch before the new thread's first change.
+ */
 export function bbReads({ args }: Parsed): boolean {
-  const [topic, action] = positional(args);
+  const [topic, action, sub] = positional(args);
+  if (BB_TOP_LEVEL.has(topic ?? "")) {
+    return true;
+  }
+  const nested = BB_NESTED_READS[`${topic ?? ""} ${action ?? ""}`];
+  if (nested !== undefined) {
+    return nested.has(sub ?? "");
+  }
+  if (topic === "thread" && action === "spawn" && flagsOf(args).some((flag) => flag === "--promote" || flag.startsWith("--promote="))) {
+    return false;
+  }
   const reads = BB_READS[topic ?? ""];
-  return BB_TOP_LEVEL.has(topic ?? "") || (reads !== undefined && reads.has(action ?? ""));
+  return reads !== undefined && reads.has(action ?? "");
 }

@@ -148,6 +148,55 @@ describe("ghReads and bbReads", () => {
   });
 });
 
+describe("bbReads: subcommands that change only bb's own state", () => {
+  // Learned from `bb <topic> <action> --help` and `bb guide thread-lifecycle` / `bb guide environments`:
+  // none of these writes a file in the checkout. Archiving retires the thread's environment, a managed
+  // worktree is removed once the grace window passes, a checkout environment never retires, and nothing
+  // is merged into the checkout. Reported in thr_8rryqyy9me: a thread that only spawned a sibling and
+  // waited was swept, because `bb thread spawn` was opaque.
+  const reads = (...words: string[]) => bbReads({ args: words.map((text) => word(text)) } as never);
+
+  it.each([
+    ["thread", "spawn", "--parent-self", "--title", "x"],
+    ["thread", "archive", "thr_1"],
+    ["thread", "unarchive", "thr_1"],
+    ["thread", "stop", "--self"],
+    ["thread", "update", "thr_1", "--parent-thread", "thr_2"],
+    ["thread", "interactions", "list", "thr_1"],
+    ["memory", "search", "a", "b"],
+    ["memory", "get", "mem_1"],
+    ["project", "list"],
+    ["project", "show", "prj_1"],
+    ["devkit", "commands"],
+    ["devkit", "skills", "list"],
+    ["devkit", "skills", "find", "x"],
+    ["devkit", "skills", "show", "x"],
+  ])("%s %s is not opaque", (...words) => {
+    expect(reads(...words)).toBe(true);
+  });
+
+  it.each([
+    ["aislop", "scan"],
+    ["auto-review", "reset"],
+    ["voice", "transcribe", "memo.m4a"],
+    ["thread", "delete", "thr_1"],
+    ["thread", "interactions", "approve", "pint_1"],
+    ["thread", "interactions"],
+    ["thread", "restore-environment", "thr_1"],
+    ["thread", "spawn", "--promote", "branch"],
+    ["thread", "spawn", "--promote=branch"],
+    ["memory", "add", "x"],
+    ["project", "delete", "prj_1"],
+    ["project", "create"],
+    ["devkit", "run", "x"],
+    ["devkit", "skills", "install"],
+    ["devkit", "skills"],
+    ["not-a-bb-command", "list"],
+  ])("%s %s stays opaque", (...words) => {
+    expect(reads(...words)).toBe(false);
+  });
+});
+
 describe("flagsOf", () => {
   it("is the words of the arguments", () => {
     expect(flagsOf([word("-a"), word("b")])).toEqual(["-a", "b"]);

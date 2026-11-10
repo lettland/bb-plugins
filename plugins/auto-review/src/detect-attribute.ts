@@ -5,6 +5,7 @@
 
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
+import { pathsLeftToSiblingCommands } from "./detect-change-time.js";
 import { familyClaims, resolveClaims, strayCommitReason } from "./detect-claim.js";
 import type { CommitFacts } from "./detect-claim.js";
 import { pathsLeftToSiblings } from "./detect-sibling-credit.js";
@@ -194,6 +195,29 @@ export async function claimedChanges(turn: TurnReading): Promise<TurnChanges> {
           kin: outcome.kin,
           candidates: unattributed(tree.uncommittedPaths).filter((path) => ours(path) && !committed.has(path)),
         });
-  const swept = unattributed([...new Set([...tree.uncommittedPaths, ...keptPaths])]);
-  return { ...result, paths: [...own, ...swept.filter((path) => ours(path) && !credited.has(path))] };
+  const swept = unattributed([...new Set([...tree.uncommittedPaths, ...keptPaths])]).filter((path) => ours(path) && !credited.has(path));
+  // A path changed only while a sibling's opaque command ran is that sibling's, not this thread's.
+  const uncommitted = new Set(tree.uncommittedPaths);
+  const left = await pathsLeftToSiblingCommands({
+    bb,
+    threadId,
+    environmentId,
+    threadEntries: input.threadEntries,
+    startedAt,
+    now,
+    ownRowsTruncated: ownRows.truncated,
+    kin: outcome.kin,
+    sibling,
+    files: input.workspace.workingTree.files,
+    candidates: swept.filter((path) => uncommitted.has(path) && !committed.has(path)),
+  });
+  if (left.length > 0) {
+    bb.log.info(`auto-review: left out of the sweep, changed only while another thread's command ran: ${examples(left)}`);
+  }
+  const leftSet = new Set(left);
+  return {
+    ...result,
+    paths: [...own, ...swept.filter((path) => !leftSet.has(path))],
+    unclaimed: [...result.unclaimed, ...left],
+  };
 }

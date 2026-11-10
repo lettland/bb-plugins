@@ -197,6 +197,23 @@ function readRow(row: WorkRow, left: Origin | undefined, readable: ReadonlySet<s
   }
 }
 
+/**
+ * What a work row could do to files. `opaque`: it ran something whose writes
+ * cannot be listed, which makes its thread's turn a sweep. `writes`: it is not
+ * read-only but names what it writes (a tool that is not read-only, a targeted
+ * write, git that writes history, a `file-change` row). `none`: it only reads.
+ */
+export function rowEffect(row: WorkRow, readable: ReadonlySet<string>): "opaque" | "writes" | "none" {
+  if (row.workKind === "file-change") {
+    return "writes";
+  }
+  const reading = readRow(row, undefined, readable);
+  if (reading.opaque !== undefined) {
+    return "opaque";
+  }
+  return reading.tool !== undefined || reading.writes.length > 0 || reading.scratch.length > 0 || reading.history ? "writes" : "none";
+}
+
 interface Pass {
   claims: FamilyClaims;
   startedAt: number;

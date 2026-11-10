@@ -81,7 +81,9 @@ It ships enabled (opt-out).
   200 uncommitted files, or with a file whose content could not be read, reviews, since a
   same-size edit to such a file cannot be seen.
 - Claims only this thread's own changes. Own means this thread plus the bb children and
-  owned threads it spawned, transitively. An edit made outside them (your IDE, a formatter or
+  owned threads it spawned, transitively. A thread created top-level and later attached under
+  this one (`bb thread update --parent-thread`) is not own: see "An attached thread" below.
+  An edit made outside them (your IDE, a formatter or
   watcher, a commit nobody of the family made) neither triggers nor widens a review. Text
   cannot say exactly which files a command wrote, so a turn is decided in one of two modes:
   - **Exact**: everything the family ran was read-only or named every file it writes. The
@@ -98,6 +100,41 @@ It ships enabled (opt-out).
     line naming the read that failed. When in doubt it is a sweep: losing a review of own work,
     or its secret scan, is the worse failure.
 
+    A sweep does leave out an uncommitted path that **only a sibling's command changed**, when
+    all of this holds. Any missing or incomplete evidence keeps the path with this thread:
+    1. The path's local `lstat` change time (ctime) falls inside the window of an opaque command
+       of a sibling thread that was read in full. An opaque command makes that sibling's own turn
+       a sweep, so its own review still claims the path. The sibling, or the root of its family,
+       must be reviewable (top-level, visible, not archived, not from a plugin, with an
+       environment), and the sibling must be in that root's family (an attached thread is not).
+       The window is the command's start and end, one second wider on each side (git's author
+       date has whole seconds); a command with no recorded end gives no window, even while it still
+       runs, since until it ends nothing of the sibling's own review covers its write.
+    2. The change time falls outside every window of a row of this thread's family that could
+       write (an opaque command, a targeted write, a tool that is not read-only, a file-change
+       row), each one second wider again on both sides, two in total. A row with no recorded end
+       runs until now. Read-only rows (`Read`, `Grep`, `bb thread wait`) do not count. The family's
+       timelines are read back to 30 minutes before the turn.
+    3. The evidence is complete: the turn start is known, the family's timelines and the
+       sibling's were read in full, this thread's turn rows are not truncated, the checkout path
+       is known, and every family row that could write has a window.
+    4. The file is a regular file below the checkout root (its directory resolves under the real
+       root), not a symlink, and the sha256 of its bytes (16 hex characters) equals the hash of
+       the content the working tree shows (the read the turn-start snapshot makes). A deleted,
+       binary, unreadable or changed-since file keeps the path. A directory entry is expanded to
+       its files (at most 200), and is left out only if every file passes. At most 200 paths are
+       checked; the rest stay.
+
+    A path left out this way is `unclaimed`, and the log says so with paths only:
+    `auto-review: left out of the sweep, changed only while another thread's command ran: <paths>`
+    (at most five, then a count). Residuals: a write that lands while a family command that can
+    write and a sibling's command both run is kept. A later writer moves a file's ctime (an
+    editor's format on save, a sibling's `git checkout`), and the file then follows that
+    writer's window. A hand edit is kept unless it happens during a sibling's command. A detached
+    write of this thread's own family (a forked child, `run_in_background`, a hook) is kept from
+    escaping only because a reviewable sibling's window must cover it; then the sibling reviews it,
+    not this thread.
+
   What the family ran is classified from the text of its commands, looking through `bash -c`,
   `env`, `timeout`, subshells, `$( )` and the other wrappers listed under the family side below:
   - **Inert**, claims nothing: `cd`, `pushd`, `popd`, `echo`, `printf`, `pwd`, `true`, `false`,
@@ -109,8 +146,11 @@ It ships enabled (opt-out).
     `fetch`, `branch` with no argument or with `--show-current`, `-a`, `-v`, `--list`,
     `config --get`, `stash list`, `remote -v`) and git that only touches the index, the history or
     a remote (`add`, `commit`, `push`, `tag`, `reset` without `--hard`, `rm --cached`); `gh pr|issue|run
-    view|list|diff|checks`; `bb status|guide`, `bb thread show|log|output|wait|list|tell`,
-    `bb auto-review status|show`; `ripwire` in a read mode (`--for`, `--grep`, `--expand`,
+    view|list|diff|checks`; `bb status|guide`, `bb thread show|log|output|wait|list|tell|spawn|archive|unarchive|stop|update`
+    and `bb thread interactions list` (they change bb's state, never a file in the checkout;
+    `bb thread spawn --promote` is opaque, since bb then switches the checkout's branch),
+    `bb memory search|get`, `bb project list|show`, `bb devkit commands` and
+    `bb devkit skills list|find|show`, `bb auto-review status|show`; `ripwire` in a read mode (`--for`, `--grep`, `--expand`,
     `--callers`, `--impact`, `--uses`, `--exemplar`, `--pack-task`, `--plan-lanes`, `--from-trace`,
     `--quality-delta`); and check runs with no fix, update, output or report flag (`npm test`,
     `npm run lint`, `npm run typecheck` and `test:*` variants, also through `pnpm`, `yarn` and
@@ -205,12 +245,28 @@ It ships enabled (opt-out).
 
   Limitations: in a turn that ran something opaque (a build, codegen, a script, an unknown
   command) an outside edit made during that turn is swept into the review, since the code cannot
-  tell it apart. A test, lint or typecheck run counts as read-only, so "run the tests and tell me"
+  tell it apart, unless it changed only while a reviewable sibling's opaque command ran (see
+  the sweep bullet above); your own edit in an IDE is still swept in. A test, lint or typecheck run counts as read-only, so "run the tests and tell me"
   while you edit in your IDE fires nothing; the miss this accepts is a file such a run writes on
   its own (a snapshot), such as `cargo test` or `cargo check` rewriting `Cargo.lock`, and a
   `lint` or `test` package script that itself runs a fixer (the script's name says it only
   checks). Writes a background process makes after the turn started are not claimed in exact
   mode. A hook that rewrites files when `git commit` runs is not seen.
+
+  An attached thread: a thread created top-level and later attached under this one is not part
+  of this thread's family. The signal is the child's own `system/operation` event with
+  `operation: "ownership_change"`, read from its event log (never matched on message text). A
+  child is attached when its lifecycle owner is not in the family, its earliest ownership change
+  has no previous parent, and its latest one names its current parent. A read that fails or is
+  partial (including the page cap) keeps the child in the family; so does a child that was
+  spawned, moved away and back, or spawned, detached and attached elsewhere. What hangs below an
+  attached child is not family either, unless a family member owns it too. An attached thread
+  adds nothing to the family's commands, windows or completeness, and it does not hold this
+  thread's turn; only the files its own tool edits (`file-change` rows) changed are still
+  claimed here. Its script and shell writes that no row names are reviewed by neither thread,
+  since an attached child is not top-level and gets no review of its own, and a turn can end
+  while it still edits. The log has one line per attached child (parent, child, seq) and one per
+  failed read (child, error class).
 
   When changes exist and none were claimed, the turn stands down with the reason
   `unclaimed-changes` (`no-authorship` still means nothing changed), and `bb auto-review status`
@@ -248,7 +304,8 @@ It ships enabled (opt-out).
 - Attributes work to the turn from the thread's own file-change rows plus a working-tree
   snapshot taken at turn start, so shell edits, generators and commits made during the
   turn all count in a sweep. Files another thread changed, files already dirty and left untouched,
-  and harness state under `.claude/`, `.codex/` and `.bb/` are not claimed.
+  and harness state under `.claude/`, `.codex/` and `.bb/` are not claimed. Nor is a file that
+  changed only while a reviewable sibling's opaque command ran (see the sweep bullet above).
   Commits replayed by a rebase with the same patches as the turn started with do not
   count as new work; changed replayed patches still count.
   A commit a sibling thread made with git from its shell during the turn (`commit`,
