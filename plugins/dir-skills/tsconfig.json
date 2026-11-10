@@ -4,10 +4,11 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "lib": ["ES2022"],
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM"],
     "types": ["node"],
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["server.ts", "scopes.ts", "profile.ts", "detect.ts", "setup.ts", "scopes.test.ts", "profile.test.ts", "setup.test.ts", "server.setup.test.ts", "vitest.config.ts"]
+  "include": ["server.ts", "app.tsx", "rpc-contract.ts", "scopes.ts", "profile.ts", "detect.ts", "setup.ts", "app.test.tsx", "scopes.test.ts", "profile.test.ts", "setup.test.ts", "server.setup.test.ts", "vitest.config.ts"]
 }

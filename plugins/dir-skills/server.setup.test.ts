@@ -9,6 +9,7 @@ import {
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ScopesSnapshot } from "./rpc-contract";
 import plugin from "./server";
 
 const REMOTE = "https://git.example.com/acme/app.git";
@@ -57,14 +58,23 @@ function acmeTree(): string {
   return app;
 }
 
-async function load(app: string, settings?: Record<string, string>) {
+interface LoadOptions {
+  /** Pre-seeded plugin kv, as if saved before this load. */
+  kv?: Record<string, unknown>;
+  /** What the host returns as the plugin's own stored settings values; absent: the lookup fails. */
+  own?: Record<string, unknown>;
+}
+
+async function load(app: string, options: LoadOptions = {}) {
   const host = createFakePluginHost({
     pluginId: "dir-skills",
     agentSkillIds: ["work-conventions"],
-    settings,
     sdk: {
       plugins: {
         getSettings: async ({ pluginId }: { pluginId: string }) => {
+          if (pluginId === "dir-skills" && options.own !== undefined) {
+            return { values: options.own };
+          }
           if (pluginId !== "provider-acp") throw new Error("404");
           return {
             values: {
@@ -89,6 +99,9 @@ async function load(app: string, settings?: Record<string, string>) {
       },
     },
   });
+  for (const [key, value] of Object.entries(options.kv ?? {})) {
+    await host.bb.storage.kv.set(key, value);
+  }
   await plugin(host.bb);
   return host;
 }
@@ -245,7 +258,6 @@ describe("cli surface", () => {
       settingScopes: 0,
       settingError: null,
       settingSkipped: [],
-      settingReloadError: null,
       autoSetup: null,
       scopes: [
         {
@@ -268,7 +280,7 @@ describe("cli surface", () => {
     expect(out).not.toContain("[claude profile");
     expect(out).toContain("work-conventions  [work]");
     expect(out).not.toContain("auto-setup:");
-    expect(out).toContain("ui scopes: 0 (Scopes setting)\n");
+    expect(out).toContain("ui scopes: 0 (settings form)\n");
   });
 
   it("rejects check without a target", async () => {
@@ -376,293 +388,510 @@ describe("cli surface", () => {
   });
 });
 
-describe("Scopes setting", () => {
-  const uiScopes = (app: string, over: Record<string, unknown> = {}) =>
-    JSON.stringify({
-      scopes: [{ name: "ui", paths: [app], skills: ["work-*"], ...over }],
-    });
+describe("Scopes form", () => {
+  type Harness = Awaited<ReturnType<typeof load>>["harness"];
+  const skillsRoot = path.join(pluginDir, "skills");
+  const userFilePath = () => path.join(home, ".bb", "dir-skills", "scopes.json");
   const writeUserFile = (scopes: unknown[]) => {
-    const userFile = path.join(home, ".bb", "dir-skills", "scopes.json");
-    mkdirSync(path.dirname(userFile), { recursive: true });
-    writeFileSync(userFile, JSON.stringify({ scopes }));
-    return userFile;
+    mkdirSync(path.dirname(userFilePath()), { recursive: true });
+    writeFileSync(userFilePath(), JSON.stringify({ scopes }));
+    return userFilePath();
   };
-  const status = async (harness: Awaited<ReturnType<typeof load>>["harness"]) =>
+  const profiled = (app: string) => ({
+    name: "work",
+    paths: [app],
+    skills: ["work-*"],
+    claudeConfigDir: "~/.claude-acme",
+  });
+  const scopeOf = (app: string, over: Record<string, unknown> = {}) => ({
+    name: "ui",
+    paths: [app],
+    skills: ["work-*"],
+    ...over,
+  });
+  const getScopes = (harness: Harness) =>
+    harness.callRpc("getScopes", null) as Promise<ScopesSnapshot>;
+  const saveScopes = (harness: Harness, scopes: unknown[]) =>
+    harness.callRpc("saveScopes", { scopes }) as Promise<ScopesSnapshot>;
+  const status = async (harness: Harness) =>
     JSON.parse((await harness.runCli(["status", "--json"])).stdout);
+  const check = async (harness: Harness, app: string) =>
+    (await harness.runCli(["check", app, "--project", "proj_app"])).stdout;
+  const warning = (name: string) =>
+    `UI scopes: scope "${name}" ignored: a scope with a Claude profile can only be changed in ~/.bb/dir-skills/scopes.json`;
 
-  it("defines a multiline Scopes setting backed by the write validation", async () => {
+  it("no longer defines a setting", async () => {
     const { harness } = await load(acmeTree());
-    expect(harness.registrations.settingsDescriptors.scopes).toMatchObject({
-      type: "string",
-      label: "Scopes",
-      experimental_multiline: true,
-    });
-    await expect(
-      harness.setSettings({ scopes: uiScopes("/x", { claudeConfigDir: "/opt/c" }) }),
-    ).rejects.toThrow(/claudeConfigDir/);
-    await expect(harness.setSettings({ scopes: "{" })).rejects.toThrow(
-      /not valid JSON/,
-    );
+    expect(harness.registrations.settingsDescriptors).toEqual({});
   });
 
-  it("activates a stored setting scope", async () => {
-    const app = acmeTree();
-    const { harness } = await load(app, { scopes: uiScopes(app) });
-    const result = await harness.runCli(["check", app, "--project", "proj_app"]);
-    expect(result.stdout).toContain("work-conventions");
-    expect(await status(harness)).toMatchObject({
-      settingScopes: 1,
-      settingError: null,
-    });
-    expect((await harness.runCli(["status"])).stdout).toContain(
-      "ui scopes: 1 (Scopes setting)\n",
-    );
-    const configured = await harness.resolveAgentConfiguration(
-      makePluginAgentConfigurationContext({
-        project: { id: "proj_app" },
-        environment: { path: app },
-      }),
-    );
-    expect(configured.skills).toContain("work-conventions");
+  it("registers getScopes and saveScopes", async () => {
+    const { harness } = await load(acmeTree());
+    expect(harness.registrations.rpcMethods.sort()).toEqual(["getScopes", "saveScopes"]);
   });
 
-  it("applies a change and a clear without a reload", async () => {
-    const app = acmeTree();
-    const { harness } = await load(app);
-    const check = async () =>
-      (await harness.runCli(["check", app, "--project", "proj_app"])).stdout;
-    expect(await check()).not.toContain("work-conventions");
-
-    await harness.setSettings({ scopes: uiScopes(app) });
-    expect(await check()).toContain("work-conventions");
-    expect((await status(harness)).settingScopes).toBe(1);
-
-    await harness.setSettings({ scopes: "" });
-    expect(await check()).not.toContain("work-conventions");
-    expect(await status(harness)).toMatchObject({
-      settingScopes: 0,
-      settingError: null,
-    });
-  });
-
-  describe("a setting scope named like a scope with a Claude profile", () => {
-    const warning = (name: string) =>
-      `Scopes setting: scope "${name}" ignored: a scope with a Claude profile can only be changed in ~/.bb/dir-skills/scopes.json`;
-    const setup = async () => {
+  describe("getScopes", () => {
+    it("returns the file scopes, the skills and no stored scopes at first", async () => {
       const app = acmeTree();
-      const elsewhere = path.join(home, "elsewhere");
-      mkdirSync(elsewhere, { recursive: true });
+      const { harness } = await load(app);
+      const snapshot = await getScopes(harness);
+      expect(snapshot).toEqual({
+        fileScopes: [
+          {
+            name: "work",
+            paths: [path.join(home, "workspace", "work")],
+            skills: ["work-*"],
+            source: "shipped",
+            hasProfile: false,
+            replacedByUi: false,
+          },
+        ],
+        uiScopes: [],
+        skills: [
+          {
+            name: "work-conventions",
+            description: expect.stringMatching(/^Placeholder work skill/),
+          },
+        ],
+        skipped: [],
+        settingError: null,
+      });
+    });
+
+    it("tags sources, profiles and replaced scopes, and returns stored scopes as saved", async () => {
+      const app = acmeTree();
       writeUserFile([
+        { name: "mine", paths: ["/mine"], skills: ["mine-*"] },
+        { name: "kept", paths: ["/kept"], skills: ["kept-*"], claudeConfigDir: "/opt/claude" },
+      ]);
+      const stored = [{ name: "mine", paths: ["~/ui", "/abs"], skills: ["a", "b-*"] }];
+      const { harness } = await load(app, { kv: { uiScopes: stored } });
+      const snapshot = await getScopes(harness);
+      expect(snapshot.fileScopes).toEqual([
+        {
+          name: "work",
+          paths: [path.join(home, "workspace", "work")],
+          skills: ["work-*"],
+          source: "shipped",
+          hasProfile: false,
+          replacedByUi: false,
+        },
+        {
+          name: "mine",
+          paths: ["/mine"],
+          skills: ["mine-*"],
+          source: "file",
+          hasProfile: false,
+          replacedByUi: true,
+        },
+        {
+          name: "kept",
+          paths: ["/kept"],
+          skills: ["kept-*"],
+          source: "file",
+          hasProfile: true,
+          replacedByUi: false,
+        },
+      ]);
+      expect(snapshot.uiScopes).toEqual(stored);
+      expect(JSON.stringify(snapshot)).not.toContain("/opt/claude");
+    });
+
+    it("gives one entry for a name in both files, tagged file, with its profile", async () => {
+      const app = acmeTree();
+      writeUserFile([profiled(app)]);
+      const { harness } = await load(app);
+      const snapshot = await getScopes(harness);
+      expect(snapshot.fileScopes).toEqual([
         {
           name: "work",
           paths: [app],
           skills: ["work-*"],
-          claudeConfigDir: "~/.claude-acme",
+          source: "file",
+          hasProfile: true,
+          replacedByUi: false,
         },
       ]);
+      expect(JSON.stringify(snapshot)).not.toContain(".claude-acme");
+    });
+
+    it("lists skills with and without a description, reading single-line frontmatter", async () => {
+      const made: string[] = [];
+      const add = (entry: string, body: string) => {
+        const dir = path.join(skillsRoot, entry);
+        mkdirSync(dir);
+        made.push(dir);
+        writeFileSync(path.join(dir, "SKILL.md"), body);
+      };
+      try {
+        add("zz-fixture-plain-desc", "---\nname: zz-plain\ndescription: Plain words\n---\nbody");
+        add("zz-fixture-quoted", '---\nname: "zz-quoted"\ndescription: "Quoted words"\n---\nbody');
+        add("zz-fixture-none", "---\nname: zz-none\n---\nbody");
+        add("zz-fixture-nofront", "no frontmatter");
+        const { harness } = await load(acmeTree());
+        const names = (await getScopes(harness)).skills;
+        expect(names).toEqual([
+          { name: "work-conventions", description: expect.stringMatching(/^Placeholder/) },
+          { name: "zz-fixture-nofront", description: "" },
+          { name: "zz-none", description: "" },
+          { name: "zz-plain", description: "Plain words" },
+          { name: "zz-quoted", description: "Quoted words" },
+        ]);
+      } finally {
+        for (const dir of made) rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("saveScopes", () => {
+    it("stores a scope as saved, makes it active and keeps it after a reload", async () => {
+      const app = acmeTree();
+      const host = await load(app);
+      const { harness } = host;
+      expect(await check(harness, app)).not.toContain("work-conventions");
+      const scopes = [scopeOf("~/ui-dir")];
+      scopes[0].paths = [app, " ~/ui-dir "];
+      const saved = await saveScopes(harness, scopes);
+      expect(saved.uiScopes).toEqual(scopes);
+      expect(saved.settingError).toBeNull();
+      expect(await host.bb.storage.kv.get("uiScopes")).toEqual(scopes);
+      expect(await check(harness, app)).toContain("work-conventions");
+      expect(await status(harness)).toMatchObject({ settingScopes: 1, settingError: null });
+      expect((await harness.runCli(["status"])).stdout).toContain(
+        "ui scopes: 1 (settings form)\n",
+      );
+      const configured = await harness.resolveAgentConfiguration(
+        makePluginAgentConfigurationContext({
+          project: { id: "proj_app" },
+          environment: { path: app },
+        }),
+      );
+      expect(configured.skills).toContain("work-conventions");
+
+      const reloaded = await harness.lifecycle.reload(plugin);
+      expect((await getScopes(reloaded.harness)).uiScopes).toEqual(scopes);
+      expect(await check(reloaded.harness, app)).toContain("work-conventions");
+    });
+
+    it("applies a change and a clear without a reload", async () => {
+      const app = acmeTree();
       const { harness } = await load(app);
-      harness.sdk.stub("projects.list", async () => [
-        {
-          id: "proj_app",
-          gitRemoteUrl: REMOTE,
-          sources: [{ path: app, hostId: SERVER_HOST }],
-        },
-        {
-          id: "proj_else",
-          gitRemoteUrl: "https://git.example.com/acme/else.git",
-          sources: [{ path: elsewhere, hostId: SERVER_HOST }],
-        },
-      ]);
-      await harness.emitThreadEvent("thread.created", {
-        thread: makeThreadResponse({ id: "thr_created" }),
+      await saveScopes(harness, [scopeOf(app)]);
+      expect(await check(harness, app)).toContain("work-conventions");
+      await saveScopes(harness, []);
+      expect(await check(harness, app)).not.toContain("work-conventions");
+      expect(await status(harness)).toMatchObject({ settingScopes: 0, settingError: null });
+    });
+
+    it.each<[string, unknown[], RegExp]>([
+      ["a relative path", [scopeOf("src/acme")], /every directory must be absolute or start with "~\/"/],
+      ["an empty name", [scopeOf("/a", { name: " " })], /scope 1 needs a name/],
+      ["a duplicate name", [scopeOf("/a"), scopeOf("/b", { name: "ui " })], /the name is used twice/],
+      ["a control character", [scopeOf("/a", { name: "a\nb" })], /control characters/],
+      ["an empty skills list", [scopeOf("/a", { skills: [] })], /needs at least one skill/],
+      ["an empty skill", [scopeOf("/a", { skills: [" "] })], /needs at least one skill/],
+      ["an empty path list", [scopeOf("/a", { paths: [] })], /needs at least one directory/],
+      ["a claudeConfigDir", [scopeOf("/a", { claudeConfigDir: "/opt/claude" })], /rpc input validation failed/],
+      ["too many scopes", Array.from({ length: 33 }, (_, i) => scopeOf("/a", { name: `s${i}` })), /rpc input validation failed/],
+    ])("stores nothing for %s", async (_label, scopes, message) => {
+      const app = acmeTree();
+      const host = await load(app);
+      const before = await status(host.harness);
+      await expect(saveScopes(host.harness, scopes)).rejects.toThrow(message);
+      expect(await host.bb.storage.kv.get("uiScopes")).toBeUndefined();
+      expect(await status(host.harness)).toEqual(before);
+      expect((await getScopes(host.harness)).uiScopes).toEqual([]);
+    });
+
+    it("leaves the stored scopes and the state alone when the user file is broken", async () => {
+      const app = acmeTree();
+      const userFile = writeUserFile([{ name: "mine", paths: ["/mine"], skills: ["mine-*"] }]);
+      const host = await load(app, { kv: { uiScopes: [scopeOf(app, { name: "old" })] } });
+      const before = await status(host.harness);
+      writeFileSync(userFile, "{ not json");
+      await expect(saveScopes(host.harness, [scopeOf(app, { name: "new" })])).rejects.toThrow(
+        `${userFile}: not valid JSON`,
+      );
+      expect(await host.bb.storage.kv.get("uiScopes")).toEqual([scopeOf(app, { name: "old" })]);
+      expect(await status(host.harness)).toEqual(before);
+      expect((await getScopes(host.harness)).uiScopes).toEqual([scopeOf(app, { name: "old" })]);
+    });
+
+    it("stores nothing when skills cannot be loaded", async () => {
+      const app = acmeTree();
+      const host = await load(app);
+      const before = await status(host.harness);
+      const mode = statSync(skillsRoot).mode & 0o7777;
+      chmodSync(skillsRoot, 0o000);
+      try {
+        await expect(saveScopes(host.harness, [scopeOf(app)])).rejects.toThrow(/EACCES/);
+      } finally {
+        chmodSync(skillsRoot, mode);
+      }
+      expect(await host.bb.storage.kv.get("uiScopes")).toBeUndefined();
+      expect(await status(host.harness)).toEqual(before);
+      expect(await check(host.harness, app)).not.toContain("work-conventions");
+    });
+
+    it("keeps the state when the store write fails", async () => {
+      const app = acmeTree();
+      const host = await load(app);
+      const before = await status(host.harness);
+      const set = vi.spyOn(host.bb.storage.kv, "set").mockRejectedValueOnce(new Error("disk full"));
+      await expect(saveScopes(host.harness, [scopeOf(app)])).rejects.toThrow(/disk full/);
+      set.mockRestore();
+      expect(await status(host.harness)).toEqual(before);
+      expect((await getScopes(host.harness)).uiScopes).toEqual([]);
+    });
+
+    it("finishes overlapping saves in order, one at a time", async () => {
+      const app = acmeTree();
+      const host = await load(app);
+      const events: string[] = [];
+      const kv = host.bb.storage.kv;
+      const realSet = kv.set.bind(kv);
+      vi.spyOn(kv, "set").mockImplementation(async (key, value) => {
+        const name = (value as Array<{ name: string }>)[0].name;
+        events.push(`start ${name}`);
+        await new Promise((resolve) => setTimeout(resolve, name === "first" ? 30 : 0));
+        await realSet(key, value);
+        events.push(`end ${name}`);
       });
-      return { app, elsewhere, harness };
+      const first = saveScopes(host.harness, [scopeOf(app, { name: "first" })]);
+      const second = saveScopes(host.harness, [scopeOf(app, { name: "second" })]);
+      const [one, two] = await Promise.all([first, second]);
+      vi.restoreAllMocks();
+      expect(events).toEqual(["start first", "end first", "start second", "end second"]);
+      expect(one.uiScopes[0].name).toBe("first");
+      expect(two.uiScopes[0].name).toBe("second");
+      expect((await getScopes(host.harness)).uiScopes[0].name).toBe("second");
+    });
+
+    it("saves after a failed save", async () => {
+      const app = acmeTree();
+      const { harness } = await load(app);
+      const bad = saveScopes(harness, [scopeOf("relative")]);
+      const good = saveScopes(harness, [scopeOf(app)]);
+      await expect(bad).rejects.toThrow(/absolute/);
+      expect((await good).uiScopes).toEqual([scopeOf(app)]);
+      expect(await check(harness, app)).toContain("work-conventions");
+    });
+  });
+
+  describe("a UI scope named like a file scope", () => {
+    const setup = async (userScopes: unknown[]) => {
+      const app = acmeTree();
+      const elsewhere = path.join(home, "elsewhere");
+      mkdirSync(elsewhere, { recursive: true });
+      writeUserFile(userScopes.length === 0 ? [profiled(app)] : userScopes);
+      const host = await load(app);
+      return { app, elsewhere, host };
     };
 
-    it("ignores the setting scope, warns, and keeps the profile on the file paths only", async () => {
-      const { app, elsewhere, harness } = await setup();
-      await harness.setSettings({
-        scopes: JSON.stringify({
-          scopes: [{ name: "work", paths: [elsewhere], skills: ["other-*"] }],
-        }),
-      });
+    it("is skipped, warned about and listed when the file scope has a profile", async () => {
+      const { app, elsewhere, host } = await setup([]);
+      const { harness } = host;
+      const saved = await saveScopes(harness, [
+        { name: "work", paths: [elsewhere], skills: ["other-*"] },
+      ]);
+      expect(saved.skipped).toEqual(["work"]);
+      expect(saved.fileScopes[0]).toMatchObject({ hasProfile: true, replacedByUi: false });
+      expect(saved.uiScopes).toHaveLength(1);
       expect(harness.logEntries).toContainEqual(
         expect.objectContaining({ level: "warn", message: warning("work") }),
       );
       const json = await status(harness);
       expect(json.settingSkipped).toEqual(["work"]);
-      const work = json.scopes.find((s: { name: string }) => s.name === "work");
-      expect(work).toEqual({
+      expect(json.scopes.find((s: { name: string }) => s.name === "work")).toEqual({
         name: "work",
         paths: [app],
         skills: ["work-*"],
         claudeConfigDir: path.join(home, ".claude-acme"),
       });
-      const text = (await harness.runCli(["status"])).stdout;
-      expect(text).toContain(
-        "ui scopes: 1 (Scopes setting)\nui scopes skipped (profile scopes are file-only): work\n",
+      expect((await harness.runCli(["status"])).stdout).toContain(
+        "ui scopes: 1 (settings form)\nui scopes skipped (profile scopes are file-only): work\n",
       );
-      expect(
-        await harness.resolveProviderEnv("claude-code", env("thr_file")),
-      ).toEqual([
+      expect(await harness.resolveProviderEnv("claude-code", env("thr_file"))).toEqual([
         expect.objectContaining({
           name: "CLAUDE_CONFIG_DIR",
           value: path.join(home, ".claude-acme"),
         }),
       ]);
-      expect(
-        await harness.resolveProviderEnv("claude-code", {
-          threadId: "thr_else",
-          projectId: "proj_else",
-          hostId: SERVER_HOST,
-        }),
-      ).toEqual([]);
     });
 
-    it("lists every skipped name and clears the list on the next successful change", async () => {
-      const { app, harness } = await setup();
-      const entry = (name: string) => ({ name, paths: [app], skills: ["x-*"] });
+    it("lists every skipped name and clears the list on the next save", async () => {
+      const app = acmeTree();
       writeUserFile([
-        {
-          name: "work",
-          paths: [app],
-          skills: ["work-*"],
-          claudeConfigDir: "~/.claude-acme",
-        },
-        { ...entry("second"), claudeConfigDir: "~/.claude-acme" },
+        profiled(app),
+        { name: "second", paths: [app], skills: ["x-*"], claudeConfigDir: "~/.claude-acme" },
       ]);
-      await harness.setSettings({
-        scopes: JSON.stringify({ scopes: [entry("work"), entry("second")] }),
-      });
-      expect((await status(harness)).settingSkipped).toEqual(["work", "second"]);
+      const { harness } = await load(app);
+      const entry = (name: string) => ({ name, paths: [app], skills: ["x-*"] });
+      expect((await saveScopes(harness, [entry("work"), entry("second")])).skipped).toEqual([
+        "work",
+        "second",
+      ]);
       expect((await harness.runCli(["status"])).stdout).toContain(
         "ui scopes skipped (profile scopes are file-only): work, second\n",
       );
-      await harness.setSettings({ scopes: JSON.stringify({ scopes: [entry("fresh")] }) });
-      expect((await status(harness)).settingSkipped).toEqual([]);
-      expect((await harness.runCli(["status"])).stdout).not.toContain(
-        "ui scopes skipped",
-      );
+      expect((await saveScopes(harness, [entry("fresh")])).skipped).toEqual([]);
+      expect((await harness.runCli(["status"])).stdout).not.toContain("ui scopes skipped");
     });
 
-    it("does not skip a setting scope that replaces a file scope without a profile", async () => {
+    it("replaces a file scope without a profile and is not skipped", async () => {
       const app = acmeTree();
       writeUserFile([{ name: "work", paths: [app], skills: ["work-*"] }]);
       const { harness } = await load(app);
-      await harness.setSettings({
-        scopes: JSON.stringify({
-          scopes: [{ name: "work", paths: [app], skills: ["other-*"] }],
-        }),
-      });
+      const saved = await saveScopes(harness, [
+        { name: "work", paths: [app], skills: ["other-*"] },
+      ]);
+      expect(saved.skipped).toEqual([]);
+      expect(saved.fileScopes[0]).toMatchObject({ hasProfile: false, replacedByUi: true });
       const json = await status(harness);
       expect(json.settingSkipped).toEqual([]);
-      expect(
-        json.scopes.find((s: { name: string }) => s.name === "work"),
-      ).toMatchObject({ skills: ["other-*"], claudeConfigDir: null });
+      expect(json.scopes.find((s: { name: string }) => s.name === "work")).toMatchObject({
+        skills: ["other-*"],
+        claudeConfigDir: null,
+      });
       expect(harness.logEntries).not.toContainEqual(
         expect.objectContaining({ message: warning("work") }),
       );
-      expect((await harness.runCli(["status"])).stdout).not.toContain(
-        "ui scopes skipped",
+      expect((await harness.runCli(["status"])).stdout).not.toContain("ui scopes skipped");
+    });
+  });
+
+  describe("a stored value that cannot be used at startup", () => {
+    it.each<[string, unknown, RegExp]>([
+      ["a wrong shape", { scopes: [] }, /wrong shape/],
+      ["a stored claudeConfigDir", [scopeOf("/a", { claudeConfigDir: "/opt/claude" })], /wrong shape/],
+      ["a relative path", [scopeOf("src/acme")], /every directory must be absolute/],
+    ])("ignores %s, reports it and clears it on the next save", async (_label, stored, message) => {
+      const app = acmeTree();
+      writeUserFile([{ name: "mine", paths: ["/mine"], skills: ["mine-*"] }]);
+      const { harness } = await load(app, { kv: { uiScopes: stored } });
+      const snapshot = await getScopes(harness);
+      expect(snapshot.uiScopes).toEqual([]);
+      expect(snapshot.settingError).toMatch(message);
+      expect(harness.logEntries).toContainEqual(
+        expect.objectContaining({
+          level: "warn",
+          message: `Stored UI scopes ignored: ${snapshot.settingError}`,
+        }),
+      );
+      const json = await status(harness);
+      expect(json.settingScopes).toBe(0);
+      expect(json.settingError).toBe(snapshot.settingError);
+      expect(json.scopes.map((s: { name: string }) => s.name).sort()).toEqual(["mine", "work"]);
+      expect((await harness.runCli(["status"])).stdout).toContain(
+        `ui scopes: ignored — ${snapshot.settingError}\n`,
+      );
+
+      const saved = await saveScopes(harness, [scopeOf(app)]);
+      expect(saved.settingError).toBeNull();
+      expect(await status(harness)).toMatchObject({ settingScopes: 1, settingError: null });
+    });
+
+    it("keeps a stored empty list as is", async () => {
+      const { harness } = await load(acmeTree(), { kv: { uiScopes: [] }, own: { scopes: "x" } });
+      expect(await getScopes(harness)).toMatchObject({ uiScopes: [], settingError: null });
+    });
+  });
+
+  describe("one-time import of the removed Scopes setting", () => {
+    const legacy = (app: string, over: Record<string, unknown> = {}) =>
+      JSON.stringify({ scopes: [scopeOf(app, over)] });
+    const imported = (message: string) =>
+      expect.objectContaining({ level: "info", message });
+
+    it("imports a stored value when the store is empty, and logs it", async () => {
+      const app = acmeTree();
+      const scope = scopeOf(app, { paths: [app, "~/ui"] });
+      const host = await load(app, { own: { scopes: JSON.stringify({ scopes: [scope] }) } });
+      expect(await host.bb.storage.kv.get("uiScopes")).toEqual([scope]);
+      expect((await getScopes(host.harness)).uiScopes).toEqual([scope]);
+      expect(host.harness.logEntries).toContainEqual(
+        imported("imported 1 scope(s) from the removed Scopes setting"),
+      );
+      expect(await check(host.harness, app)).toContain("work-conventions");
+    });
+
+    it("does not overwrite a stored value", async () => {
+      const app = acmeTree();
+      const stored = [scopeOf(app, { name: "kept" })];
+      const host = await load(app, { kv: { uiScopes: stored }, own: { scopes: legacy(app) } });
+      expect(await host.bb.storage.kv.get("uiScopes")).toEqual(stored);
+      expect((await getScopes(host.harness)).uiScopes).toEqual(stored);
+      expect(host.harness.logEntries).not.toContainEqual(
+        expect.objectContaining({ message: expect.stringContaining("removed Scopes setting") }),
+      );
+    });
+
+    it("imports nothing when the lookup fails, or the key is absent, not a string or blank", async () => {
+      const app = acmeTree();
+      for (const own of [undefined, {}, { scopes: 5 }, { scopes: null }, { scopes: "" }, { scopes: "  \n" }]) {
+        const host = await load(app, own === undefined ? {} : { own });
+        expect(await host.bb.storage.kv.get("uiScopes")).toBeUndefined();
+        expect((await getScopes(host.harness)).uiScopes).toEqual([]);
+        expect(host.harness.logEntries).not.toContainEqual(
+          expect.objectContaining({ message: expect.stringContaining("removed Scopes setting") }),
+        );
+      }
+    });
+
+    it.each<[string, (app: string) => string, string]>([
+      ["malformed JSON", () => "{", "not valid JSON"],
+      ["a null root", () => "null", "expected"],
+      ["a missing scopes key", () => "{}", "expected"],
+      ["a claudeConfigDir", (app) => legacy(app, { claudeConfigDir: "/opt/claude" }), "expected"],
+      ["a relative path", () => legacy("rel"), "every directory must be absolute"],
+    ])("imports nothing for %s and says why", async (_label, text, why) => {
+      const app = acmeTree();
+      const host = await load(app, { own: { scopes: text(app) } });
+      expect(await host.bb.storage.kv.get("uiScopes")).toBeUndefined();
+      expect((await getScopes(host.harness)).uiScopes).toEqual([]);
+      expect(host.harness.logEntries).toContainEqual(
+        expect.objectContaining({
+          level: "warn",
+          message: expect.stringMatching(
+            new RegExp(`^the removed Scopes setting was not imported: .*${why}`),
+          ),
+        }),
+      );
+    });
+
+    it("imports nothing when the store write fails, and says so", async () => {
+      const app = acmeTree();
+      const host = createFakePluginHost({
+        pluginId: "dir-skills",
+        agentSkillIds: ["work-conventions"],
+        sdk: {
+          plugins: { getSettings: async () => ({ values: { scopes: legacy(app) } }) },
+          projects: { list: async () => [] },
+        },
+      });
+      vi.spyOn(host.bb.storage.kv, "set").mockRejectedValueOnce(new Error("disk full"));
+      await plugin(host.bb);
+      vi.restoreAllMocks();
+      expect((await getScopes(host.harness)).uiScopes).toEqual([]);
+      expect(host.harness.logEntries).toContainEqual(
+        expect.objectContaining({
+          level: "warn",
+          message: "the removed Scopes setting was not imported: disk full",
+        }),
       );
     });
   });
 
-  it("ignores an invalid stored value, keeps the file layers and reports it", async () => {
+  it("serves the form state in status json and text", async () => {
     const app = acmeTree();
-    writeUserFile([{ name: "mine", paths: ["/mine"], skills: ["mine-*"] }]);
-    const { harness } = await load(app, {
-      scopes: uiScopes(app, { claudeConfigDir: "/opt/claude" }),
-    });
-    const expected =
-      'Scopes setting: scope "ui": "claudeConfigDir" can only be set in ~/.bb/dir-skills/scopes.json';
-    expect(harness.logEntries).toContainEqual(
-      expect.objectContaining({
-        level: "warn",
-        message: `Scopes setting ignored: ${expected}`,
-      }),
-    );
-    const json = await status(harness);
-    expect(json.settingScopes).toBe(0);
-    expect(json.settingError).toBe(expected);
-    expect(json.scopes.map((s: { name: string }) => s.name).sort()).toEqual([
-      "mine",
-      "work",
-    ]);
-    expect((await harness.runCli(["status"])).stdout).toContain(
-      `ui scopes: ignored — ${expected}\n`,
-    );
-  });
-
-  it("clears a recorded error once a valid value is stored", async () => {
-    const app = acmeTree();
-    const { harness } = await load(app, { scopes: "{" });
-    expect((await status(harness)).settingError).toBe(
-      "Scopes setting: not valid JSON",
-    );
-    await harness.setSettings({ scopes: uiScopes(app) });
+    const { harness } = await load(app, { kv: { uiScopes: [scopeOf(app)] } });
     expect(await status(harness)).toMatchObject({
       settingScopes: 1,
       settingError: null,
+      settingSkipped: [],
     });
-  });
-
-  it("keeps the previous state when the user file breaks, shows it, and clears it on a good change", async () => {
-    const app = acmeTree();
-    const userFile = writeUserFile([
-      { name: "mine", paths: ["/mine"], skills: ["mine-*"] },
-    ]);
-    const { harness } = await load(app);
-    writeFileSync(userFile, "{ not json");
-    await harness.setSettings({ scopes: uiScopes(app) });
-    const message = `${userFile}: not valid JSON`;
-    expect(harness.logEntries).toContainEqual(
-      expect.objectContaining({
-        level: "warn",
-        message: `scopes reload failed, keeping the previous scopes: ${message}; fix the file, then run bb plugin reload dir-skills`,
-      }),
-    );
-    const after = await status(harness);
-    expect(
-      after.scopes.map((s: { name: string }) => s.name).sort(),
-    ).toEqual(["mine", "work"]);
-    // status reports the setting state that is active, not the one that failed to load
-    expect(after.settingScopes).toBe(0);
-    expect(after.settingError).toBeNull();
-    expect(after.settingReloadError).toBe(message);
-    expect((await harness.runCli(["status"])).stdout).toContain(
-      `ui scopes: not applied — ${message}; fix the file, then run bb plugin reload dir-skills\n`,
-    );
-
-    writeUserFile([{ name: "mine", paths: ["/mine"], skills: ["mine-*"] }]);
-    await harness.setSettings({ scopes: uiScopes(app, { name: "ui2" }) });
-    const fixed = await status(harness);
-    expect(fixed.settingReloadError).toBeNull();
-    expect(fixed.settingScopes).toBe(1);
-    expect((await harness.runCli(["status"])).stdout).toContain(
-      "ui scopes: 1 (Scopes setting)\n",
-    );
-  });
-
-  it("leaves state untouched when skills cannot be loaded during a change", async () => {
-    const app = acmeTree();
-    const skillsRoot = path.join(pluginDir, "skills");
-    const { harness } = await load(app);
-    const before = await status(harness);
-    const mode = statSync(skillsRoot).mode & 0o7777;
-    chmodSync(skillsRoot, 0o000);
-    try {
-      await harness.setSettings({ scopes: uiScopes(app) });
-    } finally {
-      chmodSync(skillsRoot, mode);
-    }
-    const after = await status(harness);
-    expect(after.scopes).toEqual(before.scopes);
-    expect(after.skills).toEqual(before.skills);
-    expect(after.settingScopes).toBe(0);
-    expect(after.settingReloadError).toMatch(/EACCES/);
-    const check = await harness.runCli(["check", app, "--project", "proj_app"]);
-    expect(check.stdout).not.toContain("work-conventions");
+    expect(await status(harness)).not.toHaveProperty("settingReloadError");
+    expect((await harness.runCli(["status"])).stdout).toContain("ui scopes: 1 (settings form)\n");
   });
 });
 

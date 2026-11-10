@@ -9,8 +9,8 @@ import {
   loadScopes,
   parseScopes,
   parseScopesText,
-  scopesSettingSchema,
   selectSkills,
+  validateUiScopes,
   type SkillInfo,
 } from "./scopes";
 
@@ -151,14 +151,12 @@ describe("parseScopes", () => {
 describe("parseScopesText", () => {
   const entry = { name: "work", paths: ["/a"], skills: ["work-*"] };
   const text = (scopes: unknown[]) => JSON.stringify({ scopes });
-  const setting = { settingLayer: true };
 
-  it("parses setting text and expands ~/ paths against home", () => {
+  it("parses text and expands ~/ paths against home", () => {
     const [scope] = parseScopesText(
       text([{ ...entry, paths: ["~/src/acme", "/b"] }]),
-      "Scopes setting",
+      "file.json",
       "/home/test",
-      setting,
     );
     expect(scope).toMatchObject({
       name: "work",
@@ -168,11 +166,7 @@ describe("parseScopesText", () => {
     });
   });
 
-  it.each(["", "   ", "\n\t"])("adds nothing for blank setting text %j", (blank) => {
-    expect(parseScopesText(blank, "Scopes setting", "/h", setting)).toEqual([]);
-  });
-
-  it("treats blank text as malformed JSON on the file layer", () => {
+  it("treats blank text as malformed JSON", () => {
     expect(() => parseScopesText("", "file.json", "/h")).toThrow(
       "file.json: not valid JSON",
     );
@@ -182,114 +176,123 @@ describe("parseScopesText", () => {
     const secret = "/private/secret-path";
     let message = "";
     try {
-      parseScopesText(`{ "scopes": [ "${secret}" `, "Scopes setting", "/h", setting);
+      parseScopesText(`{ "scopes": [ "${secret}" `, "file.json", "/h");
     } catch (error) {
       message = (error as Error).message;
     }
-    expect(message).toBe("Scopes setting: not valid JSON");
+    expect(message).toBe("file.json: not valid JSON");
     expect(message).not.toContain(secret);
   });
 
-  it("rejects claudeConfigDir on the setting layer and accepts it on the file layer", () => {
-    const withDir = text([{ ...entry, claudeConfigDir: "/opt/claude" }]);
-    expect(() =>
-      parseScopesText(withDir, "Scopes setting", "/h", setting),
-    ).toThrow(
-      'Scopes setting: scope "work": "claudeConfigDir" can only be set in ~/.bb/dir-skills/scopes.json',
-    );
+  it("accepts claudeConfigDir and a relative path in a file", () => {
     expect(
-      parseScopesText(withDir, "file.json", "/h")[0].claudeConfigDir,
+      parseScopesText(
+        text([{ ...entry, paths: ["/a", "src/acme"], claudeConfigDir: "/opt/claude" }]),
+        "file.json",
+        "/h",
+      )[0].claudeConfigDir,
     ).toBe("/opt/claude");
   });
 
-  it("rejects even an invalid claudeConfigDir with the file-only message on the setting layer", () => {
+  it("keeps the shared validation", () => {
     expect(() =>
-      parseScopesText(
-        text([{ ...entry, claudeConfigDir: null }]),
-        "Scopes setting",
-        "/h",
-        setting,
-      ),
-    ).toThrow(/can only be set in ~\/\.bb\/dir-skills\/scopes\.json/);
-  });
-
-  it("rejects a relative path on the setting layer and accepts it on the file layer", () => {
-    const relative = text([{ ...entry, paths: ["/a", "src/acme"] }]);
-    expect(() =>
-      parseScopesText(relative, "Scopes setting", "/h", setting),
-    ).toThrow(
-      'Scopes setting: scope "work": every "paths" entry must be absolute or start with "~/"',
+      parseScopesText(text([{ name: "work", skills: ["x"] }]), "file.json", "/h"),
+    ).toThrow('file.json: scope "work" needs a non-empty "paths"');
+    expect(() => parseScopesText("{}", "file.json", "/h")).toThrow(
+      'file.json: expected { "scopes": [...] }',
     );
-    expect(parseScopesText(relative, "file.json", "/h")).toHaveLength(1);
-  });
-
-  it.each(["~", "./src", " /a"])("rejects the path %j on the setting layer", (p) => {
-    expect(() =>
-      parseScopesText(
-        text([{ ...entry, paths: [p] }]),
-        "Scopes setting",
-        "/h",
-        setting,
-      ),
-    ).toThrow(/every "paths" entry must be absolute or start with "~\/"/);
-  });
-
-  it("keeps the shared validation on the setting layer", () => {
-    expect(() =>
-      parseScopesText(
-        text([{ name: "work", skills: ["x"] }]),
-        "Scopes setting",
-        "/h",
-        setting,
-      ),
-    ).toThrow('Scopes setting: scope "work" needs a non-empty "paths"');
-    expect(() =>
-      parseScopesText("{}", "Scopes setting", "/h", setting),
-    ).toThrow('Scopes setting: expected { "scopes": [...] }');
   });
 });
 
-describe("scopesSettingSchema", () => {
-  const issueMessage = (value: string) => {
-    const result = scopesSettingSchema.safeParse(value);
-    return result.success ? null : result.error.issues[0].message;
-  };
+describe("validateUiScopes", () => {
+  const entry = { name: "docs", paths: ["/a"], skills: ["docs-*"] };
 
-  it("accepts empty text and valid JSON", () => {
-    expect(scopesSettingSchema.safeParse("").success).toBe(true);
-    expect(scopesSettingSchema.safeParse("  ").success).toBe(true);
-    expect(
-      scopesSettingSchema.safeParse(
-        JSON.stringify({
-          scopes: [{ name: "w", paths: ["~/src/acme"], skills: ["w-*"] }],
-        }),
-      ).success,
-    ).toBe(true);
+  it("accepts a good scope and gives it no Claude profile", () => {
+    const [scope] = validateUiScopes([entry], "/home/test");
+    expect(scope).toMatchObject({
+      name: "docs",
+      paths: ["/a"],
+      patternSources: ["docs-*"],
+      claudeConfigDir: null,
+    });
+    expect(scope.patterns[0].test("docs-style")).toBe(true);
   });
 
-  it("rejects malformed JSON, a missing paths, claudeConfigDir and a relative path", () => {
-    expect(issueMessage("{")).toBe("Scopes setting: not valid JSON");
-    expect(
-      issueMessage(JSON.stringify({ scopes: [{ name: "w", skills: ["w-*"] }] })),
-    ).toMatch(/needs a non-empty "paths"/);
-    expect(
-      issueMessage(
-        JSON.stringify({
-          scopes: [
-            { name: "w", paths: ["/a"], skills: ["w-*"], claudeConfigDir: "/o" },
-          ],
-        }),
-      ),
-    ).toMatch(/can only be set in ~\/\.bb\/dir-skills\/scopes\.json/);
-    expect(
-      issueMessage(
-        JSON.stringify({ scopes: [{ name: "w", paths: ["a"], skills: ["w-*"] }] }),
-      ),
-    ).toMatch(/must be absolute or start with "~\/"/);
+  it("returns no scopes for an empty list", () => {
+    expect(validateUiScopes([], "/h")).toEqual([]);
   });
 
-  it("rejects a non-string value", () => {
-    expect(scopesSettingSchema.safeParse(5).success).toBe(false);
+  it("trims names, paths and skills and expands ~/ against home", () => {
+    const [scope] = validateUiScopes(
+      [{ name: "  work ", paths: [" ~/x ", " /b "], skills: [" w-* ", " one "] }],
+      "/home/test",
+    );
+    expect(scope.name).toBe("work");
+    expect(scope.paths).toEqual(["/home/test/x", "/b"]);
+    expect(scope.patternSources).toEqual(["w-*", "one"]);
+  });
+
+  it("rejects a name that collides with another after trimming, and accepts distinct names", () => {
+    expect(() =>
+      validateUiScopes(
+        [
+          { ...entry, name: "work" },
+          { ...entry, name: "work " },
+        ],
+        "/h",
+      ),
+    ).toThrow('scope "work": the name is used twice');
+    expect(
+      validateUiScopes(
+        [
+          { ...entry, name: "work" },
+          { ...entry, name: "work2" },
+        ],
+        "/h",
+      ),
+    ).toHaveLength(2);
+  });
+
+  it.each(["", "   "])("rejects the empty name %j and names its position", (name) => {
+    expect(() => validateUiScopes([entry, { ...entry, name }], "/h")).toThrow(
+      "scope 2 needs a name",
+    );
+  });
+
+  it.each(["a\nb", "a\u0000b", "a\u007fb", "a\u0085b", "a\u2028b", "a\tb"])(
+    "rejects the control character in the name %j",
+    (name) => {
+      expect(() => validateUiScopes([{ ...entry, name }], "/h")).toThrow(
+        /the name must not contain control characters/,
+      );
+    },
+  );
+
+  it("accepts a name with a space and non-ASCII letters", () => {
+    expect(validateUiScopes([{ ...entry, name: "my docs ä" }], "/h")[0].name).toBe(
+      "my docs ä",
+    );
+  });
+
+  it.each([[[]], [[""]], [["  "]], [["/a", ""]]])(
+    "rejects the paths %j",
+    (paths) => {
+      expect(() => validateUiScopes([{ ...entry, paths }], "/h")).toThrow(
+        'scope "docs" needs at least one directory, none of them empty',
+      );
+    },
+  );
+
+  it.each(["~", "./src", "src/acme", "~x/y"])("rejects the relative path %j", (p) => {
+    expect(() => validateUiScopes([{ ...entry, paths: ["/a", p] }], "/h")).toThrow(
+      'scope "docs": every directory must be absolute or start with "~/"',
+    );
+  });
+
+  it.each([[[]], [[""]], [["x", "  "]]])("rejects the skills %j", (skills) => {
+    expect(() => validateUiScopes([{ ...entry, skills }], "/h")).toThrow(
+      'scope "docs" needs at least one skill or pattern, none of them empty',
+    );
   });
 });
 
@@ -320,20 +323,15 @@ describe("loadScopes", () => {
     expect(work?.claudeConfigDir).toBe("/opt/claude");
   });
 
-  describe("with setting scopes", () => {
-    const settingEntry = (over: Record<string, unknown> = {}) => ({
+  describe("with UI scopes", () => {
+    const uiEntry = (over: Record<string, unknown> = {}) => ({
       name: "work",
-      paths: ["/from-setting"],
+      paths: ["/from-ui"],
       skills: ["ui-*"],
       ...over,
     });
-    const settingScopes = (...entries: unknown[]) =>
-      parseScopesText(
-        JSON.stringify({ scopes: entries }),
-        "Scopes setting",
-        undefined,
-        { settingLayer: true },
-      );
+    const uiScopes = (...entries: ReturnType<typeof uiEntry>[]) =>
+      validateUiScopes(entries as never);
     const layers = (name: string) => {
       const root = dir(name);
       writeFileSync(
@@ -345,8 +343,8 @@ describe("loadScopes", () => {
       return root;
     };
 
-    it("ignores a setting scope named like a file scope with a profile and reports the name", () => {
-      const root = layers("setting-profiled");
+    it("ignores a UI scope named like a file scope with a profile and reports the name", () => {
+      const root = layers("ui-profiled");
       const userFile = scopesFile([
         {
           name: "work",
@@ -360,7 +358,7 @@ describe("loadScopes", () => {
         root,
         userFile,
         undefined,
-        settingScopes(settingEntry()),
+        uiScopes(uiEntry()),
         (name) => skipped.push(name),
       );
       expect(skipped).toEqual(["work"]);
@@ -371,7 +369,7 @@ describe("loadScopes", () => {
     });
 
     it("ignores a profiled scope silently when no callback is given", () => {
-      const root = layers("setting-profiled-silent");
+      const root = layers("ui-profiled-silent");
       const userFile = scopesFile([
         {
           name: "work",
@@ -380,14 +378,14 @@ describe("loadScopes", () => {
           claudeConfigDir: "/opt/claude",
         },
       ]);
-      const scopes = loadScopes(root, userFile, undefined, settingScopes(settingEntry()));
+      const scopes = loadScopes(root, userFile, undefined, uiScopes(uiEntry()));
       expect(scopes.map((s) => [s.paths, s.claudeConfigDir])).toEqual([
         [["/mine"], "/opt/claude"],
       ]);
     });
 
     it("replaces a file scope that has no profile", () => {
-      const root = layers("setting-file-plain");
+      const root = layers("ui-file-plain");
       const userFile = scopesFile([
         { name: "work", paths: ["/mine"], skills: ["work-*"] },
       ]);
@@ -396,52 +394,105 @@ describe("loadScopes", () => {
         root,
         userFile,
         undefined,
-        settingScopes(settingEntry()),
+        uiScopes(uiEntry()),
         (name) => skipped.push(name),
       );
       expect(skipped).toEqual([]);
       expect(scopes).toHaveLength(1);
-      expect(scopes[0].paths).toEqual(["/from-setting"]);
+      expect(scopes[0].paths).toEqual(["/from-ui"]);
       expect(scopes[0].patternSources).toEqual(["ui-*"]);
       expect(scopes[0].claudeConfigDir).toBeNull();
     });
 
     it("replaces a shipped scope that has no profile", () => {
-      const root = layers("setting-shipped");
+      const root = layers("ui-shipped");
       const skipped: string[] = [];
       const scopes = loadScopes(
         root,
         path.join(tmp, "absent.json"),
         undefined,
-        settingScopes(settingEntry()),
+        uiScopes(uiEntry()),
         (name) => skipped.push(name),
       );
       expect(skipped).toEqual([]);
       expect(scopes.map((s) => [s.name, s.paths, s.claudeConfigDir])).toEqual([
-        ["work", ["/from-setting"], null],
+        ["work", ["/from-ui"], null],
       ]);
     });
 
-    it("adds a setting scope with a new name", () => {
-      const root = layers("setting-new");
+    it("adds a UI scope with a new name", () => {
+      const root = layers("ui-new");
       const scopes = loadScopes(
         root,
         path.join(tmp, "absent.json"),
         undefined,
-        settingScopes(settingEntry({ name: "extra" })),
+        uiScopes(uiEntry({ name: "extra" })),
       );
       expect(scopes.map((s) => s.name)).toEqual(["work", "extra"]);
       expect(scopes[0].paths).toEqual(["/shipped"]);
       expect(scopes[1].claudeConfigDir).toBeNull();
     });
 
-    it("adds nothing for empty setting text", () => {
-      const root = layers("setting-empty");
-      const none = parseScopesText("", "Scopes setting", undefined, {
-        settingLayer: true,
-      });
-      const scopes = loadScopes(root, path.join(tmp, "absent.json"), undefined, none);
+    it("adds nothing for an empty list", () => {
+      const root = layers("ui-empty");
+      const scopes = loadScopes(root, path.join(tmp, "absent.json"), undefined, []);
       expect(scopes.map((s) => s.paths)).toEqual([["/shipped"]]);
+    });
+  });
+
+  describe("file scope sources", () => {
+    const sources = (root: string, userFile: string) => {
+      const seen: Array<[string, string, string[]]> = [];
+      loadScopes(root, userFile, undefined, [], undefined, (scope, source) =>
+        seen.push([scope.name, source, scope.paths]),
+      );
+      return seen;
+    };
+    const shipped = (name: string) => {
+      const root = dir(name);
+      writeFileSync(
+        path.join(root, "scopes.json"),
+        JSON.stringify({
+          scopes: [
+            { name: "work", paths: ["/shipped"], skills: ["work-*"] },
+            { name: "other", paths: ["/other"], skills: ["o-*"] },
+          ],
+        }),
+      );
+      return root;
+    };
+
+    it("reports every shipped scope as shipped without a user file", () => {
+      expect(sources(shipped("src-shipped"), path.join(tmp, "absent.json"))).toEqual([
+        ["work", "shipped", ["/shipped"]],
+        ["other", "shipped", ["/other"]],
+      ]);
+    });
+
+    it("reports a user scope that replaces a shipped one of the same name as file, once", () => {
+      const userFile = scopesFile([
+        { name: "work", paths: ["/mine"], skills: ["work-*"] },
+        { name: "extra", paths: ["/extra"], skills: ["e-*"] },
+      ]);
+      expect(sources(shipped("src-replaced"), userFile)).toEqual([
+        ["work", "file", ["/mine"]],
+        ["other", "shipped", ["/other"]],
+        ["extra", "file", ["/extra"]],
+      ]);
+    });
+
+    it("reports the file scopes before the UI layer is applied", () => {
+      const root = shipped("src-before-ui");
+      const seen: string[] = [];
+      loadScopes(
+        root,
+        path.join(tmp, "absent.json"),
+        undefined,
+        validateUiScopes([{ name: "work", paths: ["/ui"], skills: ["u-*"] }]),
+        undefined,
+        (scope) => seen.push(`${scope.name}:${scope.paths[0]}`),
+      );
+      expect(seen).toEqual(["work:/shipped", "other:/other"]);
     });
   });
 

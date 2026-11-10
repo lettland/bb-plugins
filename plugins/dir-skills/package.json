@@ -6,6 +6,8 @@
   "type": "module",
   "files": [
     "server.ts",
+    "app.tsx",
+    "rpc-contract.ts",
     "scopes.ts",
     "profile.ts",
     "detect.ts",
@@ -31,17 +33,25 @@
       "icon": "FolderTree"
     },
     "server": "./server.ts",
+    "app": "./app.tsx",
     "skills": [
       "skills"
     ]
   },
   "devDependencies": {
     "@get-bb/plugin-sdk": "0.6.79",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
     "@types/node": "^22.20.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@vitest/coverage-v8": "^4.1.11",
     "better-sqlite3": "^13.0.3",
     "cron-parser": "^5.10.2",
     "hono": "^4.13.13",
+    "jsdom": "^27.0.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.11"
   },

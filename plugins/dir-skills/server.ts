@@ -16,11 +16,17 @@ import {
   type ProjectSource,
 } from "./profile";
 import {
+  dirSkillsRpcContract,
+  uiScopesSchema,
+  type FileScope,
+  type ScopesSnapshot,
+  type UiScope,
+} from "./rpc-contract";
+import {
   loadScopes,
   normalizeDir,
-  parseScopesText,
-  scopesSettingSchema,
   selectSkills,
+  validateUiScopes,
   type Scope,
   type SkillInfo,
 } from "./scopes";
@@ -34,6 +40,20 @@ import {
 } from "./setup";
 
 const PROJECT_REFRESH_MS = 60_000;
+/** kv key of the scopes saved by the settings form. */
+const UI_SCOPES_KEY = "uiScopes";
+
+interface SkillEntry extends SkillInfo {
+  description: string;
+}
+
+/** What one load of the scope layers produces. Built without side effects, so a failed load can be dropped. */
+interface Computed {
+  scopes: Scope[];
+  skills: SkillEntry[];
+  fileScopes: FileScope[];
+  skipped: string[];
+}
 
 function projectSources(
   sources: ReadonlyArray<{ path?: string | null; hostId?: string | null }> | undefined,
@@ -55,20 +75,28 @@ function userScopesFile(): string {
   return path.join(homedir(), ".bb", "dir-skills", "scopes.json");
 }
 
-function frontmatterName(skillFile: string): string | null {
-  const text = readFileSync(skillFile, "utf8");
-  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
-  if (!match) return null;
-  for (const line of match[1].split(/\r?\n/)) {
-    const m = /^name:\s*(.+?)\s*$/.exec(line);
-    if (m) return m[1].replace(/^["']|["']$/g, "");
-  }
-  return null;
+function unquote(value: string): string {
+  return value.replace(/^["']|["']$/g, "");
 }
 
-function loadSkills(root: string, scopes: Scope[]): SkillInfo[] {
+/** The single-line `name` and `description` of a SKILL.md frontmatter. YAML block values are not read. */
+function frontmatter(skillFile: string): { name: string | null; description: string } {
+  const text = readFileSync(skillFile, "utf8");
+  const found = { name: null as string | null, description: "" };
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  if (!match) return found;
+  for (const line of match[1].split(/\r?\n/)) {
+    const name = /^name:\s*(.+?)\s*$/.exec(line);
+    if (name) found.name = unquote(name[1]);
+    const description = /^description:\s*(.+?)\s*$/.exec(line);
+    if (description) found.description = unquote(description[1]);
+  }
+  return found;
+}
+
+function loadSkills(root: string, scopes: Scope[]): SkillEntry[] {
   const skillsRoot = path.join(root, "skills");
-  const skills: SkillInfo[] = [];
+  const skills: SkillEntry[] = [];
   for (const entry of readdirSync(skillsRoot).sort()) {
     const dir = path.join(skillsRoot, entry);
     let isDir = false;
@@ -79,74 +107,134 @@ function loadSkills(root: string, scopes: Scope[]): SkillInfo[] {
     }
     if (!isDir) continue;
     const skillFile = path.join(dir, "SKILL.md");
-    let name: string | null = null;
+    let name: string;
+    let description: string;
     try {
-      name = frontmatterName(skillFile) ?? entry;
+      const meta = frontmatter(skillFile);
+      name = meta.name ?? entry;
+      description = meta.description;
     } catch {
       continue;
     }
     const owners = scopes
-      .filter((scope) => scope.patterns.some((re) => re.test(name as string)))
+      .filter((scope) => scope.patterns.some((re) => re.test(name)))
       .map((s) => s.name);
-    skills.push({ name, dir, scopes: owners });
+    skills.push({ name, description, dir, scopes: owners });
   }
   return skills;
 }
 
+/**
+ * The text of the removed v0.2.5 "Scopes" setting: `{ "scopes": [...] }`.
+ * Returns the scopes to import, or throws why the text cannot be imported.
+ */
+function legacyScopes(text: string, home: string): UiScope[] {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error("not valid JSON");
+  }
+  const parsed = uiScopesSchema.safeParse((raw as { scopes?: unknown } | null)?.scopes);
+  if (!parsed.success) throw new Error('expected { "scopes": [...] } with name, paths and skills only');
+  validateUiScopes(parsed.data, home);
+  return parsed.data;
+}
+
 export default async function plugin(bb: BbPluginApi) {
   const root = pluginRoot();
-  const state: { scopes: Scope[]; skills: SkillInfo[] } = {
+  const state: { scopes: Scope[]; skills: SkillEntry[] } = {
     scopes: [],
     skills: [],
   };
-  const settings = bb.settings.define({
-    scopes: {
-      type: "string",
-      label: "Scopes",
-      description:
-        'JSON in the same format as ~/.bb/dir-skills/scopes.json: { "scopes": [{ "name": string, "paths": string[], "skills": string[] }] }. "paths" entries must be absolute or start with "~/"; "skills" are name patterns. Precedence: the shipped scopes.json, then ~/.bb/dir-skills/scopes.json, then this setting; a scope replaces an earlier scope with the same name, except a scope that sets claudeConfigDir, which only the file can change. "claudeConfigDir" is not allowed here: set it in ~/.bb/dir-skills/scopes.json. Example: {"scopes":[{"name":"docs","paths":["~/src/docs"],"skills":["docs-*"]}]}',
-      experimental_multiline: true,
-      experimental_schema: scopesSettingSchema,
-      default: "",
-    },
-  });
 
-  let settingScopes: Scope[] = [];
+  // The UI scopes as saved (not normalized), what `getScopes` returns.
+  let uiScopes: UiScope[] = [];
   let settingError: string | null = null;
-  function loadSetting(text: string): Scope[] {
+
+  /** Why a stored value cannot be used, or null when it can. */
+  function storedProblem(stored: unknown): string | null {
+    const parsed = uiScopesSchema.safeParse(stored);
+    if (!parsed.success) return "the stored value has the wrong shape";
     try {
-      const scopes = parseScopesText(text, "Scopes setting", homedir(), {
-        settingLayer: true,
-      });
-      settingError = null;
-      return scopes;
+      validateUiScopes(parsed.data, homedir());
+      return null;
     } catch (error) {
-      settingError = (error as Error).message;
-      bb.log.warn(`Scopes setting ignored: ${settingError}`);
-      return [];
+      return (error as Error).message;
     }
   }
-  settingScopes = loadSetting((await settings.get()).scopes);
 
+  /** One-time, best effort: moves a value of the removed v0.2.5 "Scopes" setting into kv. */
+  async function importLegacySetting(): Promise<UiScope[] | undefined> {
+    let text: unknown;
+    try {
+      const { values } = await bb.sdk.plugins.getSettings({ pluginId: bb.pluginId });
+      text = values.scopes;
+    } catch {
+      return undefined;
+    }
+    if (typeof text !== "string" || text.trim() === "") return undefined;
+    try {
+      const imported = legacyScopes(text, homedir());
+      await bb.storage.kv.set(UI_SCOPES_KEY, imported);
+      bb.log.info(`imported ${imported.length} scope(s) from the removed Scopes setting`);
+      return imported;
+    } catch (error) {
+      bb.log.warn(`the removed Scopes setting was not imported: ${(error as Error).message}`);
+      return undefined;
+    }
+  }
+
+  let stored: unknown = await bb.storage.kv.get<unknown>(UI_SCOPES_KEY);
+  if (stored === undefined) stored = await importLegacySetting();
+  if (stored !== undefined) {
+    settingError = storedProblem(stored);
+    if (settingError === null) {
+      uiScopes = stored as UiScope[];
+    } else {
+      bb.log.warn(`Stored UI scopes ignored: ${settingError}`);
+    }
+  }
+
+  let fileScopes: FileScope[] = [];
   let settingSkipped: string[] = [];
-  let settingReloadError: string | null = null;
-  function loadState(): void {
+
+  /** Reads both scope files and the skills with the given UI scopes applied. Throws on a broken file; assigns nothing. */
+  function compute(ui: UiScope[]): Computed {
     const skipped: string[] = [];
+    const files: FileScope[] = [];
+    const uiValidated = validateUiScopes(ui, homedir());
     const scopes = loadScopes(
       root,
       userScopesFile(),
       homedir(),
-      settingScopes,
+      uiValidated,
       (name) => skipped.push(name),
+      (scope, source) =>
+        files.push({
+          name: scope.name,
+          paths: scope.paths,
+          skills: scope.patternSources,
+          source,
+          hasProfile: scope.claudeConfigDir !== null,
+          replacedByUi: false,
+        }),
     );
-    const skills = loadSkills(root, scopes);
-    state.scopes = scopes;
-    state.skills = skills;
-    settingSkipped = skipped;
-    settingReloadError = null;
-    for (const name of skipped) {
+    for (const file of files) {
+      file.replacedByUi =
+        !file.hasProfile && uiValidated.some((scope) => scope.name === file.name);
+    }
+    return { scopes, skills: loadSkills(root, scopes), fileScopes: files, skipped };
+  }
+
+  function apply(next: Computed): void {
+    state.scopes = next.scopes;
+    state.skills = next.skills;
+    fileScopes = next.fileScopes;
+    settingSkipped = next.skipped;
+    for (const name of next.skipped) {
       bb.log.warn(
-        `Scopes setting: scope "${name}" ignored: a scope with a Claude profile can only be changed in ~/.bb/dir-skills/scopes.json`,
+        `UI scopes: scope "${name}" ignored: a scope with a Claude profile can only be changed in ~/.bb/dir-skills/scopes.json`,
       );
     }
     bb.log.info(
@@ -162,20 +250,47 @@ export default async function plugin(bb: BbPluginApi) {
     }
     warnMissingConfigDirs(state.scopes, bb.log);
   }
+  function loadState(): void {
+    apply(compute(uiScopes));
+  }
   loadState();
-  settings.onChange((next) => {
-    const previous = { scopes: settingScopes, error: settingError };
-    settingScopes = loadSetting(next.scopes);
-    try {
-      loadState();
-    } catch (error) {
-      settingScopes = previous.scopes;
-      settingError = previous.error;
-      settingReloadError = (error as Error).message;
-      bb.log.warn(
-        `scopes reload failed, keeping the previous scopes: ${settingReloadError}; fix the file, then run bb plugin reload dir-skills`,
-      );
-    }
+
+  function snapshot(): ScopesSnapshot {
+    return {
+      fileScopes,
+      uiScopes,
+      skills: state.skills.map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+      })),
+      skipped: settingSkipped,
+      settingError,
+    };
+  }
+
+  // Saves run one at a time; a rejected save does not stop the next one.
+  let saves: Promise<unknown> = Promise.resolve();
+  function enqueue<T>(run: () => Promise<T>): Promise<T> {
+    const next = saves.then(run, run);
+    saves = next;
+    return next;
+  }
+
+  /** Not discoverable: these methods exist for the settings page, not for agents. */
+  bb.rpc.register(dirSkillsRpcContract, {
+    async getScopes() {
+      return snapshot();
+    },
+    saveScopes({ scopes }) {
+      return enqueue(async () => {
+        const next = compute(scopes);
+        await bb.storage.kv.set(UI_SCOPES_KEY, scopes);
+        uiScopes = scopes;
+        settingError = null;
+        apply(next);
+        return snapshot();
+      });
+    },
   });
 
   const setupDeps: SetupDeps = {
@@ -312,10 +427,9 @@ export default async function plugin(bb: BbPluginApi) {
           root,
           userScopesFile: userScopesFile(),
           userScopesLoaded: existsSync(userScopesFile()),
-          settingScopes: settingScopes.length,
+          settingScopes: uiScopes.length,
           settingError,
           settingSkipped,
-          settingReloadError,
           autoSetup: (await bb.storage.kv.get<SetupRecord>(SETUP_RECORD_KEY)) ?? null,
           scopes: state.scopes.map((s) => ({
             name: s.name,
@@ -333,11 +447,9 @@ export default async function plugin(bb: BbPluginApi) {
         const lines = [
           `plugin root: ${root}`,
           `user scopes: ${payload.userScopesFile}${payload.userScopesLoaded ? "" : " (absent)"}`,
-          settingReloadError !== null
-            ? `ui scopes: not applied — ${settingReloadError}; fix the file, then run bb plugin reload dir-skills`
-            : settingError === null
-              ? `ui scopes: ${settingScopes.length} (Scopes setting)`
-              : `ui scopes: ignored — ${settingError}`,
+          settingError === null
+            ? `ui scopes: ${uiScopes.length} (settings form)`
+            : `ui scopes: ignored — ${settingError}`,
         ];
         if (settingSkipped.length > 0)
           lines.push(

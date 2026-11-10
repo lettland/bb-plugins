@@ -54,30 +54,65 @@ names neutral too (`work-<topic>`): the skill name is committed with the skill.
 
 #### Settings UI
 
-The plugin also has a **Scopes** field in its bb plugin settings. It takes the
-same `{ "scopes": [...] }` JSON as `scopes.json`. Empty means no UI scopes.
+Settings → Plugins → Directory skills has a **Directory scopes** section, a
+form for scopes that live in bb and not in a file.
+
+- **From files** lists, read-only, the shipped `scopes.json` merged with
+  `~/.bb/dir-skills/scopes.json` before the UI layer, one entry per name. When
+  both files define a name, the user-file entry wins and is tagged `file`; the
+  others are tagged `shipped`. The list is computed at the last load or save,
+  so it matches what is active. A scope with a Claude profile carries the note
+  "Claude profile — edit in ~/.bb/dir-skills/scopes.json".
+- **Your scopes** are editable cards: a name, one or more directories
+  (absolute or `~/…`), and skills. Skills are one checkbox per skill in the
+  plugin's `skills/` directory, plus an **Extra patterns** field for globs such
+  as `docs-*`, comma-separated. A stored entry that equals a skill name shows
+  as a checked box; every other entry goes to Extra patterns. A scope needs at
+  least one checked skill or pattern.
+- **Save** is disabled until something changes. A validation or store error
+  shows above the buttons, your edits stay, and nothing is stored. **Discard
+  changes** restores the loaded state. The form reloads when the window gets
+  focus only while it has no unsaved changes.
+
+Rules and limits:
 
 - Precedence: the shipped `scopes.json`, then `~/.bb/dir-skills/scopes.json`,
-  then the Scopes setting. A scope replaces an earlier scope with the same
-  `name`; a scope with a new name is added.
-- bb checks the value when you save it and rejects invalid JSON or an invalid
-  scope. A stored value that no longer parses is ignored with a warning, and
-  the other two layers stay active. `bb dir-skills status` shows the number of
-  UI scopes, or why the setting is ignored (`ui scopes: ignored — …`). When a
-  settings change cannot apply (for example, the file is broken), status shows
-  `ui scopes: not applied — …`. Fix the file, then run
-  `bb plugin reload dir-skills`.
-- `claudeConfigDir` is file-only. The setting rejects it, and every `paths`
-  entry in the setting must be absolute or start with `~/`. A UI scope cannot
-  replace a scope that sets `claudeConfigDir`; it is ignored with a warning,
-  and `bb dir-skills status` lists it. Edit that scope in
-  `~/.bb/dir-skills/scopes.json`.
-- Anything that can run `bb plugin config dir-skills set scopes …` can write the
-  setting without file access. This is why the setting cannot set a Claude
-  profile or change where a profile applies.
+  then your scopes. A scope replaces an earlier scope with the same `name`; a
+  scope with a new name is added.
+- Names, directories and skills are trimmed. A name must not be empty, must
+  not contain control characters and must be unique after trimming. Every
+  directory must be absolute or start with `~/`.
+- At most 32 scopes, 16 directories per scope, 64 skill entries per scope.
+  Names and skill entries are at most 128 characters, directories at most 1024.
+- `claudeConfigDir` is file-only. The form never shows or sends it, and the
+  server rejects it in a save. A UI scope with the same name as a file scope
+  that sets `claudeConfigDir` is ignored (the card warns before Save, and the
+  name shows as skipped after it); `bb dir-skills status` lists it. Edit that
+  scope in `~/.bb/dir-skills/scopes.json`. A UI scope with the same name as a
+  file scope without a profile replaces it.
+- The scopes are stored in the plugin's own key-value storage (key
+  `uiScopes`). A stored value that no longer reads is ignored with a warning,
+  the file layers stay active, and the form shows a banner; the next Save
+  replaces it. `bb dir-skills status` shows the number of UI scopes, or why
+  they are ignored (`ui scopes: ignored — …`).
+- Anything that can call the plugin's `saveScopes` RPC can write UI scopes
+  without file access. This is why the form cannot set a Claude profile or
+  change where a profile applies.
 - Auto-setup (see below) only checks whether `~/.bb/dir-skills/scopes.json`
   exists. On install it can add a file scope next to scopes that exist only in
   the UI.
+
+Changes from v0.2.5, which had a **Scopes** JSON setting:
+
+- The `scopes` setting and `bb plugin config dir-skills set scopes` are
+  removed. A value stored there is no longer read, except by a one-time,
+  best-effort import: when no scopes are stored yet, the plugin reads the old
+  value once at startup, and if it is valid it is stored and one line is
+  logged. If bb no longer returns the removed key, the import does nothing.
+- `bb dir-skills status --json` no longer has `settingReloadError`. The
+  `settingScopes`, `settingError` and `settingSkipped` keys stay.
+- Rolling back to v0.2.5 ignores the scopes saved by the form, because they
+  are in storage and not in the old setting.
 
 ## Claude Code profile per directory
 
