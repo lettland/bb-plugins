@@ -20,8 +20,9 @@ function target(
   parentThreadId: string | null = null,
   provider = "claude-code",
   project = "bb-plugins",
+  title: string | null = null,
 ) {
-  return { provider, model, project, parentThreadId };
+  return { provider, model, project, parentThreadId, title };
 }
 
 describe("resolveInstructions", () => {
@@ -94,6 +95,43 @@ describe("resolveInstructions", () => {
     expect(resolveInstructions([child], target("claude-opus-5-5", "parent-1", "claude-code", "opshub"))).toBe("y");
   });
 
+  it("skips a thread whose title matches a skipTitles glob", () => {
+    const [rule] = parseRules(
+      JSON.stringify([
+        { threads: "child", skipTitles: ["Helpdesk: *", "Helpdesk catch-up *"], instructions: "x" },
+      ]),
+    );
+    const resolve = (title: string | null) =>
+      resolveInstructions([rule], target("claude-opus-5-5", "parent-1", "claude-code", "bb-plugins", title));
+    expect(resolve("Helpdesk: Anna 09:14")).toBeNull();
+    expect(resolve("Helpdesk catch-up 2026-11-10 (3)")).toBeNull();
+    expect(resolve("Helpdesk")).toBe("x");
+    expect(resolve("Fix the login bug")).toBe("x");
+    expect(resolve("helpdesk: Anna 09:14")).toBe("x");
+    expect(resolve(null)).toBe("x");
+    expect(resolve("")).toBe("x");
+  });
+
+  it("accepts skipTitles as a single glob string", () => {
+    const [rule] = parseRules(JSON.stringify([{ skipTitles: "Helpdesk: *", instructions: "x" }]));
+    expect(resolveInstructions([rule], target("m", null, "claude-code", "p", "Helpdesk: Bob 10:00"))).toBeNull();
+    expect(resolveInstructions([rule], target("m", null, "claude-code", "p", "Other"))).toBe("x");
+  });
+
+  it("leaves a rule without skipTitles unchanged for any title", () => {
+    const [rule] = parseRules(JSON.stringify([{ threads: "child", instructions: "x" }]));
+    for (const title of ["Helpdesk: Anna 09:14", "Other", "", null])
+      expect(resolveInstructions([rule], target("m", "parent-1", "claude-code", "p", title))).toBe("x");
+  });
+
+  it("applies skipTitles only on top of the other filters", () => {
+    const [rule] = parseRules(
+      JSON.stringify([{ threads: "child", skipTitles: "Helpdesk: *", instructions: "x" }]),
+    );
+    expect(resolveInstructions([rule], target("m", null, "claude-code", "p", "Other"))).toBeNull();
+    expect(resolveInstructions([rule], target("m", "parent-1", "claude-code", "p", "Other"))).toBe("x");
+  });
+
   it("requires every filter to match alongside the project", () => {
     const [rule] = parseRules(
       JSON.stringify([{ project: "bb-*", model: "claude-sonnet-*", threads: "child", instructions: "x" }]),
@@ -130,6 +168,12 @@ describe("parseRules", () => {
     ['[{"instructions": "x", "skipProjects": 5}]', "expected a glob or an array of globs"],
     ['[{"instructions": "x", "project": "bb-*", "skipProjects": []}]', "skipProjects"],
     ['[{"instructions": "x", "skipProject": "bb-*"}]', "skipProject"],
+    ['[{"instructions": "x", "skipTitles": []}]', "skipTitles"],
+    ['[{"instructions": "x", "skipTitles": ""}]', "skipTitles"],
+    ['[{"instructions": "x", "skipTitles": "  "}]', "skipTitles"],
+    ['[{"instructions": "x", "skipTitles": [""]}]', "skipTitles"],
+    ['[{"instructions": "x", "skipTitles": [5]}]', "skipTitles"],
+    ['[{"instructions": "x", "skipTitles": 5}]', "expected a glob or an array of globs"],
   ])("rejects %s", (json, message) => {
     expect(() => parseRules(json)).toThrow(message);
   });
@@ -264,10 +308,11 @@ describe("plugin", () => {
     model: string,
     parentThreadId: string | null = null,
     project = "bb-plugins",
+    title: string | null = null,
   ) {
     return host.harness.resolveAgentConfiguration(
       makePluginAgentConfigurationContext({
-        thread: { id: "thread-1", parentThreadId },
+        thread: { id: "thread-1", parentThreadId, title },
         project: { name: project },
         provider: { id: "claude-code", model },
       }),
@@ -320,6 +365,17 @@ describe("plugin", () => {
     await plugin(host.bb);
     expect((await resolve(host, "claude-opus-5-5", null, "opshub-web")).instructions).toBe("Active projects.");
     expect((await resolve(host, "claude-opus-5-5", null, "opshub-legacy")).instructions).toBeNull();
+    await host.harness.dispose();
+  });
+
+  it("passes the thread's title to skipTitles", async () => {
+    const host = createHost({
+      rules: JSON.stringify([{ threads: "child", skipTitles: "Helpdesk: *", instructions: "Helper." }]),
+    });
+    await plugin(host.bb);
+    expect((await resolve(host, "claude-opus-5-5", "parent-1", "bb-plugins", "Helpdesk: Anna 09:14")).instructions).toBeNull();
+    expect((await resolve(host, "claude-opus-5-5", "parent-1", "bb-plugins", "Fix the bug")).instructions).toBe("Helper.");
+    expect((await resolve(host, "claude-opus-5-5", "parent-1")).instructions).toBe("Helper.");
     await host.harness.dispose();
   });
 

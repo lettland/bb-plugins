@@ -44,6 +44,7 @@ export default async function plugin(bb: BbPluginApi) {
       model: context.provider.model,
       project: context.project.name,
       parentThreadId: context.thread.parentThreadId,
+      title: context.thread.title,
     });
     return {
       tools: [],

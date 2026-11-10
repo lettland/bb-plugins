@@ -16,6 +16,7 @@ array order.
 | `model` | no | Model id glob. `*` matches any run of characters; nothing else is special. End with `*` to also match suffixed ids such as `claude-opus-5-5[1m]`. Omit to match every model. |
 | `project` | no | bb project name glob (`bb-plugins`, `opshub-*`) or an array of globs; any match counts. Case-sensitive, with `*` as the only special character. Renaming a project stops its rules matching. Omit to match every project. |
 | `skipProjects` | no | A project name glob or an array of globs; any match excludes the project, and wins over `project`. Case-sensitive, so renaming a skipped project (or getting its case wrong) makes the rule apply to it again. Omit to skip nothing. |
+| `skipTitles` | no | A thread title glob or an array of globs; any match excludes the thread, and a thread with no title is never skipped. The title is read at each turn, so renaming a thread changes whether the rule applies. Case-sensitive, with `*` as the only special character. Omit to skip nothing. |
 | `threads` | no | `any` (default), `top-level` (no parent thread), or `child` (spawned with a parent thread). |
 | `instructions` | yes | A string, or an array of lines joined with newlines. |
 

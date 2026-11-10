@@ -15,6 +15,7 @@ const ruleSchema = z
     model: z.string().trim().min(1).optional(),
     project: globs.optional(),
     skipProjects: globs.optional(),
+    skipTitles: globs.optional(),
     threads: z.enum(THREAD_SCOPES).default("any"),
     instructions: z
       .union([z.string(), z.array(z.string())])
@@ -45,6 +46,7 @@ interface Target {
   model: string;
   project: string;
   parentThreadId: string | null;
+  title: string | null;
 }
 
 /** One pass, so a var value's own {{...}} text stays literal. */
@@ -129,6 +131,9 @@ function matches(rule: Rule, target: Target): boolean {
   if (
     rule.skipProjects?.some((glob) => globToRegExp(glob).test(target.project))
   )
+    return false;
+  const { title } = target;
+  if (title && rule.skipTitles?.some((glob) => globToRegExp(glob).test(title)))
     return false;
   if (rule.threads === "top-level") return target.parentThreadId === null;
   if (rule.threads === "child") return target.parentThreadId !== null;
