@@ -31,6 +31,10 @@ export interface ImportDeps {
   exclusive<T>(step: () => Promise<T>): Promise<T>;
   /** The saved config (unexpanded). Read inside the queued step. */
   current(): RawConfig;
+  /** The refusal text while a read of the plugin's storage failed at start, else undefined: nothing is written then. */
+  storageRefusal(): string | undefined;
+  /** True while the stored config failed to load at start: it is not merged into, so nothing is written. */
+  storedConfigFailed(): boolean;
   /** The full save-time check of a candidate config, with the profile scopes it would run against. Null when it passes. */
   validate(candidate: RawConfig, profileScopes: ProfileScope[]): string | null;
   /** Saves a candidate config from inside the queued step: the full checks run and the error is thrown. */
@@ -441,6 +445,12 @@ export async function importCommand(
   const dryRun = flags.includes("--dry-run");
   try {
     return await deps.exclusive(async () => {
+      const refusal = deps.storageRefusal();
+      if (refusal !== undefined) throw new ImportError([`import-dir-skills: ${refusal}`]);
+      if (deps.storedConfigFailed())
+        throw new ImportError([
+          "import-dir-skills: the saved config could not be loaded, so nothing is merged into it; fix it with bb model-instructions import <file> first",
+        ]);
       const plan = await buildPlan(deps);
       if (!dryRun) await apply(deps, plan);
       const report: ImportReport = { dryRun, ...plan.report };

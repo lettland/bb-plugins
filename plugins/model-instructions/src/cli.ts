@@ -67,8 +67,15 @@ export interface ConfigCli {
   saved(): RawConfig;
   /** The old setting text kept after a failed import, or undefined when none is kept. */
   legacyText(): string | undefined;
-  /** Validates and saves a config value (full checks), drops the kept old text, and returns what was stored. Throws the field-specific error. */
-  importConfig(value: unknown): Promise<RawConfig>;
+  /** The stored config as JSON text when it failed to load at start and is still unreplaced, else undefined. */
+  storedText(): string | undefined;
+  /** True when the plugin's storage could not be read at start, so the saved config is unknown. */
+  storageFailed(): boolean;
+  /**
+   * Validates and saves a config value (full checks), drops the kept old text, and returns what was stored.
+   * `keptTextError` is set when the save worked but the kept old text could not be removed. Throws the field-specific error.
+   */
+  importConfig(value: unknown): Promise<{ saved: RawConfig; keptTextError?: string }>;
 }
 
 export interface CliDeps {
@@ -492,11 +499,26 @@ async function readImportFile(file: string): Promise<FileText> {
 function exportConfig(config: ConfigCli, args: string[]): PluginCliResult {
   const extra = args.filter((arg) => arg !== "--legacy");
   if (extra.length > 0) return usageError(`export: unknown argument "${extra[0]}"`);
-  if (!args.includes("--legacy")) return out(config.saved());
+  // The saved config and the kept old text are unknown, so an export would look like a valid but empty answer.
+  if (config.storageFailed())
+    return {
+      exitCode: 1,
+      stderr: "export: the plugin's storage could not be read at start; reload the plugin (bb plugin reload model-instructions) first\n",
+    };
+  if (!args.includes("--legacy")) {
+    // A stored config that failed to load is printed as stored, so it can be fixed and imported again.
+    const stored = config.storedText();
+    return stored === undefined
+      ? out(config.saved())
+      : {
+          exitCode: 0,
+          stdout: stored + "\n",
+          stderr: "export: the saved config could not be loaded; this is the stored value, not the active config\n",
+        };
+  }
   const text = config.legacyText();
-  return text === undefined
-    ? { exitCode: 1, stderr: "export: no old setting text is kept\n" }
-    : { exitCode: 0, stdout: text };
+  if (text === undefined) return { exitCode: 1, stderr: "export: no old setting text is kept\n" };
+  return { exitCode: 0, stdout: text.endsWith("\n") ? text : text + "\n" };
 }
 
 async function importConfigFile(args: string[], ctx: PluginCliContext, config: ConfigCli): Promise<PluginCliResult> {
@@ -517,10 +539,13 @@ async function importConfigFile(args: string[], ctx: PluginCliContext, config: C
     return { exitCode: 1, stderr: `import: ${file}: not valid JSON\n` };
   }
   try {
-    const saved = await config.importConfig(value);
+    const { saved, keptTextError } = await config.importConfig(value);
     return {
       exitCode: 0,
       stdout: `imported ${file}: ${saved.rules.length} rules, ${saved.scopes.length} scopes, ${Object.keys(saved.vars).length} vars\n`,
+      ...(keptTextError === undefined
+        ? {}
+        : { stderr: `import: the kept old setting text could not be removed: ${keptTextError}\n` }),
     };
   } catch (error) {
     return { exitCode: 1, stderr: `import: ${(error as Error).message}\n` };

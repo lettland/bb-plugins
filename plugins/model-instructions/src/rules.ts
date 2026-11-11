@@ -1,7 +1,10 @@
 import path from "node:path";
 import { z } from "zod";
 import { activeScopes, activeScopesIn, type Scope } from "./paths.js";
+import { anyGlobMatches, globToRegExp } from "./glob.js";
 import { trimAndExpand, VAR_NAME_BODY } from "./vars.js";
+
+export { anyGlobMatches, globToRegExp };
 
 const THREAD_SCOPES = ["any", "top-level", "child"] as const;
 
@@ -202,24 +205,6 @@ export function parseConfig(json: string): Config {
 
 export function parseRules(json: string): Rule[] {
   return parseConfig(json).rules;
-}
-
-const globCache = new Map<string, RegExp>();
-
-export function globToRegExp(glob: string): RegExp {
-  let regexp = globCache.get(glob);
-  if (regexp === undefined) {
-    const escaped = glob
-      .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
-      .replace(/\*/g, ".*");
-    regexp = new RegExp(`^${escaped}$`);
-    globCache.set(glob, regexp);
-  }
-  return regexp;
-}
-
-export function anyGlobMatches(patterns: readonly string[], value: string): boolean {
-  return patterns.some((glob) => globToRegExp(glob).test(value));
 }
 
 /** The rule's name, or its position in the setting. */

@@ -63,6 +63,8 @@ interface Options {
   /** Stored under kv `legacyRules` before the plugin starts. */
   kept?: unknown;
   sdk?: Record<string, unknown>;
+  /** Runs on the host's storage before the plugin starts, to make a call fail. */
+  prepare?: (kv: ReturnType<typeof createFakePluginHost>["bb"]["storage"]["kv"]) => void;
 }
 
 function worldSdk(sdk: Record<string, unknown> = {}) {
@@ -88,6 +90,7 @@ async function load(options: Options = {}) {
   });
   if (options.stored !== undefined) await host.bb.storage.kv.set("config", options.stored);
   if (options.kept !== undefined) await host.bb.storage.kv.set("legacyRules", options.kept);
+  options.prepare?.(host.bb.storage.kv);
   const create = await pluginAt();
   await create(host.bb);
   await flush();
@@ -224,9 +227,9 @@ describe("the one-time import of the old rules setting", () => {
     expect(record.error).toMatch(/^not valid JSON: /);
     expect(await state(loaded)).toMatchObject({
       config: { vars: {}, scopes: [], rules: [] },
-      loadError: { message: record.error, legacyText: text },
+      loadError: { kind: "legacy", message: record.error, legacyText: text },
     });
-    expect(await loaded.harness.runCli(["export", "--legacy"])).toMatchObject({ exitCode: 0, stdout: text });
+    expect(await loaded.harness.runCli(["export", "--legacy"])).toMatchObject({ exitCode: 0, stdout: text + "\n" });
     expect(logs(loaded, "warn").some((line) => line.startsWith("the old rules setting was not imported: not valid JSON"))).toBe(true);
     expect((await configure(loaded)).instructions).toBeNull();
   });
@@ -239,7 +242,7 @@ describe("the one-time import of the old rules setting", () => {
   ])("keeps the text of %s instead of importing it", async (_label, text, message) => {
     const loaded = await load({ legacy: text });
     expect(await loaded.kv.get("config")).toBeUndefined();
-    expect(await state(loaded)).toMatchObject({ loadError: { message: expect.stringContaining(message), legacyText: text } });
+    expect(await state(loaded)).toMatchObject({ loadError: { kind: "legacy", message: expect.stringContaining(message), legacyText: text } });
   });
 
   it.each([
@@ -258,7 +261,8 @@ describe("the one-time import of the old rules setting", () => {
   });
 
   describe("when the old setting cannot be read", () => {
-    const MESSAGE = "the old rules setting could not be read: host down; restart bb or reload the plugin to try again";
+    const MESSAGE =
+      "the old rules setting could not be read: host down. Restart bb or reload the plugin before you save here: once this form saves, the old setting is no longer imported.";
     const down = { plugins: { getSettings: async () => { throw new Error("host down"); } } };
 
     it("warns with the reason, keeps it in memory only, and shows it with no old text", async () => {
@@ -267,7 +271,7 @@ describe("the one-time import of the old rules setting", () => {
       expect(await loaded.kv.get("legacyRules")).toBeUndefined();
       expect(logs(loaded, "warn")).toEqual([MESSAGE]);
       expect(logs(loaded, "debug")).not.toContain(MESSAGE);
-      expect((await state(loaded)).loadError).toEqual({ message: MESSAGE, legacyText: "" });
+      expect((await state(loaded)).loadError).toEqual({ kind: "legacy", message: MESSAGE, legacyText: "" });
     });
 
     it("says nothing about the old setting when the host has no plugin settings call at all", async () => {
@@ -283,7 +287,7 @@ describe("the one-time import of the old rules setting", () => {
         return { values: { rules: JSON.stringify([GUARD]) } };
       });
       const first = await load({ sdk: { plugins: { getSettings } } });
-      expect((await state(first)).loadError).toEqual({ message: MESSAGE, legacyText: "" });
+      expect((await state(first)).loadError).toEqual({ kind: "legacy", message: MESSAGE, legacyText: "" });
       broken = false;
       const restarted = await first.harness.reload(first.create);
       await flush();
@@ -294,7 +298,7 @@ describe("the one-time import of the old rules setting", () => {
 
     it("loses to a kept old text", async () => {
       const loaded = await load({ sdk: down, kept: { text: "old", error: "why" } });
-      expect((await state(loaded)).loadError).toEqual({ message: "why", legacyText: "old" });
+      expect((await state(loaded)).loadError).toEqual({ kind: "legacy", message: "why", legacyText: "old" });
     });
 
     it("is cleared by a successful form save", async () => {
@@ -306,7 +310,7 @@ describe("the one-time import of the old rules setting", () => {
     it("is kept when the form save is refused", async () => {
       const loaded = await load({ sdk: down });
       await expect(save(loaded, { rules: [{ name: "r" }] })).rejects.toThrow();
-      expect((await state(loaded)).loadError).toEqual({ message: MESSAGE, legacyText: "" });
+      expect((await state(loaded)).loadError).toEqual({ kind: "legacy", message: MESSAGE, legacyText: "" });
     });
 
     it("is cleared by a successful import-dir-skills", async () => {
@@ -399,9 +403,377 @@ describe("the one-time import of the old rules setting", () => {
 
     it("is read from storage at a start, so the banner returns after a restart until it is dismissed", async () => {
       const loaded = await load({ stored: raw({ rules: [GUARD] }), kept: { text: "old", error: "why" } });
-      expect((await state(loaded)).loadError).toEqual({ message: "why", legacyText: "old" });
-      expect(await loaded.harness.runCli(["export", "--legacy"])).toMatchObject({ exitCode: 0, stdout: "old" });
+      expect((await state(loaded)).loadError).toEqual({ kind: "legacy", message: "why", legacyText: "old" });
+      expect(await loaded.harness.runCli(["export", "--legacy"])).toMatchObject({ exitCode: 0, stdout: "old\n" });
     });
+  });
+});
+
+/** Makes one kv method throw for one key, and leaves every other call alone. */
+function failing(method: "get" | "set" | "delete", key: string, message = "disk full") {
+  return (kv: ReturnType<typeof createFakePluginHost>["bb"]["storage"]["kv"]) => {
+    const original = kv[method].bind(kv) as (key: string, value?: unknown) => Promise<unknown>;
+    vi.spyOn(kv, method).mockImplementation((async (at: string, value?: unknown) => {
+      if (at === key) throw new Error(message);
+      return original(at, value);
+    }) as never);
+  };
+}
+
+describe("a kv failure never fails the start (legacy import)", () => {
+  const OLD = JSON.stringify([GUARD]);
+  const SAVE_MESSAGE =
+    "the old rules setting could not be saved: disk full. Restart bb or reload the plugin before you save here: once this form saves, the old setting is no longer imported.";
+
+  it("clears the save-failure banner by a successful form save", async () => {
+    const loaded = await load({ legacy: OLD, prepare: failing("set", "config") });
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "legacy", message: SAVE_MESSAGE });
+    vi.restoreAllMocks();
+    expect((await save(loaded, raw({ rules: [GUARD] }))).loadError).toBeNull();
+    expect((await state(loaded)).loadError).toBeNull();
+  });
+
+  it("shows no banner when the write works", async () => {
+    const loaded = await load({ legacy: OLD });
+    expect((await state(loaded)).loadError).toBeNull();
+  });
+
+  it("logs a failed write of the imported config, runs with no rules, keeps no old text, and imports again at the next start", async () => {
+    const loaded = await load({ legacy: OLD, prepare: failing("set", "config") });
+    expect(logs(loaded, "warn")).toContain(
+      "the old rules setting could not be saved: disk full; it is imported again at the next start",
+    );
+    expect(await loaded.kv.get("config")).toBeUndefined();
+    expect(await loaded.kv.get("legacyRules")).toBeUndefined();
+    expect((await state(loaded)).loadError).toEqual({ kind: "legacy", message: SAVE_MESSAGE, legacyText: "" });
+    expect((await configure(loaded)).instructions).toBeNull();
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    expect(await restarted.bb.storage.kv.get("config")).toEqual(raw({ rules: [GUARD] }));
+  });
+
+  it("is not a parse error: a good setting is not kept as old text when the write fails", async () => {
+    const loaded = await load({ legacy: OLD, prepare: failing("set", "config") });
+    expect(logs(loaded, "warn").some((line) => line.startsWith("the old rules setting was not imported"))).toBe(false);
+    expect((await loaded.harness.runCli(["export", "--legacy"])).exitCode).toBe(1);
+  });
+
+  it("logs a failed save of the kept old text, and keeps the record in memory for this run", async () => {
+    const text = "[{";
+    const loaded = await load({ legacy: text, prepare: failing("set", "legacyRules") });
+    expect(logs(loaded, "warn")).toContain("the old rules setting could not be kept: disk full");
+    expect(await loaded.kv.get("legacyRules")).toBeUndefined();
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "legacy", legacyText: text });
+    expect(await loaded.harness.runCli(["export", "--legacy"])).toMatchObject({ exitCode: 0, stdout: text + "\n" });
+  });
+});
+
+describe("dismissing the kept old text lasts", () => {
+  const text = "[{";
+
+  it("stores the flag, and the banner stays away after a restart", async () => {
+    const loaded = await load({ legacy: text });
+    expect((await state(loaded)).loadError).not.toBeNull();
+    expect(((await loaded.harness.callRpc("dismissLegacy", null)) as ConfigState).loadError).toBeNull();
+    expect(await loaded.kv.get("legacyDismissed")).toBe(true);
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    expect(((await restarted.harness.callRpc("getState", null)) as ConfigState).loadError).toBeNull();
+    expect(await restarted.bb.storage.kv.get("legacyRules")).toBeUndefined();
+    expect(restarted.harness.logEntries.filter((entry) => entry.level === "debug").map((entry) => entry.message)).toContain(
+      "the old rules setting was dismissed; not importing it",
+    );
+    expect(loaded.getSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("without a dismissal the banner returns after a restart", async () => {
+    const loaded = await load({ legacy: text });
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    expect(((await restarted.harness.callRpc("getState", null)) as ConfigState).loadError).toMatchObject({ kind: "legacy", legacyText: text });
+    expect(await restarted.bb.storage.kv.get("legacyDismissed")).toBeUndefined();
+  });
+
+  it("is not changed by a successful import", async () => {
+    const loaded = await load({ legacy: text });
+    await loaded.harness.callRpc("dismissLegacy", null);
+    const file = path.join(base, "fixed.json");
+    writeFileSync(file, JSON.stringify(raw({ rules: [GUARD] })));
+    expect((await loaded.harness.runCli(["import", file])).exitCode).toBe(0);
+    expect(await loaded.kv.get("legacyDismissed")).toBe(true);
+  });
+});
+
+describe("the stored old text is validated", () => {
+  it.each([
+    ["a text that is not a string", { text: 5, error: "why" }],
+    ["a missing error", { text: "old" }],
+    ["an extra key", { text: "old", error: "why", more: 1 }],
+    ["a value that is not an object", "old"],
+  ])("ignores and deletes %s", async (_label, kept) => {
+    const loaded = await load({ stored: raw({ rules: [GUARD] }), kept });
+    expect(logs(loaded, "warn")).toContain("stored old setting text ignored: wrong shape");
+    expect(await loaded.kv.get("legacyRules")).toBeUndefined();
+    expect((await state(loaded)).loadError).toBeNull();
+    expect((await loaded.harness.runCli(["export", "--legacy"])).exitCode).toBe(1);
+  });
+
+  it("does not warn for a record of the right shape", async () => {
+    const loaded = await load({ stored: raw({ rules: [GUARD] }), kept: { text: "old", error: "why" } });
+    expect(logs(loaded, "warn")).toEqual([]);
+    expect(await loaded.kv.get("legacyRules")).toEqual({ text: "old", error: "why" });
+  });
+});
+
+describe("an import whose cleanup fails", () => {
+  it("still succeeds with the normal output, and warns", async () => {
+    const loaded = await load({ legacy: "[{", prepare: failing("delete", "legacyRules") });
+    const file = path.join(base, "fixed.json");
+    writeFileSync(file, JSON.stringify(raw({ rules: [GUARD] })));
+    expect(await loaded.harness.runCli(["import", file])).toMatchObject({
+      exitCode: 0,
+      stdout: `imported ${file}: 1 rules, 0 scopes, 0 vars\n`,
+    });
+    expect(logs(loaded, "warn")).toContain("the kept old setting text could not be removed: disk full");
+    expect(await loaded.kv.get("config")).toEqual(raw({ rules: [GUARD] }));
+  });
+
+  it("leaves no stale banner, and says so on stderr", async () => {
+    const loaded = await load({ legacy: "[{", prepare: failing("delete", "legacyRules") });
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "legacy", legacyText: "[{" });
+    const file = path.join(base, "fixed-stale.json");
+    writeFileSync(file, JSON.stringify(raw({ rules: [GUARD] })));
+    const result = await loaded.harness.runCli(["import", file]);
+    expect(result).toMatchObject({
+      exitCode: 0,
+      stderr: "import: the kept old setting text could not be removed: disk full\n",
+    });
+    expect((await state(loaded)).loadError).toBeNull();
+    expect((await loaded.harness.runCli(["export", "--legacy"])).exitCode).toBe(1);
+  });
+
+  it("prints nothing on stderr when the cleanup works", async () => {
+    const loaded = await load({ legacy: "[{" });
+    const file = path.join(base, "fixed-clean.json");
+    writeFileSync(file, JSON.stringify(raw({ rules: [GUARD] })));
+    const result = await loaded.harness.runCli(["import", file]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr ?? "").toBe("");
+    expect((await state(loaded)).loadError).toBeNull();
+  });
+});
+
+describe("dismissing with no kept old text", () => {
+  it("changes nothing: no flag is stored, and the state comes back", async () => {
+    const loaded = await load({ stored: raw({ rules: [GUARD] }) });
+    const result = (await loaded.harness.callRpc("dismissLegacy", null)) as ConfigState;
+    expect(result).toEqual(await state(loaded));
+    expect(result.loadError).toBeNull();
+    expect(await loaded.kv.get("legacyDismissed")).toBeUndefined();
+  });
+
+  it("sets the flag when old text is kept", async () => {
+    const loaded = await load({ legacy: "[{" });
+    await loaded.harness.callRpc("dismissLegacy", null);
+    expect(await loaded.kv.get("legacyDismissed")).toBe(true);
+  });
+});
+
+describe("a failed read of the plugin's storage at start", () => {
+  const READ = (key: string) =>
+    `the plugin's storage could not be read: disk gone ${key}`;
+  const MESSAGE = (key: string) => `${READ(key)}. Reload the plugin (bb plugin reload model-instructions) before saving.`;
+  const REFUSAL =
+    "the plugin's storage could not be read at start; reload the plugin (bb plugin reload model-instructions) before saving";
+  // Fails the start-path read of one key only; the test's own reads afterwards go through.
+  const readFails = (key: string) => (kv: ReturnType<typeof createFakePluginHost>["bb"]["storage"]["kv"]) => {
+    const original = kv.get.bind(kv) as (key: string) => Promise<unknown>;
+    let failed = false;
+    vi.spyOn(kv, "get").mockImplementation((async (at: string) => {
+      if (at === key && !failed) {
+        failed = true;
+        throw new Error(`disk gone ${key}`);
+      }
+      return original(at);
+    }) as never);
+  };
+
+  it.each(["config", "legacyRules", "legacyDismissed"])(
+    "(%s) still registers configure, RPC and CLI, warns, runs with no rules and shows the storage banner",
+    async (key) => {
+      const loaded = await load({ legacy: JSON.stringify([GUARD]), prepare: readFails(key) });
+      expect(logs(loaded, "warn")).toContain(READ(key));
+      expect((await state(loaded)).loadError).toEqual({ kind: "storage", message: MESSAGE(key), legacyText: "" });
+      expect((await configure(loaded)).instructions).toBeNull();
+      const status = await loaded.harness.runCli(["status"]);
+      expect(status.exitCode).toBe(0);
+    },
+  );
+
+  it("does not run the legacy import when a read failed", async () => {
+    const loaded = await load({ legacy: JSON.stringify([GUARD]), prepare: readFails("legacyDismissed") });
+    expect(loaded.getSettings).not.toHaveBeenCalled();
+    expect(await loaded.kv.get("config")).toBeUndefined();
+  });
+
+  it("does not adopt a stored config when the kept-text read failed", async () => {
+    const loaded = await load({ stored: raw({ rules: [GUARD] }), prepare: readFails("legacyRules") });
+    expect((await configure(loaded)).instructions).toBeNull();
+  });
+
+  it("beats a stored-config error and a kept old text in the banner", async () => {
+    const loaded = await load({ kept: { text: "old", error: "why" }, prepare: readFails("config") });
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "storage" });
+  });
+
+  it("refuses the form save, writing nothing", async () => {
+    const loaded = await load({ prepare: readFails("config") });
+    await expect(save(loaded, raw({ rules: [GUARD] }))).rejects.toThrow(REFUSAL);
+    expect(await loaded.kv.get("config")).toBeUndefined();
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "storage" });
+  });
+
+  it("refuses import, writing nothing", async () => {
+    const loaded = await load({ prepare: readFails("config") });
+    const file = path.join(base, "refused.json");
+    writeFileSync(file, JSON.stringify(raw({ rules: [GUARD] })));
+    expect(await loaded.harness.runCli(["import", file])).toMatchObject({ exitCode: 1, stderr: `import: ${REFUSAL}\n` });
+    expect(await loaded.kv.get("config")).toBeUndefined();
+  });
+
+  it("refuses import-dir-skills with exit 1, writing nothing", async () => {
+    put(path.join(home, ".bb", "dir-skills", "scopes.json"), { scopes: [{ name: "prof", paths: ["/srv/prof"], skills: ["work-*"] }] });
+    put(path.join(home, ".bb", "dir-skills", "export.json"), { uiScopes: [], pins: [] });
+    const loaded = await load({ prepare: readFails("config") });
+    expect(await loaded.harness.runCli(["import-dir-skills"])).toMatchObject({
+      exitCode: 1,
+      stderr: `import-dir-skills: ${REFUSAL}\n`,
+    });
+    expect(await loaded.kv.get("config")).toBeUndefined();
+  });
+
+  it("refuses dismissLegacy too", async () => {
+    const loaded = await load({ prepare: readFails("config") });
+    await expect(loaded.harness.callRpc("dismissLegacy", null)).rejects.toThrow(REFUSAL);
+    expect(await loaded.kv.get("legacyDismissed")).toBeUndefined();
+  });
+
+  it("is normal without the failure: no banner, saves work", async () => {
+    const loaded = await load({ legacy: "[]" });
+    expect((await state(loaded)).loadError).toBeNull();
+    expect((await save(loaded, raw({ rules: [GUARD] }))).loadError).toBeNull();
+  });
+});
+
+describe("a failed delete of a wrong-shape kept text", () => {
+  it("warns and starts normally", async () => {
+    const loaded = await load({
+      kept: { text: 1 },
+      stored: raw({ rules: [GUARD] }),
+      prepare: failing("delete", "legacyRules"),
+    });
+    expect(logs(loaded, "warn")).toContain("stored old setting text could not be removed: disk full");
+    expect((await state(loaded)).loadError).toBeNull();
+    expect((await configure(loaded)).instructions).toContain("Guard.");
+  });
+});
+
+describe("a stored config that fails to load", () => {
+  const BAD = { rules: [{ name: "r" }] };
+  const PREFIX = "the saved config could not be loaded: ";
+  const IMPORT_DIR_SKILLS_REFUSAL =
+    "import-dir-skills: the saved config could not be loaded, so nothing is merged into it; fix it with bb model-instructions import <file> first\n";
+
+  it("keeps running with no rules, and shows the message and the stored value in the banner state", async () => {
+    const loaded = await load({ stored: BAD });
+    const current = await state(loaded);
+    expect(current.config).toEqual({ vars: {}, scopes: [], rules: [] });
+    expect(current.loadError).toEqual({
+      kind: "stored",
+      message: expect.stringMatching(new RegExp(`^${PREFIX}.+`, "s")),
+      legacyText: JSON.stringify(BAD, null, 2),
+    });
+    expect((await configure(loaded)).instructions).toBeNull();
+    expect(await loaded.kv.get("config")).toEqual(BAD);
+  });
+
+  it("has an empty text when the stored value has no JSON text", async () => {
+    const loaded = await load({ prepare: (kv) => void vi.spyOn(kv, "get").mockImplementation((async (key: string) => (key === "config" ? { rules: 1n } : undefined)) as never) });
+    expect((await state(loaded)).loadError).toEqual({ kind: "stored", message: expect.stringContaining(PREFIX), legacyText: "" });
+  });
+
+  it("wins over a kept old text and a read error", async () => {
+    const kept = await load({ stored: BAD, kept: { text: "old", error: "why" } });
+    expect((await state(kept)).loadError).toMatchObject({ kind: "stored" });
+    expect(await kept.harness.runCli(["export", "--legacy"])).toMatchObject({ exitCode: 0, stdout: "old\n" });
+  });
+
+  it("does not show up for a stored config that loads", async () => {
+    const loaded = await load({ stored: raw({ rules: [GUARD] }) });
+    expect((await state(loaded)).loadError).toBeNull();
+    expect(await loaded.harness.runCli(["export"])).toMatchObject({ stdout: JSON.stringify(raw({ rules: [GUARD] }), null, 2) + "\n" });
+  });
+
+  it("is printed as stored by export, not as the empty config", async () => {
+    const loaded = await load({ stored: BAD });
+    expect(await loaded.harness.runCli(["export"])).toMatchObject({
+      exitCode: 0,
+      stdout: JSON.stringify(BAD, null, 2) + "\n",
+      stderr: "export: the saved config could not be loaded; this is the stored value, not the active config\n",
+    });
+  });
+
+  it("makes import-dir-skills refuse, for a dry run too, and write nothing", async () => {
+    put(path.join(home, ".bb", "dir-skills", "scopes.json"), { scopes: [{ name: "prof", paths: ["/srv/prof"], skills: ["work-*"] }] });
+    put(path.join(home, ".bb", "dir-skills", "export.json"), { uiScopes: [], pins: [] });
+    const loaded = await load({ stored: BAD });
+    for (const args of [["import-dir-skills"], ["import-dir-skills", "--dry-run"]])
+      expect(await loaded.harness.runCli(args)).toMatchObject({ exitCode: 1, stderr: IMPORT_DIR_SKILLS_REFUSAL });
+    expect(await loaded.kv.get("config")).toEqual(BAD);
+    expect(existsSync(profilesPath())).toBe(false);
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "stored" });
+  });
+
+  it("is kept when a form save or an import is refused", async () => {
+    const loaded = await load({ stored: BAD });
+    await expect(save(loaded, { rules: [{ name: "r" }] })).rejects.toThrow();
+    const file = path.join(base, "bad.json");
+    writeFileSync(file, JSON.stringify(BAD));
+    expect((await loaded.harness.runCli(["import", file])).exitCode).toBe(1);
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "stored" });
+    expect(await loaded.kv.get("config")).toEqual(BAD);
+  });
+
+  it("is cleared by a successful import, and import-dir-skills then works", async () => {
+    put(path.join(home, ".bb", "dir-skills", "scopes.json"), { scopes: [{ name: "prof", paths: ["/srv/prof"], skills: ["work-*"] }] });
+    put(path.join(home, ".bb", "dir-skills", "export.json"), { uiScopes: [], pins: [] });
+    const loaded = await load({ stored: BAD });
+    const file = path.join(base, "fixed.json");
+    writeFileSync(file, JSON.stringify(raw({ rules: [GUARD] })));
+    expect((await loaded.harness.runCli(["import", file])).exitCode).toBe(0);
+    expect((await state(loaded)).loadError).toBeNull();
+    expect((await loaded.harness.runCli(["export"])).stdout).toBe(JSON.stringify(raw({ rules: [GUARD] }), null, 2) + "\n");
+    expect((await loaded.harness.runCli(["import-dir-skills"])).exitCode).toBe(0);
+  });
+
+  it("is cleared by a successful form save", async () => {
+    const loaded = await load({ stored: BAD });
+    expect((await save(loaded, raw({ rules: [GUARD] }))).loadError).toBeNull();
+    expect((await state(loaded)).loadError).toBeNull();
+    expect((await loaded.harness.runCli(["export"])).stdout).toBe(JSON.stringify(raw({ rules: [GUARD] }), null, 2) + "\n");
+  });
+
+  it("is not carried to a restart that finds a config that loads", async () => {
+    const loaded = await load({ stored: BAD });
+    await save(loaded, raw({ rules: [GUARD] }));
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    expect(((await restarted.harness.callRpc("getState", null)) as ConfigState).loadError).toBeNull();
+  });
+
+  it("is not touched by dismissLegacy", async () => {
+    const loaded = await load({ stored: BAD, kept: { text: "old", error: "why" } });
+    expect(((await loaded.harness.callRpc("dismissLegacy", null)) as ConfigState).loadError).toMatchObject({ kind: "stored" });
   });
 });
 

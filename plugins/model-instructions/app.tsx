@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { definePluginApp, useRpc } from "@get-bb/plugin-sdk/app";
 import type { ConfigState, ModelInstructionsRpcContract, RawConfig } from "./rpc-contract";
+import { globToRegExp } from "./src/glob";
 import { previewLength } from "./src/vars";
 
 const SOFT_INK = "color-mix(in oklch, var(--ink) 68%, var(--canvas))";
@@ -13,13 +14,39 @@ const PROFILE_NOTE = "Claude profile — edit ~/.bb/model-instructions/profiles.
 const NOT_CHECKABLE_PREFIX = "budget not checkable yet";
 const NOT_CHECKABLE_HINT = "bb is still loading the provider and project lists; try again in a moment.";
 const DUPLICATE_NOTE = "This name is already used above; rename one of them.";
+const NO_SCOPE_NOTE = "Matches no directory scope";
+const STORED_FIX =
+  "Saving here replaces it. To keep it, run bb model-instructions export, fix the file, and import it.";
 const LEGACY_FIX = "Fix it, save it to a file and run bb model-instructions import <file>, or dismiss it.";
 
 type RawRule = RawConfig["rules"][number];
 type Threads = RawRule["threads"];
+/** The rule fields that are lists with a typing box, and so can hold text that was typed but not added. */
+type ListField = "project" | "skipProjects" | "skipTitles" | "scope" | "skills";
+type Pending = Record<ListField, string>;
+
+const noPending = (): Pending => ({ project: "", skipProjects: "", skipTitles: "", scope: "", skills: "" });
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Server messages count from 0 and say rules[n] or scopes[n]; the cards say Rule n+1 and Directory scope n+1,
+ * followed by the card's name in brackets when it has one.
+ */
+function cardNames(message: string, draft: Draft): string {
+  const titled = (label: string, index: number, name: string | undefined) => {
+    const trimmed = name?.trim() ?? "";
+    return trimmed === "" ? `${label} ${index + 1}` : `${label} ${index + 1} (${trimmed})`;
+  };
+  return message
+    .replace(/\brules\[(\d+)\]/g, (_, index: string) =>
+      titled("Rule", Number(index), draft.rules[Number(index)]?.name),
+    )
+    .replace(/\bscopes\[(\d+)\]/g, (_, index: string) =>
+      titled("Directory scope", Number(index), draft.scopes[Number(index)]?.name),
+    );
 }
 
 interface VarRow {
@@ -47,6 +74,8 @@ interface RuleRow {
   scope: string[];
   skills: string[];
   instructions: string;
+  /** Text typed in a list's box and not added yet. */
+  pending: Pending;
 }
 
 interface Draft {
@@ -80,6 +109,7 @@ function fromConfig(config: RawConfig, previous: Draft, nextKey: () => number): 
       scope: rule.scope ?? [],
       skills: rule.skills ?? [],
       instructions: rule.instructions ?? "",
+      pending: noPending(),
     })),
   };
 }
@@ -104,11 +134,12 @@ function ruleToPayload(rule: RuleRow): RawRule {
     name: textOrUndefined(rule.name),
     provider: textOrUndefined(rule.provider),
     model: textOrUndefined(rule.model),
-    project: listOrUndefined(rule.project),
-    skipProjects: listOrUndefined(rule.skipProjects),
-    skipTitles: listOrUndefined(rule.skipTitles),
-    scope: listOrUndefined(rule.scope),
-    skills: listOrUndefined(rule.skills),
+    // Text typed in a box and not added yet is sent as if it was added.
+    project: listOrUndefined([...rule.project, rule.pending.project]),
+    skipProjects: listOrUndefined([...rule.skipProjects, rule.pending.skipProjects]),
+    skipTitles: listOrUndefined([...rule.skipTitles, rule.pending.skipTitles]),
+    scope: listOrUndefined([...rule.scope, rule.pending.scope]),
+    skills: listOrUndefined([...rule.skills, rule.pending.skills]),
     threads: rule.threads,
     // The server trims before it expands, so the text goes as typed.
     instructions: rule.instructions.trim() === "" ? undefined : rule.instructions,
@@ -210,42 +241,56 @@ function TextField(props: {
   );
 }
 
-/** A list of strings: an input plus Add, and one removable tag per entry. Leaving the input also adds it. */
+/**
+ * A list of strings: an input plus Add, and one removable tag per entry. Leaving the input also adds it.
+ * The typed text lives in the form's draft, so it counts as a change until it is added or discarded.
+ */
 function TagList(props: {
   label: string;
   values: string[];
   onChange: (values: string[]) => void;
+  pending: string;
+  onPending: (text: string) => void;
   hint?: string;
   suggestions?: string[];
+  /** A short note shown next to an entry, or undefined for none. */
+  noteFor?: (value: string) => string | undefined;
 }) {
-  const { label, values, onChange, hint, suggestions } = props;
+  const { label, values, onChange, pending, onPending, hint, suggestions, noteFor } = props;
   const base = useId();
   const hintId = `${base}-hint`;
   const listId = `${base}-list`;
-  const [pending, setPending] = useState("");
   const add = () => {
     const value = pending.trim();
     if (value === "") return;
     onChange([...values, value]);
-    setPending("");
+    onPending("");
   };
   return (
     <div data-tag-list="">
       <label htmlFor={`${base}-input`}>{label}</label>
       {values.length === 0 ? null : (
         <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexWrap: "wrap", gap: 4 }}>
-          {values.map((value, index) => (
-            <li key={index} style={{ border: RULE, borderRadius: 6, padding: "0 4px" }}>
-              <span>{value}</span>{" "}
-              <button
-                type="button"
-                aria-label={`Remove ${value}`}
-                onClick={() => onChange(values.filter((_, at) => at !== index))}
-              >
-                Remove
-              </button>
-            </li>
-          ))}
+          {values.map((value, index) => {
+            const note = noteFor?.(value);
+            return (
+              <li key={index} style={{ border: RULE, borderRadius: 6, padding: "0 4px" }}>
+                <span>{value}</span>{" "}
+                {note === undefined ? null : (
+                  <>
+                    <span style={{ fontSize: 12, color: SOFT_INK }}>{note}</span>{" "}
+                  </>
+                )}
+                <button
+                  type="button"
+                  aria-label={`Remove ${value}`}
+                  onClick={() => onChange(values.filter((_, at) => at !== index))}
+                >
+                  Remove
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
       <div style={{ display: "flex", gap: 8 }}>
@@ -255,7 +300,7 @@ function TagList(props: {
           value={pending}
           list={suggestions === undefined ? undefined : listId}
           aria-describedby={hint === undefined ? undefined : hintId}
-          onChange={(event) => setPending(event.target.value)}
+          onChange={(event) => onPending(event.target.value)}
           onBlur={add}
           onKeyDown={(event) => {
             if (event.key !== "Enter") return;
@@ -285,8 +330,11 @@ function PickList(props: {
   known: Array<{ name: string; description?: string }>;
   values: string[];
   onChange: (values: string[]) => void;
+  pending: string;
+  onPending: (text: string) => void;
+  noteFor?: (value: string) => string | undefined;
 }) {
-  const { legend, known, values, onChange } = props;
+  const { legend, known, values, onChange, pending, onPending, noteFor } = props;
   const base = useId();
   const names = known.map((entry) => entry.name);
   return (
@@ -324,6 +372,9 @@ function PickList(props: {
         label="Other patterns"
         values={values.filter((value) => !names.includes(value))}
         onChange={(others) => onChange([...values.filter((value) => names.includes(value)), ...others])}
+        pending={pending}
+        onPending={onPending}
+        noteFor={noteFor}
       />
     </fieldset>
   );
@@ -539,6 +590,12 @@ function RuleCard(props: {
     ? state.providers.filter((provider) => provider.id === row.provider.trim()).flatMap((provider) => provider.models)
     : [...new Set(state.providers.flatMap((provider) => provider.models))];
   const projectNames = state.projects.map((project) => project.name);
+  const pendingOf = (field: ListField) => ({
+    pending: row.pending[field],
+    onPending: (text: string) => onChange({ pending: { ...row.pending, [field]: text } }),
+  });
+  const matchesNoScope = (value: string) =>
+    scopeNames.some((name) => globToRegExp(value).test(name)) ? undefined : NO_SCOPE_NOTE;
   return (
     <fieldset style={{ margin: "0 0 12px", padding: 12, border: RULE, borderRadius: 8 }}>
       <legend style={{ color: "var(--ink)", fontWeight: 500 }}>{title}</legend>
@@ -586,6 +643,7 @@ function RuleCard(props: {
               hint="Project names; * matches any characters."
               suggestions={projectNames}
               onChange={(project) => onChange({ project })}
+              {...pendingOf("project")}
             />
             <TagList
               label="Skip projects"
@@ -593,18 +651,22 @@ function RuleCard(props: {
               hint="Project names; * matches any characters."
               suggestions={projectNames}
               onChange={(skipProjects) => onChange({ skipProjects })}
+              {...pendingOf("skipProjects")}
             />
             <TagList
               label="Skip titles"
               values={row.skipTitles}
               hint="Thread titles; * matches any characters."
               onChange={(skipTitles) => onChange({ skipTitles })}
+              {...pendingOf("skipTitles")}
             />
             <PickList
               legend="Directories"
               known={scopeNames.map((name) => ({ name }))}
               values={row.scope}
               onChange={(scope) => onChange({ scope })}
+              {...pendingOf("scope")}
+              noteFor={matchesNoScope}
             />
           </div>
         </fieldset>
@@ -613,6 +675,7 @@ function RuleCard(props: {
           known={state.skills}
           values={row.skills}
           onChange={(skills) => onChange({ skills })}
+          {...pendingOf("skills")}
         />
         <div>
           <TextField
@@ -670,34 +733,50 @@ function LoadFailure(props: { error: string; onRetry: () => void }) {
   );
 }
 
-function LegacyBanner(props: { error: NonNullable<ConfigState["loadError"]>; onDismiss: () => void }) {
+function Banner(props: { error: NonNullable<ConfigState["loadError"]>; onDismiss: () => void }) {
+  const { error } = props;
+  const stored = error.kind === "stored";
+  if (error.kind === "storage")
+    return (
+      <section aria-labelledby="mi-legacy-heading" style={{ border: RULE, borderRadius: 8, padding: 12 }}>
+        <h4 id="mi-legacy-heading" style={{ margin: "0 0 4px", color: DESTRUCTIVE }}>
+          The plugin's storage could not be read
+        </h4>
+        <p style={{ margin: 0 }}>{error.message}</p>
+      </section>
+    );
+  const hasText = error.legacyText !== "";
   return (
     <section aria-labelledby="mi-legacy-heading" style={{ border: RULE, borderRadius: 8, padding: 12 }}>
       <h4 id="mi-legacy-heading" style={{ margin: "0 0 4px", color: DESTRUCTIVE }}>
-        The old rules setting could not be imported
+        {stored ? "The saved configuration could not be loaded" : "The old rules setting could not be imported"}
       </h4>
-      <p style={{ margin: props.error.legacyText === "" ? 0 : "0 0 8px" }}>{props.error.message}</p>
-      {props.error.legacyText === "" ? null : (
+      <p style={{ margin: hasText || stored ? "0 0 8px" : 0 }}>{error.message}</p>
+      {hasText ? (
+        <pre
+          style={{
+            margin: "0 0 8px",
+            padding: 8,
+            border: RULE,
+            borderRadius: 6,
+            overflow: "auto",
+            whiteSpace: "pre-wrap",
+            fontFamily: "ui-monospace, monospace",
+          }}
+        >
+          {error.legacyText}
+        </pre>
+      ) : null}
+      {stored ? (
+        <SectionNote>{STORED_FIX}</SectionNote>
+      ) : hasText ? (
         <>
-          <pre
-            style={{
-              margin: "0 0 8px",
-              padding: 8,
-              border: RULE,
-              borderRadius: 6,
-              overflow: "auto",
-              whiteSpace: "pre-wrap",
-              fontFamily: "ui-monospace, monospace",
-            }}
-          >
-            {props.error.legacyText}
-          </pre>
           <button type="button" onClick={props.onDismiss}>
             Dismiss old text
           </button>
           <SectionNote>{LEGACY_FIX}</SectionNote>
         </>
-      )}
+      ) : null}
     </section>
   );
 }
@@ -715,6 +794,7 @@ function newRule(key: number): RuleRow {
     scope: [],
     skills: [],
     instructions: "",
+    pending: noPending(),
   };
 }
 
@@ -796,7 +876,7 @@ function Instructions() {
       apply(result);
       setSaved(true);
     } catch (error) {
-      setSaveError(describeError(error));
+      setSaveError(cardNames(describeError(error), draft));
     } finally {
       setSaving(false);
     }
@@ -807,7 +887,7 @@ function Instructions() {
       // Only the state changes: unsaved edits in the form are not replaced.
       setState(await rpc.call("dismissLegacy", null));
     } catch (error) {
-      setSaveError(describeError(error));
+      setSaveError(cardNames(describeError(error), draft));
     }
   };
 
@@ -921,7 +1001,7 @@ function Instructions() {
     <div ref={rootRef} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {loadFailure === null ? null : <LoadFailure error={loadFailure} onRetry={() => void load()} />}
       {state.loadError === null ? null : (
-        <LegacyBanner error={state.loadError} onDismiss={() => void dismissLegacy()} />
+        <Banner error={state.loadError} onDismiss={() => void dismissLegacy()} />
       )}
       <fieldset disabled={saving} style={{ margin: 0, padding: 0, border: "none" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -966,7 +1046,7 @@ function Instructions() {
           </section>
           {saveError === null ? null : (
             <div role="alert" style={{ color: DESTRUCTIVE }}>
-              <div>{saveError}</div>
+              <div style={{ whiteSpace: "pre-wrap" }}>{saveError}</div>
               {saveError.startsWith(NOT_CHECKABLE_PREFIX) ? <div>{NOT_CHECKABLE_HINT}</div> : null}
             </div>
           )}

@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { z } from "zod";
 import { budgetReport, cacheProblem, describeType, type Role } from "./src/budget.js";
 import { runCli, type OverBudgetRecord, type OverflowEvent } from "./src/cli.js";
 import { modelInstructionsRpcContract, type ConfigState } from "./rpc-contract.js";
@@ -45,11 +46,31 @@ import type { SetupDeps } from "./src/setup.js";
 const CONFIG_KEY = "config";
 /** kv key of the old `rules` setting text that could not be imported, with the reason. */
 const LEGACY_KEY = "legacyRules";
+/** kv key that is `true` once the user dismissed the kept old text: the old setting is not imported again. */
+const LEGACY_DISMISSED_KEY = "legacyDismissed";
 
-interface LegacyRecord {
+const legacyRecordSchema = z.strictObject({ text: z.string(), error: z.string() });
+type LegacyRecord = z.infer<typeof legacyRecordSchema>;
+
+/** A stored config that failed to load at start: the reason, and the stored value as JSON text ("" if it has none). */
+interface StoredError {
+  message: string;
   text: string;
-  error: string;
 }
+
+const LEGACY_READ_ERROR = (reason: string) =>
+  `the old rules setting could not be read: ${reason}. Restart bb or reload the plugin before you save here: once this form saves, the old setting is no longer imported.`;
+
+const LEGACY_SAVE_ERROR = (reason: string) =>
+  `the old rules setting could not be saved: ${reason}. Restart bb or reload the plugin before you save here: once this form saves, the old setting is no longer imported.`;
+
+const STORAGE_READ_ERROR = (reason: string) => `the plugin's storage could not be read: ${reason}`;
+/** What every writer says while a start-path read of the plugin's storage has failed. */
+const STORAGE_REFUSAL =
+  "the plugin's storage could not be read at start; reload the plugin (bb plugin reload model-instructions) before saving";
+
+/** What a start-path read returns when the storage failed; the failure is already recorded. */
+const READ_FAILED = Symbol("read failed");
 
 /** Who wrote the config, as the log line names it. */
 type WriteSource = "form" | "import" | "import-dir-skills" | "legacy setting";
@@ -82,8 +103,12 @@ export default async function plugin(bb: BbPluginApi) {
   let raw: RawConfig = { vars: {}, scopes: [], rules: [] };
   let config: Config = { rules: [], scopes: [] };
   let legacy: LegacyRecord | undefined;
-  /** Why the old setting could not be read; memory only, so the next start tries again. */
-  let legacyReadError: string | undefined;
+  /** Why the stored config could not be loaded; memory only. Cleared by a full replace (form save or import). */
+  let storedError: StoredError | undefined;
+  /** Why the old setting could not be read or saved; memory only. Cleared by a full replace (form save or import). */
+  let legacyMemoryError: string | undefined;
+  /** Why a read of the plugin's storage failed at start; memory only. While set, no writer writes. */
+  let storageError: string | undefined;
   let scopes: Scope[] = [];
   /** Saved scopes left out of `scopes` because a profile scope has their name. */
   let ignoredScopes: string[] = [];
@@ -205,9 +230,11 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** The write itself: validate, store, apply, re-check the budget, log. Runs inside the queue. */
   async function writeStep(value: unknown, source: WriteSource, mode: WriteMode): Promise<RawConfig> {
+    if (storageError !== undefined) throw new Error(STORAGE_REFUSAL);
     const { next, parsed } = validate(value, mode, checkEnv);
     await bb.storage.kv.set(CONFIG_KEY, next);
-    legacyReadError = undefined;
+    legacyMemoryError = undefined;
+    storedError = undefined;
     adopt(next, parsed);
     recheckBudget();
     bb.log.info(
@@ -226,37 +253,89 @@ export default async function plugin(bb: BbPluginApi) {
     legacy = undefined;
   }
 
-  /** One-time, best effort: moves the old `rules` setting into kv. Structural checks only. */
+  /** One-time, best effort: moves the old `rules` setting into kv. Structural checks only. Never rejects on a kv failure. */
   async function importLegacySetting(): Promise<void> {
+    const dismissed = await startRead<boolean>(LEGACY_DISMISSED_KEY);
+    if (dismissed === READ_FAILED) return;
+    if (dismissed === true) {
+      bb.log.debug("the old rules setting was dismissed; not importing it");
+      return;
+    }
     let text: unknown;
     try {
       text = (await bb.sdk.plugins.getSettings({ pluginId: bb.pluginId })).values.rules;
     } catch (error) {
-      legacyReadError = `the old rules setting could not be read: ${(error as Error).message}; restart bb or reload the plugin to try again`;
-      bb.log.warn(legacyReadError);
+      legacyMemoryError = LEGACY_READ_ERROR((error as Error).message);
+      bb.log.warn(legacyMemoryError);
       return;
     }
     if (typeof text !== "string" || text.trim() === "") {
       bb.log.debug("no old rules setting to import");
       return;
     }
+    let value: RawConfig;
     try {
-      await writeConfig(parseLegacyText(text), "legacy setting", "structural");
+      value = parseLegacyText(text);
+      validate(value, "structural", checkEnv);
     } catch (error) {
       const message = (error as Error).message;
       legacy = { text, error: message };
-      await bb.storage.kv.set(LEGACY_KEY, legacy);
       bb.log.warn(
         `the old rules setting was not imported: ${message}; its text is kept (bb model-instructions export --legacy)`,
+      );
+      try {
+        await bb.storage.kv.set(LEGACY_KEY, legacy);
+      } catch (keepError) {
+        bb.log.warn(`the old rules setting could not be kept: ${(keepError as Error).message}`);
+      }
+      return;
+    }
+    try {
+      await writeConfig(value, "legacy setting", "structural");
+    } catch (error) {
+      legacyMemoryError = LEGACY_SAVE_ERROR((error as Error).message);
+      bb.log.warn(
+        `the old rules setting could not be saved: ${(error as Error).message}; it is imported again at the next start`,
       );
     }
   }
 
+  /** A start-path read. A failure is logged and kept as the storage error, and the caller stops loading. */
+  async function startRead<T>(key: string): Promise<T | undefined | typeof READ_FAILED> {
+    try {
+      return await bb.storage.kv.get<T>(key);
+    } catch (error) {
+      storageError = STORAGE_READ_ERROR((error as Error).message);
+      bb.log.warn(storageError);
+      return READ_FAILED;
+    }
+  }
+
+  /** The kept old text from kv; a value of the wrong shape is ignored and deleted. False when the read failed. */
+  async function loadKeptLegacy(): Promise<boolean> {
+    const kept = await startRead<unknown>(LEGACY_KEY);
+    if (kept === READ_FAILED) return false;
+    if (kept === undefined) return true;
+    const parsed = legacyRecordSchema.safeParse(kept);
+    if (parsed.success) {
+      legacy = parsed.data;
+      return true;
+    }
+    bb.log.warn("stored old setting text ignored: wrong shape");
+    try {
+      await bb.storage.kv.delete(LEGACY_KEY);
+    } catch (error) {
+      bb.log.warn(`stored old setting text could not be removed: ${(error as Error).message}`);
+    }
+    return true;
+  }
+
   loadProfiles();
   rebuildScopes();
-  legacy = await bb.storage.kv.get<LegacyRecord>(LEGACY_KEY);
-  const stored = await bb.storage.kv.get<unknown>(CONFIG_KEY);
-  if (stored === undefined) await importLegacySetting();
+  const stored = (await loadKeptLegacy()) ? await startRead<unknown>(CONFIG_KEY) : READ_FAILED;
+  if (stored === READ_FAILED) {
+    // The reads stop at the first failure: no rules run, and the legacy import does not.
+  } else if (stored === undefined) await importLegacySetting();
   else {
     try {
       const next = parseRawConfig(stored);
@@ -264,6 +343,13 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.info(`loaded ${config.rules.length} rule(s), ${scopes.length} scope(s)`);
     } catch (error) {
       bb.log.warn(`saved config ignored: ${(error as Error).message}`);
+      let text = "";
+      try {
+        text = JSON.stringify(stored, null, 2);
+      } catch {
+        // A value that has no JSON text leaves the text block empty.
+      }
+      storedError = { message: `the saved config could not be loaded: ${(error as Error).message}`, text };
     }
   }
 
@@ -337,10 +423,18 @@ export default async function plugin(bb: BbPluginApi) {
     );
   }
 
-  /** The kept old text wins over a read error; a read error shows only while no config is stored. */
+  /** A stored config that failed to load wins over the kept old text, which wins over a read error. */
   function loadError(): ConfigState["loadError"] {
-    if (legacy !== undefined) return { message: legacy.error, legacyText: legacy.text };
-    if (legacyReadError !== undefined) return { message: legacyReadError, legacyText: "" };
+    if (storageError !== undefined)
+      return {
+        kind: "storage",
+        message: `${storageError}. Reload the plugin (bb plugin reload model-instructions) before saving.`,
+        legacyText: "",
+      };
+    if (storedError !== undefined)
+      return { kind: "stored", message: storedError.message, legacyText: storedError.text };
+    if (legacy !== undefined) return { kind: "legacy", message: legacy.error, legacyText: legacy.text };
+    if (legacyMemoryError !== undefined) return { kind: "legacy", message: legacyMemoryError, legacyText: "" };
     return null;
   }
 
@@ -376,6 +470,10 @@ export default async function plugin(bb: BbPluginApi) {
     },
     dismissLegacy() {
       return enqueue(async () => {
+        if (storageError !== undefined) throw new Error(STORAGE_REFUSAL);
+        // Nothing kept: nothing to dismiss, and the permanent flag stays unset.
+        if (legacy === undefined) return state();
+        await bb.storage.kv.set(LEGACY_DISMISSED_KEY, true);
         await dropLegacy();
         return state();
       });
@@ -399,6 +497,8 @@ export default async function plugin(bb: BbPluginApi) {
     skillNames,
     exclusive: enqueue,
     current: () => raw,
+    storageRefusal: () => (storageError === undefined ? undefined : STORAGE_REFUSAL),
+    storedConfigFailed: () => storedError !== undefined,
     validate(candidate, profileScopes: ProfileScope[]) {
       try {
         validate(candidate, "full", {
@@ -478,11 +578,21 @@ export default async function plugin(bb: BbPluginApi) {
         config: {
           saved: () => raw,
           legacyText: () => legacy?.text,
+          storedText: () => storedError?.text,
+          storageFailed: () => storageError !== undefined,
           importConfig: (value) =>
             enqueue(async () => {
               const stored = await writeStep(value, "import", "full");
-              await dropLegacy();
-              return stored;
+              try {
+                await dropLegacy();
+              } catch (error) {
+                const message = (error as Error).message;
+                bb.log.warn(`the kept old setting text could not be removed: ${message}`);
+                // The import succeeded: the form must not keep a banner for text that no longer matters.
+                legacy = undefined;
+                return { saved: stored, keptTextError: message };
+              }
+              return { saved: stored };
             }),
         },
       }),

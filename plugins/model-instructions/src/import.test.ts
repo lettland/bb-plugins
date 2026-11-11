@@ -79,6 +79,8 @@ function harness(opts: Options = {}) {
       return step();
     },
     current: () => state.config,
+    storageRefusal: () => undefined,
+    storedConfigFailed: () => false,
     validate: (candidate, scopes) => problemOf(candidate, () => scopes),
     async save(candidate) {
       if (opts.setError !== undefined) throw new Error(opts.setError);
@@ -568,6 +570,44 @@ describe("profile scopes", () => {
     expect(result.stderr).toBe("import-dir-skills: the saved config was rejected: rejected\nnothing was written\n");
     const text = await importCommand({ ...h.deps, save: async () => { throw "plain"; } }, [], false);
     expect(text.stderr).toContain("was rejected: plain");
+  });
+
+  it("refuse, both for a real run and a dry run, while the stored config failed to load, and write nothing", async () => {
+    const message =
+      "import-dir-skills: the saved config could not be loaded, so nothing is merged into it; fix it with bb model-instructions import <file> first";
+    for (const flags of [[], ["--dry-run"]]) {
+      const h = harness({ ui: [scope()] });
+      const result = await importCommand({ ...h.deps, storedConfigFailed: () => true }, flags, false);
+      expect(result).toEqual({ exitCode: 1, stderr: message + "\n" });
+      expect(h.state.sets).toEqual([]);
+      expect(h.kv.size).toBe(0);
+      expect(existsSync(h.files.profiles)).toBe(false);
+    }
+    const json = await importCommand({ ...harness({ ui: [scope()] }).deps, storedConfigFailed: () => true }, [], true);
+    expect(JSON.parse(json.stdout!)).toEqual({ ok: false, errors: [message] });
+  });
+
+  it("refuse first, both for a real run and a dry run, while a start-path read of the storage failed, and write nothing", async () => {
+    const message = "import-dir-skills: the plugin's storage could not be read at start; reload the plugin (bb plugin reload model-instructions) before saving";
+    for (const flags of [[], ["--dry-run"]]) {
+      const h = harness({ ui: [scope()] });
+      // Both failures set: the storage refusal wins.
+      const result = await importCommand(
+        { ...h.deps, storageRefusal: () => "the plugin's storage could not be read at start; reload the plugin (bb plugin reload model-instructions) before saving", storedConfigFailed: () => true },
+        flags,
+        false,
+      );
+      expect(result).toEqual({ exitCode: 1, stderr: message + "\n" });
+      expect(h.state.sets).toEqual([]);
+      expect(h.kv.size).toBe(0);
+      expect(existsSync(h.files.profiles)).toBe(false);
+    }
+  });
+
+  it("does not refuse once the stored config loads", async () => {
+    const h = harness({ ui: [scope()] });
+    expect((await importCommand({ ...h.deps, storedConfigFailed: () => false }, [], false)).exitCode).toBe(0);
+    expect(h.state.sets).toHaveLength(1);
   });
 
   it("rethrow an error that is not an import failure", async () => {

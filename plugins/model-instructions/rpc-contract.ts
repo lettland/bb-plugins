@@ -60,8 +60,15 @@ const stateSchema = z.strictObject({
   ignoredScopes: z.array(z.string()),
   cache: z.strictObject({ providers: listStateSchema, projects: listStateSchema }),
   overBudget: z.array(overBudgetSchema),
-  /** The old `rules` setting text that could not be imported, with the reason; null when none is kept. */
-  loadError: z.strictObject({ message: z.string(), legacyText: z.string() }).nullable(),
+  /**
+   * What the form must warn about, or null. `legacy`: the old `rules` setting could not be imported or read;
+   * `legacyText` is its kept text ("" when it could not be read). `stored`: the saved config could not be
+   * loaded at start; `legacyText` is then the stored value as JSON text. `storage`: a read of the plugin's
+   * storage failed at start, so nothing can be saved; `legacyText` is "".
+   */
+  loadError: z
+    .strictObject({ kind: z.enum(["legacy", "stored", "storage"]), message: z.string(), legacyText: z.string() })
+    .nullable(),
 });
 export type ConfigState = z.infer<typeof stateSchema>;
 

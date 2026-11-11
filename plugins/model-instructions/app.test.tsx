@@ -618,7 +618,7 @@ describe("Rules: rendering", () => {
       state({
         skills: [{ name: "evil", description: "<script>alert(1)</script>" }],
         config: config({ rules: [rule({ name: "<b>x</b>", instructions: "<img src=x onerror=alert(1)>" })] }),
-        loadError: { message: "<i>bad</i>", legacyText: "<script>alert(2)</script>" },
+        loadError: { kind: "legacy", message: "<i>bad</i>", legacyText: "<script>alert(2)</script>" },
       }),
     );
     expect(await screen.findByRole("group", { name: "<b>x</b>" })).toBeTruthy();
@@ -626,6 +626,141 @@ describe("Rules: rendering", () => {
     expect(screen.getByText("<i>bad</i>")).toBeTruthy();
     expect(screen.getByText("<script>alert(2)</script>")).toBeTruthy();
     expect(document.querySelector("script, img, b, i")).toBeNull();
+  });
+});
+
+describe("Directories: Other patterns that match no scope", () => {
+  const NOTE = "Matches no directory scope";
+  const directoriesOf = async () => subgroup(await screen.findByRole("group", { name: "Rule 1" }), "Directories");
+  const others = (directories: HTMLElement) => tagList(directories, "Other patterns");
+
+  it("notes an entry that matches no saved or profile scope name, and only that entry", async () => {
+    render(
+      state({
+        config: config({
+          scopes: [{ name: "work", paths: ["/w"] }],
+          rules: [rule({ scope: ["~/x*", "wor*", "co*", "*", "plain", "w.rk"] })],
+        }),
+        profileScopes: [{ name: "corp", paths: ["/c"] }],
+      }),
+    );
+    const list = others(await directoriesOf());
+    const items = within(list).getAllByRole("listitem");
+    const noted = (value: string) =>
+      within(items.find((item) => item.querySelector("span")!.textContent === value)!).queryAllByText(NOTE).length;
+    expect(noted("~/x*")).toBe(1);
+    expect(noted("plain")).toBe(1);
+    // A dot is not a wildcard: "w.rk" matches no name, "work" does not match it.
+    expect(noted("w.rk")).toBe(1);
+    expect(noted("wor*")).toBe(0);
+    expect(noted("co*")).toBe(0);
+    expect(noted("*")).toBe(0);
+    expect(within(list).getAllByText(NOTE)).toHaveLength(3);
+  });
+
+  it("follows the scope names as they are typed, and the note leaves with a matching name", async () => {
+    render(state({ config: config({ scopes: [{ name: "work", paths: ["/w"] }], rules: [rule({ scope: ["team*"] })] }) }));
+    const directories = await directoriesOf();
+    expect(within(others(directories)).getAllByText(NOTE)).toHaveLength(1);
+    type(screen.getAllByLabelText("Name").find((input) => (input as HTMLInputElement).value === "work")!, "teamwork");
+    expect(within(others(await directoriesOf())).queryAllByText(NOTE)).toHaveLength(0);
+  });
+
+  it("notes a newly added entry too", async () => {
+    render(withRules(rule()));
+    const directories = await directoriesOf();
+    addTag(directories, "Other patterns", "nothing-*");
+    expect(within(others(directories)).getAllByText(NOTE)).toHaveLength(1);
+  });
+
+  it("is not shown for the Skills patterns or any other list", async () => {
+    render(
+      state({
+        config: config({
+          rules: [rule({ skills: ["no-such-*"], project: ["zzz"], skipProjects: ["zzz"], skipTitles: ["zzz"] })],
+        }),
+      }),
+    );
+    const card = await screen.findByRole("group", { name: "Rule 1" });
+    expect(within(card).queryAllByText(NOTE)).toHaveLength(0);
+  });
+});
+
+describe("Typed text that was not added", () => {
+  const lists = [
+    ["Projects", "project", (card: HTMLElement) => within(card).getByRole("group", { name: "Applies to" })],
+    ["Skip projects", "skipProjects", (card: HTMLElement) => within(card).getByRole("group", { name: "Applies to" })],
+    ["Skip titles", "skipTitles", (card: HTMLElement) => within(card).getByRole("group", { name: "Applies to" })],
+    ["Other patterns", "scope", (card: HTMLElement) => subgroup(subgroup(card, "Applies to"), "Directories")],
+    ["Other patterns", "skills", (card: HTMLElement) => subgroup(card, "Skills")],
+  ] as const;
+
+  it.each(lists)("in %s (%s) enables Save, is saved as if added, and is cleared by Discard", async (label, key, within_) => {
+    const view = render(withRules(rule()));
+    const card = await screen.findByRole("group", { name: "Rule 1" });
+    expect(save().disabled).toBe(true);
+    expect(discard().disabled).toBe(true);
+    type(field(within_(card), label), "  typed* ");
+    expect(save().disabled).toBe(false);
+    expect(discard().disabled).toBe(false);
+    // Discard first: the typed text goes, and the form is clean again.
+    fireEvent.click(discard());
+    expect(field(within_(card), label).value).toBe("");
+    expect(save().disabled).toBe(true);
+    expect(discard().disabled).toBe(true);
+    type(field(within_(card), label), "  typed* ");
+    fireEvent.click(save());
+    await waitFor(() => expect(calls(view, "saveConfig")).toHaveLength(1));
+    expect(savedConfig(view).rules[0]![key]).toEqual(["typed*"]);
+  });
+
+  it("is sent after the entries already added, and not twice when it was added first", async () => {
+    const view = render(withRules(rule({ project: ["alpha"] })));
+    const card = await screen.findByRole("group", { name: "Rule 1" });
+    const applies = subgroup(card, "Applies to");
+    type(field(applies, "Projects"), "beta");
+    fireEvent.click(save());
+    await waitFor(() => expect(calls(view, "saveConfig")).toHaveLength(1));
+    expect(savedConfig(view).rules[0]!.project).toEqual(["alpha", "beta"]);
+  });
+
+  it("adds it once when Add is used, and Save then sends it once", async () => {
+    const view = render(withRules(rule()));
+    const card = await screen.findByRole("group", { name: "Rule 1" });
+    const applies = subgroup(card, "Applies to");
+    addTag(applies, "Projects", "beta");
+    expect(field(applies, "Projects").value).toBe("");
+    fireEvent.click(save());
+    await waitFor(() => expect(calls(view, "saveConfig")).toHaveLength(1));
+    expect(savedConfig(view).rules[0]!.project).toEqual(["beta"]);
+  });
+
+  it("does not enable Save when only spaces were typed, but Discard can still clear them", async () => {
+    render(withRules(rule()));
+    const card = await screen.findByRole("group", { name: "Rule 1" });
+    const applies = subgroup(card, "Applies to");
+    type(field(applies, "Projects"), "   ");
+    expect(save().disabled).toBe(true);
+    expect(discard().disabled).toBe(false);
+    fireEvent.click(discard());
+    expect(field(applies, "Projects").value).toBe("");
+  });
+
+  it("stays on its own rule: a second rule's box is not touched", async () => {
+    render(withRules(rule(), rule()));
+    await screen.findByRole("group", { name: "Rule 1" });
+    type(field(subgroup(ruleCard("Rule 1"), "Applies to"), "Projects"), "only-first");
+    expect(field(subgroup(ruleCard("Rule 2"), "Applies to"), "Projects").value).toBe("");
+  });
+
+  it("is dropped by a successful save, so the next save has nothing pending", async () => {
+    const view = render(withRules(rule()));
+    const card = await screen.findByRole("group", { name: "Rule 1" });
+    type(field(subgroup(card, "Applies to"), "Projects"), "beta");
+    fireEvent.click(save());
+    await waitFor(() => expect(calls(view, "saveConfig")).toHaveLength(1));
+    await waitFor(() => expect(save().disabled).toBe(true));
+    expect(field(subgroup(ruleCard("Rule 1"), "Applies to"), "Projects").value).toBe("");
   });
 });
 
@@ -1062,6 +1197,87 @@ describe("Save and Discard", () => {
     expect(screen.queryByText(/still loading the provider/)).toBeNull();
   });
 
+  describe("the save error", () => {
+    const failWith = async (message: string) => {
+      render(withRules(rule()), {
+        saveConfig: () => {
+          throw new Error(message);
+        },
+      });
+      const card = await screen.findByRole("group", { name: "Rule 1" });
+      type(field(card, "Name (optional)"), "n");
+      fireEvent.click(save());
+      return (await screen.findByRole("alert")).firstElementChild as HTMLElement;
+    };
+
+    // Both messages are what the server sends (rules.ts) for an unknown variable in rule 2 and a relative path in scope 2.
+    it("names a rule and a directory scope as the cards do, and keeps its line breaks", async () => {
+      const rule = await failWith("rules[1]: unknown variable {{nope}}");
+      expect(rule.textContent).toBe("Rule 2: unknown variable {{nope}}");
+      expect(rule.style.whiteSpace).toBe("pre-wrap");
+      cleanup();
+      const scope = await failWith(
+        '✖ expected an absolute path or a path starting with "~/"\n  → at scopes[1].paths[0]',
+      );
+      expect(scope.textContent).toBe(
+        '✖ expected an absolute path or a path starting with "~/"\n  → at Directory scope 2.paths[0]',
+      );
+      expect(scope.style.whiteSpace).toBe("pre-wrap");
+    });
+
+    it("replaces every position in one message, and only a whole rules[n] or scopes[n]", async () => {
+      const element = await failWith("rules[0] and rules[11]: scopes[2] twice scopes[3]; myrules[1], rules[x], scopes[]");
+      expect(element.textContent).toBe(
+        "Rule 1 (n) and Rule 12: Directory scope 3 twice Directory scope 4; myrules[1], rules[x], scopes[]",
+      );
+    });
+
+    it("adds the name of a named rule card or directory scope card, and leaves an unnamed or blank-named one without", async () => {
+      render(
+        state({
+          config: config({
+            scopes: [
+              { name: "work", paths: ["/w"] },
+              { name: "", paths: ["/x"] },
+            ],
+            rules: [rule({ name: "guard" }), rule(), rule({ name: "  " })],
+          }),
+        }),
+        {
+          saveConfig: () => {
+            throw new Error("rules[0]: a; rules[1]: b; rules[2]: c; scopes[0] and scopes[1]");
+          },
+        },
+      );
+      await screen.findByRole("group", { name: "guard" });
+      fireEvent.click(screen.getByRole("button", { name: "Add rule" }));
+      fireEvent.click(save());
+      const element = (await screen.findByRole("alert")).firstElementChild as HTMLElement;
+      expect(element.textContent).toBe(
+        "Rule 1 (guard): a; Rule 2: b; Rule 3: c; Directory scope 1 (work) and Directory scope 2",
+      );
+    });
+
+    it("uses the name the card had when Save was pressed, not a later edit", async () => {
+      render(withRules(rule({ name: "guard" })), {
+        saveConfig: () => {
+          throw new Error("rules[0]: a");
+        },
+      });
+      const card = await screen.findByRole("group", { name: "guard" });
+      type(field(card, "Name (optional)"), "guard2");
+      fireEvent.click(save());
+      await screen.findByRole("alert");
+      type(field(screen.getByRole("group", { name: "guard2" }), "Name (optional)"), "other");
+      expect((screen.getByRole("alert").firstElementChild as HTMLElement).textContent).toBe("Rule 1 (guard2): a");
+    });
+
+    it("leaves a message with neither as it is", async () => {
+      const element = await failWith("over the 4096-character limit");
+      expect(element.textContent).toBe("over the 4096-character limit");
+    });
+  });
+
   it("words a save rejection that is not an Error as-is", async () => {
     render(withRules(rule()));
     const card = await screen.findByRole("group", { name: "Rule 1" });
@@ -1283,9 +1499,71 @@ describe("a save supersedes loads in flight", () => {
   });
 });
 
+describe("the saved configuration banner", () => {
+  const MESSAGE = "the saved config could not be loaded: ✖ Invalid input\n  → at rules[0]";
+  const TEXT = '{\n  "rules": [\n    {\n      "name": "<b>r</b>"\n    }\n  ]\n}';
+  const stored = (legacyText = TEXT) => state({ loadError: { kind: "stored", message: MESSAGE, legacyText } });
+  const NAME = "The saved configuration could not be loaded";
+
+  it("shows the heading, message, stored text and the line to keep it, in that order, with no dismiss button", async () => {
+    render(stored());
+    const banner = await screen.findByRole("region", { name: NAME });
+    expect(Array.from(banner.children).map((child) => child.tagName)).toEqual(["H4", "P", "PRE", "DIV"]);
+    expect(banner.children[1]!.textContent).toBe(MESSAGE);
+    expect(banner.querySelector("pre")!.textContent).toBe(TEXT);
+    expect(banner.children[3]!.textContent).toBe(
+      "Saving here replaces it. To keep it, run bb model-instructions export, fix the file, and import it.",
+    );
+    expect(within(banner).queryAllByRole("button")).toHaveLength(0);
+    expect(screen.queryByText(/Fix it, save it to a file/)).toBeNull();
+    expect(banner.querySelector("b")).toBeNull();
+  });
+
+  it("shows the heading, message and the line when the stored value has no text", async () => {
+    render(stored(""));
+    const banner = await screen.findByRole("region", { name: NAME });
+    expect(Array.from(banner.children).map((child) => child.tagName)).toEqual(["H4", "P", "DIV"]);
+    expect(banner.querySelector("pre")).toBeNull();
+  });
+
+  it("does not show the legacy heading, and the legacy banner does not show this one", async () => {
+    render(stored());
+    await screen.findByRole("region", { name: NAME });
+    expect(screen.queryByRole("region", { name: "The old rules setting could not be imported" })).toBeNull();
+    cleanup();
+    render(state({ loadError: { kind: "legacy", message: "m", legacyText: "t" } }));
+    await screen.findByRole("region", { name: "The old rules setting could not be imported" });
+    expect(screen.queryByRole("region", { name: NAME })).toBeNull();
+    expect(screen.queryByText(/Saving here replaces it/)).toBeNull();
+  });
+});
+
+describe("the storage banner", () => {
+  const MESSAGE =
+    "the plugin's storage could not be read: disk gone. Reload the plugin (bb plugin reload model-instructions) before saving.";
+  const NAME = "The plugin's storage could not be read";
+
+  it("shows the heading and the message, with no text block and no button", async () => {
+    render(state({ loadError: { kind: "storage", message: MESSAGE, legacyText: "" } }));
+    const banner = await screen.findByRole("region", { name: NAME });
+    expect(Array.from(banner.children).map((child) => child.tagName)).toEqual(["H4", "P"]);
+    expect(banner.children[1]!.textContent).toBe(MESSAGE);
+    expect(within(banner).queryAllByRole("button")).toHaveLength(0);
+    expect(banner.querySelector("pre")).toBeNull();
+    expect(screen.queryByRole("region", { name: "The saved configuration could not be loaded" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "The old rules setting could not be imported" })).toBeNull();
+  });
+
+  it("is not shown for the other kinds", async () => {
+    render(state({ loadError: { kind: "legacy", message: "m", legacyText: "" } }));
+    await screen.findByRole("region", { name: "The old rules setting could not be imported" });
+    expect(screen.queryByRole("region", { name: NAME })).toBeNull();
+  });
+});
+
 describe("the old rules setting banner", () => {
   const broken = () =>
-    state({ loadError: { message: "rules[2]: bad glob", legacyText: '[{"project": 1}]\n  second line' } });
+    state({ loadError: { kind: "legacy", message: "rules[2]: bad glob", legacyText: '[{"project": 1}]\n  second line' } });
 
   it("shows the heading, message, old text, button and the line to fix it, in that order", async () => {
     render(broken());
@@ -1302,8 +1580,9 @@ describe("the old rules setting banner", () => {
   });
 
   it("shows only the heading and the message when no old text was kept", async () => {
-    const message = "the old rules setting could not be read: host down; restart bb or reload the plugin to try again";
-    render(state({ loadError: { message, legacyText: "" } }));
+    const message =
+      "the old rules setting could not be read: host down. Restart bb or reload the plugin before you save here: once this form saves, the old setting is no longer imported.";
+    render(state({ loadError: { kind: "legacy", message, legacyText: "" } }));
     const banner = await screen.findByRole("region", { name: "The old rules setting could not be imported" });
     expect(Array.from(banner.children).map((child) => child.tagName)).toEqual(["H4", "P"]);
     expect(within(banner).getByText(message)).toBeTruthy();
