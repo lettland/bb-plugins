@@ -286,7 +286,7 @@ async function buildPlan(deps: ImportDeps): Promise<Plan> {
       skipped.push({
         kind: "scope",
         name: scope.name,
-        reason: "a profile scope with that name comes from profiles.json, so a setting scope of that name would be ignored",
+        reason: "a profile scope with that name comes from profiles.json, so a saved scope of that name would be ignored",
       });
     else if (takenScopes.has(scope.name))
       skipped.push({ kind: "scope", name: scope.name, reason: "the saved config already has a scope with that name" });

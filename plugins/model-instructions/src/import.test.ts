@@ -447,7 +447,9 @@ describe("collisions", () => {
     expect(out.settingScopes).toEqual([]);
     expect(out.rules).toEqual([]);
     expect(out.skipped[0]).toMatchObject({ kind: "scope", name: "acme" });
-    expect(out.skipped[0].reason).toMatch(/would be ignored/);
+    expect(out.skipped[0].reason).toBe(
+      "a profile scope with that name comes from profiles.json, so a saved scope of that name would be ignored",
+    );
   });
 
   it("fails the whole import, writing nothing, when the setting would be rejected", async () => {

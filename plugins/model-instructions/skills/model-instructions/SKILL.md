@@ -10,14 +10,18 @@ provider, model, project, directory, and thread position match a rule. Rules liv
 in the model-instructions plugin's saved config, an object of `vars`, `scopes` and `rules`, edited in Settings → Plugins → Model instructions. Every matching rule applies, in array order.
 
 ```json
-[
-  {
-    "provider": "claude-code",
-    "model": "claude-opus-5-5*",
-    "threads": "top-level",
-    "instructions": ["line one", "line two"]
-  }
-]
+{
+  "vars": {},
+  "scopes": [],
+  "rules": [
+    {
+      "provider": "claude-code",
+      "model": "claude-opus-5-5*",
+      "threads": "top-level",
+      "instructions": ["line one", "line two"]
+    }
+  ]
+}
 ```
 
 | Field | Required | Meaning |
@@ -36,12 +40,16 @@ in the model-instructions plugin's saved config, an object of `vars`, `scopes` a
 Example: everything except a few projects:
 
 ```json
-[
-  {
-    "skipProjects": ["opshub-legacy", "sandbox-*"],
-    "instructions": "Run the project's tests before reporting done."
-  }
-]
+{
+  "vars": {},
+  "scopes": [],
+  "rules": [
+    {
+      "skipProjects": ["opshub-legacy", "sandbox-*"],
+      "instructions": "Run the project's tests before reporting done."
+    }
+  ]
+}
 ```
 
 Combine with `project` to narrow to a set first, e.g. `"project": ["opshub-*", "bb-*"], "skipProjects": "opshub-legacy"`; skip wins.
@@ -49,13 +57,17 @@ Combine with `project` to narrow to a set first, e.g. `"project": ["opshub-*", "
 Example: child rule that skips helpdesk threads by title:
 
 ```json
-[
-  {
-    "threads": "child",
-    "skipTitles": ["Helpdesk: *", "Helpdesk catch-up *"],
-    "instructions": "You are an implementation worker. Do exactly what the brief asks."
-  }
-]
+{
+  "vars": {},
+  "scopes": [],
+  "rules": [
+    {
+      "threads": "child",
+      "skipTitles": ["Helpdesk: *", "Helpdesk catch-up *"],
+      "instructions": "You are an implementation worker. Do exactly what the brief asks."
+    }
+  ]
+}
 ```
 
 The match uses the thread title at each turn. A thread with no title is never skipped.

@@ -28,6 +28,10 @@ To back up or move the config, use `bb model-instructions export` and `bb model-
 An invalid config is rejected on save. `bb provider models <provider>` lists
 model ids; `bb project list --include-personal` lists project names.
 
+## Settings form
+
+Settings → Plugins → Model instructions has three parts: **Shared texts** (the `vars`), **Directories** (the `scopes`, plus the read-only profile scopes from profiles.json) and **Rules**. Rules are cards in priority order; move them with Move up and Move down. Provider, Model and the project and title fields take `*` globs; the Directories and Skills checkboxes have an **Other patterns** list for globs. The character count under each rule's instructions uses the same expansion and limit as the save check. Save is checked like any other save; on an error nothing is stored and your edits stay in the form.
+
 ## Variables
 
 The config can also name reusable values (`vars`), so the same
@@ -475,6 +479,8 @@ bb model-instructions check --all [--json]
 bb model-instructions setup [--dry-run] [--json]
 bb model-instructions unpin [<thread-id>]
 bb model-instructions import-dir-skills [--dry-run] [--json]
+bb model-instructions export [--legacy]
+bb model-instructions import <file>
 ```
 
 - `status` lists the state of profiles.json, the profile scopes, the ignored
@@ -502,41 +508,52 @@ bb model-instructions import-dir-skills [--dry-run] [--json]
 ## Example: Opus supervises, Sonnet implements
 
 ```json
-[
-  {
-    "provider": "claude-code",
-    "model": "claude-opus-5-5*",
-    "threads": "top-level",
-    "instructions": [
-      "You are the planner and supervisor for this thread. Plan, review, and talk to the user here; do not write implementation code yourself.",
-      "Hand each implementation step to a Sonnet worker thread in this thread's environment:",
-      "1. Write a self-contained brief (goal, files, constraints, how to verify) to a file.",
-      "2. Spawn the worker: `bb thread spawn --parent-self --environment <this thread's environment id from bb status> --provider claude-code --model claude-sonnet-5-5 --prompt-file <brief>`.",
-      "3. `bb thread wait <id>`, then read `bb thread output <id>` and review the diff yourself.",
-      "4. Send corrections with `bb thread tell <id> <message>` until the step is right."
-    ]
-  },
-  {
-    "provider": "claude-code",
-    "model": "claude-sonnet-5-5*",
-    "threads": "child",
-    "instructions": "You are an implementation worker. Do exactly what the brief asks, run its verification, and end with a short report of what changed and what you checked."
-  }
-]
+{
+  "vars": {},
+  "scopes": [],
+  "rules": [
+    {
+      "provider": "claude-code",
+      "model": "claude-opus-5-5*",
+      "threads": "top-level",
+      "instructions": [
+        "You are the planner and supervisor for this thread. Plan, review, and talk to the user here; do not write implementation code yourself.",
+        "Hand each implementation step to a Sonnet worker thread in this thread's environment:",
+        "1. Write a self-contained brief (goal, files, constraints, how to verify) to a file.",
+        "2. Spawn the worker: `bb thread spawn --parent-self --environment <this thread's environment id from bb status> --provider claude-code --model claude-sonnet-5-5 --prompt-file <brief>`.",
+        "3. `bb thread wait <id>`, then read `bb thread output <id>` and review the diff yourself.",
+        "4. Send corrections with `bb thread tell <id> <message>` until the step is right."
+      ]
+    },
+    {
+      "provider": "claude-code",
+      "model": "claude-sonnet-5-5*",
+      "threads": "child",
+      "instructions": "You are an implementation worker. Do exactly what the brief asks, run its verification, and end with a short report of what changed and what you checked."
+    }
+  ]
+}
 ```
 
 ## Example: everything except a few projects
 
 ```json
-[
-  {
-    "skipProjects": ["opshub-legacy", "sandbox-*"],
-    "instructions": "Run the project's tests before reporting done."
-  }
-]
+{
+  "vars": {},
+  "scopes": [],
+  "rules": [
+    {
+      "skipProjects": [
+        "opshub-legacy",
+        "sandbox-*"
+      ],
+      "instructions": "Run the project's tests before reporting done."
+    }
+  ]
+}
 ```
 
-Combine with `project` to narrow to a set first, e.g. `"project": ["opshub-*", "bb-*"], "skipProjects": "opshub-legacy"`; skip wins.
+Combine with `project` to narrow to a set first, e.g. `"project": ["opshub-*", "bb-*"], "skipProjects": ["opshub-legacy"]`; skip wins.
 
 ## Constraints
 
