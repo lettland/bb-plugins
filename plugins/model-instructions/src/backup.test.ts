@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -43,10 +44,58 @@ describe("backupRules", () => {
     expect(readFileSync(second, "utf8")).toBe("two");
   });
 
-  it("finds an identical file of any name in the folder", () => {
+  it("finds an identical file named rules-*.txt in the folder", () => {
     mkdirSync(dirIn(), { recursive: true });
-    writeFileSync(path.join(dirIn(), "mine.json"), "kept");
-    expect(backupRules(dirIn(), "kept")).toBe(path.join(dirIn(), "mine.json"));
+    writeFileSync(path.join(dirIn(), "rules-mine.txt"), "kept");
+    expect(backupRules(dirIn(), "kept")).toBe(path.join(dirIn(), "rules-mine.txt"));
+  });
+
+  describe("an entry that is not a real backup is not taken as the existing copy", () => {
+    const text = "the rules text";
+    const wrote = (file: string) => {
+      expect(path.basename(file)).toMatch(/^rules-\d{4}-.*\.txt$/);
+      expect(readFileSync(file, "utf8")).toBe(text);
+    };
+
+    it.each(["rules-abc.tmp", "mine.txt", "rules.txt", "rules-abc.txt.bak", "notes.json"])("a file named %s with the same content", (name) => {
+      mkdirSync(dirIn(), { recursive: true });
+      writeFileSync(path.join(dirIn(), name), text);
+      const file = backupRules(dirIn(), text, at, () => "0001");
+      wrote(file);
+      expect(readdirSync(dirIn()).sort()).toEqual([name, path.basename(file)].sort());
+    });
+
+    it("a symbolic link named like a backup that points to a file with the same content", () => {
+      mkdirSync(dirIn(), { recursive: true });
+      writeFileSync(path.join(base, "elsewhere"), text);
+      symlinkSync(path.join(base, "elsewhere"), path.join(dirIn(), "rules-link.txt"));
+      wrote(backupRules(dirIn(), text, at, () => "0001"));
+    });
+
+    it("a folder, and a FIFO, named like a backup", () => {
+      mkdirSync(path.join(dirIn(), "rules-folder.txt"), { recursive: true });
+      execFileSync("mkfifo", [path.join(dirIn(), "rules-fifo.txt")]);
+      wrote(backupRules(dirIn(), text, at, () => "0001"));
+    });
+
+    it("a backup of a different size", () => {
+      mkdirSync(dirIn(), { recursive: true });
+      writeFileSync(path.join(dirIn(), "rules-short.txt"), "short");
+      wrote(backupRules(dirIn(), text, at, () => "0001"));
+    });
+
+    it("a backup of the same size and different content", () => {
+      mkdirSync(dirIn(), { recursive: true });
+      writeFileSync(path.join(dirIn(), "rules-same-size.txt"), text.replace("rules", "other"));
+      wrote(backupRules(dirIn(), text, at, () => "0001"));
+    });
+
+    it("counts the byte length, not the character count, of a text with multi-byte characters", () => {
+      const wide = "ā€😀";
+      mkdirSync(dirIn(), { recursive: true });
+      writeFileSync(path.join(dirIn(), "rules-wide.txt"), wide);
+      expect(backupRules(dirIn(), wide)).toBe(path.join(dirIn(), "rules-wide.txt"));
+    });
   });
 
   it("counts a file that cannot be read as different, not as a failure", () => {

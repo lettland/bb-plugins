@@ -465,13 +465,16 @@ plugin moves them by itself, the first time it runs after the upgrade:
 
 1. **Back up.** The setting's text is written unchanged to
    `~/.bb/model-instructions/backups/rules-<date and time>-<4 hex digits>.txt`
-   (file mode 0600, folder mode 0700). A backup with identical content that is
-   already in the folder is reused, not written again. Backups are kept until you
-   delete them.
-2. **Move.** With no saved config, the text is saved as the config (only its
-   structure is checked). If a config is already saved and equals the old rules,
-   nothing is saved. If it differs, the form shows a banner (see below) and nothing
-   is changed. If the old text cannot be read and a config is already saved, the
+   (file mode 0600; a new folder is made with mode 0700). A backup with
+   identical content that is already in the folder is reused, not written
+   again. Backups are kept until you delete them. If the saved config cannot be
+   loaded (the form says so), nothing is backed up or moved until that is fixed.
+2. **Move.** With no saved config, or an empty one, the text is saved as the
+   config (only its structure is checked). If a config is already saved and
+   equals the old rules, nothing is saved. If you ran `bb model-instructions
+   import` before the move, your import wins and nothing is saved. If the saved
+   config differs otherwise, the form shows a banner (see below) and nothing is
+   changed. If the old text cannot be read and a config is already saved, the
    saved config wins and the plugin logs a warning with the backup path.
 3. **Empty.** The `rules` setting is emptied. While the move is not done, the
    setting shows in the plugin's settings as **Rules (previous versions)**. After
@@ -479,19 +482,22 @@ plugin moves them by itself, the first time it runs after the upgrade:
 
 A value that is blank or an empty list (the old default `[]`) is not backed up;
 the setting is emptied and the move counts as done. If a step fails, the plugin
-logs a warning, keeps the setting, and tries again at the next start.
+logs a warning, keeps the setting, and tries again at the next start; if the
+moved rules could not be saved, the form also shows the banner below.
 
 Two banners can show in the settings form:
 
 - **Your rules from the previous version were not moved.** The old text could not
-  be read as a config (the banner gives the reason), or no backup could be made.
-  With a backup, fix the file and run `bb model-instructions import <backup path>`;
+  be read as a config, it could not be saved, or no backup could be made (the
+  banner gives the reason). If the text could not be read, fix the backup file;
+  then run `bb model-instructions import <backup path>`;
   a successful `import` or a form save then empties the setting and ends the
   banner. Without a backup the rules stay in the setting and the move is tried
   again at the next start.
 - **Your rules from the previous version differ from the rules saved here.** A
   config is saved and the old rules are different. Run
-  `bb model-instructions import <backup path>` to use the old rules, or press
+  `bb model-instructions import <backup path>` to replace the rules saved here
+  with the old ones, or press
   **Keep the rules saved here**. Either one empties the setting and ends the
   banner. A form save does not end it.
 

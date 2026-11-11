@@ -78,8 +78,10 @@ const NO_COPY_MESSAGE = (reason: string) =>
   `${reason}. No copy could be made; the rules are still in the plugin's settings and the move is tried again at the next start.`;
 const COPY_MESSAGE = (reason: string, backupPath: string) =>
   `${reason}. A copy is in ${backupPath}. Fix it there and run bb model-instructions import ${backupPath}.`;
+const SAVE_FAILED_MESSAGE = (reason: string, backupPath: string) =>
+  `the rules could not be saved: ${reason}. A copy is in ${backupPath}; the move is tried again at the next start, or run bb model-instructions import ${backupPath}.`;
 const CONFLICT_MESSAGE = (backupPath: string) =>
-  `A copy of the previous rules is in ${backupPath}. To use them, run bb model-instructions import ${backupPath}; to keep the rules saved here, press Keep the rules saved here.`;
+  `A copy of the previous rules is in ${backupPath}. To replace the rules saved here with them, run bb model-instructions import ${backupPath}; to keep the rules saved here, press Keep the rules saved here.`;
 
 const STORAGE_READ_ERROR = (reason: string) => `the plugin's storage could not be read: ${reason}`;
 /** What every writer says while a start-path read of the plugin's storage has failed. */
@@ -279,7 +281,7 @@ export default async function plugin(bb: BbPluginApi) {
         type: "string",
         label: "Rules (previous versions)",
         description:
-          "Moved into the form below automatically, then removed. A copy is kept in ~/.bb/model-instructions/backups/. Edits here are not read after the move.",
+          "Moved into the form below automatically, then removed. If the form shows a banner about it, the move is waiting for you. A copy is kept in ~/.bb/model-instructions/backups/. Edits here are not read after the move.",
         experimental_multiline: true,
         default: "",
       },
@@ -294,6 +296,11 @@ export default async function plugin(bb: BbPluginApi) {
    * the setting with 404 until the factory has finished. Returns what the service and the form need.
    */
   function previousSettingMigration(setting: RulesSetting) {
+    /** True once the move has started in this process. */
+    let moveStarted = false;
+    /** True when an `import` succeeded before the move started: the user's own choice, which the move must not question. */
+    let importedFirst = false;
+
     /** Step d: empties the setting and reads it back. False, with a warning, when it is not empty. */
     async function emptySetting(): Promise<boolean> {
       let reason: string;
@@ -309,34 +316,47 @@ export default async function plugin(bb: BbPluginApi) {
     }
 
     /** Steps d and e: empties the setting, then sets the flag. */
-    async function finishMove(backupPath: string, outcome: "moved" | "already saved"): Promise<void> {
+    async function finishMove(backupPath: string, outcome: "moved" | "already saved" | "imported"): Promise<void> {
       if (!(await emptySetting())) return;
       await bb.storage.kv.set(DONE_KEY, true);
       bb.log.info(
-        outcome === "moved"
-          ? `rules from the previous version moved: backup ${backupPath}`
-          : `rules from the previous version already saved; backup ${backupPath}`,
+        {
+          moved: `rules from the previous version moved: backup ${backupPath}`,
+          "already saved": `rules from the previous version already saved; backup ${backupPath}`,
+          imported: `rules from the previous version not moved: rules were imported; backup ${backupPath}`,
+        }[outcome],
       );
     }
 
     /** Backs up and removes what v0.1.12 kept in kv. False when the move must wait for the next start. */
     async function removeV012Keys(): Promise<boolean> {
-      const kept = v012RecordSchema.safeParse(await bb.storage.kv.get<unknown>(V012_RULES_KEY));
+      const record = await bb.storage.kv.get<unknown>(V012_RULES_KEY);
+      const kept = v012RecordSchema.safeParse(record);
       if (kept.success) {
         try {
           backupRules(backupDir, kept.data.text);
         } catch (error) {
-          bb.log.warn(BACKUP_FAILED((error as Error).message));
+          const message = (error as Error).message;
+          bb.log.warn(BACKUP_FAILED(message));
+          pending = {
+            kind: "migration",
+            message: NO_COPY_MESSAGE(`the rules text saved by version 0.1.12 could not be backed up: ${message}`),
+            backupPath: null,
+          };
           return false;
         }
-        await bb.storage.kv.delete(V012_RULES_KEY);
+      } else if (record !== undefined) {
+        // It holds no usable text, so there is nothing to back up.
+        bb.log.warn("stored rules record of an earlier version ignored: wrong shape");
       }
+      if (record !== undefined) await bb.storage.kv.delete(V012_RULES_KEY);
       await bb.storage.kv.delete(V012_DISMISSED_KEY);
       return true;
     }
 
     /** Steps a to e, decided from the current state. Runs inside the write queue. */
     async function migrate(): Promise<void> {
+      moveStarted = true;
       if (!(await removeV012Keys())) return;
       const text = (await setting.get()).rules;
       const blank = text.trim() === "";
@@ -359,6 +379,8 @@ export default async function plugin(bb: BbPluginApi) {
         }
         return;
       }
+      // A stored config that failed to load: change nothing, not even a backup.
+      if (storedError !== undefined) return;
       // b. Back up.
       let backupPath: string;
       try {
@@ -369,18 +391,30 @@ export default async function plugin(bb: BbPluginApi) {
         pending = { kind: "migration", message: NO_COPY_MESSAGE(message), backupPath: null };
         return;
       }
-      // c. Decide.
-      if (storedError !== undefined) return;
-      if (!hasStored) {
+      // c. Decide. An empty saved config counts as none.
+      if (!hasStored || isEmptyConfig(raw)) {
         if (old === undefined) {
           pending = { kind: "migration", message: COPY_MESSAGE(reason, backupPath), backupPath };
           return;
         }
-        await writeStep(old, "previous setting", "structural");
+        try {
+          await writeStep(old, "previous setting", "structural");
+        } catch (error) {
+          const message = (error as Error).message;
+          bb.log.warn(MOVE_FAILED(message));
+          pending = {
+            kind: "migration",
+            message: SAVE_FAILED_MESSAGE(message, backupPath),
+            backupPath,
+          };
+          return;
+        }
         await finishMove(backupPath, "moved");
       } else if (old === undefined) {
         bb.log.warn(NOT_READ(backupPath));
-        await finishMove(backupPath, "moved");
+        await finishMove(backupPath, "already saved");
+      } else if (importedFirst) {
+        await finishMove(backupPath, "imported");
       } else if (sameConfig(old, raw)) {
         await finishMove(backupPath, "already saved");
       } else {
@@ -390,6 +424,7 @@ export default async function plugin(bb: BbPluginApi) {
 
     /** Settles a pending move after the saved config was replaced or the user chose: the backup exists, so steps d and e run. */
     async function resolve(by: Resolution): Promise<void> {
+      if (by === "import" && !moveStarted) importedFirst = true;
       const current = pending;
       if (current === undefined || current.backupPath === null) return;
       if (current.kind === "migration" ? by === "keep" : by === "form") return;

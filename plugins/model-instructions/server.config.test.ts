@@ -197,7 +197,7 @@ const BACKUP_FAILED = (reason: string) =>
 const MOVE_FAILED = (reason: string) =>
   `the rules from the previous version could not be moved: ${reason}; it is tried again at the next start`;
 const CONFLICT = (file: string) =>
-  `A copy of the previous rules is in ${file}. To use them, run bb model-instructions import ${file}; to keep the rules saved here, press Keep the rules saved here.`;
+  `A copy of the previous rules is in ${file}. To replace the rules saved here with them, run bb model-instructions import ${file}; to keep the rules saved here, press Keep the rules saved here.`;
 
 function importFile(name: string, content: unknown): string {
   const file = path.join(base, name);
@@ -231,7 +231,7 @@ describe("the setting of the previous versions: declared until it is moved", () 
         type: "string",
         label: "Rules (previous versions)",
         description:
-          "Moved into the form below automatically, then removed. A copy is kept in ~/.bb/model-instructions/backups/. Edits here are not read after the move.",
+          "Moved into the form below automatically, then removed. If the form shows a banner about it, the move is waiting for you. A copy is kept in ~/.bb/model-instructions/backups/. Edits here are not read after the move.",
         experimental_multiline: true,
         default: "",
       }),
@@ -323,11 +323,11 @@ describe("the move: back up (step b)", () => {
 
   it("skips the write when a backup with identical content is already in the folder, and names that file", async () => {
     mkdirSync(backupDir(), { recursive: true });
-    writeFileSync(path.join(backupDir(), "mine.txt"), OLD);
+    writeFileSync(path.join(backupDir(), "rules-mine.txt"), OLD);
     const loaded = await load({ rules: OLD });
     await endRun(await runMigration(loaded));
-    expect(backupFiles()).toEqual(["mine.txt"]);
-    expect(logs(loaded, "info")).toContain(MOVED(path.join(backupDir(), "mine.txt")));
+    expect(backupFiles()).toEqual(["rules-mine.txt"]);
+    expect(logs(loaded, "info")).toContain(MOVED(path.join(backupDir(), "rules-mine.txt")));
     expect(await loaded.rules()).toBe("");
   });
 
@@ -466,6 +466,9 @@ describe("the move: decide (step c) when a config is stored", () => {
     expect(await loaded.kv.get("config")).toEqual(bad);
     expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
     expect((await state(loaded)).loadError).toMatchObject({ kind: "stored" });
+    // No backup either: a corrupt stored config means do nothing.
+    expect(existsSync(backupDir())).toBe(false);
+    expect(backupFiles()).toEqual([]);
   });
 
   it("lets the rules saved here win when the old text cannot be read: empties the setting, warns, shows no banner", async () => {
@@ -480,6 +483,9 @@ describe("the move: decide (step c) when a config is stored", () => {
     expect(await loaded.kv.get("previousSettingDone")).toBe(true);
     expect(await loaded.kv.get("config")).toEqual(SAVED);
     expect((await state(loaded)).loadError).toBeNull();
+    // The text was never moved, so the log says "already saved", not "moved".
+    expect(logs(loaded, "info")).toContain(ALREADY_SAVED(file));
+    expect(logs(loaded, "info")).not.toContain(MOVED(file));
   });
 
   it("respects a form save that lands after the factory and before the service: the saved config stays, a conflict is shown", async () => {
@@ -494,13 +500,98 @@ describe("the move: decide (step c) when a config is stored", () => {
     expect(await loaded.rules()).toBe(OLD);
     expect((await configure(loaded)).instructions).toBe("Guard.");
   });
+});
 
-  it("respects an import that lands after the factory and before the service", async () => {
+describe("an empty saved config counts as no saved config", () => {
+  it("imports the old text over a saved config with no rules, no scopes and no vars", async () => {
+    const loaded = await load({ rules: OLD, stored: { vars: {}, scopes: [], rules: [] } });
+    await endRun(await runMigration(loaded));
+    expect(await loaded.kv.get("config")).toEqual(raw({ rules: [OLD_RULE] }));
+    expect(await loaded.rules()).toBe("");
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(logs(loaded, "info")).toContain(MOVED(backupPath()));
+    expect((await state(loaded)).loadError).toBeNull();
+  });
+
+  it("does not import over a config that has only vars or only a scope", async () => {
+    for (const stored of [raw({ vars: { a: "b" }, scopes: [], rules: [] }), raw({ vars: {}, scopes: [{ name: "s", paths: ["/p"] }], rules: [] })]) {
+      const loaded = await load({ rules: OLD, stored });
+      await endRun(await runMigration(loaded));
+      expect((await state(loaded)).loadError).toMatchObject({ kind: "conflict" });
+      expect(await loaded.kv.get("config")).toEqual(stored);
+    }
+  });
+
+  it("explains an unreadable old text with a migration banner over an empty saved config", async () => {
+    const loaded = await load({ rules: BAD_OLD, stored: { vars: {}, scopes: [], rules: [] } });
+    await endRun(await runMigration(loaded));
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "migration" });
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+  });
+});
+
+describe("an import that lands before the move is the user's choice", () => {
+  const imported = raw({ rules: [GUARD] });
+  const importEarly = async (loaded: Loaded) => {
+    expect((await loaded.harness.runCli(["import", importFile("early.json", imported)])).exitCode).toBe(0);
+  };
+
+  it.each([
+    ["differ from", JSON.stringify([{ name: "old", instructions: "Changed." }])],
+    ["equal", JSON.stringify([GUARD])],
+  ])("backs up the old rules that %s the imported ones, empties the setting, sets the flag, and shows no banner", async (_label, text) => {
+    const loaded = await load({ rules: text });
+    await importEarly(loaded);
+    expect(await loaded.rules()).toBe(text);
+    await endRun(await runMigration(loaded));
+    const file = backupPath();
+    expect(readFileSync(file, "utf8")).toBe(text);
+    expect(backupFiles()).toHaveLength(1);
+    expect(await loaded.rules()).toBe("");
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(await loaded.kv.get("config")).toEqual(imported);
+    expect((await state(loaded)).loadError).toBeNull();
+    expect(logs(loaded, "info")).toContain(`rules from the previous version not moved: rules were imported; backup ${file}`);
+    expect(logs(loaded, "info")).not.toContain(MOVED(file));
+    expect(logs(loaded, "info")).not.toContain(ALREADY_SAVED(file));
+  });
+
+  it("applies to an old text that cannot be read as well: the saved rules win", async () => {
+    const loaded = await load({ rules: BAD_OLD });
+    await importEarly(loaded);
+    await endRun(await runMigration(loaded));
+    expect((await state(loaded)).loadError).toBeNull();
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(await loaded.kv.get("config")).toEqual(imported);
+    expect(backupFiles()).toHaveLength(1);
+  });
+
+  it("is not set by a form save in the same window: the conflict banner shows", async () => {
     const loaded = await load({ rules: OLD });
-    expect((await loaded.harness.runCli(["import", importFile("early.json", raw({ rules: [GUARD] }))])).exitCode).toBe(0);
+    await save(loaded, imported);
     await endRun(await runMigration(loaded));
     expect((await state(loaded)).loadError).toMatchObject({ kind: "conflict" });
-    expect(await loaded.kv.get("config")).toEqual(raw({ rules: [GUARD] }));
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    expect(await loaded.rules()).toBe(OLD);
+  });
+
+  it("is not set by an import that is refused: a later form save then still gets the conflict banner", async () => {
+    const loaded = await load({ rules: OLD });
+    expect((await loaded.harness.runCli(["import", importFile("bad.json", { rules: [{ name: "r" }] })])).exitCode).not.toBe(0);
+    await save(loaded, imported);
+    await endRun(await runMigration(loaded));
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "conflict" });
+  });
+
+  it("is not set by an import after the move has run: the conflict is resolved the usual way", async () => {
+    const loaded = await load({ rules: JSON.stringify([{ name: "old", instructions: "Changed." }]), stored: raw({ rules: [OLD_RULE] }) });
+    const run = await runMigration(loaded);
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "conflict" });
+    await importEarly(loaded);
+    expect((await state(loaded)).loadError).toBeNull();
+    expect(logs(loaded, "info")).toContain(MOVED(backupPath()));
+    expect(logs(loaded, "info").filter((line) => line.includes("rules were imported"))).toEqual([]);
+    await endRun(run);
   });
 });
 
@@ -729,13 +820,18 @@ describe("the move: empty the setting and set the flag (steps d and e)", () => {
     expect(logs(restarted, "debug")).toContain("no rules from the previous version to move");
   });
 
-  it("logs a failed write of the imported config as a warning, and changes nothing else", async () => {
+  it("logs a failed write of the imported config as a warning, shows a banner with the backup path, and changes nothing else", async () => {
     const loaded = await load({ rules: OLD, prepare: failing("set", "config") });
     await endRun(await runMigration(loaded));
     expect(logs(loaded, "warn")).toContain(MOVE_FAILED("disk full"));
     expect(await loaded.rules()).toBe(OLD);
     expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
-    expect((await state(loaded)).loadError).toBeNull();
+    const file = backupPath();
+    expect((await state(loaded)).loadError).toEqual({
+      kind: "migration",
+      message: `the rules could not be saved: disk full. A copy is in ${file}; the move is tried again at the next start, or run bb model-instructions import ${file}.`,
+      backupPath: file,
+    });
   });
 });
 
@@ -805,10 +901,10 @@ describe("what v0.1.12 kept in kv is cleaned up once, at the start of the move",
 
   it("does not make a second copy of a text that already has a backup", async () => {
     mkdirSync(backupDir(), { recursive: true });
-    writeFileSync(path.join(backupDir(), "mine.txt"), "[{broken");
+    writeFileSync(path.join(backupDir(), "rules-mine.txt"), "[{broken");
     const loaded = await load({ rules: "", v012Rules: { text: "[{broken", error: "why" } });
     await endRun(await runMigration(loaded));
-    expect(backupFiles()).toEqual(["mine.txt"]);
+    expect(backupFiles()).toEqual(["rules-mine.txt"]);
     expect(await loaded.kv.get("legacyRules")).toBeUndefined();
   });
 
@@ -821,20 +917,35 @@ describe("what v0.1.12 kept in kv is cleaned up once, at the start of the move",
     expect(await loaded.kv.get("legacyRules")).toEqual({ text: "[{broken", error: "why" });
     expect(await loaded.rules()).toBe(OLD);
     expect(await loaded.kv.get("config")).toBeUndefined();
-    expect((await state(loaded)).loadError).toBeNull();
+    const warning = logs(loaded, "warn").find((line) => line.startsWith("could not back up the rules from the previous version: "))!;
+    const reason = warning.slice("could not back up the rules from the previous version: ".length, -"; nothing was changed, it is tried again at the next start".length);
+    expect((await state(loaded)).loadError).toEqual({
+      kind: "migration",
+      message: `the rules text saved by version 0.1.12 could not be backed up: ${reason}. No copy could be made; the rules are still in the plugin's settings and the move is tried again at the next start.`,
+      backupPath: null,
+    });
   });
 
-  it("leaves a record that has no text alone", async () => {
-    const loaded = await load({ rules: "", v012Rules: { error: "why" } });
+  it.each([
+    ["has no text", { error: "why" }],
+    ["is not an object", "text"],
+    ["has a text that is not a string", { text: 5 }],
+  ])("deletes a record that %s, with a warning, and makes no backup", async (_label, record) => {
+    const loaded = await load({ rules: "", v012Rules: record });
     await endRun(await runMigration(loaded));
-    expect(await loaded.kv.get("legacyRules")).toEqual({ error: "why" });
+    expect(await loaded.kv.get("legacyRules")).toBeUndefined();
+    expect(logs(loaded, "warn")).toContain("stored rules record of an earlier version ignored: wrong shape");
     expect(backupFiles()).toEqual([]);
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
   });
 
-  it("keeps going when there is nothing of v0.1.12 in kv", async () => {
+  it("keeps going, with no warning and no delete of the record, when there is nothing of v0.1.12 in kv", async () => {
     const loaded = await load({ rules: "" });
+    const deleted = vi.spyOn(loaded.kv, "delete");
     await endRun(await runMigration(loaded));
     expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(logs(loaded, "warn")).not.toContain("stored rules record of an earlier version ignored: wrong shape");
+    expect(deleted.mock.calls.map(([key]) => key)).not.toContain("legacyRules");
   });
 
   it("warns and keeps the move for the next start when a delete fails", async () => {
