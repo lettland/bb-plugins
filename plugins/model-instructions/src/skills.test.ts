@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { frontmatter, loadSkills } from "./skills.js";
 
-// Ported from the skill discovery cases of plugins/dir-skills/server.setup.test.ts, against a fixture root.
+// Ported from the skill discovery cases of plugins/dir-skills/server.setup.test.ts (tag dir-skills/v0.2.8), against a fixture root.
 const root = realpathSync(mkdtempSync(path.join(tmpdir(), "model-instructions-skills-")));
 
 afterAll(() => {

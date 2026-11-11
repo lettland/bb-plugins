@@ -10,7 +10,7 @@ import {
   normalizeDir,
 } from "./paths.js";
 
-// Ported from plugins/dir-skills/scopes.test.ts (expandHome, activeScopes) and extended for
+// Ported from plugins/dir-skills/scopes.test.ts (tag dir-skills/v0.2.8) (expandHome, activeScopes) and extended for
 // normalizeDir and isWithin, which dir-skills covered only through other tests.
 const tmp = realpathSync(mkdtempSync(path.join(tmpdir(), "model-instructions-paths-")));
 

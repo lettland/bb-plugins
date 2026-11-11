@@ -357,19 +357,48 @@ work profile on its next turn.
 
 ## Moving from dir-skills
 
-`dir-skills` is deprecated: this plugin does what it did (directory scopes, skills,
-Claude profiles, pins). Skills are now claimed by a rule's `skills` globs, so a
-scope's skill patterns become rules.
+`dir-skills` is removed (last release v0.2.8). This plugin takes over its
+directory scopes, Claude profiles and pins, and a scope's skill patterns become
+rules with `skills` globs. dir-skills' own bundled skills are not carried over:
+a pattern that matches no skill bundled with this plugin is skipped by the
+import and listed, so ship such skills from another plugin.
 
-The `export` command exists from dir-skills v0.2.8 (git tag `dir-skills/v0.2.8` in this repository); dir-skills is no longer listed in the marketplace, so an older install has to update to that tag first.
+The `export` command exists from dir-skills v0.2.8 (git tag `dir-skills/v0.2.8`
+in this repository). `bb plugin source dir-skills` shows how yours was installed
+and `bb plugin list` its version.
 
-To move your scopes, claims and pins over:
+- **v0.2.8 or later:** run the steps below.
+- **Older, tracking a version range** (source `git:…@semver:…`): run
+  `bb plugin update dir-skills --range '>=0.2.8'` (bb keeps a plugin's data
+  when its range changes), check the version with `bb plugin list`, then run
+  the steps below. If the update is refused, follow the next case.
+- **Older, pinned to a commit or tracking a branch** (source `git:…@<sha>` or
+  `git:…@master`): `bb plugin install` refuses to install over it and its
+  source has no range to change. Remove it and install the tag:
+
+  ```sh
+  bb plugin remove dir-skills
+  bb plugin install git:https://github.com/lettland/bb-plugins.git@dir-skills/v0.2.8 \
+    --subdirectory plugins/dir-skills
+  ```
+
+  This was checked on a v0.2.4 install: `bb plugin remove` kept the plugin's
+  stored data (scopes from the settings form and every pin) and
+  `~/.bb/dir-skills/scopes.json`, and after the reinstall `export` wrote all
+  of its pins. `remove` does delete plugin settings and the plugin's own
+  files, so run `bb dir-skills status --json` first and keep the output if
+  you are on v0.2.5 (scopes in a Scopes setting) or v0.1.x (scopes in the
+  plugin's own `scopes.json`); re-add those scopes by hand afterwards.
+
+Steps for dir-skills v0.2.8 or later:
 
 1. In dir-skills, run `bb dir-skills export`. It writes
    `~/.bb/dir-skills/export.json` with the scopes from its settings form and every
    Claude profile pin, which only that plugin can read.
 2. In this plugin, run `bb model-instructions import-dir-skills --dry-run`, read
    the plan, then run it without `--dry-run`.
+3. Check the result with `bb model-instructions status`, then run
+   `bb plugin remove dir-skills`.
 
 ```sh
 bb model-instructions import-dir-skills [--dry-run] [--json]
