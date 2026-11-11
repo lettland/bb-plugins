@@ -1301,6 +1301,17 @@ describe("the old rules setting banner", () => {
     expect(within(banner).queryAllByRole("textbox")).toHaveLength(0);
   });
 
+  it("shows only the heading and the message when no old text was kept", async () => {
+    const message = "the old rules setting could not be read: host down; restart bb or reload the plugin to try again";
+    render(state({ loadError: { message, legacyText: "" } }));
+    const banner = await screen.findByRole("region", { name: "The old rules setting could not be imported" });
+    expect(Array.from(banner.children).map((child) => child.tagName)).toEqual(["H4", "P"]);
+    expect(within(banner).getByText(message)).toBeTruthy();
+    expect(banner.querySelector("pre")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Dismiss old text" })).toBeNull();
+    expect(screen.queryByText(/Fix it, save it to a file/)).toBeNull();
+  });
+
   it("is not shown when there is no load error", async () => {
     render();
     await screen.findByRole("button", { name: "Add rule" });

@@ -676,24 +676,28 @@ function LegacyBanner(props: { error: NonNullable<ConfigState["loadError"]>; onD
       <h4 id="mi-legacy-heading" style={{ margin: "0 0 4px", color: DESTRUCTIVE }}>
         The old rules setting could not be imported
       </h4>
-      <p style={{ margin: "0 0 8px" }}>{props.error.message}</p>
-      <pre
-        style={{
-          margin: "0 0 8px",
-          padding: 8,
-          border: RULE,
-          borderRadius: 6,
-          overflow: "auto",
-          whiteSpace: "pre-wrap",
-          fontFamily: "ui-monospace, monospace",
-        }}
-      >
-        {props.error.legacyText}
-      </pre>
-      <button type="button" onClick={props.onDismiss}>
-        Dismiss old text
-      </button>
-      <SectionNote>{LEGACY_FIX}</SectionNote>
+      <p style={{ margin: props.error.legacyText === "" ? 0 : "0 0 8px" }}>{props.error.message}</p>
+      {props.error.legacyText === "" ? null : (
+        <>
+          <pre
+            style={{
+              margin: "0 0 8px",
+              padding: 8,
+              border: RULE,
+              borderRadius: 6,
+              overflow: "auto",
+              whiteSpace: "pre-wrap",
+              fontFamily: "ui-monospace, monospace",
+            }}
+          >
+            {props.error.legacyText}
+          </pre>
+          <button type="button" onClick={props.onDismiss}>
+            Dismiss old text
+          </button>
+          <SectionNote>{LEGACY_FIX}</SectionNote>
+        </>
+      )}
     </section>
   );
 }

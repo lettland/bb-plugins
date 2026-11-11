@@ -82,6 +82,8 @@ export default async function plugin(bb: BbPluginApi) {
   let raw: RawConfig = { vars: {}, scopes: [], rules: [] };
   let config: Config = { rules: [], scopes: [] };
   let legacy: LegacyRecord | undefined;
+  /** Why the old setting could not be read; memory only, so the next start tries again. */
+  let legacyReadError: string | undefined;
   let scopes: Scope[] = [];
   /** Saved scopes left out of `scopes` because a profile scope has their name. */
   let ignoredScopes: string[] = [];
@@ -205,6 +207,7 @@ export default async function plugin(bb: BbPluginApi) {
   async function writeStep(value: unknown, source: WriteSource, mode: WriteMode): Promise<RawConfig> {
     const { next, parsed } = validate(value, mode, checkEnv);
     await bb.storage.kv.set(CONFIG_KEY, next);
+    legacyReadError = undefined;
     adopt(next, parsed);
     recheckBudget();
     bb.log.info(
@@ -229,7 +232,8 @@ export default async function plugin(bb: BbPluginApi) {
     try {
       text = (await bb.sdk.plugins.getSettings({ pluginId: bb.pluginId })).values.rules;
     } catch (error) {
-      bb.log.debug(`the old rules setting could not be read: ${(error as Error).message}`);
+      legacyReadError = `the old rules setting could not be read: ${(error as Error).message}; restart bb or reload the plugin to try again`;
+      bb.log.warn(legacyReadError);
       return;
     }
     if (typeof text !== "string" || text.trim() === "") {
@@ -333,6 +337,13 @@ export default async function plugin(bb: BbPluginApi) {
     );
   }
 
+  /** The kept old text wins over a read error; a read error shows only while no config is stored. */
+  function loadError(): ConfigState["loadError"] {
+    if (legacy !== undefined) return { message: legacy.error, legacyText: legacy.text };
+    if (legacyReadError !== undefined) return { message: legacyReadError, legacyText: "" };
+    return null;
+  }
+
   /** What the settings form shows. Never carries a Claude config dir. */
   function state(): ConfigState {
     const snapshot = caches.snapshot();
@@ -350,7 +361,7 @@ export default async function plugin(bb: BbPluginApi) {
         projects: { loaded: snapshot.projects.loaded, failed: snapshot.projects.failed },
       },
       overBudget: [...overBudget.values()],
-      loadError: legacy === undefined ? null : { message: legacy.error, legacyText: legacy.text },
+      loadError: loadError(),
     };
   }
 

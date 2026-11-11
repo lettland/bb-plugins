@@ -257,14 +257,74 @@ describe("the one-time import of the old rules setting", () => {
     expect((await state(loaded)).loadError).toBeNull();
   });
 
-  it("does nothing, at debug level, when the host cannot be asked", async () => {
-    const loaded = await load();
-    expect(await loaded.kv.get("config")).toBeUndefined();
-    expect(loaded.harness.logEntries).toContainEqual({
-      level: "debug",
-      message: expect.stringContaining("the old rules setting could not be read: "),
+  describe("when the old setting cannot be read", () => {
+    const MESSAGE = "the old rules setting could not be read: host down; restart bb or reload the plugin to try again";
+    const down = { plugins: { getSettings: async () => { throw new Error("host down"); } } };
+
+    it("warns with the reason, keeps it in memory only, and shows it with no old text", async () => {
+      const loaded = await load({ sdk: down });
+      expect(await loaded.kv.get("config")).toBeUndefined();
+      expect(await loaded.kv.get("legacyRules")).toBeUndefined();
+      expect(logs(loaded, "warn")).toEqual([MESSAGE]);
+      expect(logs(loaded, "debug")).not.toContain(MESSAGE);
+      expect((await state(loaded)).loadError).toEqual({ message: MESSAGE, legacyText: "" });
     });
-    expect(logs(loaded, "warn")).toEqual([]);
+
+    it("says nothing about the old setting when the host has no plugin settings call at all", async () => {
+      const loaded = await load();
+      expect(await loaded.kv.get("config")).toBeUndefined();
+      expect(logs(loaded, "warn")).toEqual([expect.stringContaining("the old rules setting could not be read: ")]);
+    });
+
+    it("is not kept across a restart: the import is tried again, and a good read leaves no error", async () => {
+      let broken = true;
+      const getSettings = vi.fn(async () => {
+        if (broken) throw new Error("host down");
+        return { values: { rules: JSON.stringify([GUARD]) } };
+      });
+      const first = await load({ sdk: { plugins: { getSettings } } });
+      expect((await state(first)).loadError).toEqual({ message: MESSAGE, legacyText: "" });
+      broken = false;
+      const restarted = await first.harness.reload(first.create);
+      await flush();
+      expect(getSettings).toHaveBeenCalledTimes(2);
+      expect(await restarted.bb.storage.kv.get("config")).toEqual(raw({ rules: [GUARD] }));
+      expect(((await restarted.harness.callRpc("getState", null)) as ConfigState).loadError).toBeNull();
+    });
+
+    it("loses to a kept old text", async () => {
+      const loaded = await load({ sdk: down, kept: { text: "old", error: "why" } });
+      expect((await state(loaded)).loadError).toEqual({ message: "why", legacyText: "old" });
+    });
+
+    it("is cleared by a successful form save", async () => {
+      const loaded = await load({ sdk: down });
+      expect((await save(loaded, raw({ rules: [GUARD] }))).loadError).toBeNull();
+      expect((await state(loaded)).loadError).toBeNull();
+    });
+
+    it("is kept when the form save is refused", async () => {
+      const loaded = await load({ sdk: down });
+      await expect(save(loaded, { rules: [{ name: "r" }] })).rejects.toThrow();
+      expect((await state(loaded)).loadError).toEqual({ message: MESSAGE, legacyText: "" });
+    });
+
+    it("is cleared by a successful import-dir-skills", async () => {
+      put(path.join(home, ".bb", "dir-skills", "scopes.json"), { scopes: [{ name: "prof", paths: ["/srv/prof"], skills: ["work-*"] }] });
+      put(path.join(home, ".bb", "dir-skills", "export.json"), { uiScopes: [], pins: [] });
+      const loaded = await load({ sdk: down });
+      expect((await loaded.harness.runCli(["import-dir-skills"])).exitCode).toBe(0);
+      expect(logs(loaded, "info")).toContain("config saved from import-dir-skills: 1 rules, 1 scopes, 0 vars");
+      expect((await state(loaded)).loadError).toBeNull();
+    });
+
+    it("is cleared by a successful import", async () => {
+      const loaded = await load({ sdk: down });
+      const file = path.join(base, "fixed.json");
+      writeFileSync(file, JSON.stringify(raw({ rules: [GUARD] })));
+      expect((await loaded.harness.runCli(["import", file])).exitCode).toBe(0);
+      expect((await state(loaded)).loadError).toBeNull();
+    });
   });
 
   describe("once kv holds a config", () => {
