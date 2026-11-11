@@ -702,6 +702,18 @@ describe("an import before the move is finished is remembered across a restart",
     expect((await state(loaded)).loadError).toBeNull();
     expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
     expect(await loaded.rules()).toBe(OLD);
+    // The read comes before the backup, so a read that keeps failing leaves the backups folder empty.
+    expect(backupFiles()).toEqual([]);
+  });
+
+  it("a failed read of the record with no saved config: the path never uses it, so the move still finishes", async () => {
+    const loaded = await load({ rules: OLD, prepare: failing("get", "previousImported") });
+    await endRun(await runMigration(loaded));
+    expect(logs(loaded, "warn").filter((line) => line.includes("could not be moved"))).toEqual([]);
+    expect((await state(loaded)).loadError).toBeNull();
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(await loaded.rules()).toBe("");
+    expect(backupFiles()).toHaveLength(1);
   });
 
   it("the record is deleted on the nothing-to-move path", async () => {

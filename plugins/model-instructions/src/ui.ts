@@ -1,4 +1,4 @@
-// Class lists follow bb's button component (MIT).
+// Class lists modelled on bb's button component (MIT).
 // Rule: no call site combines two classes that set the same CSS property. `cx` only joins, it resolves no conflicts.
 
 export const cx = (...parts: string[]): string => parts.join(" ");
@@ -28,18 +28,20 @@ export const textarea = cx(inputBase, "min-h-32 py-2 font-mono resize-y");
 export const field = "flex flex-col gap-1.5";
 export const label = "text-sm font-medium";
 export const hint = "text-xs text-muted-foreground";
-/** Used instead of `hint`, never with it: both set the colour, and the compiled CSS would keep the grey. */
-export const countOver = "text-xs text-destructive";
+/** The red hint text: used instead of `hint`, never with it. Both set the colour, and the compiled CSS would keep the grey. */
+export const errorHint = "text-xs text-destructive";
 
-const cardBase = "rounded-lg border border-border p-4 flex flex-col gap-4";
-export const card = cx(cardBase, "bg-card");
-/** A read-only card: `bg-muted` replaces `bg-card`, the two are never joined. */
-export const cardMuted = cx(cardBase, "bg-muted");
+export const card = "rounded-lg border border-border bg-card p-4 flex flex-col gap-4";
+/** A read-only row: no call site joins it with `card`, so their padding and background never conflict. */
+export const cardMuted = "rounded-lg border border-border bg-muted p-3 flex flex-col gap-1";
 export const cardTitle = "text-base font-semibold";
 export const cardNote = "text-sm text-muted-foreground";
 
 export const badge = "inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-xs";
+/** The Remove button inside a chip: smaller than `buttonSm`, so the chip stays one line high. */
+export const chipButton =
+  "inline-flex items-center rounded-sm px-1 text-xs hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
 export const banner = "rounded-md border border-destructive/50 p-3 text-sm";
 export const bannerTitle = "font-medium text-destructive";
-export const pre = "rounded-md bg-muted p-2 font-mono text-xs whitespace-pre-wrap";
+export const pre = "rounded-md bg-muted p-2 font-mono text-xs whitespace-pre-wrap overflow-auto";

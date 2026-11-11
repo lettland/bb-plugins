@@ -391,6 +391,12 @@ export default async function plugin(bb: BbPluginApi) {
       }
       // A stored config that failed to load: change nothing, not even a backup.
       if (storedError !== undefined) return;
+      // Read before the backup: a read that keeps failing then writes no backup at each start.
+      // Only the path that compares the old text with a saved config uses it.
+      const previousImported =
+        hasStored && !isEmptyConfig(raw) && old !== undefined
+          ? await bb.storage.kv.get<boolean>(IMPORTED_KEY)
+          : false;
       // b. Back up.
       let backupPath: string;
       try {
@@ -423,7 +429,7 @@ export default async function plugin(bb: BbPluginApi) {
       } else if (old === undefined) {
         bb.log.warn(NOT_READ(backupPath));
         await finishMove(backupPath, "already saved");
-      } else if ((await bb.storage.kv.get<boolean>(IMPORTED_KEY)) === true) {
+      } else if (previousImported === true) {
         await finishMove(backupPath, "imported");
       } else if (sameConfig(old, raw)) {
         await finishMove(backupPath, "already saved");

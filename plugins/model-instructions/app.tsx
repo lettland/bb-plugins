@@ -285,7 +285,7 @@ function TagList(props: {
                 )}
                 <button
                   type="button"
-                  className={ui.buttonSm.ghost}
+                  className={ui.chipButton}
                   aria-label={`Remove ${value}`}
                   onClick={() => onChange(values.filter((_, at) => at !== index))}
                 >
@@ -706,11 +706,11 @@ function RuleCard(props: {
             multiline
             onChange={(instructions) => onChange({ instructions })}
           />
-          <div id={countId} className={over ? ui.countOver : ui.hint}>
+          <div id={countId} className={over ? ui.errorHint : ui.hint}>
             {over ? `${length} / ${LIMIT} characters — over the limit` : `${length} / ${LIMIT} characters`}
           </div>
           {unknown.map((name) => (
-            <div key={name} className={ui.countOver}>
+            <div key={name} className={ui.errorHint}>
               {`Unknown shared text {{${name}}}`}
             </div>
           ))}

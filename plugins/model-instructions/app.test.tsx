@@ -4,6 +4,7 @@ import { installTestPluginRuntime, loadPluginApp, renderSlot } from "@get-bb/plu
 import type { PluginRpcTestHandlers } from "@get-bb/plugin-sdk/testing/app";
 import type { PluginSettingsSectionRegistration } from "@get-bb/plugin-sdk";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import * as ui from "./src/ui";
 import type { ConfigState, ModelInstructionsRpcContract, RawConfig } from "./rpc-contract";
 
 // The test rpc harness wraps every handler throw in an Error subclass, so a
@@ -132,12 +133,10 @@ const tags = (scope: HTMLElement, label: string) =>
     .queryAllByRole("listitem")
     .map((item) => item.querySelector("span")!.textContent);
 const subgroup = (card: HTMLElement, name: string) => within(card).getByRole("group", { name });
-// The class strings the form must use, from src/ui.ts.
-const hint = "text-xs text-muted-foreground";
-const countOver = "text-xs text-destructive";
 /** The wrapper of a label and its control: a column, so the label sits above the control and does not run into it. */
 const wrapperOf = (scope: HTMLElement, label: string) => field(scope, label).parentElement as HTMLElement;
-const isField = (element: HTMLElement) => element.className === "flex flex-col gap-1.5";
+const isField = (element: HTMLElement) =>
+  element.className === ui.field && element.classList.contains("flex-col");
 
 describe("registration", () => {
   it("registers the Instructions settings section with its description", () => {
@@ -1161,14 +1160,14 @@ describe("the character count", () => {
     expect(within(card).getByText("4097 / 4096 characters — over the limit")).toBeTruthy();
   });
 
-  it("styles the count with countOver when over the limit and with hint otherwise, never both", async () => {
+  it("styles the count with errorHint when over the limit and with hint otherwise, never both", async () => {
     const card = await open();
     type(field(card, "Instructions"), "a".repeat(4096));
     const within4096 = within(card).getByText("4096 / 4096 characters");
-    expect(within4096.className).toBe(hint);
+    expect(within4096.className).toBe(ui.hint);
     type(field(card, "Instructions"), "a".repeat(4097));
     const over = within(card).getByText("4097 / 4096 characters — over the limit");
-    expect(over.className).toBe(countOver);
+    expect(over.className).toBe(ui.errorHint);
     expect(over.classList.contains("text-muted-foreground")).toBe(false);
   });
 
@@ -1570,6 +1569,12 @@ describe("the saved configuration banner", () => {
     );
     expect(within(banner).queryAllByRole("button")).toHaveLength(0);
     expect(banner.querySelector("b")).toBeNull();
+  });
+
+  it("scrolls the stored text sideways, so compact JSON with no spaces does not overflow the banner", async () => {
+    render(stored());
+    const banner = await screen.findByRole("region", { name: NAME });
+    expect(banner.querySelector("pre")!.classList.contains("overflow-auto")).toBe(true);
   });
 
   it("shows the heading, message and the line when the stored value has no text", async () => {
