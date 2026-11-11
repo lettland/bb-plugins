@@ -541,7 +541,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (command === "unpin") return unpinThread(profileDeps.kv, args[1], ctx.threadId);
       if (command === "export")
         return exportCommand(
-          { kv: bb.storage.kv, uiScopes, target: exportFile() },
+          { kv: bb.storage.kv, uiScopes, settingError, target: exportFile() },
           json,
         );
       return {

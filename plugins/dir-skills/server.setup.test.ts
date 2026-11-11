@@ -1,4 +1,4 @@
-import { chmodSync, readdirSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readdirSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -456,12 +456,24 @@ describe("export", () => {
     expect(JSON.parse(readFileSync(exportPath(), "utf8"))).toEqual({ uiScopes: [], pins: [] });
   });
 
-  it("writes no UI scopes while the stored value is ignored", async () => {
+  it("refuses to export while the stored UI scopes are ignored", async () => {
     const { harness } = await load(acmeTree(), { kv: { uiScopes: "not an array" } });
-    expect(((await harness.callRpc("getScopes", null)) as ScopesSnapshot).settingError).not.toBeNull();
-    const result = await harness.runCli(["export"]);
-    expect(result.exitCode).toBe(0);
-    expect(JSON.parse(readFileSync(exportPath(), "utf8"))).toEqual({ uiScopes: [], pins: [] });
+    const settingError = ((await harness.callRpc("getScopes", null)) as ScopesSnapshot).settingError;
+    expect(settingError).not.toBeNull();
+    const plain = await harness.runCli(["export"]);
+    expect(plain).toMatchObject({
+      exitCode: 1,
+      stderr: `export: stored UI scopes are ignored (${settingError}); fix them in the Scopes settings form, then run again\n`,
+    });
+    expect(plain.stdout ?? "").toBe("");
+    const json = await harness.runCli(["export", "--json"]);
+    expect(json).toMatchObject({
+      exitCode: 1,
+      stdout:
+        JSON.stringify({ path: exportPath(), status: "ignored-ui-scopes", settingError }, null, 2) + "\n",
+    });
+    expect(json.stderr ?? "").toBe("");
+    expect(existsSync(exportPath())).toBe(false);
   });
 
   it("does not replace an existing file", async () => {
@@ -488,12 +500,18 @@ describe("export", () => {
     const { harness } = await load(acmeTree());
     mkdirSync(path.join(home, ".bb"), { recursive: true });
     writeFileSync(path.join(home, ".bb", "dir-skills"), "a file, not a directory");
-    for (const flags of [[], ["--json"]]) {
-      expect(await harness.runCli(["export", ...flags])).toMatchObject({
-        exitCode: 1,
-        stderr: `export: could not write ${exportPath()}\n`,
-      });
-    }
+    const plain = await harness.runCli(["export"]);
+    expect(plain).toMatchObject({
+      exitCode: 1,
+      stderr: `export: could not write ${exportPath()}\n`,
+    });
+    expect(plain.stdout ?? "").toBe("");
+    const json = await harness.runCli(["export", "--json"]);
+    expect(json).toMatchObject({
+      exitCode: 1,
+      stdout: JSON.stringify({ path: exportPath(), status: "error" }, null, 2) + "\n",
+    });
+    expect(json.stderr ?? "").toBe("");
   });
 
   it("changes no stored data, setting or scope", async () => {

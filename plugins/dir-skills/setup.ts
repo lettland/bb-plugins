@@ -343,6 +343,8 @@ export interface ExportDeps {
   kv: Pick<BbPluginApi["storage"]["kv"], "get" | "list">;
   /** The UI scopes held by the plugin; empty while a stored value is ignored. */
   uiScopes: UiScope[];
+  /** Why the stored UI scopes are ignored, or null when they are in use. */
+  settingError: string | null;
   target: string;
 }
 
@@ -351,6 +353,21 @@ export async function exportCommand(
   deps: ExportDeps,
   json: boolean,
 ): Promise<{ exitCode: number; stdout?: string; stderr?: string }> {
+  if (deps.settingError !== null)
+    return json
+      ? {
+          exitCode: 1,
+          stdout:
+            JSON.stringify(
+              { path: deps.target, status: "ignored-ui-scopes", settingError: deps.settingError },
+              null,
+              2,
+            ) + "\n",
+        }
+      : {
+          exitCode: 1,
+          stderr: `export: stored UI scopes are ignored (${deps.settingError}); fix them in the Scopes settings form, then run again\n`,
+        };
   const prefix = pinKey("");
   const pins: Array<{ threadId: string; pin: ConfigDirPin }> = [];
   for (const key of [...(await deps.kv.list(prefix))].sort()) {
@@ -366,7 +383,12 @@ export async function exportCommand(
       JSON.stringify(data, null, 2) + "\n",
     );
   } catch {
-    return { exitCode: 1, stderr: `export: could not write ${deps.target}\n` };
+    return json
+      ? {
+          exitCode: 1,
+          stdout: JSON.stringify({ path: deps.target, status: "error" }, null, 2) + "\n",
+        }
+      : { exitCode: 1, stderr: `export: could not write ${deps.target}\n` };
   }
   if (status === "exists")
     return json

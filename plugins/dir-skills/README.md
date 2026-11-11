@@ -296,9 +296,15 @@ bb dir-skills export [--json]
 Writes `~/.bb/dir-skills/export.json` with the data only this plugin can read
 from its storage: `{ "uiScopes": [...], "pins": [{ "threadId", "pin" }] }`, the
 saved UI scopes and the Claude profile pin of each thread. A later
-`model-instructions` release imports it. The command only reads; it never
-overwrites. If the file already exists it exits with 1 and changes nothing, so
-move it away to export again.
+`model-instructions` release imports it. It changes no stored data and never
+replaces an existing file. If the file already exists it exits with 1 and
+changes nothing, so move it away to export again. It refuses to export while
+stored UI scopes are ignored (see `bb dir-skills status`); fix them first.
+
+With `--json` it prints `{ path, status }` on stdout (`wrote` adds the counts,
+`ignored-ui-scopes` adds `settingError`); status is `wrote`, `exists`, `ignored-ui-scopes` or `error`, and every
+status except `wrote` exits 1. You can delete the file after `model-instructions`
+has imported it.
 
 ## Adding a work skill
 

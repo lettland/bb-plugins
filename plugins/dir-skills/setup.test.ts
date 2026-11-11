@@ -1054,6 +1054,20 @@ describe("writeScopesFile", () => {
     expect((thrown as Error).message).toBe("could not write scopes.json");
     expect(readdirSync(dir)).toEqual([]);
   });
+
+  it("fails with the same message when the directory cannot be created", () => {
+    const w = world();
+    const blocker = path.join(w.home, "blocker");
+    writeFileSync(blocker, "a file, not a directory");
+    let thrown: unknown;
+    try {
+      writeScopesFile(path.join(blocker, "scopes.json"), candidate, w.home);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(SetupError);
+    expect((thrown as Error).message).toBe("could not write scopes.json");
+  });
 });
 
 describe("exportCommand", () => {
@@ -1065,7 +1079,7 @@ describe("exportCommand", () => {
       get: async <T,>(key: string) =>
         (key.endsWith("thr_gone") ? undefined : { dir: null, scope: null }) as T | undefined,
     };
-    const result = await exportCommand({ kv, uiScopes: [], target }, false);
+    const result = await exportCommand({ kv, uiScopes: [], settingError: null, target }, false);
     expect(result).toEqual({ exitCode: 0, stdout: `wrote ${target}: 0 UI scope(s), 2 pin(s)\n` });
     expect(JSON.parse(readFileSync(target, "utf8")).pins.map((p: { threadId: string }) => p.threadId)).toEqual([
       "thr_a",
