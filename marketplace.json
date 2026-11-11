@@ -122,7 +122,7 @@
     {
       "id": "model-instructions",
       "displayName": "Model instructions",
-      "description": "Custom instructions per provider, model, and project, optionally only for top-level or only for child threads — e.g. Opus plans and supervises, Sonnet worker threads implement.",
+      "description": "Custom instructions and skills per directory, project, provider and model, optionally only for top-level or only for child threads, plus a Claude Code profile per directory. A save that would push any known thread past bb's 4096-character limit is rejected.",
       "icon": "SlidersHorizontal",
       "author": {
         "name": "Lettland",
