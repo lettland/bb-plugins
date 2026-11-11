@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -12,7 +12,8 @@ import { writeProjectConfig } from "./config.js";
 import { createReviewContext } from "./context.js";
 import { registerPlanTools } from "./present-plan.js";
 import { FORM_OPEN_FRESH_MS, nextFormOpenedAt, planFormMarkerFresh } from "./present-plan-form.js";
-import { PLAN_APPROVAL_TIMEOUT_MS } from "./plan-approval-form.js";
+import { PLAN_APPROVAL_TIMEOUT_MS, PLAN_CHANGED_TITLE } from "./plan-approval-form.js";
+import { PLAN_APPROVAL_PAYLOAD_BUDGET_BYTES, planSha256Of } from "./plan-approval-payload.js";
 import {
   PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
   PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM,
@@ -26,7 +27,9 @@ import {
   PRESENT_PLAN_FORM_APPROVED_MESSAGE,
   PRESENT_PLAN_FORM_CHECK_FAILED_MESSAGE,
   PRESENT_PLAN_FORM_OPEN_MESSAGE,
+  PRESENT_PLAN_FORM_PLAN_CHANGED_MESSAGE,
   PRESENT_PLAN_FORM_UNREADABLE_MESSAGE,
+  PRESENT_PLAN_INVALID_PATH_MESSAGE,
 } from "./prompt.js";
 import { PRESENT_PLAN_CHAT_KEYS } from "./chat-approval-state.js";
 import { LATCH_KEYS, PLAN_GATE_KEYS, PRESENT_PLAN_KEYS } from "./state.js";
@@ -281,7 +284,18 @@ const LIVE_FORM: Json = { id: "pint-live", status: "pending", origin: planFormOr
  * spies on the host's, passing through to the fake unless a test stubs it.
  */
 async function withFormHost(
-  options: { form: boolean; reviewMode?: "self" | "devkit" },
+  options: {
+    form: boolean;
+    reviewMode?: "self" | "devkit";
+    /** The plan the form is armed for; default `PLAN`, a path that exists nowhere (a plan on a remote host). */
+    planPath?: string;
+    /** The thread's checkout path as the environment reports it; default none. */
+    workspace?: string | null;
+    /** `bb.server.experimental_dataDir`; default the fake host's. */
+    dataDir?: string;
+    /** Makes the thread lookup fail, as it does when the thread cannot be read. */
+    threadLookupFails?: boolean;
+  },
   body: (f: {
     host: ReturnType<typeof createFakePluginHost>;
     review: Awaited<ReturnType<typeof createReviewContext>>;
@@ -294,12 +308,13 @@ async function withFormHost(
     infos: () => string[];
     warns: () => string[];
     call: (ctx?: { signal?: AbortSignal; threadId?: string }) => Promise<unknown>;
-    settle: (value: unknown, scope?: Json, answer?: Json) => Promise<unknown>;
+    settle: (value: unknown, scope?: Json, answer?: Json, between?: () => Promise<void>) => Promise<unknown>;
   }) => Promise<void>,
 ) {
+  const planPath = options.planPath ?? PLAN;
   const metadata: Json = {
     presentPlanArmedAt: Date.now(),
-    presentPlanArmedPath: PLAN,
+    presentPlanArmedPath: planPath,
     presentPlanArmedSeq: 77,
     presentPlanRedone: true,
   };
@@ -315,7 +330,14 @@ async function withFormHost(
     listError: undefined as unknown,
   };
   const sdk = {
+    environments: { get: async () => ({ path: options.workspace ?? null }) },
     threads: {
+      get: async () => {
+        if (options.threadLookupFails === true) {
+          throw new Error("thread lookup down");
+        }
+        return { environmentId: options.workspace === undefined ? null : "env-1" };
+      },
       getPluginMetadata: async () => ({ ...metadata }),
       updatePluginMetadata: async (args: { set?: Json; remove?: string[] }) => {
         if (faults.updateError !== undefined) {
@@ -363,7 +385,12 @@ async function withFormHost(
     // The size gate asks typesafe for a verdict; none here, so it falls back to the window cursor.
     plugins: { callRpc: async () => ({ verdict: null, messageSeq: null }) },
   } as unknown as CreateFakePluginHostOptions["sdk"];
-  const host = createFakePluginHost({ pluginId: "auto-review", sdk, agentSkillIds: ["auto-review"] });
+  const host = createFakePluginHost({
+    pluginId: "auto-review",
+    sdk,
+    agentSkillIds: ["auto-review"],
+    ...(options.dataDir === undefined ? {} : { dataDir: options.dataDir }),
+  });
   try {
     const review = await createReviewContext(host.bb);
     review.globals.reviewMode = options.reviewMode ?? "self";
@@ -373,13 +400,19 @@ async function withFormHost(
     const logs = (level: string) => () =>
       host.harness.logEntries.filter((entry) => entry.level === level).map((entry) => entry.message);
     const call = (ctx: { signal?: AbortSignal; threadId?: string } = {}) =>
-      host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, { ...CTX, ...ctx });
+      host.harness.callAgentTool("PresentPlan", { planFilePath: planPath }, { ...CTX, ...ctx });
     // Answers the open form the way the host would: the row's description is
     // what the plugin's own `describeSubmission` returned for the value.
     // `answer` is what the host records beside the description: `answeredVia` as the app answers it by default.
-    const settle = async (value: unknown, scope: Json = { kind: "turn", turnId: "turn-1" }, answer: Json = { answeredVia: "app" }) => {
+    const settle = async (
+      value: unknown,
+      scope: Json = { kind: "turn", turnId: "turn-1" },
+      answer: Json = { answeredVia: "app" },
+      between: () => Promise<void> = async () => undefined,
+    ) => {
       const pending = call();
       await vi.waitFor(() => expect(host.harness.pendingInteractions).toHaveLength(1));
+      await between();
       const [request] = requestInput.mock.calls[0] as unknown as [{ describeSubmission(value: unknown): unknown }];
       rows.push({
         seq: 80,
@@ -443,7 +476,12 @@ describe("PresentPlan's approval form", () => {
         timeoutMs: 3_600_000,
       });
       expect(request.timeoutMs).toBe(PLAN_APPROVAL_TIMEOUT_MS);
-      expect(holdOptions).toEqual({ signal: controller.signal, experimental_holdToolCall: true, experimental_requireAppAnswer: true });
+      expect(holdOptions).toEqual({
+        signal: controller.signal,
+        experimental_holdToolCall: true,
+        experimental_requireAppAnswer: true,
+        experimental_detachOnAbort: true,
+      });
       controller.abort();
       await pending;
     });
@@ -476,7 +514,7 @@ describe("PresentPlan's approval form", () => {
       const oversized = { approved: false, feedback: "x".repeat(2001) };
       expect(await settle(oversized)).toBe(PRESENT_PLAN_FORM_UNREADABLE_MESSAGE);
       const [request] = requestInput.mock.calls[0] as [{ describeSubmission(value: unknown): unknown }];
-      expect(request.describeSubmission(oversized)).toEqual({ title: "Answer not readable", payload: { approved: false } });
+      expect(await request.describeSubmission(oversized)).toEqual({ title: "Answer not readable", payload: { approved: false } });
       expect(infos().some((line) => line.includes("could not be read"))).toBe(true);
     });
   });
@@ -497,7 +535,7 @@ describe("PresentPlan's approval form", () => {
     await withFormHost({ form: true }, async ({ settle, requestInput }) => {
       expect(await settle({ approved: false })).toBe(presentPlanChangesRequestedMessage());
       const [request] = requestInput.mock.calls[0] as [{ describeSubmission(value: unknown): unknown }];
-      expect(request.describeSubmission({ approved: false })).toEqual({ title: "Changes requested", payload: { approved: false } });
+      expect(await request.describeSubmission({ approved: false })).toEqual({ title: "Changes requested", payload: { approved: false } });
     });
   });
 
@@ -505,9 +543,9 @@ describe("PresentPlan's approval form", () => {
     await withFormHost({ form: true }, async ({ settle, requestInput, rows }) => {
       expect(await settle({ approved: true, extra: 1 })).toBe(PRESENT_PLAN_FORM_UNREADABLE_MESSAGE);
       const [request] = requestInput.mock.calls[0] as [{ describeSubmission(value: unknown): unknown }];
-      expect(request.describeSubmission({ approved: true, extra: 1 })).toEqual({ title: "Answer not readable", payload: { approved: false } });
-      expect(request.describeSubmission({ approved: true })).toEqual({ title: "Approved", payload: { approved: true } });
-      const withFeedback = request.describeSubmission({ approved: false, feedback: "secret plan notes" });
+      expect(await request.describeSubmission({ approved: true, extra: 1 })).toEqual({ title: "Answer not readable", payload: { approved: false } });
+      expect(await request.describeSubmission({ approved: true })).toEqual({ title: "Approved", payload: { approved: true } });
+      const withFeedback = await request.describeSubmission({ approved: false, feedback: "secret plan notes" });
       expect(withFeedback).toEqual({ title: "Changes requested", payload: { approved: false } });
       expect(JSON.stringify(withFeedback)).not.toContain("secret");
       expect(JSON.stringify(rows)).not.toContain("secret");
@@ -558,7 +596,7 @@ describe("PresentPlan's approval form", () => {
   ] as const))("tells the agent the form is unavailable whatever was clicked (%s review, %s: %s) when the resolution is thread-scoped, a detached call", async (reviewMode, reviewed, _name, value) => {
     await withFormHost({ form: true, reviewMode }, async ({ settle, infos }) => {
       expect(await settle(value, { kind: "thread" })).toBe(presentPlanFormUnavailableMessage(reviewed));
-      expect(infos().filter((line) => line.includes("not held by the host (its resolution is not turn-scoped)"))).toHaveLength(1);
+      expect(infos().filter((line) => line.includes("not held by the host (its resolution is not turn-scoped and carries no heldTurnId)"))).toHaveLength(1);
       expect(infos().some((line) => line.includes("did not come from the bb app"))).toBe(false);
     });
   });
@@ -1265,5 +1303,279 @@ describe("agentConfiguration's plan instructions", () => {
       expect(await call()).toBe(expected);
       expect(requestInput).toHaveBeenCalledTimes(form ? 1 : 0);
     });
+  });
+});
+
+/**
+ * The form shows the plan as the review left it, and binds an approval to that
+ * text. Real files under a temp workspace and data dir: the plugin reads them
+ * with node's fs, so the confinement and the re-read are exercised for real.
+ */
+describe("the approval form shows the plan and binds the approval to it", () => {
+  interface Fixture {
+    base: string;
+    workspace: string;
+    dataDir: string;
+    plan: string;
+  }
+  async function withFiles(body: (f: Fixture) => Promise<void>): Promise<void> {
+    const base = await realpath(await mkdtemp(join(tmpdir(), "present-plan-form-")));
+    const workspace = join(base, "ws");
+    const dataDir = join(base, "data");
+    await mkdir(join(workspace, "docs"), { recursive: true });
+    await mkdir(join(dataDir, "plans", THREAD_ID), { recursive: true });
+    const plan = join(workspace, "docs", "p.md");
+    await writeFile(plan, "# Plan\n\n1. first step\n");
+    try {
+      await body({ base, workspace, dataDir, plan });
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  }
+  const payloadOf = (requestInput: { mock: { calls: unknown[][] } }, index = 0) =>
+    (requestInput.mock.calls[index] as [{ payload: Json }])[0].payload;
+  const size = (host: ReturnType<typeof createFakePluginHost>) => reviewSize(host.bb, THREAD_ID, ["a.ts"], null, 77);
+
+  it("shows the plan after the review's fixes, not the plan staged at arm time, and credits the approval", async () => {
+    await withFiles(async ({ workspace, dataDir, plan }) => {
+      await withFormHost({ form: true, planPath: plan, workspace, dataDir }, async ({ host, call, settle, metadata, requestInput, rows }) => {
+        for (const key of Object.keys(metadata)) {
+          delete metadata[key];
+        }
+        expect(typeof (await call())).toBe("string");
+        expect(requestInput).not.toHaveBeenCalled();
+        const afterReview = "# Plan\n\n1. first step, as the review fixed it\n2. second step\n";
+        await writeFile(plan, afterReview);
+        expect(await settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+        expect(payloadOf(requestInput)).toEqual({
+          planFilePath: plan,
+          reviewed: true,
+          planText: afterReview,
+          planSha256: planSha256Of(Buffer.from(afterReview)),
+          truncated: false,
+        });
+        const description = (rows[0] as { data: { interaction: { resolution: { description: Json } } } }).data.interaction.resolution.description;
+        expect(description).toEqual({ title: "Approved", payload: { approved: true } });
+        expect(await size(host)).toEqual({ trivial: false, blocker: false });
+      });
+    });
+  });
+
+  it("approves a file that was rewritten with the same bytes after the form opened", async () => {
+    await withFiles(async ({ workspace, dataDir, plan }) => {
+      await withFormHost({ form: true, planPath: plan, workspace, dataDir }, async ({ settle }) => {
+        expect(await settle({ approved: true }, undefined, undefined, () => writeFile(plan, "# Plan\n\n1. first step\n"))).toBe(
+          PRESENT_PLAN_FORM_APPROVED_MESSAGE,
+        );
+      });
+    });
+  });
+
+  it.each([
+    ["edited", (plan: string) => writeFile(plan, "# Plan\n\n1. a different step\n")],
+    ["deleted", (plan: string) => rm(plan)],
+    ["replaced by a directory, so it cannot be read", async (plan: string) => { await rm(plan); await mkdir(plan); }],
+  ])("does not count an approval when the plan file was %s after the form opened", async (_name, change) => {
+    await withFiles(async ({ workspace, dataDir, plan }) => {
+      await withFormHost({ form: true, planPath: plan, workspace, dataDir }, async (f) => {
+        const result = await f.settle({ approved: true }, undefined, undefined, () => change(plan));
+        expect(result).toBe(PRESENT_PLAN_FORM_PLAN_CHANGED_MESSAGE);
+        expect(result).toContain("Your approval did not count because the plan file changed after the form opened. Call PresentPlan again with the same path. This runs the review again, so a new form will follow.");
+        expect(f.infos().some((line) => line.includes("changed after the form opened, so the approval did not count"))).toBe(true);
+        const { description } = (f.rows[0] as { data: { interaction: { resolution: { description: Json } } } }).data.interaction.resolution;
+        expect(description).toEqual({ title: PLAN_CHANGED_TITLE, payload: { approved: false, planChanged: true } });
+        expect(description.title).toBe("Not counted: the plan changed after the form opened");
+        expect(await size(f.host)).toEqual({ trivial: false, blocker: true });
+        expect(f.metadata.presentPlanAutoApprovedSeq).toBeUndefined();
+      });
+    });
+  });
+
+  it("gives the agent the change request, not the plan-changed text, when the user asked for changes on a plan that changed", async () => {
+    await withFiles(async ({ workspace, dataDir, plan }) => {
+      await withFormHost({ form: true, planPath: plan, workspace, dataDir }, async ({ settle }) => {
+        const result = await settle({ approved: false, feedback: "split it" }, undefined, undefined, () => writeFile(plan, "changed"));
+        expect(result).toBe(presentPlanChangesRequestedMessage("split it"));
+      });
+    });
+  });
+
+  it("counts a planChanged resolution before the approved check: the agent is not told the form was unavailable", async () => {
+    await withFormHost({ form: true }, async ({ call, requestInput, rows, infos }) => {
+      rows.push({
+        seq: 80,
+        type: "system/interaction/lifecycle",
+        scope: { kind: "turn", turnId: "turn-1" },
+        data: {
+          interaction: {
+            id: "pint-form",
+            status: "resolved",
+            statusReason: null,
+            origin: { kind: "plugin", pluginId: "auto-review", rendererId: "plan-approval" },
+            payload: { kind: "plugin", title: "Plan approval", data: {} },
+            resolution: { kind: "plugin_submitted", description: { title: PLAN_CHANGED_TITLE, payload: { approved: false, planChanged: true } }, answeredVia: "app" },
+          },
+        },
+      });
+      requestInput.mockResolvedValueOnce({ outcome: "submitted", value: { approved: true } });
+      expect(await call()).toBe(PRESENT_PLAN_FORM_PLAN_CHANGED_MESSAGE);
+      expect(infos().some((line) => line.includes("does not record approved: true"))).toBe(false);
+    });
+  });
+
+  it("opens with the path and no hash for a plan this host cannot read (a remote host), and credits the approval as before", async () => {
+    await withFiles(async ({ workspace, dataDir }) => {
+      await withFormHost({ form: true, workspace, dataDir }, async ({ host, settle, requestInput, rows }) => {
+        expect(await settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+        expect(payloadOf(requestInput)).toEqual({ planFilePath: PLAN, reviewed: true, planText: null, planSha256: null, truncated: false });
+        const { description } = (rows[0] as { data: { interaction: { resolution: { description: Json } } } }).data.interaction.resolution;
+        expect(description).toEqual({ title: "Approved", payload: { approved: true } });
+        expect(await size(host)).toEqual({ trivial: false, blocker: false });
+      });
+    });
+  });
+
+  it("is not an invalid-path result when the plan file is not on this host, and the form still opens", async () => {
+    await withFormHost({ form: true }, async ({ call, requestInput }) => {
+      requestInput.mockResolvedValueOnce({ outcome: "cancelled", reason: "user" });
+      expect(await call()).toBe(presentPlanApprovalCancelledMessage("user"));
+      expect(payloadOf(requestInput)).toMatchObject({ planFilePath: PLAN, planText: null });
+    });
+  });
+
+  it("reads a plan from <bb data dir>/plans/<threadId>/", async () => {
+    await withFiles(async ({ workspace, dataDir }) => {
+      const stored = join(dataDir, "plans", THREAD_ID, "plan.md");
+      await writeFile(stored, "kept by bb");
+      await withFormHost({ form: true, planPath: stored, workspace, dataDir }, async ({ settle, requestInput }) => {
+        expect(await settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+        expect(payloadOf(requestInput)).toMatchObject({ planText: "kept by bb" });
+      });
+    });
+  });
+
+  it("cuts a plan that does not fit the payload budget and still binds the approval to the whole file", async () => {
+    await withFiles(async ({ workspace, dataDir, plan }) => {
+      const big = `${"计划步骤 🚀 \"quoted\"\n".repeat(20000)}`;
+      await writeFile(plan, big);
+      await withFormHost({ form: true, planPath: plan, workspace, dataDir }, async ({ settle, requestInput }) => {
+        expect(await settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+        const payload = payloadOf(requestInput) as { planText: string; planSha256: string; truncated: boolean };
+        expect(payload.truncated).toBe(true);
+        expect(Buffer.byteLength(JSON.stringify(payload), "utf8")).toBeLessThanOrEqual(PLAN_APPROVAL_PAYLOAD_BUDGET_BYTES);
+        expect(big.startsWith(payload.planText)).toBe(true);
+        expect(payload.planSha256).toBe(planSha256Of(Buffer.from(big)));
+      });
+    });
+  });
+
+  describe("path confinement", () => {
+    const refused = async (f: Fixture, planPath: string, workspace: string | null | undefined = f.workspace) => {
+      await withFormHost({ form: true, planPath, workspace, dataDir: f.dataDir }, async ({ call, requestInput, metadata, host }) => {
+        const result = (await call()) as { content: { text: string }[]; isError: boolean };
+        expect(result).toEqual({ content: [{ type: "text", text: PRESENT_PLAN_INVALID_PATH_MESSAGE }], isError: true });
+        expect(requestInput).not.toHaveBeenCalled();
+        expect(host.harness.pendingInteractions).toHaveLength(0);
+        // Refused before anything is cleared: the plan stays armed and no form marker is left.
+        expect(metadata.presentPlanArmedPath).toBe(planPath);
+        expect(metadata.presentPlanFormOpenAt).toBeUndefined();
+      });
+    };
+
+    it("refuses an absolute path outside the workspace and the plan directory", async () => {
+      await withFiles(async (f) => {
+        await mkdir(join(f.base, "other"));
+        await writeFile(join(f.base, "other", "secret.md"), "secret");
+        await refused(f, join(f.base, "other", "secret.md"));
+      });
+    });
+
+    it("refuses a path that climbs out of the workspace with ..", async () => {
+      await withFiles(async (f) => {
+        await mkdir(join(f.base, "other"));
+        await writeFile(join(f.base, "other", "secret.md"), "secret");
+        await refused(f, `${f.workspace}/docs/../../other/secret.md`);
+      });
+    });
+
+    it("refuses a symlink in the workspace that points outside it", async () => {
+      await withFiles(async (f) => {
+        await mkdir(join(f.base, "other"));
+        await writeFile(join(f.base, "other", "secret.md"), "secret");
+        await symlink(join(f.base, "other", "secret.md"), join(f.workspace, "link.md"));
+        await refused(f, join(f.workspace, "link.md"));
+      });
+    });
+
+    it("refuses a sibling directory whose name starts with the workspace's", async () => {
+      await withFiles(async (f) => {
+        await mkdir(`${f.workspace}-evil`);
+        await writeFile(join(`${f.workspace}-evil`, "plan.md"), "evil");
+        await refused(f, join(`${f.workspace}-evil`, "plan.md"));
+      });
+    });
+
+    it("refuses a workspace file when the thread has no environment: only the plan directory is allowed then", async () => {
+      await withFiles(async (f) => {
+        await refused(f, f.plan, null);
+      });
+    });
+
+    it("accepts a workspace reached through a symlink, comparing resolved paths on both sides (the macOS /private/var case)", async () => {
+      await withFiles(async ({ base, workspace, dataDir, plan }) => {
+        const alias = join(base, "alias");
+        await symlink(workspace, alias);
+        await withFormHost({ form: true, planPath: plan, workspace: alias, dataDir }, async ({ settle, requestInput }) => {
+          expect(await settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+          expect(payloadOf(requestInput)).toMatchObject({ planText: "# Plan\n\n1. first step\n" });
+        });
+      });
+    });
+
+    it("does not confine a plan that opens no form: setting off, and an auto-approval read nothing", async () => {
+      await withFiles(async (f) => {
+        await mkdir(join(f.base, "other"));
+        await writeFile(join(f.base, "other", "secret.md"), "secret");
+        await withFormHost({ form: false, planPath: join(f.base, "other", "secret.md"), workspace: f.workspace, dataDir: f.dataDir }, async ({ call }) => {
+          expect(await call()).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+        });
+      });
+    });
+
+    it("fails closed when the thread cannot be read: a workspace file is then outside the allowed roots", async () => {
+      await withFiles(async (f) => {
+        await withFormHost({ form: true, planPath: f.plan, workspace: f.workspace, dataDir: f.dataDir, threadLookupFails: true }, async ({ call, requestInput }) => {
+          expect(await call()).toMatchObject({ isError: true });
+          expect(requestInput).not.toHaveBeenCalled();
+        });
+      });
+    });
+  });
+});
+
+describe("a plan approval form that detached from its turn", () => {
+  const detachedAnswer = { answeredVia: "app", heldTurnId: "turn-1" };
+  const size = (host: ReturnType<typeof createFakePluginHost>) => reviewSize(host.bb, THREAD_ID, ["a.ts"], null, 77);
+
+  it.each(MODES)("is approved when the answer is thread-scoped but carries core's heldTurnId and came from the app (%s review)", async (reviewMode) => {
+    await withFormHost({ form: true, reviewMode }, async (f) => {
+      expect(await f.settle({ approved: true }, { kind: "thread" }, detachedAnswer)).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+      expect(await size(f.host)).toEqual({ trivial: false, blocker: false });
+    });
+  });
+
+  it.each(MODES)("is still not approved without the app origin, whatever heldTurnId says (%s review)", async (reviewMode, reviewed) => {
+    await withFormHost({ form: true, reviewMode }, async (f) => {
+      expect(await f.settle({ approved: true }, { kind: "thread" }, { answeredVia: "api", heldTurnId: "turn-1" })).toBe(
+        presentPlanFormUnavailableMessage(reviewed),
+      );
+      expect(await size(f.host)).toEqual({ trivial: false, blocker: true });
+    });
+  });
+
+  it("tells the agent about a later-delivered result: the form instructions name it as a PresentPlan result", () => {
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM).toContain(
+      "bb delivers it in a message saying your earlier PresentPlan tool call has finished, with the result below it. Such a message counts as the PresentPlan result.",
+    );
   });
 });

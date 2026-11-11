@@ -418,6 +418,97 @@ describe("a held plan approval form", () => {
   });
 });
 
+describe("a plan approval form detached from its turn", () => {
+  const held = { kind: "turn", turnId: "turn-1" } as const;
+  const detached = { kind: "thread" } as const;
+  const answeredDetached = (seq: number, over: Record<string, unknown> = {}) =>
+    form(seq, detached, {
+      resolution: {
+        kind: "plugin_submitted",
+        description: { title: "Approved", payload: { approved: true } },
+        answeredVia: "app",
+        heldTurnId: "turn-1",
+        ...over,
+      },
+    });
+  const pending = (seq: number, scope: Row["scope"]) => form(seq, scope, { status: "pending", resolution: null });
+  const credited = (seq: number, requestedSeq: number | undefined) => [{ id: "pint-form", seq, requestedSeq }];
+
+  it("counts as a plan approval in the walk when it carries heldTurnId and came from the app", async () => {
+    expect(await planLatestDecisionApproves(logOf([answeredDetached(12)]).bb, "thr")).toBe(true);
+  });
+
+  it.each([
+    ["it has no heldTurnId", form(12, detached)],
+    ["it did not come from the app", answeredDetached(12, { answeredVia: "api" })],
+    ["it was approved without an answeredVia", answeredDetached(12, { answeredVia: undefined })],
+    ["it is recorded as not approved", answeredDetached(12, { description: { payload: { approved: false } } })],
+    ["the plan changed", answeredDetached(12, { description: { payload: { approved: false, planChanged: true } } })],
+  ])("does not count when %s", async (_name, row) => {
+    expect(await planLatestDecisionApproves(logOf([row]).bb, "thr")).toBe(false);
+  });
+
+  it("counts an approval whose plan changed as a denial that cancels an earlier approval", async () => {
+    const changed = answeredDetached(20, { description: { payload: { approved: false, planChanged: true } } });
+    expect(await planLatestDecisionApproves(logOf([form(5, held), changed]).bb, "thr")).toBe(false);
+  });
+
+  it("is credited to the first turn to end after the answer, with the original turn-scoped pending as its request", async () => {
+    const rows = [pending(3, held), completed(5, "turn-1"), pending(6, detached), answeredDetached(7), completed(10, "turn-2")];
+    expect((await endedTurn(logOf(rows).bb, "thr", 0, 5)).approvedPlans).toEqual(credited(7, 3));
+  });
+
+  it("credits it once when two turns end after one detached approval: only the first counts", async () => {
+    const rows = [pending(3, held), completed(5, "turn-1"), answeredDetached(7), completed(10, "turn-2"), completed(14, "turn-3")];
+    const { bb } = logOf(rows);
+    expect((await endedTurn(bb, "thr", 0, 5)).approvedPlans).toEqual(credited(7, 3));
+    expect((await endedTurn(bb, "thr", 0, 10)).approvedPlans).toEqual([]);
+  });
+
+  it("does not credit an approval that lands after the ended turn's own end", async () => {
+    const rows = [completed(5, "turn-1"), completed(10, "turn-2"), answeredDetached(12), completed(14, "turn-3")];
+    const { bb } = logOf(rows);
+    expect((await endedTurn(bb, "thr", 0, 5)).approvedPlans).toEqual([]);
+    expect((await endedTurn(bb, "thr", 0, 10)).approvedPlans).toEqual(credited(12, undefined));
+  });
+
+  it("does not credit an approval at or before the last turn handled, even when the cursor is older", async () => {
+    const { bb } = logOf([answeredDetached(5), completed(10, "turn-2")]);
+    expect((await endedTurn(bb, "thr", 0, 5)).approvedPlans).toEqual([]);
+    expect((await endedTurn(bb, "thr", 0, 4)).approvedPlans).toEqual(credited(5, undefined));
+  });
+
+  it("uses the cursor as the window start when no turn was handled yet", async () => {
+    const { bb } = logOf([answeredDetached(5), completed(10, "turn-2")]);
+    expect((await endedTurn(bb, "thr", 5)).approvedPlans).toEqual([]);
+    expect((await endedTurn(bb, "thr", 4)).approvedPlans).toEqual(credited(5, undefined));
+  });
+
+  it("takes the request seq from the original turn-scoped pending, never the detach's second pending", async () => {
+    // The original pending (seq 3) lies before the cursor: only the detach's thread-scoped pending (seq 9) is in the read.
+    const rows = [pending(3, held), completed(5, "turn-1"), pending(9, detached), answeredDetached(11), completed(14, "turn-2")];
+    expect((await endedTurn(logOf(rows).bb, "thr", 4, 5)).approvedPlans).toEqual(credited(11, undefined));
+  });
+
+  it("keeps the earliest turn-scoped pending when the form's pending is announced again in its own turn", async () => {
+    const rows = [pending(3, held), pending(4, held), form(5, held, { resolution: { kind: "plugin_submitted", description: { payload: { approved: true } }, answeredVia: "app", heldTurnId: "turn-1" } }), completed(8, "turn-1")];
+    expect((await endedTurn(logOf(rows).bb, "thr", 0)).approvedPlans).toEqual(credited(5, 3));
+  });
+
+  it("lists a turn-scoped approval that carries heldTurnId once, in its own turn only", async () => {
+    const own = form(5, held, { resolution: { kind: "plugin_submitted", description: { payload: { approved: true } }, answeredVia: "app", heldTurnId: "turn-1" } });
+    const { bb } = logOf([own, completed(8, "turn-1"), completed(12, "turn-2")]);
+    expect((await endedTurn(bb, "thr", 0)).approvedPlans).toEqual(credited(5, undefined));
+    expect((await endedTurn(bb, "thr", 0, 8)).approvedPlans).toEqual([]);
+  });
+
+  it("still takes the request seq of a native plan approval from its pending event, thread-scoped or not", async () => {
+    const nativePending = { ...lifecycle(3, "turn-1", "pending", null), scope: { kind: "thread" } } as Row;
+    const { bb } = logOf([nativePending, lifecycle(4, "turn-1", "resolved"), completed(5, "turn-1")]);
+    expect((await endedTurn(bb, "thr", 0)).approvedPlans).toEqual([{ id: "pint-1", seq: 4, requestedSeq: 3 }]);
+  });
+});
+
 describe("planFormResolutionSince", () => {
   const held = { kind: "turn", turnId: "turn-1" } as const;
 
@@ -428,8 +519,15 @@ describe("planFormResolutionSince", () => {
 
   it("reads whether the latest resolution was held, described as approved and answered in the app", async () => {
     const changes = form(9, { kind: "thread" }, { resolution: { kind: "plugin_submitted", description: { payload: { approved: false } } } });
-    expect(await planFormResolutionSince(logOf([form(5, held)]).bb, "thr", 0)).toEqual({ held: true, approved: true, app: true });
-    expect(await planFormResolutionSince(logOf([form(5, held), changes]).bb, "thr", 0)).toEqual({ held: false, approved: false, app: false });
+    const credited = { held: true, detached: false, approved: true, planChanged: false, app: true };
+    expect(await planFormResolutionSince(logOf([form(5, held)]).bb, "thr", 0)).toEqual(credited);
+    expect(await planFormResolutionSince(logOf([form(5, held), changes]).bb, "thr", 0)).toEqual({
+      held: false,
+      detached: false,
+      approved: false,
+      planChanged: false,
+      app: false,
+    });
   });
 
   it.each([
@@ -440,7 +538,46 @@ describe("planFormResolutionSince", () => {
     const row = form(5, held, {
       resolution: { kind: "plugin_submitted", description: { payload: { approved: true } }, ...(answeredVia === undefined ? {} : { answeredVia }) },
     });
-    expect(await planFormResolutionSince(logOf([row]).bb, "thr", 0)).toEqual({ held: true, approved: true, app: false });
+    expect(await planFormResolutionSince(logOf([row]).bb, "thr", 0)).toEqual({
+      held: true,
+      detached: false,
+      approved: true,
+      planChanged: false,
+      app: false,
+    });
+  });
+
+  it("reads a thread-scoped resolution that carries core's heldTurnId as held and detached", async () => {
+    const row = form(5, { kind: "thread" }, { resolution: { kind: "plugin_submitted", description: { payload: { approved: true } }, answeredVia: "app", heldTurnId: "turn-1" } });
+    expect(await planFormResolutionSince(logOf([row]).bb, "thr", 0)).toEqual({
+      held: true,
+      detached: true,
+      approved: true,
+      planChanged: false,
+      app: true,
+    });
+  });
+
+  it.each([["an empty string", ""], ["a number", 7], ["null", null]])("does not read heldTurnId as %s as proof the form was held", async (_name, heldTurnId) => {
+    const row = form(5, { kind: "thread" }, { resolution: { kind: "plugin_submitted", description: { payload: { approved: true } }, answeredVia: "app", heldTurnId } });
+    expect(await planFormResolutionSince(logOf([row]).bb, "thr", 0)).toMatchObject({ held: false, detached: false });
+  });
+
+  it("reads an approval recorded as planChanged as not approved, and held when the host held it", async () => {
+    const row = form(5, held, {
+      resolution: {
+        kind: "plugin_submitted",
+        description: { title: "Not counted: the plan changed after the form opened", payload: { approved: false, planChanged: true } },
+        answeredVia: "app",
+      },
+    });
+    expect(await planFormResolutionSince(logOf([row]).bb, "thr", 0)).toEqual({
+      held: true,
+      detached: false,
+      approved: false,
+      planChanged: true,
+      app: true,
+    });
   });
 
   it("ignores native approvals and forms that are still open", async () => {

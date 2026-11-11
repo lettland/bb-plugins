@@ -10,6 +10,8 @@ import { z } from "zod";
 import { PRESENT_PLAN_CHAT_KEYS } from "./chat-approval-state.js";
 import { clearPlanBaseline, planScope, settlePlanBaseline, stagePlanPending } from "./baseline-store.js";
 import { effectiveConfig, readProjectConfig } from "./config.js";
+import { buildPlanApprovalPayload, planSha256Of } from "./plan-approval-payload.js";
+import { readPlanFileForForm } from "./plan-file.js";
 import { recordFire, type EffectiveConfig, type ReviewContext } from "./context.js";
 import { tryCaptureSinceSeq } from "./detect.js";
 import { isNativePlanGateProvider } from "./gate.js";
@@ -101,6 +103,9 @@ function captureArmedSeq(review: ReviewContext, threadId: string): Promise<numbe
  * run in one. With the approval form on (`formMode`), the two outcomes that
  * wait for the user return a `NeedsForm` instead of their text, and record the
  * form as open; with a form already open the release is refused, still armed.
+ * The form's payload carries the plan as it is at this release (read once, see
+ * `readPlanFileForForm`); a plan path outside the thread's workspace and its
+ * plan directory is refused with the invalid-path result, still armed.
  */
 async function releasePlan(
   review: ReviewContext,
@@ -172,6 +177,13 @@ async function releasePlan(
     }
     bb.log.info(`auto-review: the plan approval form's open marker in ${ctx.threadId} has no pending form behind it, so it is stale and replaced`);
   }
+  // The form shows the plan as it stands now, after the review's fixes: read once, from the resolved
+  // path, never from the baseline staged at arm time. A path outside the allowed roots is refused
+  // here, before anything is cleared, so the plan stays armed.
+  const planRead = opensForm ? await readPlanFileForForm(bb, ctx.threadId, planFilePath) : null;
+  if (planRead?.kind === "outside") {
+    return { content: [{ type: "text", text: PRESENT_PLAN_INVALID_PATH_MESSAGE }], isError: true };
+  }
   // One patch: a failed write cannot leave the plan disarmed without its marker.
   await writeState(bb, ctx.threadId, opensForm ? { presentPlanFormOpenAt: openedAt } : {}, [...PRESENT_PLAN_KEYS]);
   await settlePlanBaseline(bb, ctx.threadId, planFilePath, reviewWorked);
@@ -210,7 +222,15 @@ async function releasePlan(
     }
     return text;
   }
-  return { form: { planFilePath, reviewed: check !== "missing" }, openedAt };
+  return {
+    form: buildPlanApprovalPayload({
+      planFilePath,
+      reviewed: check !== "missing",
+      bytes: planRead?.kind === "read" ? planRead.bytes : null,
+    }),
+    bound: planRead?.kind === "read" ? { path: planRead.path, sha256: planSha256Of(planRead.bytes) } : null,
+    openedAt,
+  };
 }
 
 /** `PresentPlan`'s `execute`: the first call for a plan arms its review, the second releases it. */

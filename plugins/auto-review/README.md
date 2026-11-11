@@ -628,7 +628,7 @@ plugin, so agents can read it too.
 | Enabled | on | Global kill switch |
 | Merge-eligible mainlines | `master` | Comma-separated branch names a feature branch may be merged into locally |
 | Review mode | `auto` | `auto` uses devkit's calibrated review when `devkit_load_skill` is available, else self-review; `devkit` requires it; `self` always self-reviews |
-| Plan approval form | off | `PresentPlan` asks for plan approval in a form that holds the agent's turn until you answer (needs a bb build with both `experimental_holdToolCall` and `experimental_requireAppAnswer`); only an answer given in the app counts; a toggle applies to threads started after it; a thread keeps the mode it started with |
+| Plan approval form | off | `PresentPlan` asks for plan approval in a form that shows the plan text and holds the agent's turn until you answer (needs a bb build with `experimental_holdToolCall` and `experimental_requireAppAnswer`; the form also survives the end of the turn on a build with `experimental_detachOnAbort`); only an answer given in the app counts, and only for a plan file that did not change after the form opened; a toggle applies to threads started after it; a thread keeps the mode it started with |
 
 Under bb, `auto` (when devkit is available) and `devkit` modes hand the five lens reviews — and
 the closure review — to bb child threads when the thread can spawn children (otherwise provider
@@ -682,9 +682,10 @@ project the typesafe plugin skips (`skipProjects`). A new plan (a new `PresentPl
 needs a new approval; `bb auto-review reset` keeps the record.
 
 With it on, `PresentPlan` opens an approval form once the review is done, on providers other
-than Claude Code. The form shows the plan path and whether the review completed, with Approve,
-Request changes (which needs feedback) and Cancel. The agent's turn stays blocked until you
-answer, and the answer is the `PresentPlan` result itself:
+than Claude Code. The form shows the plan text (rendered as Markdown in a scroll box, as the
+plan stands after the review's fixes), the plan path and whether the review completed, with
+Approve, Request changes (which needs feedback) and Cancel. The agent's turn stays blocked until
+you answer, and the answer is the `PresentPlan` result itself:
 
 - **Approve:** the result says the plan was approved in the form, and the agent implements it. The missing-plan Blocker of the code review counts this approval, but only when the answer was given in the app.
 - **Request changes:** the agent revises the plan file from your feedback and calls `PresentPlan` again, which runs a new review and then a new form. The feedback reaches the agent as quoted data, never as an instruction.
@@ -695,14 +696,57 @@ With the form on, a chat reply is not approval: the agent's instructions say to 
 `PresentPlan` again so you can approve in the form. The form waits at most 60 minutes, which
 stays under the 65-minute limit the fork daemon puts on forwarded tool calls.
 
+**The plan text.** The form reads the plan file once, when the review is released, and shows
+that text. Past 60 KiB (measured as the UTF-8 bytes of the serialized form payload, so JSON
+escaping and multi-byte text count) the text is cut between characters and the form says "The
+plan is longer than the form can show; the rest is in the file below." You can still approve a
+cut plan: the approval is bound to the whole file. The text is rendered by bb's chat Markdown
+renderer, the same one agent messages use.
+
+**An approval counts only for an unchanged plan file.** The plugin hashes the file when the form
+opens and hashes it again when you answer. If the file changed, was deleted, could not be read,
+or the read took longer than a second, the approval does not count: the row says "Not counted: the
+plan changed after the form opened", it counts as a denial for the missing-plan Blocker, and the
+agent is told to call `PresentPlan` again (a new review, then a new form). The check is made when
+you answer; it cannot stop the agent from editing the file after you approved. Request changes
+is not checked: it carries your feedback whatever the file does.
+
+**Which plan files the form reads.** The path must be inside the thread's workspace or inside
+`<bb data dir>/plans/<thread id>/` (the data dir comes from the bb server, not from `~/.bb`). Paths
+are resolved first (symlinks, `..`, macOS `/var` to `/private/var`) and compared whole-segment, so
+`/ws-evil` is not inside `/ws`; the file is read from the resolved path. A path outside both gets
+the invalid-path result and the plan stays armed. A plan file this server cannot read, such as a
+thread on a remote host, is not an error: the form opens with the path and the notice "The plan
+text isn't available on this host; open the file to read it.", nothing binds the approval to a
+text, and the approval is credited as before.
+
+**Surviving the end of the turn.** On a bb build with `experimental_detachOnAbort`, the form is
+opened with it. Codex runs bb tools inside a script that yields after about 30 seconds, and the
+agent may end its turn while the form is open; without the option bb then closes the form
+(`request-aborted`). With it, the form stays open, no longer bound to a turn, and your answer
+reaches the agent as a bb message ("Your earlier PresentPlan tool call has finished. Its
+result: ...") that starts a new turn. The gate counts that approval for the first turn that ends
+after the answer, and only that one. A detached form survives the provider exiting, a stop of a later turn and the host
+restarting; it closes on Cancel, thread deletion, plugin update, the 60-minute limit, removing its
+machine and a bb server restart. **Cancel and the timeout after the form detached wake the agent with nothing:** no
+message and no turn, and the plan stays unapproved. Older bb builds ignore the option, so the form
+still disappears at the end of the turn there.
+
+**Where the plan text is stored.** The plan text, not only its path, is now kept by bb: in the form's
+row, in each of its lifecycle events (the original `pending`, the second `pending` a detach writes,
+and the resolution) and in the `interaction.pending` payload other plugins receive. All of it is
+removed with the thread, like chat messages. Do not put secrets in a plan file.
+
 **One form per thread.** While a plan approval form is open, a `PresentPlan` call that would open a second one gets an error and leaves the plan armed, so a later call releases it after the first form settles. If the plugin restarts while a form is open, bb closes that form, and the next release finds the open marker stale and replaces it. If a form is still pending in the app (for example after a bb crash), answer or dismiss it there first.
 
 **What it needs from bb.** The form only works on a bb build with both options of
 `bb.ui.requestInput`: `experimental_holdToolCall`, which holds a tool call while a form is open,
 and `experimental_requireAppAnswer`, which refuses an answer to the form that did not come from
-the bb app and records how each answer arrived (`answeredVia` on the resolution). Neither the SDK
-version this plugin pins nor the published SDK has either option in its types or a flag to detect
-it, so the plugin cannot check; it passes the options and checks the result instead. Self-test: if
+the bb app and records how each answer arrived (`answeredVia` on the resolution). A third option,
+`experimental_detachOnAbort`, keeps the form open past the end of the turn and records
+`heldTurnId` on the answer; without it the form still works while the turn lasts. None of the
+three is in the types of the SDK version this plugin pins or of the published SDK, and there is no
+flag to detect them, so the plugin cannot check; it passes the options and checks the result instead. Self-test: if
 the agent keeps working while the form is open, your bb does not support the hold; turn the
 setting off. If Approve is never accepted (the agent reports the form did not work), your bb lacks
 `experimental_requireAppAnswer`: rebuild bb. On a bb without the hold, the form detaches from the
@@ -723,18 +767,25 @@ When the form is unavailable, the plugin log names the cause. These are the line
 - `auto-review: the plan approval form for <file> in thread <thread> failed, so the plan is released without it: …`
 - `auto-review: could not read the plan approval form's resolution in <thread>, so it counts as not held: …`
 - `auto-review: the plan approval form for <file> in thread <thread> left no resolution event after it settled, so nothing is approved`
-- `auto-review: the plan approval form for <file> in thread <thread> was not held by the host (its resolution is not turn-scoped), so nothing is approved`
+- `auto-review: the plan approval form for <file> in thread <thread> was not held by the host (its resolution is not turn-scoped and carries no heldTurnId), so nothing is approved`
+- `auto-review: the plan file for <file> in thread <thread> changed after the form opened, so the approval did not count`
 - `auto-review: the plan approval form for <file> in thread <thread> was answered approved but its resolution does not record approved: true, so nothing is approved`
 - `auto-review: the plan approval form for <file> in thread <thread> was approved by an answer that did not come from the bb app (no answeredVia "app" on the resolution; does your bb support experimental_requireAppAnswer?), so nothing is approved`
 
 **Self-approval.** For the plan-approval form, CLI and plain API answers are refused and never
 credited: bb core rejects an answer to the form unless it came from the app, and the missing-plan
-check credits only a held, approved form whose resolution says `answeredVia: "app"`. A process
-that forges the app header, or an agent driving the app UI, still can be credited. This is a
-deterrent, not a security boundary. Native ExitPlanMode approvals are not covered and stay
+check credits only a held, approved form whose resolution says `answeredVia: "app"`. That value
+comes from the `x-bb-app-surface` request header, which the client declares about itself, so a
+process with bb API access that sends the header, or an agent driving the app UI, still can be
+credited. This is a deterrent, not a security boundary, and it is wider with
+`experimental_detachOnAbort`: a detached form stays open up to 60 minutes while the agent can start
+new turns, where a form that dies at the end of the turn left one turn to try. Binding answers to
+a real app-session identity is the stabilization criterion on bb's side. The approval binding
+above does not change this: it protects you from approving a text you did not see, not from
+another caller answering. Native ExitPlanMode approvals are not covered and stay
 self-approvable through `bb thread interactions approve --self`. Another plugin cannot forge the
 approval: the host sets the form's origin plugin, and the missing-plan check also requires the
-form to have been held in the turn.
+form to have been held for the turn (a turn-scoped event, or core's `heldTurnId` on the answer).
 
 Known gap in chat mode: a `bb thread tell` from the CLI looks the same as a message you typed,
 so a process that can run it can send an approving reply. TypeSafe still has to judge the text

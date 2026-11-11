@@ -2,7 +2,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
 import { chatApprovalSeq } from "./detect-chat-approval.js";
 import { EVENT_PAGE_MAX, eventsSince, type EventOf } from "./detect-event-log.js";
-import { planFormResolution } from "./detect-plan-form.js";
+import { isPlanFormInteraction, planFormResolution } from "./detect-plan-form.js";
 import { AUTO_REVIEW_MARKER, CODE_REVIEW_OPENING } from "./prompt.js";
 import { readState } from "./state.js";
 
@@ -119,7 +119,8 @@ function isCodeReviewRequest(data: TurnRequestData): boolean {
  * The plan approval the interaction lifecycle event resolved, or null when it
  * resolves none: a `resolved` approval whose decision is `allow_once` or
  * `allow_for_session` of a plan, or a held plan-approval form answered
- * `approved` through the app (`planFormResolution`); a deny, an interaction still
+ * `approved` through the app (`planFormResolution`, held for the turn that asked
+ * or detached from it with core's `heldTurnId`); a deny, an interaction still
  * `resolving`, or an approval of anything else is not one. The event carries
  * no resolver, so the caller tells an approval the user gave from one
  * auto-review gave itself.
@@ -156,10 +157,11 @@ function approvedPlanOf(
  * What a lifecycle event says about plan approval: `approved` for an approval
  * `approvedPlanOf` credits, `denied` for a resolved native `deny` of a plan or a
  * resolved plan-approval form answered `approved: false` (held or detached: a
- * request for changes is a request whoever was shown it), and null for
- * everything else — a `resolving` row, even one already carrying a deny, an
- * approval the gate does not credit (a detached form, one answered through
- * `api`), and anything that is not a plan.
+ * request for changes is a request whoever was shown it; an approval that did
+ * not count because the plan file changed is recorded this way too), and null
+ * for everything else — a `resolving` row, even one already carrying a deny, an
+ * approval the gate does not credit (a form the host did not hold, one answered
+ * through `api`), and anything that is not a plan.
  */
 function planDecisionOf(event: EventOf<"system/interaction/lifecycle">): "approved" | "denied" | null {
   if (approvedPlanOf(event, undefined) !== null) {
@@ -320,16 +322,31 @@ export async function endedTurn(
     // requested before that delivery.
     const requestedSeqOf = new Map<string, number>();
     for (const event of lifecycle) {
-      if (event.data.interaction.status !== "pending") {
+      const { interaction } = event.data;
+      if (interaction.status !== "pending") {
         continue;
       }
-      const earliest = requestedSeqOf.get(event.data.interaction.id);
+      // A plan form that detached from its turn is announced a second time, thread-scoped: only the
+      // original turn-scoped `pending` says when it was asked, so the second one is never the answer
+      // (it would put the request after the review's delivery and set the approval aside).
+      if (event.scope.kind !== "turn" && isPlanFormInteraction(interaction)) {
+        continue;
+      }
+      const earliest = requestedSeqOf.get(interaction.id);
       if (earliest === undefined || event.seq < earliest) {
-        requestedSeqOf.set(event.data.interaction.id, event.seq);
+        requestedSeqOf.set(interaction.id, event.seq);
       }
     }
+    // A detached form's answer lands between turns, thread-scoped, so no turn's scope names it: the first
+    // turn to end after it counts it. The window is `(max(sinceSeq, handledSeq), completed.seq]` because
+    // `sinceSeq` stays fixed across the hold, and one approval must not be credited again to every later turn.
+    const afterHandled = Math.max(sinceSeq, handledSeq);
     const approvedPlans = lifecycle
-      .filter(({ scope }) => scope.kind === "turn" && scope.turnId === turnId)
+      .filter(
+        (event) =>
+          (event.scope.kind === "turn" && event.scope.turnId === turnId) ||
+          (event.seq > afterHandled && event.seq <= completed.seq && planFormResolution(event)?.detached === true),
+      )
       .flatMap((event) => {
         const approval = approvedPlanOf(event, requestedSeqOf.get(event.data.interaction.id));
         return approval === null ? [] : [approval];

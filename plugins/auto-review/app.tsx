@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { RefObject } from "react";
 import {
+  Markdown,
   definePluginApp,
   useRealtime,
   useRealtimeConnectionState,
@@ -10,11 +11,14 @@ import type { PluginPendingInteractionProps, PluginThreadHeaderActionProps } fro
 import {
   PLAN_APPROVAL_FEEDBACK_MAX,
   PLAN_APPROVAL_RENDERER,
+  PLAN_TRUNCATED_NOTICE,
+  PLAN_UNAVAILABLE_NOTICE,
   planApprovalPayloadSchema,
 } from "./src/plan-approval-form.js";
 import type { AutoReviewRpcContract, ProjectSetting, ThreadReview } from "./src/rpc-contract.js";
 
 const SOFT_INK = "color-mix(in oklch, var(--ink) 68%, var(--canvas))";
+const PLAN_BOX_BORDER = "color-mix(in oklch, var(--ink) 16%, var(--canvas))";
 const BUTTON_BASE =
   "inline-flex h-8 cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50";
 const PRIMARY_BUTTON = `${BUTTON_BASE} bg-foreground text-background hover:bg-foreground/90`;
@@ -490,7 +494,10 @@ function ReviewBadge(props: PluginThreadHeaderActionProps) {
 /**
  * The plan approval form `PresentPlan` opens. Approve and Request changes
  * submit the shapes `parsePlanApprovalValue` reads; Cancel postpones the
- * decision. Chat sends are rejected while a held form is open, so Cancel is
+ * decision. The form shows the plan text (rendered by the host's `Markdown`,
+ * the chat renderer, in a bounded scroll box) above the path, so the user
+ * approves what they can read; a plan this host could not read shows a notice
+ * and the path only. The composer is hidden while a form is open, so Cancel is
  * the visible way out and Request changes needs feedback typed here. A payload that does not parse shows only Cancel.
  */
 function PlanApproval(props: PluginPendingInteractionProps) {
@@ -517,6 +524,26 @@ function PlanApproval(props: PluginPendingInteractionProps) {
       {payload.success ? (
         <>
           <div style={{ color: "var(--ink)", fontWeight: 500 }}>Approve this plan?</div>
+          {payload.data.planText === null ? null : (
+            <div
+              role="region"
+              aria-label="Plan text"
+              tabIndex={0}
+              style={{
+                maxHeight: "min(40vh, 320px)",
+                overflow: "auto",
+                border: `1px solid ${PLAN_BOX_BORDER}`,
+                borderRadius: 6,
+                padding: 8,
+              }}
+            >
+              <Markdown content={payload.data.planText} />
+            </div>
+          )}
+          {payload.data.planText === null ? (
+            <div style={{ fontSize: 12, color: SOFT_INK }}>{PLAN_UNAVAILABLE_NOTICE}</div>
+          ) : null}
+          {payload.data.truncated ? <div style={{ fontSize: 12, color: SOFT_INK }}>{PLAN_TRUNCATED_NOTICE}</div> : null}
           <div style={{ fontSize: 12, color: SOFT_INK }}>
             <div>{payload.data.planFilePath}</div>
             <div>

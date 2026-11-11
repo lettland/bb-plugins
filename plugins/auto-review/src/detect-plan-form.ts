@@ -1,21 +1,51 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
 import { eventsSince, type EventOf } from "./detect-event-log.js";
-import { PLAN_APPROVAL_PLUGIN_ID, PLAN_APPROVAL_RENDERER, planApprovalDescribed } from "./plan-approval-form.js";
+import {
+  PLAN_APPROVAL_PLUGIN_ID,
+  PLAN_APPROVAL_RENDERER,
+  planApprovalChanged,
+  planApprovalDescribed,
+} from "./plan-approval-form.js";
 
 /**
- * What a plan-approval form's resolution says. `held`: the event is
- * turn-scoped, since a form the host held is bound to the active turn while
- * one that detached is thread-scoped (bb core `pending-interaction-timeline.ts`,
- * `interactionScope`), and its answer arrives outside the turn that asked.
- * `approved`: the row's description records `approved: true`. `app`: the
- * answer reached bb through the app (`answeredVia: "app"`), not the CLI or a
- * plain API call.
+ * What a plan-approval form's resolution says. `held`: the host held the form
+ * for the turn that asked, which shows two ways. The event is turn-scoped
+ * (a form bound to the active turn); or the resolution carries `heldTurnId`,
+ * which core writes on the answer to a form it held inside a turn, also after
+ * the form detached from that turn (bb core `experimental_detachOnAbort`) and
+ * its event became thread-scoped. A form a host without the hold detached has
+ * neither. `detached`: held through `heldTurnId` while the event is
+ * thread-scoped, so the answer arrived outside the turn that asked and the turn
+ * its message starts is the one that counts it (`endedTurn`).
+ * `approved`: the row's description records `approved: true`. `planChanged`:
+ * the description records an approval that did not count because the plan file
+ * changed after the form opened (`approved` is then false). `app`: the answer
+ * reached bb through the app (`answeredVia: "app"`), not the CLI or a plain API
+ * call.
+ *
+ * `app` is a deterrent, not a guarantee. It rests on the `x-bb-app-surface`
+ * request header, which the client declares about itself, so a caller with bb
+ * API access that sends the header is recorded as an app answer. A detached form
+ * stays open for up to its whole timeout while the agent can start new turns,
+ * which widens that window. Nothing here proves the user pressed the button.
  */
 export interface PlanFormResolution {
   held: boolean;
+  detached: boolean;
   approved: boolean;
+  planChanged: boolean;
   app: boolean;
+}
+
+/** Whether the interaction is this plugin's plan-approval form, in whatever state. */
+export function isPlanFormInteraction(interaction: EventOf<"system/interaction/lifecycle">["data"]["interaction"]): boolean {
+  return (
+    interaction.payload.kind === "plugin" &&
+    interaction.origin.kind === "plugin" &&
+    interaction.origin.pluginId === PLAN_APPROVAL_PLUGIN_ID &&
+    interaction.origin.rendererId === PLAN_APPROVAL_RENDERER
+  );
 }
 
 /**
@@ -29,10 +59,7 @@ export function planFormResolution(event: EventOf<"system/interaction/lifecycle"
   const { interaction } = event.data;
   const { resolution } = interaction;
   if (
-    interaction.payload.kind !== "plugin" ||
-    interaction.origin.kind !== "plugin" ||
-    interaction.origin.pluginId !== PLAN_APPROVAL_PLUGIN_ID ||
-    interaction.origin.rendererId !== PLAN_APPROVAL_RENDERER ||
+    !isPlanFormInteraction(interaction) ||
     interaction.status !== "resolved" ||
     resolution === null ||
     !("kind" in resolution) ||
@@ -40,12 +67,16 @@ export function planFormResolution(event: EventOf<"system/interaction/lifecycle"
   ) {
     return null;
   }
+  // `answeredVia` and `heldTurnId` are fork-only (bb core `packages/domain/src/pending-interactions.ts`,
+  // the `plugin_submitted` resolution): @get-bb/plugin-sdk 0.6.79 (the pinned version) lacks both, so they are read by narrowing;
+  // drop the narrowing once a pinned SDK types them. Only core writes `heldTurnId`.
+  const heldTurnId = "heldTurnId" in resolution && typeof resolution.heldTurnId === "string" && resolution.heldTurnId !== "";
+  const turnScoped = event.scope.kind === "turn";
   return {
-    held: event.scope.kind === "turn",
+    held: turnScoped || heldTurnId,
+    detached: !turnScoped && heldTurnId,
     approved: planApprovalDescribed(resolution.description?.payload),
-    // `answeredVia` is fork-only (bb core `packages/domain/src/pending-interactions.ts`,
-    // the `plugin_submitted` resolution): @get-bb/plugin-sdk 0.6.79 (the pinned version) lacks it, so it is read by narrowing;
-    // drop the narrowing once a pinned SDK types it.
+    planChanged: planApprovalChanged(resolution.description?.payload),
     // Absent, `"api"` and any other value are not an app answer.
     app: "answeredVia" in resolution && resolution.answeredVia === "app",
   };

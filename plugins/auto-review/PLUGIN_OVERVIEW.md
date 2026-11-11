@@ -164,25 +164,34 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   configure, because `PresentPlan` follows the mode the thread's instructions describe) makes the
   second `PresentPlan` call open a form with `bb.ui.requestInput`, after the thread lock is
   released and with `experimental_holdToolCall` and `experimental_requireAppAnswer`, on a bb build that
-  supports holding a tool call for a form and refusing answers that did not come from the app. The form shows the plan path and whether the review completed (Approve, Request
-  changes with feedback, Cancel). The agent's turn stays blocked, and the answer becomes the
+  supports holding a tool call for a form and refusing answers that did not come from the app, and
+  with `experimental_detachOnAbort`, so a form that outlives the turn stays open and its answer is
+  delivered as a message. The form shows the plan text (read once at the release, from a path inside
+  the thread's workspace or `<bb data dir>/plans/<thread id>/`; cut to a 60 KiB payload budget), the
+  plan path and whether the review completed (Approve, Request changes with feedback, Cancel); an
+  approval counts only if the plan file still has the hash it had when the form opened (`planChanged`
+  otherwise, which counts as a denial), and a plan the server cannot read (a remote host) shows the
+  path only, unbound. The agent's turn stays blocked, and the answer becomes the
   tool result: approved (implement), changes requested (revise and call `PresentPlan` again; the
   feedback is quoted as data), cancelled (not approved; end the turn, ask again later), or "Answer
   not readable" (a value that fails the strict shape, e.g. feedback past the form's length cap, is
   discarded and never credited; not approved, the agent tells the user their answer was not read). The
   form waits 60 minutes, under the fork daemon's 65-minute ceiling on forwarded tool calls. The
   plugin cannot detect the hold, so after the form settles it reads the lifecycle events: a
-  form whose resolution is not turn-scoped (a detached call), and a form that cannot be
+  form whose resolution is neither turn-scoped nor carries core's `heldTurnId` (a host without the
+  hold), and a form that cannot be
   opened or read, return a "form unavailable" text (not approved; end the turn and tell the user)
   whatever was clicked. One form is open per thread: `presentPlanFormOpenAt` marks it, a release
   that would open a second one returns an error and stays armed, and the form's `finally` clears the
   mark (a mark younger than 30 seconds always blocks, since its form may still be registering; a mark older than the form timeout plus 60 seconds no longer blocks; an older mark with no pending `plan-approval` interaction behind it is stale and replaced at the next release, and a release that cannot list the interactions is refused with its own text). If the plugin restarts while a form is open, bb closes that form, and the next release finds the open marker stale and replaces it. If a form is still pending in the app (for example after a bb crash), answer or dismiss it there first. The missing-plan Blocker (`approvedPlanSince`), the turn-end approvals
-  and the user-turn bookkeeping credit only a turn-scoped, resolved `plan-approval` form whose
+  and the user-turn bookkeeping credit only a held (turn-scoped, or thread-scoped with `heldTurnId`
+  after a detach; the detached one counts only in the first turn to end after it), resolved `plan-approval` form whose
   row says `approved: true` and whose resolution says `answeredVia: "app"` (`planFormResolution`;
   the field is fork-only, read by narrowing); the row keeps no feedback. The form is opened with
   `experimental_requireAppAnswer`, so bb core refuses a CLI or plain API answer and records how
-  each answer arrived. Self-approval of the form is deterred, not prevented: a process that forges
-  the app header, or an agent driving the app UI, can still approve, and native ExitPlanMode
+  each answer arrived. Self-approval of the form is deterred, not prevented: `answeredVia` rests on
+  the self-declared `x-bb-app-surface` header, so a process that sends it, or an agent driving the
+  app UI, can still approve (a detached form widens that window), and native ExitPlanMode
   approvals stay self-approvable with `bb thread interactions approve --self`. An auto-approved
   `PresentPlan` leaves no interaction, so the
   gate reads `presentPlanAutoApprovedSeq` from the thread state instead; `bb auto-review reset`

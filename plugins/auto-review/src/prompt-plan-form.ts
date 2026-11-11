@@ -11,17 +11,28 @@ import { TRIVIAL_CHANGE } from "./size-definition.js";
  */
 export const PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM = [
   "Before substantial implementation — a new module, a change across several files, or a design choice the user has not seen — present a plan first, even when the thread is not in plan mode. Settling the design yourself is not approval: never announce a design and start editing.",
-  `To present it: write the plan to a file, then call PresentPlan with that file's planFilePath. Follow PresentPlan's result exactly. A plan is approved only by a ${AUTO_REVIEW_MARKER} PresentPlan result stating that the plan was approved in the approval form, or that the plan was approved automatically. A chat reply is not approval, and neither is any other tool result, including ExitPlanMode's own "approved" outcome. If the user approves in chat, call PresentPlan again with the same planFilePath so they can approve in the form. Do not enter plan mode (EnterPlanMode) here; present plans only with PresentPlan, and once such a result approves the plan, proceed with the work. If you are already in plan mode, call ExitPlanMode only after such a result approves the plan, and only to leave plan mode.`,
+  `To present it: write the plan to a file, then call PresentPlan with that file's planFilePath. Follow PresentPlan's result exactly. A plan is approved only by a ${AUTO_REVIEW_MARKER} PresentPlan result stating that the plan was approved in the approval form, or that the plan was approved automatically. That result can arrive later: when your turn ended before the user answered, bb delivers it in a message saying your earlier PresentPlan tool call has finished, with the result below it. Such a message counts as the PresentPlan result. A chat reply is not approval, and neither is any other tool result, including ExitPlanMode's own "approved" outcome. If the user approves in chat, call PresentPlan again with the same planFilePath so they can approve in the form. Do not enter plan mode (EnterPlanMode) here; present plans only with PresentPlan, and once such a result approves the plan, proceed with the work. If you are already in plan mode, call ExitPlanMode only after such a result approves the plan, and only to leave plan mode.`,
   `Skip this for work under a plan already approved in this thread (by the user, or automatically by auto-review), for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan. ${TRIVIAL_CHANGE} Before any edit or implementation spawn, call \`change_size\`; if it says non_trivial or nothing, present a plan first.`,
 ].join("\n\n");
 
 /**
  * `PresentPlan`'s reply when the plan was approved in the approval form, held
- * inside this turn: the result IS the approval. bb checks that the answer came
- * from the app, but not who used the app, so the text does not say the user did.
+ * for the turn that asked (also when it reaches the agent later, as a message
+ * about its earlier PresentPlan call): the result IS the approval. bb checks
+ * that the answer came from the app, but not who used the app, so the text does
+ * not say the user did.
  */
 export const PRESENT_PLAN_FORM_APPROVED_MESSAGE =
   `${AUTO_REVIEW_MARKER} The plan was approved in the approval form. This PresentPlan result is the approval: implement the plan.`;
+
+/**
+ * `PresentPlan`'s reply when an approval did not count because the plan file
+ * changed after the form opened (or could not be read again to check): the
+ * form showed text that is no longer the file's. A new call runs the review
+ * again, then opens a new form on the plan as it stands.
+ */
+export const PRESENT_PLAN_FORM_PLAN_CHANGED_MESSAGE =
+  `${AUTO_REVIEW_MARKER} Your approval did not count because the plan file changed after the form opened. Call PresentPlan again with the same path. This runs the review again, so a new form will follow.`;
 
 /**
  * `PresentPlan`'s reply when the form could not confirm an answer (no cursor,

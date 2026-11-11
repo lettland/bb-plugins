@@ -18,16 +18,34 @@ export const PLAN_APPROVAL_TITLE = "Plan approval";
  * How long the form waits for an answer. Under the fork daemon's 65-minute
  * ceiling on forwarded tool calls (`TOOL_CALL_TIMEOUT_MS` in bb core
  * `apps/host-daemon/src/server-client.fork.ts`): past it the held request
- * aborts and the plugin's own cancel text cannot reach the agent.
+ * aborts and the plugin's own cancel text cannot reach the agent. A form that
+ * detached from its turn (`experimental_detachOnAbort`) no longer depends on the
+ * transport: its result reaches the agent as a bb message, so only this timeout
+ * ends it.
  */
 export const PLAN_APPROVAL_TIMEOUT_MS = 60 * 60 * 1000;
 
 export const PLAN_APPROVAL_FEEDBACK_MAX = 2000;
 
-/** What the form shows: the plan file and whether its review completed. */
+/** Shown above the path when the plan text was cut to fit the payload budget. */
+export const PLAN_TRUNCATED_NOTICE = "The plan is longer than the form can show; the rest is in the file below.";
+
+/** Shown above the path when this host could not read the plan file (a plan on a remote host). */
+export const PLAN_UNAVAILABLE_NOTICE = "The plan text isn't available on this host; open the file to read it.";
+
+/**
+ * What the form shows: the plan file, the plan text and whether its review
+ * completed. `planText` and `planSha256` are null together when the plan file is
+ * not readable on this host (a thread on a remote host): the form then shows
+ * only the path, and nothing binds the approval to a text. `planSha256` hashes
+ * the whole file, whether or not `truncated` cut the shown text.
+ */
 export const planApprovalPayloadSchema = z.object({
   planFilePath: z.string(),
   reviewed: z.boolean(),
+  planText: z.string().nullable(),
+  planSha256: z.string().nullable(),
+  truncated: z.boolean(),
 });
 export type PlanApprovalPayload = z.infer<typeof planApprovalPayloadSchema>;
 
@@ -51,12 +69,26 @@ export function parsePlanApprovalValue(value: unknown): PlanApprovalDecision {
 }
 
 /** What the resolved row keeps. Never the feedback: it is free text from whoever answered. */
-const planApprovalDescriptionPayloadSchema = z.object({ approved: z.boolean() });
+const planApprovalDescriptionPayloadSchema = z.object({ approved: z.boolean(), planChanged: z.boolean().optional() });
 
-export function planApprovalDescription(decision: PlanApprovalDecision): {
+/** The title of a row for an approval that did not count because the plan file changed after the form opened. */
+export const PLAN_CHANGED_TITLE = "Not counted: the plan changed after the form opened";
+
+/**
+ * The row for a submitted value. `planChanged` is set only for an approval
+ * whose plan file no longer matches the text the form showed: it is recorded as
+ * not approved, so the gate never credits it and counts it as a denial.
+ */
+export function planApprovalDescription(
+  decision: PlanApprovalDecision,
+  planChanged = false,
+): {
   title: string;
-  payload: { approved: boolean };
+  payload: { approved: boolean; planChanged?: true };
 } {
+  if (planChanged) {
+    return { title: PLAN_CHANGED_TITLE, payload: { approved: false, planChanged: true } };
+  }
   return {
     title: decision.approved ? "Approved" : "unreadable" in decision ? "Answer not readable" : "Changes requested",
     payload: { approved: decision.approved },
@@ -67,4 +99,10 @@ export function planApprovalDescription(decision: PlanApprovalDecision): {
 export function planApprovalDescribed(payload: unknown): boolean {
   const parsed = planApprovalDescriptionPayloadSchema.safeParse(payload);
   return parsed.success && parsed.data.approved;
+}
+
+/** Whether a resolved row's description payload records an approval that did not count because the plan changed. */
+export function planApprovalChanged(payload: unknown): boolean {
+  const parsed = planApprovalDescriptionPayloadSchema.safeParse(payload);
+  return parsed.success && parsed.data.planChanged === true;
 }

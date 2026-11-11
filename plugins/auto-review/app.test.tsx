@@ -638,9 +638,18 @@ describe("Review badge", () => {
   });
 });
 
+const planPayload = (over: Record<string, unknown> = {}) => ({
+  planFilePath: "/w/docs/plans/p.md",
+  reviewed: true,
+  planText: "# Plan\n\n1. first step\n",
+  planSha256: "a".repeat(64),
+  truncated: false,
+  ...over,
+});
+
 describe("Plan approval form", () => {
   function renderForm(
-    payload: unknown = { planFilePath: "/w/docs/plans/p.md", reviewed: true },
+    payload: unknown = planPayload(),
     over: Partial<Pick<PluginPendingInteractionProps, "submit" | "cancel">> = {},
   ) {
     const submit = vi.fn<PluginPendingInteractionProps["submit"]>(async () => undefined);
@@ -687,8 +696,57 @@ describe("Plan approval form", () => {
   });
 
   it("says when the review could not be confirmed", () => {
-    renderForm({ planFilePath: "/w/p.md", reviewed: false });
+    renderForm(planPayload({ planFilePath: "/w/p.md", reviewed: false }));
     expect(screen.getByText("auto-review could not confirm that its review of this plan completed.")).toBeTruthy();
+  });
+
+  describe("the plan text", () => {
+    it("renders the plan in a bordered, labelled, focusable scroll box with a bounded height, above the path and the reviewed line", () => {
+      renderForm();
+      const box = screen.getByRole("region", { name: "Plan text" });
+      expect(box.getAttribute("tabindex")).toBe("0");
+      expect(box.style.maxHeight).toBe("min(40vh, 320px)");
+      expect(box.style.overflow).toBe("auto");
+      expect(box.style.border).toContain("1px solid");
+      expect(within(box).getByTestId("bb-markdown").textContent).toBe("# Plan\n\n1. first step\n");
+      const path = screen.getByText("/w/docs/plans/p.md");
+      const reviewed = screen.getByText("auto-review completed its review of this plan.");
+      expect(box.compareDocumentPosition(path) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(path.compareDocumentPosition(reviewed) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it("shows the truncation notice only when the text was cut, between the box and the path", () => {
+      const notice = "The plan is longer than the form can show; the rest is in the file below.";
+      renderForm(planPayload({ truncated: true }));
+      const shown = screen.getByText(notice);
+      expect(shown.compareDocumentPosition(screen.getByText("/w/docs/plans/p.md")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(screen.getByRole("region", { name: "Plan text" }).compareDocumentPosition(shown) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      cleanup();
+      renderForm();
+      expect(screen.queryByText(notice)).toBeNull();
+    });
+
+    it("shows a notice and the path, with no text box, for a plan this host could not read, and Approve still works", async () => {
+      const { submit } = renderForm(planPayload({ planText: null, planSha256: null }));
+      expect(screen.getByText("The plan text isn't available on this host; open the file to read it.")).toBeTruthy();
+      expect(screen.getByText("/w/docs/plans/p.md")).toBeTruthy();
+      expect(screen.queryByRole("region", { name: "Plan text" })).toBeNull();
+      expect(screen.queryByTestId("bb-markdown")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+      await waitFor(() => expect(submit).toHaveBeenCalledWith({ approved: true }));
+    });
+
+    // The plugin test runtime's `Markdown` prints its content as plain text, so it cannot show how the host's renderer
+    // treats `javascript:` links, raw HTML or remote images: that is the host's chat renderer, not testable here. What
+    // this pins is the plugin's side: the plan reaches `Markdown` as one string, with no raw-HTML path of its own.
+    it("hands hostile plan text to Markdown as plain content and builds no link, image or element from it", () => {
+      const hostile = '[click](javascript:alert(1))\n\n<img src="https://tracker.example/p.png" onerror="alert(1)">\n\n![x](https://tracker.example/i.png)\n\n<script>alert(1)</script>';
+      renderForm(planPayload({ planText: hostile }));
+      const box = screen.getByRole("region", { name: "Plan text" });
+      expect(within(box).getByTestId("bb-markdown").textContent).toBe(hostile);
+      expect(box.querySelector("a, img, script, [onerror]")).toBeNull();
+      expect(box.innerHTML).not.toContain("<img");
+    });
   });
 
   it("Approve submits { approved: true }", async () => {
@@ -756,6 +814,7 @@ describe("Plan approval form", () => {
 
   it.each([
     ["a missing field", { planFilePath: "/w/p.md" }],
+    ["a payload from before the plan text was shown", { planFilePath: "/w/p.md", reviewed: true }],
     ["a wrong type", { planFilePath: 3, reviewed: true }],
     ["null", null],
   ])("a payload with %s renders only the error and Cancel", async (_name, payload) => {
