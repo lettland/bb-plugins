@@ -715,10 +715,20 @@ is not checked: it carries your feedback whatever the file does.
 `<bb data dir>/plans/<thread id>/` (the data dir comes from the bb server, not from `~/.bb`). Paths
 are resolved first (symlinks, `..`, macOS `/var` to `/private/var`) and compared whole-segment, so
 `/ws-evil` is not inside `/ws`; the file is read from the resolved path. A path outside both gets
-the invalid-path result and the plan stays armed. A plan file this server cannot read, such as a
-thread on a remote host, is not an error: the form opens with the path and the notice "The plan
-text isn't available on this host; open the file to read it.", nothing binds the approval to a
-text, and the approval is credited as before.
+the invalid-path result and the plan stays armed. The answer-time check resolves the path again and
+reads it only if it is still the same file inside those roots, so a file swapped for a symlink after
+the form opened cannot make the check read elsewhere.
+
+**A plan file that is missing or unreadable fails closed.** If the plan file is not there or cannot
+be read on the bb server (a typo, a deleted file, no permission), no form opens and `PresentPlan`
+returns an error: "The plan file <path> was not found or could not be read. Write the plan to that
+path and call PresentPlan again." The plan stays armed, so the next call for the same path releases
+it. The one exception is a thread on a remote host: when the thread has a workspace path and that
+path does not exist on the bb server, its plan file lives on another machine and cannot be read
+here. The form then opens with the path and the notice "The plan text isn't available on this host;
+open the file to read it.", nothing binds the approval to a text, and the approval is credited as
+before. A plan in `<bb data dir>/plans/<thread id>/` is always this server's, so a missing file
+there is an error, not a remote host.
 
 **Surviving the end of the turn.** On a bb build with `experimental_detachOnAbort`, the form is
 opened with it. Codex runs bb tools inside a script that yields after about 30 seconds, and the

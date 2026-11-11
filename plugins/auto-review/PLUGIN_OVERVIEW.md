@@ -170,7 +170,9 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   the thread's workspace or `<bb data dir>/plans/<thread id>/`; cut to a 60 KiB payload budget), the
   plan path and whether the review completed (Approve, Request changes with feedback, Cancel); an
   approval counts only if the plan file still has the hash it had when the form opened (`planChanged`
-  otherwise, which counts as a denial), and a plan the server cannot read (a remote host) shows the
+  otherwise, which counts as a denial; the re-read resolves the path again and stays inside the roots),
+  a plan file that is missing or unreadable on the server opens no form and returns an error (the plan
+  stays armed), and only a thread whose workspace path is not on the server (a remote host) shows the
   path only, unbound. The agent's turn stays blocked, and the answer becomes the
   tool result: approved (implement), changes requested (revise and call `PresentPlan` again; the
   feedback is quoted as data), cancelled (not approved; end the turn, ask again later), or "Answer

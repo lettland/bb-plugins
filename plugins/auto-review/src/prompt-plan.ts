@@ -363,6 +363,15 @@ export const PRESENT_PLAN_INVALID_PATH_MESSAGE =
   "planFilePath must be a plain file path (letters, digits, '.', '_', '/', '@', '+', '-' only — no shell metacharacters or spaces). Save the plan to such a path and call PresentPlan again.";
 
 /**
+ * `PresentPlan`'s error result when the approval form is on and the plan file
+ * cannot be found or read on this server: no form opens, and the plan stays
+ * armed so the next call for the same path releases it.
+ */
+export function presentPlanFileMissingMessage(planFilePath: string): string {
+  return `The plan file ${planFilePath} was not found or could not be read. Write the plan to that path and call PresentPlan again.`;
+}
+
+/**
  * The text a plan-approval deny carries: what the agent reads in place of the
  * bare rejection core used to answer ExitPlanMode with. The steered review
  * reaches the agent only after its next tool call, so the message names that

@@ -33,6 +33,7 @@ import {
   PRESENT_PLAN_INCOMPLETE_MESSAGE,
   PRESENT_PLAN_INVALID_PATH_MESSAGE,
   PRESENT_PLAN_OFF_MESSAGE,
+  presentPlanFileMissingMessage,
   presentPlanRedoMessage,
   PRESENT_PLAN_REVIEWED_MESSAGE,
   SCOPE_PATH_ALLOW,
@@ -105,7 +106,9 @@ function captureArmedSeq(review: ReviewContext, threadId: string): Promise<numbe
  * form as open; with a form already open the release is refused, still armed.
  * The form's payload carries the plan as it is at this release (read once, see
  * `readPlanFileForForm`); a plan path outside the thread's workspace and its
- * plan directory is refused with the invalid-path result, still armed.
+ * plan directory is refused with the invalid-path result, and a plan file that
+ * is missing or unreadable here (unless the thread is on a remote host) with
+ * its own error result, both still armed.
  */
 async function releasePlan(
   review: ReviewContext,
@@ -178,11 +181,15 @@ async function releasePlan(
     bb.log.info(`auto-review: the plan approval form's open marker in ${ctx.threadId} has no pending form behind it, so it is stale and replaced`);
   }
   // The form shows the plan as it stands now, after the review's fixes: read once, from the resolved
-  // path, never from the baseline staged at arm time. A path outside the allowed roots is refused
-  // here, before anything is cleared, so the plan stays armed.
+  // path, never from the baseline staged at arm time. A path outside the allowed roots, and a plan
+  // file that is not there or cannot be read, are refused here, before anything is cleared, so the
+  // plan stays armed and no form opens. Only a plan on a remote host opens the form without text.
   const planRead = opensForm ? await readPlanFileForForm(bb, ctx.threadId, planFilePath) : null;
   if (planRead?.kind === "outside") {
     return { content: [{ type: "text", text: PRESENT_PLAN_INVALID_PATH_MESSAGE }], isError: true };
+  }
+  if (planRead?.kind === "missing") {
+    return { content: [{ type: "text", text: presentPlanFileMissingMessage(planFilePath) }], isError: true };
   }
   // One patch: a failed write cannot leave the plan disarmed without its marker.
   await writeState(bb, ctx.threadId, opensForm ? { presentPlanFormOpenAt: openedAt } : {}, [...PRESENT_PLAN_KEYS]);

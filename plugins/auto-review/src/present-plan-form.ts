@@ -278,7 +278,7 @@ async function runPlanApproval(
         describeSubmission: async (value) => {
           const decision = parsePlanApprovalValue(value);
           // The hash is the one this form was opened with; an approval counts only for a file that still has it.
-          const changed = decision.approved && bound !== null && !(await planFileUnchanged(bound.path, bound.sha256));
+          const changed = decision.approved && bound !== null && !(await planFileUnchanged(bb, ctx.threadId, bound.path, bound.sha256));
           return planApprovalDescription(decision, changed);
         },
       },

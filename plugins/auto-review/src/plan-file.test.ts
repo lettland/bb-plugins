@@ -121,14 +121,53 @@ describe("readPlanFileForForm", () => {
     expect(await read(workspace, join(alias, "docs", "p.md"))).toMatchObject({ kind: "read", path: file });
   });
 
-  it("treats a file this host cannot resolve (a plan on a remote host) as unavailable, not as outside", async () => {
-    expect(await read(workspace, join(workspace, "docs", "missing.md"))).toEqual({ kind: "unavailable" });
-    expect(await read(workspace, "/remote/home/user/plan.md")).toEqual({ kind: "unavailable" });
+  // A remote host: the thread's workspace path does not exist on this server.
+  const gone = () => join(base, "gone");
+
+  it("is remote only when the thread's workspace path does not resolve on this server", async () => {
+    expect(await read(gone(), join(gone(), "docs", "p.md"))).toEqual({ kind: "remote" });
+    expect(await read(gone(), "docs/p.md")).toEqual({ kind: "remote" });
+    expect(await read(gone(), "/remote/home/user/plan.md")).toEqual({ kind: "remote" });
   });
 
-  it("treats a file that resolves inside a root but cannot be read as unavailable", async () => {
+  it("fails closed as missing for a local file that is not there, in a workspace that exists", async () => {
+    expect(await read(workspace, join(workspace, "docs", "missing.md"))).toEqual({ kind: "missing" });
+    expect(await read(workspace, "docs/missing.md")).toEqual({ kind: "missing" });
+    expect(await read(workspace, "/remote/home/user/plan.md")).toEqual({ kind: "missing" });
+  });
+
+  it("fails closed as missing when the thread has no workspace, whatever the path", async () => {
+    expect(await read(null, join(workspace, "docs", "missing.md"))).toEqual({ kind: "missing" });
+    expect(await read(null, "docs/missing.md")).toEqual({ kind: "missing" });
+    expect(await read("lookup-fails", join(workspace, "docs", "missing.md"))).toEqual({ kind: "missing" });
+  });
+
+  it("fails closed as missing for a missing file in the plan directory, even for a thread on a remote host", async () => {
+    const absent = join(dataDir, "plans", THREAD, "absent.md");
+    expect(await read(gone(), absent)).toEqual({ kind: "missing" });
+    expect(await read(workspace, absent)).toEqual({ kind: "missing" });
+    expect(await read(null, absent)).toEqual({ kind: "missing" });
+    // The plan directory itself does not need to exist yet.
+    await rm(join(dataDir, "plans"), { recursive: true });
+    expect(await read(gone(), absent)).toEqual({ kind: "missing" });
+    // A sibling of the plan directory is not the plan directory.
+    expect(await read(gone(), join(dataDir, "plans", `${THREAD}-evil`, "p.md"))).toEqual({ kind: "remote" });
+  });
+
+  it("reads a file in the plan directory for a thread on a remote host", async () => {
+    const file = join(dataDir, "plans", THREAD, "plan.md");
+    await writeFile(file, "kept by bb");
+    expect(await read(gone(), file)).toMatchObject({ kind: "read", path: file });
+  });
+
+  it("fails closed as missing for a local file that cannot be read", async () => {
     await mkdir(join(workspace, "docs", "a-directory"));
-    expect(await read(workspace, join(workspace, "docs", "a-directory"))).toEqual({ kind: "unavailable" });
+    expect(await read(workspace, join(workspace, "docs", "a-directory"))).toEqual({ kind: "missing" });
+    if (process.getuid?.() !== 0) {
+      const locked = join(workspace, "docs", "locked.md");
+      await writeFile(locked, "secret", { mode: 0o000 });
+      expect(await read(workspace, locked)).toEqual({ kind: "missing" });
+    }
   });
 
   it.each([
@@ -137,7 +176,7 @@ describe("readPlanFileForForm", () => {
   ])("with %s, only the plan directory is a root, and a relative path is not resolved against anything", async (_name, checkout) => {
     await writeFile(join(workspace, "docs", "p.md"), "in the workspace");
     expect(await read(checkout, join(workspace, "docs", "p.md"))).toEqual({ kind: "outside" });
-    expect(await read(checkout, "docs/p.md")).toEqual({ kind: "unavailable" });
+    expect(await read(checkout, "docs/p.md")).toEqual({ kind: "missing" });
     await writeFile(join(dataDir, "plans", THREAD, "p.md"), "in the plan dir");
     expect(await read(checkout, join(dataDir, "plans", THREAD, "p.md"))).toMatchObject({ kind: "read" });
   });
@@ -150,20 +189,64 @@ describe("readPlanFileForForm", () => {
 });
 
 describe("planFileUnchanged", () => {
+  const unchanged = (path: string, hash: string, checkout: string | null | "lookup-fails" = workspace) =>
+    planFileUnchanged(hostWith(checkout), THREAD, path, hash);
+  const hashOf = (text: string) => planSha256Of(Buffer.from(text));
+
   it("is true for the same bytes, false for a changed, deleted or unreadable file", async () => {
     const file = join(workspace, "p.md");
     await writeFile(file, "one");
-    const hash = planSha256Of(Buffer.from("one"));
-    expect(await planFileUnchanged(file, hash)).toBe(true);
+    expect(await unchanged(file, hashOf("one"))).toBe(true);
     await writeFile(file, "one two");
-    expect(await planFileUnchanged(file, hash)).toBe(false);
+    expect(await unchanged(file, hashOf("one"))).toBe(false);
     await rm(file);
-    expect(await planFileUnchanged(file, hash)).toBe(false);
+    expect(await unchanged(file, hashOf("one"))).toBe(false);
     await mkdir(file);
-    expect(await planFileUnchanged(file, hash)).toBe(false);
+    expect(await unchanged(file, hashOf("one"))).toBe(false);
   });
 
-  it("is false when the read takes longer than the 1 s budget, and stays under core's 2 s describeSubmission budget", async () => {
+  it("is true for a plan in the plan directory", async () => {
+    const file = join(dataDir, "plans", THREAD, "plan.md");
+    await writeFile(file, "kept");
+    expect(await unchanged(file, hashOf("kept"), null)).toBe(true);
+  });
+
+  it("does not read through a symlink put in the file's place after the form opened, even one that stays inside the roots", async () => {
+    const file = join(workspace, "p.md");
+    await writeFile(file, "one");
+    await writeFile(join(workspace, "other.md"), "one");
+    await rm(file);
+    await symlink(join(workspace, "other.md"), file);
+    expect(await unchanged(file, hashOf("one"))).toBe(false);
+  });
+
+  it("does not read a file that now resolves outside the allowed roots, whatever it holds", async () => {
+    await mkdir(join(base, "other"));
+    await writeFile(join(base, "other", "secret.md"), "secret");
+    const file = join(workspace, "p.md");
+    await writeFile(file, "secret");
+    await rm(file);
+    await symlink(join(base, "other", "secret.md"), file);
+    expect(await unchanged(file, hashOf("secret"))).toBe(false);
+    // A real path outside the roots is refused too, though it is its own resolved path.
+    expect(await unchanged(join(base, "other", "secret.md"), hashOf("secret"))).toBe(false);
+  });
+
+  it("is false when the thread's roots cannot be found any more", async () => {
+    const file = join(workspace, "p.md");
+    await writeFile(file, "one");
+    expect(await unchanged(file, hashOf("one"), null)).toBe(false);
+    expect(await unchanged(file, hashOf("one"), "lookup-fails")).toBe(false);
+  });
+
+  it("is false when the roots lookup itself fails", async () => {
+    const file = join(workspace, "p.md");
+    await writeFile(file, "one");
+    const broken = { server: {}, sdk: {} } as unknown as BbPluginApi;
+    expect(await planFileUnchanged(broken, THREAD, file, hashOf("one"))).toBe(false);
+  });
+
+  it("is false when the check takes longer than the 1 s budget, and stays under core's 2 s describeSubmission budget", async () => {
     expect(PLAN_REREAD_TIMEOUT_MS).toBe(1000);
     vi.resetModules();
     vi.doMock("node:fs/promises", async (importOriginal) => ({
@@ -174,8 +257,10 @@ describe("planFileUnchanged", () => {
         }),
     }));
     const slow = await import("./plan-file.js");
+    const file = join(workspace, "p.md");
+    await writeFile(file, "one");
     vi.useFakeTimers();
-    const pending = slow.planFileUnchanged("/never/returns", "hash");
+    const pending = slow.planFileUnchanged(hostWith(workspace), THREAD, file, hashOf("one"));
     await vi.advanceTimersByTimeAsync(slow.PLAN_REREAD_TIMEOUT_MS - 1);
     let settled = false;
     void pending.then(() => {
