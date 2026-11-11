@@ -1,6 +1,6 @@
 {
   "name": "@lettland/bb-plugin-model-instructions",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "type": "module",
   "description": "Add instructions, bundled skills and a Claude Code profile to a thread by its directory, project, provider, model, and whether it is a top-level or child thread.",
   "license": "BSD-2-Clause",
