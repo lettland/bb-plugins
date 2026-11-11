@@ -213,6 +213,10 @@ export function createCaches(bb: BbPluginApi, onRefreshed: () => void) {
         );
       return out;
     },
+    /** A project's checkouts with their host ids (paths normalized), or undefined when the project is not cached. */
+    sourcesOf(projectId: string): ProjectSource[] | undefined {
+      return projects.get(projectId)?.sources;
+    },
     projectName(projectId: string): string | undefined {
       return projects.get(projectId)?.name;
     },

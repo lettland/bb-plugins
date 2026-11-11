@@ -10,6 +10,15 @@ import {
   type ThreadType,
 } from "./budget.js";
 import type { Scope } from "./paths.js";
+import { importCommand, type ImportDeps } from "./import.js";
+import {
+  checkClaudeProfile,
+  claudeProfileLines,
+  pinKey,
+  unpinThread,
+  type ClaudeProfileDeps,
+} from "./profile.js";
+import { ignoredScopeText, type ProfilesState } from "./profiles-file.js";
 import type { Caches } from "./projects.js";
 import {
   activeScopeNamesIn,
@@ -23,6 +32,7 @@ import {
   unresolvedRefs,
   type Rule,
 } from "./rules.js";
+import { setupCommand, type SetupDeps } from "./setup.js";
 import type { SkillEntry } from "./skills.js";
 
 /** A thread type that is over the limit, as `status` lists it. */
@@ -55,10 +65,18 @@ export interface CliDeps {
   overBudget(): OverBudgetRecord[];
   events(): OverflowEvent[];
   threads: ThreadLookup;
+  profiles(): ProfilesState;
+  /** Where profiles.json is read from. */
+  profilesFile: string;
+  /** Names of setting scopes left out because a profile scope has the same name. */
+  ignoredSettingScopes(): string[];
+  profile: ClaudeProfileDeps;
+  setup: SetupDeps;
+  importDirSkills: ImportDeps;
 }
 
 export const USAGE =
-  "bb model-instructions status [--json] | check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json]";
+  "bb model-instructions status [--json] | check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json] | setup [--dry-run] [--json] | unpin [<thread-id>] | import-dir-skills [--dry-run] [--json]";
 
 const out = (value: unknown): PluginCliResult => ({
   exitCode: 0,
@@ -89,7 +107,7 @@ function uncheckedText(unchecked: ReadonlyArray<{ id: string; reason: string }>)
   return unchecked.map((provider) => `${provider.id} (${provider.reason})`).join(", ");
 }
 
-function status(deps: CliDeps, json: boolean): PluginCliResult {
+async function status(deps: CliDeps, json: boolean): Promise<PluginCliResult> {
   const rules = deps.rules();
   const skills = deps.skills();
   const snapshot = deps.caches.snapshot();
@@ -99,7 +117,24 @@ function status(deps: CliDeps, json: boolean): PluginCliResult {
     scopes.map((scope) => scope.name),
     skills.map((skill) => skill.name),
   );
+  const profiles = deps.profiles();
   const payload = {
+    profiles: {
+      file: deps.profilesFile,
+      state: profiles.state,
+      ...(profiles.state === "malformed" ? { message: profiles.message } : {}),
+      scopes:
+        profiles.state === "valid"
+          ? profiles.scopes.map((scope) => ({
+              name: scope.name,
+              paths: scope.paths,
+              claudeConfigDir: scope.claudeConfigDir,
+              dirExists: deps.profile.isDir(scope.claudeConfigDir),
+            }))
+          : [],
+      pins: (await deps.profile.kv.list(pinKey(""))).length,
+    },
+    ignoredSettingScopes: deps.ignoredSettingScopes(),
     scopes: scopes.map((scope) => ({ name: scope.name, paths: scope.paths })),
     rules: rules.map((rule, index) => ({
       name: ruleLabel(rule, index),
@@ -132,7 +167,18 @@ function status(deps: CliDeps, json: boolean): PluginCliResult {
     overflowEvents: deps.events(),
   };
   if (json) return out(payload);
-  const lines = ["scopes:"];
+  const lines = [
+    `profiles file: ${payload.profiles.file}`,
+    payload.profiles.state === "malformed"
+      ? `profiles.json: malformed — ${payload.profiles.message}`
+      : `profiles.json: ${payload.profiles.state}`,
+  ];
+  for (const scope of payload.profiles.scopes)
+    lines.push(
+      `  profile scope ${scope.name}: ${scope.paths.join(", ")} -> ${scope.claudeConfigDir} (${scope.dirExists ? "directory exists" : "not a directory"})`,
+    );
+  for (const name of payload.ignoredSettingScopes) lines.push(ignoredScopeText(name));
+  lines.push(`pins: ${payload.profiles.pins}`, "", "scopes:");
   if (payload.scopes.length === 0) lines.push("  (none)");
   for (const scope of payload.scopes) lines.push(`  ${scope.name}: ${scope.paths.join(", ")}`);
   lines.push("", "rules:");
@@ -354,6 +400,9 @@ async function check(
     matched,
     deps.skills().map((skill) => skill.name),
   );
+  const { decision, pinned } = await checkClaudeProfile(deps.profile, projectId, ctx.threadId);
+  const ignored = deps.ignoredSettingScopes();
+  const profiles = deps.profiles();
   const payload = {
     target: { provider, model, role, project: projectName, projectId, path: environmentPath, title },
     sources,
@@ -363,6 +412,20 @@ async function check(
     limit: INSTRUCTIONS_LIMIT,
     dropped: result.dropped,
     skills: result.skills,
+    ignoredSettingScopes: ignored,
+    claudeProfile: {
+      profilesFile: profiles.state,
+      decision:
+        decision === null
+          ? null
+          : {
+              status: decision.status,
+              dir: decision.pin.dir,
+              scope: decision.pin.scope,
+              conflict: decision.conflict,
+            },
+      ...(ctx.threadId === undefined ? {} : { threadId: ctx.threadId, pinned }),
+    },
   };
   if (flags.json) return out(payload);
   const target = payload.target;
@@ -379,6 +442,8 @@ async function check(
     payload.dropped.length === 0 ? "dropped: none" : `dropped: ${payload.dropped.join(", ")}`,
     `skills: ${payload.skills.join(", ")}`,
   ];
+  for (const name of ignored) lines.push(ignoredScopeText(name));
+  lines.push(...claudeProfileLines(profiles, decision, pinned, ctx.threadId));
   return { exitCode: 0, stdout: lines.join("\n") + "\n" };
 }
 
@@ -388,12 +453,23 @@ export async function runCli(
   deps: CliDeps,
 ): Promise<PluginCliResult> {
   const [command = "status", ...rest] = argv;
+  if (command === "setup") {
+    return setupCommand(deps.setup, rest.filter((arg) => arg !== "--json"), rest.includes("--json"));
+  }
+  if (command === "unpin") return unpinThread(deps.profile.kv, rest[0], ctx.threadId);
+  if (command === "import-dir-skills") {
+    return importCommand(
+      deps.importDirSkills,
+      rest.filter((arg) => arg !== "--json"),
+      rest.includes("--json"),
+    );
+  }
   if (command === "status") {
     const json = rest.includes("--json");
     const extra = rest.filter((arg) => arg !== "--json");
     return extra.length > 0
       ? usageError(`status: unknown argument "${extra[0]}"`)
-      : status(deps, json);
+      : await status(deps, json);
   }
   if (command === "check") return check(rest, ctx, deps);
   return usageError(`unknown command "${command}"`);

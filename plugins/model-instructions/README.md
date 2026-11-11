@@ -3,7 +3,8 @@
 Custom instructions per provider, model, and project for bb. bb's built-in
 "Custom instructions" setting applies to every thread; this plugin adds
 instructions only to threads whose provider, model, project, and position
-(top-level or child thread) match a rule.
+(top-level or child thread) match a rule. It also gives Claude Code threads a
+separate Claude profile per directory (see Claude profiles).
 
 ## Rules
 
@@ -96,7 +97,7 @@ in the object form:
   resolved on both sides, so a link into the tree counts. A path that does not
   exist yet is used as written.
 - The array form has no `scopes`; a `scope` rule there matches a scope only if
-  another source defines it.
+  another source defines it. Profile scopes (see Claude profiles) are another source.
 - A rule with no `scope` matches in every directory. All other matchers
   (`provider`, `model`, `project`, `skipProjects`, `skipTitles`, `threads`) work
   as before and must match too.
@@ -201,15 +202,227 @@ one text:
   through project checkouts starts working when the project list loads; the
   environment path of a thread is always a candidate.
 
+## Claude profiles
+
+A profile scope is a scope that also sets `claudeConfigDir`, a Claude Code
+config directory (an absolute path or one starting with `~/`). Profile scopes
+live in `~/.bb/model-instructions/profiles.json`, a file you own, not in the
+`rules` setting:
+
+```json
+{
+  "scopes": [
+    { "name": "work", "paths": ["~/workspace/<org>"], "claudeConfigDir": "~/.claude-work" }
+  ]
+}
+```
+
+- The file is strict: `scopes` only, each scope has `name`, `paths` and
+  `claudeConfigDir` and nothing else. Names, paths and limits are the same as for
+  setting scopes (1–128 character unique names, 1–16 paths, at most 32 scopes).
+  `claudeConfigDir` may not be your home directory or one of its parents.
+- A profile scope is a full scope: a rule can name it in `scope`, and the save
+  check knows its name. A rule can use it to inject text and skills for the same
+  directories that select the profile.
+- **The file defines the profile scope.** A scope in the `rules` setting with the
+  same name as a profile scope is ignored: the plugin logs a warning at load, and
+  `status` and `check` show `ignored setting scope "<name>": a profile scope with
+  that name comes from profiles.json`. The profile decision uses only the paths in
+  the file, so nothing that can run `bb plugin config` can move or redirect a
+  Claude login.
+- The file is read when the plugin loads, again on `bb plugin reload`, and right
+  after `setup` or `import-dir-skills` writes it.
+
+Claude Code threads whose project lives under a profile scope start with
+`CLAUDE_CONFIG_DIR` set to its directory, so they get that profile's plugins,
+subagents and hooks natively while other projects keep the default profile.
+"Default profile" here means the personal Claude login, the profile at
+`~/.claude`.
+
+- The profile replaces the default one entirely for those threads: its
+  settings, permissions, hooks, MCP servers, plugins, memory and `CLAUDE.md`.
+  Settings that only exist in the default profile (such as
+  `worktree.bgIsolation`) are not inherited.
+- Matching uses the project's checkout paths only, on the host the thread runs
+  on. A project with a checkout under the scope gets the profile for all of its
+  threads; an environment path under the scope alone matches the scope's rules
+  but does not select the profile.
+- Local host only. The directory is expanded and checked on the machine that
+  runs the bb server, and bb does not tell a plugin which host that is, so the
+  plugin cannot refuse other hosts: a thread running on a remote host would
+  receive the same path, which does not exist there. Use `claudeConfigDir` only
+  for projects whose threads run on the bb server's own machine.
+- A thread's profile is fixed at its first resolution and kept as a pin for its
+  lifetime, across plugin reloads, so editing the file or reloading the plugin
+  never moves a conversation to another profile. This includes the first
+  resolution of a thread that already ran under a different profile: when a
+  project already has Claude Code threads under another profile, each of those
+  threads switches to the scope's profile on its next turn, and its earlier
+  session stays in the old directory, so the turn may start without it.
+- **An existing pin is always served first and fails closed.** If a pinned
+  directory later disappears, the thread still gets that directory (it never
+  falls back to the personal login), the plugin logs a warning, and the pin is
+  kept. This holds in every state of profiles.json.
+- **New pins are written only while profiles.json is valid.**
+  - Absent: a thread with no pin gets no `CLAUDE_CONFIG_DIR` and no pin is
+    written, so threads keep using the default profile until you create the file.
+  - Malformed (it cannot be read, is not valid JSON or breaks a rule above): it is
+    never treated as absent. The plugin logs a warning at load and `status` shows
+    `profiles.json: malformed — <message>`. Existing pins are still served, no new
+    pin is written, and rules and skills keep working.
+- To make a thread resolve afresh (for example after fixing the file), run
+  `bb model-instructions unpin [<thread-id>]` (default: the current thread). It
+  deletes the thread's pin and prints what it removed. The thread's earlier
+  Claude session stays in its previous profile; the next turn may start without
+  it. A project that cannot be resolved (the lookup failed or took over 3
+  seconds) pins the thread to the default profile; unpin it to try again. Pins
+  are kept when a thread is deleted.
+- If the directory is not a directory (missing, or a file), a new thread starts
+  with the default profile and is pinned to it; the plugin logs a warning and
+  `check` shows the reason. It never lets Claude create a fresh, logged-out
+  profile there. If a project matches several profile scopes with different
+  directories, the first scope by name wins and a warning is logged.
+- A forked thread gets its own id and resolves on its own; the same project
+  gives the same profile.
+- A `CLAUDE_CODE_OAUTH_TOKEN` passed by bb takes priority over the profile's
+  own login. Without one, bb threads use the profile's login and refresh it
+  alongside any standalone `claude` session using the same directory.
+- `status` shows the state of profiles.json, each profile scope with its
+  directory and whether it exists, the ignored setting scopes and the number of
+  pins. `check` shows which profile the project's checkouts select (all hosts;
+  "unknown project" if bb cannot resolve it) and the pin of the calling thread.
+
+## Setup
+
+```sh
+bb model-instructions setup [--dry-run] [--json]
+```
+
+`setup` creates `profiles.json` with one `work` scope when the file is absent. It
+reads only the sources listed below and guesses nothing: if any step is unsure, it
+writes nothing and says why. It never replaces a file that exists, even one that
+appears while it runs.
+
+1. **Profile.** The `customAgents` setting of the `provider-acp` and
+   `bb--provider-acp-next` plugins is a JSON array of ACP agents. Setup reads only
+   each agent's `env.CLAUDE_CONFIG_DIR` (an absolute path or one starting with
+   `~/`), resolves symlinks, and keeps directories that exist. The default profile
+   (`~/.claude`) and your home directory or its parents never count. Exactly one
+   distinct directory must remain, for example `~/.claude-work`.
+2. **Work remotes.** The profile's `settings.json` lists marketplaces under
+   `extraKnownMarketplaces`. Only `git` marketplaces count. Each URL becomes a
+   lowercase `host/first-path-segment` key, for example `git.example.com/acme`,
+   whether it is written as `https://`, `ssh://git@host:port/`, or
+   `git@host:group/...`; userinfo, port, and a trailing `.git` are dropped. Keys on
+   GitHub, GitLab.com, Bitbucket Cloud and Codeberg are ignored, and so is any key
+   the default profile's `settings.json` also lists. At least one key must remain.
+3. **Projects.** Bb projects whose remote has one of those keys, and that have a
+   checkout on this machine, are the work projects.
+4. **Directory.** All matched checkouts must share one parent directory, and that
+   parent must not be your home directory or one of its parents. Every entry in
+   the parent that does not start with a dot must be a git checkout whose `origin`
+   remote has a work key. Setup reads each `.git/config` itself and does not run
+   git; a `.git` file (a linked worktree) counts as not work.
+
+The written file looks like this, with paths in `~/` form when they are under your
+home directory:
+
+```json
+{ "scopes": [ { "name": "work", "paths": ["~/src/acme"], "claudeConfigDir": "~/.claude-work" } ] }
+```
+
+- Without flags it creates the file when detection succeeds and reads it into the
+  running plugin at once, so new threads use it without `bb plugin reload`.
+- `--dry-run` always runs detection and writes nothing. It prints the scope it
+  would write and the key each matched project produced, plus `would skip: exists`
+  if the file is already there.
+- `--json` prints `{ outcome, reason?, candidate?, matches, profileSource?,
+  affectedThreads }`, where `outcome` is `wrote`, `skipped`, or `dry-run`.
+- Exit code 0 for a write or a dry run, 2 for any skip. Skip reasons: `exists`,
+  `no-profile`, `ambiguous-profiles`, `no-self-hosted-marketplace`,
+  `no-project-match`, `no-common-parent` and `parent-has-non-work-entries`.
+- The output shows detected paths and normalized `host/group` keys only. Raw
+  remote URLs, and anything that could hold credentials, are never printed or
+  logged.
+- Setup does not run on install; run it yourself. Only ACP `customAgents` are
+  read, only a self-hosted `git` marketplace counts, an ssh config alias host never
+  matches the real host, and nested layouts skip. A directory scope covers every
+  repository under the work tree, which is why the parent must contain nothing but
+  work checkouts. All paths are checked on the machine that runs the bb server.
+
+A thread that already started is pinned to the default profile for good (see
+above). After a write, setup lists those threads whose project the new scope
+covers; run `bb model-instructions unpin <thread-id>` for each to move it to the
+work profile on its next turn.
+
+## Moving from dir-skills
+
+`dir-skills` is deprecated: this plugin does what it did (directory scopes, skills,
+Claude profiles, pins). Skills are now claimed by a rule's `skills` globs, so a
+scope's skill patterns become rules. To move your scopes, claims and pins over:
+
+1. In dir-skills, run `bb dir-skills export`. It writes
+   `~/.bb/dir-skills/export.json` with the scopes from its settings form and every
+   Claude profile pin, which only that plugin can read.
+2. In this plugin, run `bb model-instructions import-dir-skills --dry-run`, read
+   the plan, then run it without `--dry-run`.
+
+```sh
+bb model-instructions import-dir-skills [--dry-run] [--json]
+```
+
+It takes no file argument. It reads only `~/.bb/dir-skills/scopes.json` (may be
+absent) and `~/.bb/dir-skills/export.json` (required; without it the command exits
+1 with `import-dir-skills: ~/.bb/dir-skills/export.json not found; run bb
+dir-skills export first`).
+
+- **Setting scopes and skill rules.** Every scope without `claudeConfigDir` (from
+  `scopes.json`) and every settings-form scope (from `export.json`) becomes a
+  scope in the `rules` setting plus a rule `{ "name": "dir-skills:<scope>",
+  "scope": "<scope>", "skills": [<the scope's patterns>] }`. A settings-form scope
+  replaces a `scopes.json` scope of the same name, except one that has
+  `claudeConfigDir`. The example scope dir-skills shipped (`work`, `~/workspace/work`,
+  `work-*`) is never imported.
+- **Profile scopes.** A `scopes.json` scope with `claudeConfigDir` goes into
+  `profiles.json`, only when that file is absent; a file that exists is never
+  overwritten. The scope is then listed as skipped, with its reason, and so is its
+  rule, unless the file already has the identical scope (a re-run).
+- **Pins.** Each pin in `export.json` is checked strictly. A pin is imported when
+  its directory is `null` (default profile) or equals a `claudeConfigDir` in
+  `profiles.json` after the write above; any other pin is rejected and listed. An
+  existing pin is never overwritten (it is listed as kept).
+- **Skill patterns** that match no bundled skill would fail the save check, so
+  that pattern is not written; it is listed as `skipped: no bundled skill matches
+  "<pattern>"`.
+- **Names.** A scope whose name, paths or directory break this plugin's rules is
+  rejected with a list, nothing is written and the command exits 1; rename it in
+  the source file and run again.
+- **The setting** is changed by read-modify-write: it must parse (otherwise exit 1,
+  nothing written), an array is converted to the object form
+  `{ "vars": {}, "scopes": [...], "rules": [...] }`, every existing rule is kept
+  unchanged and in order, and the imported scopes and rules are appended. A scope or
+  rule whose name already exists is skipped and listed. The normal save-time check
+  runs; if it rejects, the command prints the reason and exits 1.
+- **Order.** Everything is validated first; then `profiles.json`, then the setting,
+  then the pins. `--dry-run` prints the full plan and writes nothing; `--json`
+  prints the same data.
+
+Run it again after a failure part-way: scopes and rules that already exist are
+skipped, and the profile scope already in `profiles.json` is recognised.
+
 ## Inspect and try
 
 ```sh
 bb model-instructions status [--json]
 bb model-instructions check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json]
 bb model-instructions check --all [--json]
+bb model-instructions setup [--dry-run] [--json]
+bb model-instructions unpin [<thread-id>]
+bb model-instructions import-dir-skills [--dry-run] [--json]
 ```
 
-- `status` lists the scopes, the rules (name or `rules[<index>]`, matchers,
+- `status` lists the state of profiles.json, the profile scopes, the ignored
+  setting scopes and the pin count (see Claude profiles), the scopes, the rules (name or `rules[<index>]`, matchers,
   instructions length, skills), the bundled skills with the rules that claim
   them and the unclaimed ones, the state of the caches, the providers whose
   models could not be listed (unchecked, with the reason), the thread types that
@@ -217,7 +430,8 @@ bb model-instructions check --all [--json]
   matches nothing is marked under its rule (`! scope "<glob>" matches nothing`;
   `unresolved` in `--json`).
 - `check` shows what one thread would get: the matched rules, the length out of
-  4096, the dropped rules and the skills. Run inside a bb thread, it takes
+  4096, the dropped rules and the skills, then the Claude profile decision for the
+  project and the calling thread's pin. Run inside a bb thread, it takes
   provider, model, role, title, project and path from that thread; the output
   says which values were defaulted. A flag overrides its default. `--child` and
   `--top-level` force the role; giving both is a usage error. `--project`
@@ -226,6 +440,7 @@ bb model-instructions check --all [--json]
 - `check --all` prints the save-time budget table, grouped like the budget
   error. It exits 1 when any thread type is over the limit. When providers are
   unchecked it ends with `unchecked providers: <id> (<reason>), ...`.
+- `setup`, `unpin` and `import-dir-skills` are described above.
 - An unknown command exits 2 with a usage line.
 
 ## Example: Opus supervises, Sonnet implements

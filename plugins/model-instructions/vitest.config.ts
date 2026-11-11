@@ -16,14 +16,14 @@ export default defineConfig({
         test: {
           name: "bb-plugin-model-instructions",
           include: ["**/*.test.{ts,tsx}"],
-          exclude: [...exclude, "server.plugin.test.ts"],
+          exclude: [...exclude, "server.plugin.test.ts", "server.profiles.test.ts"],
         },
       },
       {
         // Plugin-level tests set HOME, swap node:url and reset modules: one fork per file, files in series.
         test: {
           name: "bb-plugin-model-instructions-server",
-          include: ["server.plugin.test.ts"],
+          include: ["server.plugin.test.ts", "server.profiles.test.ts"],
           exclude,
           pool: "forks",
           isolate: true,

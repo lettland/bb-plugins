@@ -19,6 +19,12 @@ function depsFor(snapshot: ReturnType<typeof snapshotOf>): CliDeps {
       },
       defaultExecutionOptions: async () => null,
     },
+    profiles: () => ({ state: "absent" }),
+    profilesFile: "/profiles.json",
+    ignoredSettingScopes: () => [],
+    profile: { kv: { list: async () => [] } } as unknown as CliDeps["profile"],
+    setup: {} as CliDeps["setup"],
+    importDirSkills: {} as CliDeps["importDirSkills"],
   };
 }
 

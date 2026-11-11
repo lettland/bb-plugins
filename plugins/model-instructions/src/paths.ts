@@ -43,17 +43,17 @@ export function buildScope(
 }
 
 /** Scopes with a path that contains any of the directories; the directories must be normalized already. */
-export function activeScopesIn(scopes: Scope[], dirs: string[]): Scope[] {
+export function activeScopesIn<T extends Scope>(scopes: T[], dirs: string[]): T[] {
   return scopes.filter((scope) =>
     scope.paths.some((root) => dirs.some((dir) => isWithin(root, dir))),
   );
 }
 
 /** Scopes with a path that contains any of the candidate paths; the candidates are normalized here. */
-export function activeScopes(
-  scopes: Scope[],
+export function activeScopes<T extends Scope>(
+  scopes: T[],
   candidatePaths: string[],
-): Scope[] {
+): T[] {
   return activeScopesIn(
     scopes,
     candidatePaths.map((p) => normalizeDir(p)),

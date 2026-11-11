@@ -1,9 +1,25 @@
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { budgetReport, cacheProblem, describeType, type Role } from "./src/budget.js";
 import { runCli, type OverBudgetRecord, type OverflowEvent } from "./src/cli.js";
 import { buildScope, type Scope } from "./src/paths.js";
+import {
+  isDirectory,
+  PROJECT_LOOKUP_TIMEOUT_MS,
+  resolveClaudeEnv,
+  warnMissingConfigDirs,
+  withTimeout,
+  type ClaudeProfileDeps,
+} from "./src/profile.js";
+import {
+  ignoredScopeText,
+  mergeScopes,
+  profilesFile,
+  readProfiles,
+  type ProfilesState,
+} from "./src/profiles-file.js";
 import { createCaches } from "./src/projects.js";
 import {
   activeScopeNamesIn,
@@ -14,8 +30,10 @@ import {
   unresolvedRefs,
   type Config,
 } from "./src/rules.js";
-import { createRulesSettingSchema } from "./src/settings.js";
+import { createRulesSettingSchema, settingProblem, type SettingsEnv } from "./src/settings.js";
 import { loadSkills, type SkillEntry } from "./src/skills.js";
+import type { ImportDeps } from "./src/import.js";
+import type { SetupDeps } from "./src/setup.js";
 
 const OVERFLOW_EVENTS_KEPT = 20;
 const OVERFLOW_SEEN_KEPT = 1000;
@@ -36,8 +54,14 @@ export default async function plugin(bb: BbPluginApi) {
   }
   const skillNames = () => skills.map((skill) => skill.name);
 
+  const home = homedir();
+  const profilesPath = profilesFile(home);
+
   let config: Config = { rules: [], scopes: [] };
   let scopes: Scope[] = [];
+  /** Setting scopes left out of `scopes` because a profile scope has their name. */
+  let ignoredScopes: string[] = [];
+  let profiles: ProfilesState = { state: "absent" };
   const overBudget = new Map<string, OverBudgetRecord>();
   const overflowSeen = new Set<string>();
   const overflowEvents: OverflowEvent[] = [];
@@ -70,6 +94,49 @@ export default async function plugin(bb: BbPluginApi) {
 
   const caches = createCaches(bb, recheckBudget);
 
+  /** Profile scopes come only from profiles.json; the `rules` setting never feeds a Claude profile. */
+  const profileScopes = () => (profiles.state === "valid" ? profiles.scopes : []);
+
+  /** The scope list rules see: profile scopes first, then the setting's scopes that do not collide with them. */
+  function rebuildScopes(): void {
+    const merged = mergeScopes(
+      config.scopes.map((scope) => buildScope(scope)),
+      profileScopes(),
+    );
+    scopes = merged.scopes;
+    ignoredScopes = merged.ignored;
+    for (const name of ignoredScopes) bb.log.warn(ignoredScopeText(name));
+  }
+
+  /** Reads profiles.json: at startup, and again after `setup` or `import-dir-skills` writes it. A reload of the plugin re-runs this too. */
+  function loadProfiles(): void {
+    profiles = readProfiles(profilesPath, home);
+    if (profiles.state === "malformed")
+      bb.log.warn(
+        `profiles.json is malformed and ignored: ${profiles.message}; no new Claude profile is pinned until it is fixed (existing pins still apply; rules and skills are unaffected)`,
+      );
+    else if (profiles.state === "absent")
+      bb.log.info(
+        "profiles.json is absent: a thread without a pin gets no CLAUDE_CONFIG_DIR, and no pin is written",
+      );
+    else {
+      bb.log.info(`loaded ${profiles.scopes.length} profile scope(s) from profiles.json`);
+      warnMissingConfigDirs(profiles.scopes, bb.log);
+    }
+  }
+
+  function reloadProfiles(): void {
+    loadProfiles();
+    rebuildScopes();
+    recheckBudget();
+  }
+
+  const settingsEnv: SettingsEnv = {
+    skillNames,
+    scopesFor: (own) => mergeScopes(own, profileScopes()).scopes,
+    caches: () => caches.snapshot(),
+  };
+
   const settings = bb.settings.define({
     rules: {
       type: "string",
@@ -77,12 +144,7 @@ export default async function plugin(bb: BbPluginApi) {
       description:
         'JSON array of rules, or an object { "vars"?, "scopes"?, "rules" }. See the plugin README; run `bb model-instructions status` to inspect and `bb model-instructions check` to try a thread.',
       experimental_multiline: true,
-      experimental_schema: createRulesSettingSchema({
-        skillNames,
-        // Another source of scopes (a file) plugs in here.
-        scopesFor: (own) => own,
-        caches: () => caches.snapshot(),
-      }),
+      experimental_schema: createRulesSettingSchema(settingsEnv),
       default: "[]",
     },
   });
@@ -90,16 +152,16 @@ export default async function plugin(bb: BbPluginApi) {
   function load(json: string): void {
     try {
       config = parseConfig(json);
-      scopes = config.scopes.map((scope) => buildScope(scope));
     } catch (error) {
       config = { rules: [], scopes: [] };
-      scopes = [];
+      rebuildScopes();
       bb.log.warn(
         // v8 ignore next -- @preserve parseConfig only throws Error, so the non-Error arm is unreachable.
         `rules setting ignored: ${error instanceof Error ? error.message : String(error)}`,
       );
       return;
     }
+    rebuildScopes();
     bb.log.info(
       `loaded ${config.rules.length} rule(s), ${scopes.length} scope(s)`,
     );
@@ -119,6 +181,7 @@ export default async function plugin(bb: BbPluginApi) {
       );
   }
 
+  loadProfiles();
   load((await settings.get()).rules);
   settings.onChange((next) => {
     load(next.rules);
@@ -171,9 +234,62 @@ export default async function plugin(bb: BbPluginApi) {
     };
   });
 
+  const profileDeps: ClaudeProfileDeps = {
+    get profiles() {
+      return profiles;
+    },
+    log: bb.log,
+    kv: bb.storage.kv,
+    isDir: isDirectory,
+    async sourcesFor(projectId) {
+      if (caches.sourcesOf(projectId) === undefined)
+        await withTimeout(caches.refresh(), PROJECT_LOOKUP_TIMEOUT_MS);
+      return caches.sourcesOf(projectId);
+    },
+  };
+
+  if (typeof bb.providers?.experimental_contributeEnv === "function") {
+    bb.providers.experimental_contributeEnv("claude-code", (ctx) =>
+      resolveClaudeEnv(profileDeps, ctx),
+    );
+  } else {
+    bb.log.warn(
+      "bb.providers.experimental_contributeEnv unavailable; claudeConfigDir is not applied",
+    );
+  }
+
+  const setupDeps: SetupDeps = {
+    home,
+    profilesFile: profilesPath,
+    sdk: bb.sdk,
+    kv: bb.storage.kv,
+    log: bb.log,
+    reload: reloadProfiles,
+  };
+
+  const importDeps: ImportDeps = {
+    home,
+    scopesFile: path.join(home, ".bb", "dir-skills", "scopes.json"),
+    exportFile: path.join(home, ".bb", "dir-skills", "export.json"),
+    profilesFile: profilesPath,
+    skillNames,
+    getRules: async () => (await settings.get()).rules,
+    setRules: async (json) => {
+      await settings.experimental_set({ rules: json });
+    },
+    validate: (json, profileScopes) =>
+      settingProblem(json, {
+        ...settingsEnv,
+        scopesFor: (own) => mergeScopes(own, profileScopes).scopes,
+      }),
+    reloadProfiles,
+    kv: bb.storage.kv,
+    log: bb.log,
+  };
+
   bb.cli.register({
     name: "model-instructions",
-    summary: "Show the instruction rules and check what a thread would receive",
+    summary: "Show the instruction rules, Claude profiles and pins, and check what a thread would receive",
     commands: [
       {
         name: "status",
@@ -186,6 +302,21 @@ export default async function plugin(bb: BbPluginApi) {
         usage:
           "bb model-instructions check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json]",
       },
+      {
+        name: "setup",
+        summary: "Create profiles.json from detected work settings when it is missing",
+        usage: "bb model-instructions setup [--dry-run] [--json]",
+      },
+      {
+        name: "unpin",
+        summary: "Forget a thread's pinned Claude profile",
+        usage: "bb model-instructions unpin [<thread-id>]",
+      },
+      {
+        name: "import-dir-skills",
+        summary: "Import dir-skills scopes, skill claims and pins from ~/.bb/dir-skills",
+        usage: "bb model-instructions import-dir-skills [--dry-run] [--json]",
+      },
     ],
     run: (argv, ctx) =>
       runCli(argv, ctx, {
@@ -196,6 +327,12 @@ export default async function plugin(bb: BbPluginApi) {
         overBudget: () => [...overBudget.values()],
         events: () => overflowEvents,
         threads: bb.sdk.threads,
+        profiles: () => profiles,
+        profilesFile: profilesPath,
+        ignoredSettingScopes: () => ignoredScopes,
+        profile: profileDeps,
+        setup: setupDeps,
+        importDirSkills: importDeps,
       }),
   });
   // Registered first, so the rules apply at once; the first refresh must not hold them up.

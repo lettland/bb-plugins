@@ -117,6 +117,18 @@ A rule's `skills` globs claim bundled skills by name. A thread gets `model-instr
 no rule claims is injected nowhere; `*` never lists `model-instructions` twice. Skills are
 never dropped for the character limit.
 
+## Claude profiles
+
+`~/.bb/model-instructions/profiles.json` is `{ "scopes": [ { "name", "paths", "claudeConfigDir" } ] }`
+(strict, same name and path rules as scopes). A profile scope is a full scope, so rules can name it
+in `scope`, and Claude Code threads whose project has a checkout under it start with
+`CLAUDE_CONFIG_DIR` set to its directory. A setting scope with the same name is ignored (shown in
+`status` and `check`): the file decides, never the setting. A thread's profile is pinned at its first
+turn; an existing pin is always served, even if the file is absent or malformed, and a new pin is
+written only while the file is valid. `bb model-instructions setup [--dry-run] [--json]` creates the
+file when absent, `unpin [<thread-id>]` forgets a pin, and `import-dir-skills [--dry-run] [--json]`
+moves dir-skills scopes, skill claims and pins over (run `bb dir-skills export` first). See the README.
+
 ## Budget
 
 bb cuts a plugin's instructions at 4096 characters per thread, without a warning.
@@ -156,7 +168,9 @@ recent overflow events; a `scope` or `skills` glob that matches nothing is marke
 `check` shows the matched rules, length out of 4096, dropped rules and skills for one thread;
 inside a bb thread it defaults provider, model, role, title, project and path from that thread and
 prints what it defaulted. `--child` and `--top-level` force the role (both together is a usage
-error). `check --all` prints the save-time budget table and the unchecked providers.
+error). `check --all` prints the save-time budget table and the unchecked providers. `status` also shows
+the state of profiles.json, the profile scopes, ignored setting scopes and the pin count; `check`
+adds the Claude profile decision and the calling thread's pin.
 
 ## Read and change the rules
 

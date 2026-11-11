@@ -9,8 +9,8 @@ export const INSTRUCTIONS_LIMIT = 4096;
 /** The always-injected bundled skill; skill claims never match it. */
 export const SELF_SKILL = "model-instructions";
 const SEPARATOR = "\n\n";
-const MAX_SCOPES = 32;
-const MAX_SCOPE_PATHS = 16;
+export const MAX_SCOPES = 32;
+export const MAX_SCOPE_PATHS = 16;
 const MAX_NAME = 128;
 const MAX_PATH = 1024;
 
@@ -24,7 +24,7 @@ const globs = z
 // C0/C1 controls and the Unicode line separators: a name with one would add fake lines to logs and status.
 const NAME_CONTROL = /[\p{Cc}\u2028\u2029]/u;
 
-const nameSchema = z
+export const nameSchema = z
   .string()
   .trim()
   .min(1)
@@ -33,7 +33,7 @@ const nameSchema = z
     error: "the name must not contain control characters",
   });
 
-const scopePathSchema = z
+export const scopePathSchema = z
   .string()
   .trim()
   .max(MAX_PATH)
@@ -41,7 +41,7 @@ const scopePathSchema = z
     error: 'expected an absolute path or a path starting with "~/"',
   });
 
-const scopeSchema = z
+export const scopeSchema = z
   .object({
     name: nameSchema,
     paths: z.array(scopePathSchema).min(1).max(MAX_SCOPE_PATHS),

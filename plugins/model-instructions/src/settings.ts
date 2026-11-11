@@ -56,6 +56,17 @@ export function checkConfig(config: Config, env: SettingsEnv): string | null {
   return formatGroups(groupOverflows(report.overflowing, config.rules)).join("\n");
 }
 
+/** The save-time check of a setting text: why it cannot be saved, or null. */
+export function settingProblem(json: string, env: SettingsEnv): string | null {
+  let config: Config;
+  try {
+    config = parseConfig(json);
+  } catch (error) {
+    return (error as Error).message;
+  }
+  return checkConfig(config, env);
+}
+
 /** Validates the setting on write so a broken or over-long value never gets stored. */
 export function createRulesSettingSchema(env: SettingsEnv) {
   return z.string().superRefine((json, ctx) => {

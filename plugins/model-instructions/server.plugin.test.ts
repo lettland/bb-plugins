@@ -1039,6 +1039,8 @@ describe("bb model-instructions status", () => {
     const result = await harness.runCli(["status", "--json"]);
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({
+      profiles: { file: path.join(home, ".bb", "model-instructions", "profiles.json"), state: "absent", scopes: [], pins: 0 },
+      ignoredSettingScopes: [],
       scopes: [{ name: "work", paths: ["/work/one", "/work/two"] }],
       rules: [
         {
@@ -1077,6 +1079,10 @@ describe("bb model-instructions status", () => {
     const text = (await harness.runCli([])).stdout;
     expect(text).toBe(
       [
+        `profiles file: ${path.join(home, ".bb", "model-instructions", "profiles.json")}`,
+        "profiles.json: absent",
+        "pins: 0",
+        "",
         "scopes:",
         "  work: /work/one, /work/two",
         "",
@@ -1210,6 +1216,8 @@ describe("bb model-instructions check", () => {
       limit: 4096,
       dropped: [],
       skills: ["model-instructions", "work-conventions"],
+      ignoredSettingScopes: [],
+      claudeProfile: { profilesFile: "absent", decision: null, threadId: "thr_cli", pinned: null },
     });
     expect(lookup.get).toHaveBeenCalledWith({ threadId: "thr_cli", include: "environment" });
   });
@@ -1229,6 +1237,8 @@ describe("bb model-instructions check", () => {
         "length: 39/4096",
         "dropped: none",
         "skills: model-instructions, work-conventions",
+        "Claude profile: none (profiles.json is absent; a thread without a pin gets no CLAUDE_CONFIG_DIR and no pin is written)",
+        "Claude profile pinned for thread thr_cli: not pinned yet",
         "",
       ].join("\n"),
     );
@@ -1401,7 +1411,7 @@ describe("bb model-instructions check", () => {
     const result = await harness.runCli(["bogus"]);
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toBe(
-      'unknown command "bogus"\nusage: bb model-instructions status [--json] | check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json]\n',
+      'unknown command "bogus"\nusage: bb model-instructions status [--json] | check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json] | setup [--dry-run] [--json] | unpin [<thread-id>] | import-dir-skills [--dry-run] [--json]\n',
     );
   });
 });
@@ -1457,10 +1467,16 @@ describe("bb model-instructions check --all", () => {
 });
 
 describe("registration", () => {
-  it("registers the model-instructions command with status and check", async () => {
+  it("registers the model-instructions command with its commands", async () => {
     const { harness } = await load();
     expect(harness.registrations.cli?.name).toBe("model-instructions");
-    expect(harness.registrations.cli?.commands?.map((command) => command.name)).toEqual(["status", "check"]);
+    expect(harness.registrations.cli?.commands?.map((command) => command.name)).toEqual([
+      "status",
+      "check",
+      "setup",
+      "unpin",
+      "import-dir-skills",
+    ]);
   });
 
   it("describes the setting briefly and points to the README, status and check", async () => {
