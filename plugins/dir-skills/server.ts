@@ -33,6 +33,7 @@ import {
 import {
   autoSetup,
   autoSetupLine,
+  exportCommand,
   SETUP_RECORD_KEY,
   setupCommand,
   type SetupDeps,
@@ -73,6 +74,10 @@ function pluginRoot(): string {
 
 function userScopesFile(): string {
   return path.join(homedir(), ".bb", "dir-skills", "scopes.json");
+}
+
+function exportFile(): string {
+  return path.join(homedir(), ".bb", "dir-skills", "export.json");
 }
 
 function unquote(value: string): string {
@@ -417,6 +422,11 @@ export default async function plugin(bb: BbPluginApi) {
         summary: "Forget a thread's pinned Claude profile",
         usage: "bb dir-skills unpin [<thread-id>]",
       },
+      {
+        name: "export",
+        summary: "Write UI scopes and Claude profile pins to ~/.bb/dir-skills/export.json",
+        usage: "bb dir-skills export [--json]",
+      },
     ],
     async run(argv, ctx) {
       const json = argv.includes("--json");
@@ -529,9 +539,14 @@ export default async function plugin(bb: BbPluginApi) {
       }
       if (command === "setup") return setupCommand(setupDeps, args.slice(1), json);
       if (command === "unpin") return unpinThread(profileDeps.kv, args[1], ctx.threadId);
+      if (command === "export")
+        return exportCommand(
+          { kv: bb.storage.kv, uiScopes, target: exportFile() },
+          json,
+        );
       return {
         exitCode: 2,
-        stderr: `unknown command "${command}"; try: bb dir-skills status | check [<path>] | setup [--dry-run] | unpin [<thread-id>]\n`,
+        stderr: `unknown command "${command}"; try: bb dir-skills status | check [<path>] | setup [--dry-run] | unpin [<thread-id>] | export\n`,
       };
     },
   });

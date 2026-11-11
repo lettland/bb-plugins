@@ -26,6 +26,7 @@ import {
   ACP_PLUGIN_IDS,
   autoSetup,
   autoSetupLine,
+  exportCommand,
   runSetup,
   setupCommand,
   SetupError,
@@ -1052,6 +1053,24 @@ describe("writeScopesFile", () => {
     expect(thrown).toBeInstanceOf(SetupError);
     expect((thrown as Error).message).toBe("could not write scopes.json");
     expect(readdirSync(dir)).toEqual([]);
+  });
+});
+
+describe("exportCommand", () => {
+  it("skips a pin whose value is gone by the time it is read", async () => {
+    const w = world();
+    const target = path.join(w.home, ".bb", "dir-skills", "export.json");
+    const kv = {
+      list: async () => ["claude-config-dir:thr_b", "claude-config-dir:thr_gone", "claude-config-dir:thr_a"],
+      get: async <T,>(key: string) =>
+        (key.endsWith("thr_gone") ? undefined : { dir: null, scope: null }) as T | undefined,
+    };
+    const result = await exportCommand({ kv, uiScopes: [], target }, false);
+    expect(result).toEqual({ exitCode: 0, stdout: `wrote ${target}: 0 UI scope(s), 2 pin(s)\n` });
+    expect(JSON.parse(readFileSync(target, "utf8")).pins.map((p: { threadId: string }) => p.threadId)).toEqual([
+      "thr_a",
+      "thr_b",
+    ]);
   });
 });
 

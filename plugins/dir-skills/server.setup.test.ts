@@ -1,4 +1,4 @@
-import { chmodSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, readdirSync, statSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -385,6 +385,126 @@ describe("cli surface", () => {
     expect(result.stdout).toContain(`path: ${app}\n`);
     expect(result.stdout).not.toContain("(project");
     expect(result.stdout).toContain("Claude profile: needs --project");
+  });
+});
+
+describe("export", () => {
+  const exportPath = () => path.join(home, ".bb", "dir-skills", "export.json");
+  const uiScope = (app: string) => ({ name: "ui", paths: [app], skills: ["work-*"] });
+  const pin = (dir: string | null) => ({ dir, scope: dir === null ? null : "work" });
+
+  it("is listed with its usage and named in the unknown-command hint", async () => {
+    const { harness } = await load(acmeTree());
+    expect(harness.registrations.cli?.commands.find((c) => c.name === "export")).toMatchObject({
+      summary: "Write UI scopes and Claude profile pins to ~/.bb/dir-skills/export.json",
+      usage: "bb dir-skills export [--json]",
+    });
+    expect((await harness.runCli(["bogus"])).stderr).toContain("| unpin [<thread-id>] | export\n");
+  });
+
+  it("writes the UI scopes and the pins sorted by thread id, mode 0600", async () => {
+    const app = acmeTree();
+    const scopes = [uiScope(app)];
+    const { harness, bb } = await load(app, {
+      kv: {
+        uiScopes: scopes,
+        "claude-config-dir:thr_b": pin("/p/b"),
+        "claude-config-dir:thr_a": pin(null),
+        "unrelated-key": { dir: "/nope" },
+      },
+    });
+    const result = await harness.runCli(["export"]);
+    expect(result).toMatchObject({
+      exitCode: 0,
+      stdout: `wrote ${exportPath()}: 1 UI scope(s), 2 pin(s)\n`,
+    });
+    const text = readFileSync(exportPath(), "utf8");
+    expect(text).toBe(
+      JSON.stringify(
+        {
+          uiScopes: scopes,
+          pins: [
+            { threadId: "thr_a", pin: pin(null) },
+            { threadId: "thr_b", pin: pin("/p/b") },
+          ],
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    expect(statSync(exportPath()).mode & 0o777).toBe(0o600);
+    expect(readdirSync(path.dirname(exportPath()))).toEqual(["export.json"]);
+    expect(await bb.storage.kv.get("uiScopes")).toEqual(scopes);
+  });
+
+  it("prints json with the counts", async () => {
+    const app = acmeTree();
+    const { harness } = await load(app, {
+      kv: { uiScopes: [uiScope(app)], "claude-config-dir:thr_a": pin(null) },
+    });
+    const result = await harness.runCli(["export", "--json"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe(
+      JSON.stringify({ path: exportPath(), status: "wrote", uiScopes: 1, pins: 1 }, null, 2) + "\n",
+    );
+  });
+
+  it("writes empty lists when nothing is stored", async () => {
+    const { harness } = await load(acmeTree());
+    const result = await harness.runCli(["export"]);
+    expect(result.stdout).toBe(`wrote ${exportPath()}: 0 UI scope(s), 0 pin(s)\n`);
+    expect(JSON.parse(readFileSync(exportPath(), "utf8"))).toEqual({ uiScopes: [], pins: [] });
+  });
+
+  it("writes no UI scopes while the stored value is ignored", async () => {
+    const { harness } = await load(acmeTree(), { kv: { uiScopes: "not an array" } });
+    expect(((await harness.callRpc("getScopes", null)) as ScopesSnapshot).settingError).not.toBeNull();
+    const result = await harness.runCli(["export"]);
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(exportPath(), "utf8"))).toEqual({ uiScopes: [], pins: [] });
+  });
+
+  it("does not replace an existing file", async () => {
+    const { harness } = await load(acmeTree());
+    mkdirSync(path.dirname(exportPath()), { recursive: true });
+    writeFileSync(exportPath(), "mine");
+    const plain = await harness.runCli(["export"]);
+    expect(plain).toMatchObject({
+      exitCode: 1,
+      stderr: `export: ${exportPath()} already exists; move it away and run again\n`,
+    });
+    const json = await harness.runCli(["export", "--json"]);
+    expect(json).toMatchObject({
+      exitCode: 1,
+      stdout: JSON.stringify({ path: exportPath(), status: "exists" }, null, 2) + "\n",
+    });
+    expect(json.stderr ?? "").toBe("");
+    expect(plain.stdout ?? "").toBe("");
+    expect(readFileSync(exportPath(), "utf8")).toBe("mine");
+    expect(readdirSync(path.dirname(exportPath()))).toEqual(["export.json"]);
+  });
+
+  it("reports a fixed error when the file cannot be written", async () => {
+    const { harness } = await load(acmeTree());
+    mkdirSync(path.join(home, ".bb"), { recursive: true });
+    writeFileSync(path.join(home, ".bb", "dir-skills"), "a file, not a directory");
+    for (const flags of [[], ["--json"]]) {
+      expect(await harness.runCli(["export", ...flags])).toMatchObject({
+        exitCode: 1,
+        stderr: `export: could not write ${exportPath()}\n`,
+      });
+    }
+  });
+
+  it("changes no stored data, setting or scope", async () => {
+    const app = acmeTree();
+    const kv = { uiScopes: [uiScope(app)], "claude-config-dir:thr_a": pin(null) };
+    const { harness, bb } = await load(app, { kv });
+    const before = await harness.callRpc("getScopes", null);
+    await harness.runCli(["export"]);
+    expect(await harness.callRpc("getScopes", null)).toEqual(before);
+    expect(await bb.storage.kv.get("uiScopes")).toEqual(kv.uiScopes);
+    expect(await bb.storage.kv.list("")).toEqual(expect.arrayContaining(Object.keys(kv)));
   });
 });
 

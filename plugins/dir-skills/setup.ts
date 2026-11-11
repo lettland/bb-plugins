@@ -10,6 +10,7 @@ import {
   type SetupProject,
   type SkipReason,
 } from "./detect";
+import type { UiScope } from "./rpc-contract";
 import { activeScopes, parseScopes, type Scope } from "./scopes";
 
 export const ACP_PLUGIN_IDS = ["provider-acp", "bb--provider-acp-next"] as const;
@@ -53,33 +54,49 @@ export interface SetupDeps {
 export class SetupError extends Error {}
 
 
-export function writeScopesFile(
+/**
+ * Writes `content` to `target` without replacing a file that is already there:
+ * a private temp file in the same directory, then a hard link. Throws on any
+ * failure other than the target existing.
+ */
+function writeNewFile(
   target: string,
-  candidate: Candidate,
-  home: string,
+  tempPrefix: string,
+  content: string,
+  validate?: (temp: string) => void,
 ): "wrote" | "exists" {
   const dir = path.dirname(target);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const temp = path.join(dir, `.scopes-${randomBytes(8).toString("hex")}.tmp`);
+  const temp = path.join(dir, `${tempPrefix}-${randomBytes(8).toString("hex")}.tmp`);
   try {
-    writeFileSync(temp, JSON.stringify({ scopes: [candidate] }, null, 2) + "\n", {
-      flag: "wx",
-      mode: 0o600,
-    });
-    parseScopes(temp, home);
+    writeFileSync(temp, content, { flag: "wx", mode: 0o600 });
+    validate?.(temp);
     try {
       linkSync(temp, target);
       return "wrote";
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") return "exists";
-      throw new SetupError("could not write scopes.json");
+      throw error;
     }
-  } catch (error) {
-    throw error instanceof SetupError
-      ? error
-      : new SetupError("could not write scopes.json");
   } finally {
     rmSync(temp, { force: true });
+  }
+}
+
+export function writeScopesFile(
+  target: string,
+  candidate: Candidate,
+  home: string,
+): "wrote" | "exists" {
+  try {
+    return writeNewFile(
+      target,
+      ".scopes",
+      JSON.stringify({ scopes: [candidate] }, null, 2) + "\n",
+      (temp) => parseScopes(temp, home),
+    );
+  } catch {
+    throw new SetupError("could not write scopes.json");
   }
 }
 
@@ -320,4 +337,52 @@ export async function autoSetup(deps: SetupDeps): Promise<void> {
       `auto-setup: ${error instanceof SetupError ? error.message : "failed"}`,
     );
   }
+}
+
+export interface ExportDeps {
+  kv: Pick<BbPluginApi["storage"]["kv"], "get" | "list">;
+  /** The UI scopes held by the plugin; empty while a stored value is ignored. */
+  uiScopes: UiScope[];
+  target: string;
+}
+
+/** Writes the data only this plugin can read (UI scopes, Claude profile pins) for a later import. Reads kv; changes nothing but the target file. */
+export async function exportCommand(
+  deps: ExportDeps,
+  json: boolean,
+): Promise<{ exitCode: number; stdout?: string; stderr?: string }> {
+  const prefix = pinKey("");
+  const pins: Array<{ threadId: string; pin: ConfigDirPin }> = [];
+  for (const key of [...(await deps.kv.list(prefix))].sort()) {
+    const pin = await deps.kv.get<ConfigDirPin>(key);
+    if (pin !== undefined) pins.push({ threadId: key.slice(prefix.length), pin });
+  }
+  const data = { uiScopes: deps.uiScopes, pins };
+  let status: "wrote" | "exists";
+  try {
+    status = writeNewFile(
+      deps.target,
+      ".export",
+      JSON.stringify(data, null, 2) + "\n",
+    );
+  } catch {
+    return { exitCode: 1, stderr: `export: could not write ${deps.target}\n` };
+  }
+  if (status === "exists")
+    return json
+      ? {
+          exitCode: 1,
+          stdout: JSON.stringify({ path: deps.target, status }, null, 2) + "\n",
+        }
+      : {
+          exitCode: 1,
+          stderr: `export: ${deps.target} already exists; move it away and run again\n`,
+        };
+  const counts = { uiScopes: data.uiScopes.length, pins: pins.length };
+  return {
+    exitCode: 0,
+    stdout: json
+      ? JSON.stringify({ path: deps.target, status, ...counts }, null, 2) + "\n"
+      : `wrote ${deps.target}: ${counts.uiScopes} UI scope(s), ${counts.pins} pin(s)\n`,
+  };
 }

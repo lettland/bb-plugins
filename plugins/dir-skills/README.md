@@ -287,6 +287,19 @@ covers; run `bb dir-skills unpin <thread-id>` for each to move it to the work
 profile on its next turn. `bb dir-skills status` shows `auto-setup: wrote` or
 `auto-setup: skipped (<reason>)` for the last install or non-dry run.
 
+## Export
+
+```
+bb dir-skills export [--json]
+```
+
+Writes `~/.bb/dir-skills/export.json` with the data only this plugin can read
+from its storage: `{ "uiScopes": [...], "pins": [{ "threadId", "pin" }] }`, the
+saved UI scopes and the Claude profile pin of each thread. A later
+`model-instructions` release imports it. The command only reads; it never
+overwrites. If the file already exists it exits with 1 and changes nothing, so
+move it away to export again.
+
 ## Adding a work skill
 
 1. Create `skills/work-<topic>/SKILL.md` with `name: work-<topic>` and a
