@@ -287,7 +287,7 @@ describe("parseRules", () => {
       skillNames: () => [],
       scopesFor: (own) => own,
       caches: () => ({
-        providers: { loaded: true, failed: false, list: [] },
+        providers: { loaded: true, failed: false, list: [], unchecked: [] },
         projects: { loaded: true, failed: false, list: [] },
       }),
     });
@@ -357,6 +357,11 @@ describe("plugin", () => {
   it("follows a rules change without a reload", async () => {
     const host = createHost();
     await plugin(host.bb);
+    // The first cache refresh runs in the background; a save is refused until it has loaded the lists.
+    await vi.waitFor(async () => {
+      const status = JSON.parse((await host.harness.runCli(["status", "--json"])).stdout);
+      expect(status.cache.providers.loaded && status.cache.projects.loaded).toBe(true);
+    });
     await host.harness.setSettings({ rules: JSON.stringify([SUPERVISOR, WORKER]) });
     expect((await resolve(host, "claude-opus-5-5")).instructions).toBe(
       "Plan and supervise.\nSpawn Sonnet workers to implement.",

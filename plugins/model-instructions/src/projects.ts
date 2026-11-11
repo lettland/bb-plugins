@@ -1,8 +1,9 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { normalizeDir } from "./paths.js";
 
 export const PROJECT_REFRESH_MS = 60_000;
-/** One hung provider call must not hold the plugin's startup or the refresh loop forever. */
-const PROVIDER_TIMEOUT_MS = 30_000;
+/** One hung project or provider call must not hold the refresh loop forever. */
+const LOOKUP_TIMEOUT_MS = 30_000;
 
 export interface ProjectSource {
   path: string;
@@ -21,16 +22,23 @@ export interface ProviderEntry {
   models: string[];
 }
 
+/** An available provider whose models could not be listed; its thread types are not budget-checked. */
+export interface UncheckedProvider {
+  id: string;
+  /** The error code or message of the failed model lookup. */
+  reason: string;
+}
+
 export interface ProjectEntry {
   id: string;
   name: string;
-  /** Checkout paths of the project. */
+  /** Checkout paths of the project, normalized when the list is refreshed. */
   paths: string[];
 }
 
 /** A read-only copy of what the caches hold. */
 export interface CacheSnapshot {
-  providers: ListState & { list: ProviderEntry[] };
+  providers: ListState & { list: ProviderEntry[]; unchecked: UncheckedProvider[] };
   projects: ListState & { list: ProjectEntry[] };
 }
 
@@ -52,21 +60,29 @@ function errorText(error: unknown): string {
 /**
  * The project list and the provider/model list, kept in memory and refreshed together:
  * on a timer, on `thread.created`, and through `refresh()`. `onRefreshed` runs after every refresh.
+ * At most one refresh runs at a time; calls made while one runs share one follow-up refresh.
  */
 export function createCaches(bb: BbPluginApi, onRefreshed: () => void) {
   let providers: ProviderEntry[] = [];
+  let unchecked: UncheckedProvider[] = [];
   let providerState: ListState = { loaded: false, failed: false };
   let projects = new Map<string, { name: string; sources: ProjectSource[] }>();
   let projectState: ListState = { loaded: false, failed: false };
 
   async function refreshProjects(): Promise<void> {
     try {
-      const listed = await bb.sdk.projects.list({ includePersonal: true });
+      const listed = await bb.sdk.projects.list({
+        includePersonal: true,
+        signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
+      });
       const next = new Map<string, { name: string; sources: ProjectSource[] }>();
       for (const project of listed) {
         next.set(project.id, {
           name: project.name,
-          sources: projectSources(project.sources),
+          sources: projectSources(project.sources).map((source) => ({
+            ...source,
+            path: normalizeDir(source.path),
+          })),
         });
       }
       projects = next;
@@ -79,25 +95,39 @@ export function createCaches(bb: BbPluginApi, onRefreshed: () => void) {
 
   async function refreshProviders(): Promise<void> {
     try {
-      const signal = AbortSignal.timeout(PROVIDER_TIMEOUT_MS);
-      const listed = await bb.sdk.providers.list({ signal });
+      const listed = await bb.sdk.providers.list({
+        signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
+      });
+      // Every lookup runs at once, each with its own timeout and its own catch,
+      // so a refresh takes one timeout at most and one failure only marks its own provider.
+      const outcomes = await Promise.all(
+        listed
+          .filter((provider) => provider.available)
+          .map(async (provider): Promise<ProviderEntry | UncheckedProvider> => {
+            try {
+              const result = await bb.sdk.providers.models({
+                providerId: provider.id,
+                signal: AbortSignal.timeout(LOOKUP_TIMEOUT_MS),
+              });
+              if (result.modelLoadError !== null) return { id: provider.id, reason: result.modelLoadError.code };
+              const models = [...new Set(result.models.map((model) => model.model))];
+              if (models.length === 0) return { id: provider.id, reason: "no models listed" };
+              return { id: provider.id, models };
+            } catch (error) {
+              return { id: provider.id, reason: errorText(error) };
+            }
+          }),
+      );
       const next: ProviderEntry[] = [];
-      for (const provider of listed) {
-        if (!provider.available) continue;
-        const result = await bb.sdk.providers.models({
-          providerId: provider.id,
-          signal,
-        });
-        if (result.modelLoadError !== null)
-          throw new Error(
-            `${provider.id}: models not loaded (${result.modelLoadError.code})`,
-          );
-        next.push({
-          id: provider.id,
-          models: [...new Set(result.models.map((model) => model.model))],
-        });
+      const skipped: UncheckedProvider[] = [];
+      for (const outcome of outcomes) {
+        if ("models" in outcome) next.push(outcome);
+        else skipped.push(outcome);
       }
+      for (const { id, reason } of skipped)
+        bb.log.warn(`provider ${id} left unchecked: models not loaded (${reason})`);
       providers = next;
+      unchecked = skipped;
       providerState = { loaded: true, failed: false };
     } catch (error) {
       providerState = { ...providerState, failed: true };
@@ -105,9 +135,30 @@ export function createCaches(bb: BbPluginApi, onRefreshed: () => void) {
     }
   }
 
-  async function refresh(): Promise<void> {
+  async function refreshOnce(): Promise<void> {
     await Promise.all([refreshProjects(), refreshProviders()]);
     onRefreshed();
+  }
+
+  let running: Promise<void> | null = null;
+  let followUp = false;
+
+  function refresh(): Promise<void> {
+    if (running !== null) {
+      followUp = true;
+      return running;
+    }
+    running = (async () => {
+      try {
+        do {
+          followUp = false;
+          await refreshOnce();
+        } while (followUp);
+      } finally {
+        running = null;
+      }
+    })();
+    return running;
   }
 
   bb.background.service("project-path-cache", {
@@ -129,14 +180,16 @@ export function createCaches(bb: BbPluginApi, onRefreshed: () => void) {
     },
   });
   bb.events.on("thread.created", () => {
-    void refresh();
+    refresh().catch((error) => {
+      bb.log.warn(`cache refresh failed: ${errorText(error)}`);
+    });
   });
 
   return {
     refresh,
     snapshot(): CacheSnapshot {
       return {
-        providers: { ...providerState, list: providers },
+        providers: { ...providerState, list: providers, unchecked },
         projects: {
           ...projectState,
           list: [...projects].map(([id, { name, sources }]) => ({
@@ -147,12 +200,13 @@ export function createCaches(bb: BbPluginApi, onRefreshed: () => void) {
         },
       };
     },
+    /** The environment path (normalized here) and the project's checkout paths (normalized at refresh). */
     candidatesFor(
       environmentPath: string | null,
       projectId: string | null,
     ): string[] {
       const out: string[] = [];
-      if (environmentPath) out.push(environmentPath);
+      if (environmentPath) out.push(normalizeDir(environmentPath));
       if (projectId)
         out.push(
           ...(projects.get(projectId)?.sources ?? []).map((s) => s.path),

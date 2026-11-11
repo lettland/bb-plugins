@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
@@ -30,6 +30,8 @@ afterEach(() => {
   else process.env.HOME = originalHome;
   rmSync(base, { recursive: true, force: true });
   vi.doUnmock("node:url");
+  vi.doUnmock("./src/budget.js");
+  vi.restoreAllMocks();
   vi.resetModules();
   vi.useRealTimers();
 });
@@ -83,6 +85,11 @@ async function pluginAt(root: string, file = "server.ts") {
   return (await import("./server.js")).default;
 }
 
+/** The first cache refresh is not awaited at startup; let its promise chain run. */
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 50; i += 1) await Promise.resolve();
+}
+
 interface HostOptions {
   settings?: Record<string, string>;
   world?: World;
@@ -104,6 +111,7 @@ async function load(options: HostOptions = {}) {
   const root = options.root ?? skillsRoot(["model-instructions", ...skills]);
   const create = await pluginAt(root, options.file);
   await create(host.bb);
+  await flushMicrotasks();
   return { host, harness: host.harness, world };
 }
 
@@ -338,7 +346,7 @@ describe("the setting: save checks and load", () => {
       },
     });
     await expect(harness.setSettings({ rules: rules({ instructions: "x" }) })).rejects.toThrow(
-      "budget not checkable yet: provider list not loaded; retry",
+      "budget not checkable yet: provider list refresh failed; retry after the next refresh (every minute), or see bb model-instructions status",
     );
     expect(warnings(harness)).toContain("provider list refresh failed: providers down");
     expect(warnings(harness)).toContain("project list refresh failed: projects down");
@@ -349,7 +357,7 @@ describe("the setting: save checks and load", () => {
     );
     await vi.waitFor(async () =>
       await expect(harness.setSettings({ rules: rules({ instructions: "x" }) })).rejects.toThrow(
-        "budget not checkable yet: project list not loaded; retry",
+        "budget not checkable yet: project list refresh failed; retry after the next refresh (every minute), or see bb model-instructions status",
       ),
     );
     projectsFail = false;
@@ -363,7 +371,7 @@ describe("the setting: save checks and load", () => {
     await harness.emitThreadEvent("thread.created", { thread: makeThreadResponse({ id: "thr_z" }) });
     await vi.waitFor(async () =>
       await expect(harness.setSettings({ rules: rules({ instructions: "again" }) })).rejects.toThrow(
-        "project list not loaded",
+        "project list refresh failed",
       ),
     );
   });
@@ -498,6 +506,37 @@ describe("the cache refresh and the budget re-check", () => {
     expect(JSON.parse((await harness.runCli(["status", "--json"])).stdout).overBudget).toEqual([]);
   });
 
+  it("updates the length and rules of a record that is still over budget, and keeps its time", async () => {
+    const root = path.join(base, "scoped");
+    mkdirSync(path.join(root, "checkout"), { recursive: true });
+    const { harness, world } = await load({
+      settings: {
+        rules: JSON.stringify({
+          scopes: [{ name: "r", paths: [root] }],
+          rules: [
+            { name: "a", model: "new-*", instructions: x(3000) },
+            { name: "b", model: "new-*", instructions: x(3000) },
+            { name: "c", model: "new-*", scope: "r", instructions: x(500) },
+          ],
+        }),
+      },
+    });
+    world.providers["claude-code"] = ["opus", "new-1"];
+    await refreshed(harness);
+    const record = async () =>
+      JSON.parse((await harness.runCli(["status", "--json"])).stdout).overBudget.find(
+        (entry: { model: string; role: string; project: string }) =>
+          entry.model === "new-1" && entry.role === "top-level" && entry.project === "bb-plugins",
+      );
+    const first = await record();
+    expect(first).toMatchObject({ length: 6002, rules: [0, 1] });
+    // The project gains a checkout inside the scope: rule c now matches too.
+    world.projects = [{ id: "proj_1", name: "bb-plugins", sources: [{ path: path.join(root, "checkout"), hostId: "h" }] }];
+    await refreshed(harness);
+    const second = await record();
+    expect(second).toMatchObject({ length: 6504, rules: [0, 1, 2], since: first.since });
+  });
+
   it("records nothing for a refresh without an overflow", async () => {
     const { harness, world } = await load({ settings: { rules: NEW_MODEL_ONLY } });
     world.providers["claude-code"] = ["opus", "newer-thing"];
@@ -630,18 +669,357 @@ describe("the project and provider caches", () => {
     expect(all.checked).toBe(2 * 2 * 2);
   });
 
-  it("treats a provider whose models failed to load as a failed refresh", async () => {
+  describe("a provider whose models cannot be listed", () => {
+    const MIXED = {
+      providers: {
+        list: async () => [
+          { id: "good", available: true },
+          { id: "needs-auth", available: true },
+          { id: "broken", available: true },
+        ],
+        models: async ({ providerId }: { providerId: string }) => {
+          if (providerId === "broken") throw new Error("socket closed");
+          if (providerId === "needs-auth")
+            return { models: [], modelLoadError: { code: "auth_required", detail: null, providerId } };
+          return { models: [{ id: "m", model: "m" }], modelLoadError: null };
+        },
+      },
+    };
+
+    it("is left out and recorded as unchecked; the others are still checked and the save is accepted", async () => {
+      const { harness } = await load({ sdk: MIXED });
+      expect(warnings(harness)).toContain("provider needs-auth left unchecked: models not loaded (auth_required)");
+      expect(warnings(harness)).toContain("provider broken left unchecked: models not loaded (socket closed)");
+      await harness.setSettings({ rules: rules({ instructions: "fits" }) });
+      expect((await configure(harness, { provider: "good", model: "m" })).instructions).toBe("fits");
+      // The provider that loaded is still budget-checked.
+      await expect(
+        harness.setSettings({ rules: rules({ instructions: x(2500) }, { instructions: x(2500) }) }),
+      ).rejects.toThrow("good m top-level");
+    });
+
+    it("is listed with its reason by status, in text and in JSON", async () => {
+      const { harness } = await load({ sdk: MIXED });
+      const unchecked = [
+        { id: "needs-auth", reason: "auth_required" },
+        { id: "broken", reason: "socket closed" },
+      ];
+      const json = JSON.parse((await harness.runCli(["status", "--json"])).stdout);
+      expect(json.cache.providers).toEqual({ loaded: true, failed: false, unchecked });
+      expect((await harness.runCli(["status"])).stdout).toContain(
+        "unchecked providers: needs-auth (auth_required), broken (socket closed)",
+      );
+    });
+
+    it("is listed by check --all, in text and in JSON", async () => {
+      const { harness } = await load({ sdk: MIXED });
+      const text = await harness.runCli(["check", "--all"]);
+      expect(text.exitCode).toBe(0);
+      expect(text.stdout).toBe(
+        "no thread type exceeds 4096 characters (4 checked)\nunchecked providers: needs-auth (auth_required), broken (socket closed)\n",
+      );
+      const json = JSON.parse((await harness.runCli(["check", "--all", "--json"])).stdout);
+      expect(json.uncheckedProviders).toEqual([
+        { id: "needs-auth", reason: "auth_required" },
+        { id: "broken", reason: "socket closed" },
+      ]);
+    });
+
+    it("lists the unchecked providers after an overflow table too", async () => {
+      const { harness } = await load({
+        sdk: MIXED,
+        settings: { rules: rules({ instructions: x(3000) }, { instructions: x(3000) }) },
+      });
+      const text = await harness.runCli(["check", "--all"]);
+      expect(text.exitCode).toBe(1);
+      expect(text.stdout.trimEnd().split("\n").pop()).toBe(
+        "unchecked providers: needs-auth (auth_required), broken (socket closed)",
+      );
+    });
+
+    it("is checked again once it comes back, and an overflow is recorded then", async () => {
+      const models: Record<string, string[] | null> = { good: ["m"], late: null };
+      const { harness } = await load({
+        settings: { rules: rules({ model: "late-*", instructions: x(3000) }, { model: "late-*", instructions: x(3000) }) },
+        sdk: {
+          providers: {
+            list: async () => [{ id: "good", available: true }, { id: "late", available: true }],
+            models: async ({ providerId }: { providerId: string }) => {
+              const found = models[providerId];
+              if (found === null) throw new Error("not yet");
+              return { models: found.map((model) => ({ id: model, model })), modelLoadError: null };
+            },
+          },
+        },
+      });
+      expect(JSON.parse((await harness.runCli(["status", "--json"])).stdout).overBudget).toEqual([]);
+      models.late = ["late-1"];
+      const before = harness.sdk.callsTo("providers.list").length;
+      await harness.emitThreadEvent("thread.created", { thread: makeThreadResponse({ id: "t" }) });
+      await vi.waitFor(async () => {
+        const status = JSON.parse((await harness.runCli(["status", "--json"])).stdout);
+        expect(harness.sdk.callsTo("providers.list").length).toBeGreaterThan(before);
+        expect(status.cache.providers.unchecked).toEqual([]);
+        expect(status.overBudget.map((record: { model: string }) => record.model)).toContain("late-1");
+      });
+    });
+
+    it("does not make the provider list failed; a failing providers.list does", async () => {
+      const { harness } = await load({ sdk: MIXED });
+      expect((await harness.runCli(["status"])).stdout).toContain("cache: provider list loaded;");
+      const failing = await load({
+        sdk: { providers: { list: async () => { throw new Error("down"); }, models: async () => ({}) } },
+      });
+      await expect(failing.harness.setSettings({ rules: rules({ instructions: "x" }) })).rejects.toThrow(
+        "budget not checkable yet: provider list refresh failed; retry after the next refresh (every minute), or see bb model-instructions status",
+      );
+    });
+  });
+});
+
+describe("a provider whose model lookup hangs", () => {
+  it("gives every models call its own timeout, so one hung provider does not leave the later ones unchecked", async () => {
+    const controllers: AbortController[] = [];
+    vi.spyOn(AbortSignal, "timeout").mockImplementation(() => {
+      const controller = new AbortController();
+      controllers.push(controller);
+      return controller.signal;
+    });
+    const signals: Record<string, AbortSignal> = {};
+    const { harness } = await load({
+      sdk: {
+        providers: {
+          list: async () => ["hung", "later-a", "later-b"].map((id) => ({ id, available: true })),
+          models: ({ providerId, signal }: { providerId: string; signal: AbortSignal }) => {
+            signals[providerId] = signal;
+            if (providerId !== "hung")
+              return Promise.resolve({ models: [{ id: "m", model: "m" }], modelLoadError: null });
+            return new Promise((_resolve, reject) => {
+              signal.addEventListener("abort", () => reject(new DOMException("timed out", "TimeoutError")), { once: true });
+            });
+          },
+        },
+      },
+    });
+    // All lookups started at once; the hung provider's own timeout fires.
+    expect(Object.keys(signals).sort()).toEqual(["hung", "later-a", "later-b"]);
+    controllers.find((controller) => controller.signal === signals.hung)!.abort();
+    await vi.waitFor(async () => {
+      const status = JSON.parse((await harness.runCli(["status", "--json"])).stdout);
+      expect(status.cache.providers.unchecked).toEqual([{ id: "hung", reason: "timed out" }]);
+    });
+    // Both later providers were checked: 2 providers × 1 model × 2 roles × (1 project + none).
+    expect(JSON.parse((await harness.runCli(["check", "--all", "--json"])).stdout).checked).toBe(8);
+    expect(signals["later-a"]).not.toBe(signals.hung);
+    expect(signals["later-b"]).not.toBe(signals["later-a"]);
+    expect(signals["later-a"].aborted).toBe(false);
+    expect(signals["later-b"].aborted).toBe(false);
+  });
+});
+
+describe("model lookups", () => {
+  it("start for every available provider before any resolves, and the result keeps the provider list order", async () => {
+    const started: string[] = [];
+    const resolvers: Record<string, () => void> = {};
+    const { harness } = await load({
+      settings: { rules: rules({ instructions: x(3000) }, { instructions: x(3000) }) },
+      sdk: {
+        providers: {
+          list: async () => ["first", "off", "second"].map((id) => ({ id, available: id !== "off" })),
+          models: ({ providerId }: { providerId: string }) => {
+            started.push(providerId);
+            return new Promise((resolve) => {
+              resolvers[providerId] = () =>
+                resolve({ models: [{ id: `${providerId}-m`, model: `${providerId}-m` }], modelLoadError: null });
+            });
+          },
+        },
+      },
+    });
+    await vi.waitFor(() => expect(started).toEqual(["first", "second"]));
+    // Resolve in reverse order: the list still follows the provider list.
+    resolvers.second();
+    resolvers.first();
+    await vi.waitFor(async () => {
+      const status = JSON.parse((await harness.runCli(["status", "--json"])).stdout);
+      expect(status.cache.providers.loaded).toBe(true);
+    });
+    const json = JSON.parse((await harness.runCli(["check", "--all", "--json"])).stdout);
+    expect(json.checked).toBe(2 * 2 * 2);
+    const status = JSON.parse((await harness.runCli(["status", "--json"])).stdout);
+    const order = status.overBudget.map((record: { provider: string }) => record.provider);
+    expect(order.indexOf("first")).toBeGreaterThanOrEqual(0);
+    expect(order.lastIndexOf("first")).toBeLessThan(order.indexOf("second"));
+  });
+
+  it("list the unchecked providers in the provider list order too", async () => {
+    const { harness } = await load({
+      sdk: {
+        providers: {
+          list: async () => ["a", "b", "c"].map((id) => ({ id, available: true })),
+          models: ({ providerId }: { providerId: string }) =>
+            providerId === "a"
+              ? new Promise((_resolve, reject) => setTimeout(() => reject(new Error("slow failure")), 20))
+              : Promise.reject(new Error(`${providerId} failed`)),
+        },
+      },
+    });
+    await vi.waitFor(async () => {
+      const status = JSON.parse((await harness.runCli(["status", "--json"])).stdout);
+      expect(status.cache.providers.unchecked).toEqual([
+        { id: "a", reason: "slow failure" },
+        { id: "b", reason: "b failed" },
+        { id: "c", reason: "c failed" },
+      ]);
+    });
+  });
+});
+
+describe("a provider that lists no models", () => {
+  const EMPTY = { models: [], modelLoadError: null };
+
+  it("is unchecked, and a save is rejected when it is the only available provider", async () => {
+    const { harness } = await load({
+      sdk: { providers: { list: async () => [{ id: "empty", available: true }], models: async () => EMPTY } },
+    });
+    await expect(harness.setSettings({ rules: rules({ instructions: "x" }) })).rejects.toThrow(
+      "budget not checkable yet: no provider's models could be listed (empty (no models listed)); see bb model-instructions status",
+    );
+  });
+
+  it("is listed as unchecked while another provider's models are still checked", async () => {
+    const { harness } = await load({
+      sdk: {
+        providers: {
+          list: async () => [{ id: "empty", available: true }, { id: "good", available: true }],
+          models: async ({ providerId }: { providerId: string }) =>
+            providerId === "empty" ? EMPTY : { models: [{ id: "m", model: "m" }], modelLoadError: null },
+        },
+      },
+    });
+    await harness.setSettings({ rules: rules({ instructions: "fits" }) });
+    const json = JSON.parse((await harness.runCli(["status", "--json"])).stdout);
+    expect(json.cache.providers.unchecked).toEqual([{ id: "empty", reason: "no models listed" }]);
+    expect((await harness.runCli(["status"])).stdout).toContain("unchecked providers: empty (no models listed)");
+    expect(warnings(harness)).toContain("provider empty left unchecked: models not loaded (no models listed)");
+  });
+});
+
+describe("a save while no provider's models could be listed", () => {
+  const ALL_UNCHECKED = {
+    providers: {
+      list: async () => [{ id: "needs-auth", available: true }, { id: "broken", available: true }],
+      models: async ({ providerId }: { providerId: string }) => {
+        if (providerId === "broken") throw new Error("socket closed");
+        return { models: [], modelLoadError: { code: "auth_required", detail: null, providerId } };
+      },
+    },
+  };
+
+  it("rejects a value with text, and check --all refuses with the same message", async () => {
+    const { harness } = await load({ sdk: ALL_UNCHECKED });
+    const message =
+      "budget not checkable yet: no provider's models could be listed (needs-auth (auth_required), broken (socket closed)); see bb model-instructions status";
+    await expect(harness.setSettings({ rules: rules({ instructions: "x" }) })).rejects.toThrow(message);
+    expect(await harness.runCli(["check", "--all"])).toMatchObject({ exitCode: 1, stderr: `${message}\n` });
+    // No instruction text: nothing to check, so the save is accepted.
+    await harness.setSettings({ rules: rules({ skills: "other" }) });
+  });
+
+  it("accepts a value once one provider could be listed", async () => {
+    let authed = false;
     const { harness } = await load({
       sdk: {
         providers: {
           list: async () => [{ id: "p", available: true }],
-          models: async () => ({ models: [], modelLoadError: { code: "auth_required", detail: null, providerId: "p" } }),
+          models: async ({ providerId }: { providerId: string }) =>
+            authed
+              ? { models: [{ id: "m", model: "m" }], modelLoadError: null }
+              : { models: [], modelLoadError: { code: "auth_required", detail: null, providerId } },
         },
       },
     });
-    expect(warnings(harness)).toContain("provider list refresh failed: p: models not loaded (auth_required)");
+    await expect(harness.setSettings({ rules: rules({ instructions: "x" }) })).rejects.toThrow("no provider's models could be listed (p (auth_required))");
+    authed = true;
+    await harness.emitThreadEvent("thread.created", { thread: makeThreadResponse({ id: "t" }) });
+    await vi.waitFor(async () => {
+      await harness.setSettings({ rules: rules({ instructions: "x" }) });
+    });
+  });
+
+  it("accepts a value when no provider is available at all", async () => {
+    const { harness } = await load({
+      sdk: { providers: { list: async () => [{ id: "off", available: false }], models: async () => ({}) } },
+    });
+    await harness.setSettings({ rules: rules({ instructions: "x" }) });
+    expect((await configure(harness)).instructions).toBe("x");
+  });
+
+  it("says the list was not loaded while the first refresh has not finished", async () => {
+    const { harness } = await load({
+      sdk: { providers: { list: () => new Promise(() => {}), models: async () => ({}) } },
+    });
     await expect(harness.setSettings({ rules: rules({ instructions: "x" }) })).rejects.toThrow(
-      "budget not checkable yet: provider list not loaded; retry",
+      "budget not checkable yet: provider list not loaded; retry after the next refresh (every minute), or see bb model-instructions status",
+    );
+  });
+});
+
+describe("a project list lookup that is aborted", () => {
+  it("counts as failed, keeps the last good data, and recovers on the next refresh", async () => {
+    const root = path.join(base, "repos");
+    mkdirSync(path.join(root, "app"), { recursive: true });
+    const world = DEFAULT_WORLD();
+    world.projects = [{ id: "proj_1", name: "bb-plugins", sources: [{ path: path.join(root, "app"), hostId: "h" }] }];
+    let aborted = false;
+    const list = vi.fn(async ({ signal }: { signal: AbortSignal }) => {
+      signal.throwIfAborted();
+      return world.projects;
+    });
+    const { harness } = await load({
+      world,
+      sdk: { projects: { list } },
+      settings: { rules: JSON.stringify({ scopes: [{ name: "r", paths: [root] }], rules: [{ scope: "r", instructions: "scoped" }] }) },
+    });
+    expect((await configure(harness, { path: null })).instructions).toBe("scoped");
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => (aborted ? AbortSignal.abort() : realTimeout(ms)));
+    aborted = true;
+    await harness.emitThreadEvent("thread.created", { thread: makeThreadResponse({ id: "t1" }) });
+    await vi.waitFor(async () =>
+      expect((await harness.runCli(["status"])).stdout).toContain("project list loaded, last refresh failed"),
+    );
+    expect(warnings(harness).some((line) => line.startsWith("project list refresh failed: "))).toBe(true);
+    // The last good data still serves threads.
+    expect((await configure(harness, { path: null })).instructions).toBe("scoped");
+    aborted = false;
+    await harness.emitThreadEvent("thread.created", { thread: makeThreadResponse({ id: "t2" }) });
+    await vi.waitFor(async () => {
+      const status = (await harness.runCli(["status"])).stdout;
+      expect(status).toContain("project list loaded");
+      expect(status).not.toContain("last refresh failed");
+    });
+    expect((await configure(harness, { path: null })).instructions).toBe("scoped");
+  });
+});
+
+describe("a refresh that throws", () => {
+  it.each([
+    ["an Error", new Error("recheck broke"), "recheck broke"],
+    ["a string", "recheck string", "recheck string"],
+  ])("logs a failure of the first refresh and of a thread.created refresh, thrown as %s", async (_label, failure, text) => {
+    vi.resetModules();
+    vi.doMock("./src/budget.js", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("./src/budget.js")>()),
+      budgetReport: () => {
+        throw failure;
+      },
+    }));
+    const { harness } = await load();
+    expect(warnings(harness).filter((line) => line === `cache refresh failed: ${text}`)).toHaveLength(1);
+    await harness.emitThreadEvent("thread.created", { thread: makeThreadResponse({ id: "t" }) });
+    await vi.waitFor(() =>
+      expect(warnings(harness).filter((line) => line === `cache refresh failed: ${text}`)).toHaveLength(2),
     );
   });
 });
@@ -668,14 +1046,16 @@ describe("bb model-instructions status", () => {
           matchers: { provider: "claude-code", scope: ["work"], threads: "top-level" },
           instructionsLength: 12,
           skills: [],
+          unresolved: [],
         },
         {
           name: "rules[1]",
           matchers: { model: "m*", project: ["a", "b"], skipProjects: ["c"], skipTitles: ["T*"] },
           instructionsLength: null,
           skills: ["work-*"],
+          unresolved: [],
         },
-        { name: "rules[2]", matchers: {}, instructionsLength: 3, skills: [] },
+        { name: "rules[2]", matchers: {}, instructionsLength: 3, skills: [], unresolved: [] },
       ],
       skills: [
         { name: "model-instructions", claimedBy: null },
@@ -684,7 +1064,7 @@ describe("bb model-instructions status", () => {
       ],
       unclaimedSkills: ["other"],
       cache: {
-        providers: { loaded: true, failed: false },
+        providers: { loaded: true, failed: false, unchecked: [] },
         projects: { loaded: true, failed: false },
       },
       overBudget: [],
@@ -712,6 +1092,7 @@ describe("bb model-instructions status", () => {
         "unclaimed skills (injected nowhere): other",
         "",
         "cache: provider list loaded; project list loaded",
+        "unchecked providers: none",
         "",
         "over budget:",
         "  (none)",
@@ -895,6 +1276,18 @@ describe("bb model-instructions check", () => {
     expect(result.matched).toContain("child-only");
   });
 
+  it("forces the top-level role with --top-level, even for a child thread", async () => {
+    const { harness } = await loadForCheck({ parentThreadId: "thr_parent" });
+    const result = JSON.parse((await harness.runCli(["check", "--top-level", "--json"], ctx)).stdout);
+    expect(result.target.role).toBe("top-level");
+    expect(result.sources.role).toBe("flag");
+    expect(result.matched).not.toContain("child-only");
+    const noThread = JSON.parse(
+      (await harness.runCli(["check", "--top-level", "--provider", "p", "--model", "m", "--json"], {})).stdout,
+    );
+    expect(noThread.sources.role).toBe("flag");
+  });
+
   it("applies the thread's title to skipTitles", async () => {
     const { harness } = await loadForCheck({ title: "Helpdesk: Anna" });
     expect(JSON.parse((await harness.runCli(["check", "--json"], ctx)).stdout).matched).not.toContain("titled");
@@ -992,6 +1385,9 @@ describe("bb model-instructions check", () => {
     [["check", "--model"], "check: --model needs a value"],
     [["check", "--all", "--model", "m"], "check: --all takes no other flag except --json"],
     [["check", "--all", "--child"], "check: --all takes no other flag except --json"],
+    [["check", "--all", "--top-level"], "check: --all takes no other flag except --json"],
+    [["check", "--top-level", "--child"], "check: --top-level and --child cannot be used together"],
+    [["check", "--child", "--top-level", "--provider", "p", "--model", "m"], "check: --top-level and --child cannot be used together"],
   ])("rejects %j", async (argv, message) => {
     const { harness } = await loadForCheck();
     const result = await harness.runCli(argv, ctx);
@@ -1005,7 +1401,7 @@ describe("bb model-instructions check", () => {
     const result = await harness.runCli(["bogus"]);
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toBe(
-      'unknown command "bogus"\nusage: bb model-instructions status [--json] | check [--provider P] [--model M] [--child] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json]\n',
+      'unknown command "bogus"\nusage: bb model-instructions status [--json] | check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json]\n',
     );
   });
 });
@@ -1053,10 +1449,10 @@ describe("bb model-instructions check --all", () => {
       sdk: { projects: { list: async () => { throw new Error("down"); } } },
     });
     const text = await harness.runCli(["check", "--all"]);
-    expect(text).toMatchObject({ exitCode: 1, stderr: "budget not checkable yet: project list not loaded; retry\n" });
+    expect(text).toMatchObject({ exitCode: 1, stderr: "budget not checkable yet: project list refresh failed; retry after the next refresh (every minute), or see bb model-instructions status\n" });
     const json = await harness.runCli(["check", "--all", "--json"]);
     expect(json.exitCode).toBe(1);
-    expect(JSON.parse(json.stdout)).toEqual({ ok: false, error: "budget not checkable yet: project list not loaded; retry" });
+    expect(JSON.parse(json.stdout)).toEqual({ ok: false, error: "budget not checkable yet: project list refresh failed; retry after the next refresh (every minute), or see bb model-instructions status" });
   });
 });
 
@@ -1077,5 +1473,187 @@ describe("registration", () => {
     expect(rulesSetting.description).toContain("bb model-instructions status");
     expect(rulesSetting.description).toContain("bb model-instructions check");
     expect(rulesSetting.description!.length).toBeLessThan(300);
+  });
+});
+
+describe("bb model-instructions status: unresolved references", () => {
+  it("marks every scope and skills glob that matches nothing, in JSON and in text", async () => {
+    const { harness } = await load({
+      settings: {
+        rules: JSON.stringify({
+          scopes: [{ name: "work", paths: ["/work"] }],
+          rules: [
+            { name: "fine", scope: "work", skills: "work-*", instructions: "ok" },
+            { name: "bad", scope: ["work", "gone-*"], skills: ["typo", "other"], instructions: "x" },
+          ],
+        }),
+      },
+    });
+    const json = JSON.parse((await harness.runCli(["status", "--json"])).stdout);
+    expect(json.rules.map((rule: { unresolved: unknown }) => rule.unresolved)).toEqual([
+      [],
+      [
+        { kind: "scope", glob: "gone-*" },
+        { kind: "skills", glob: "typo" },
+      ],
+    ]);
+    const text = (await harness.runCli(["status"])).stdout;
+    expect(text).toContain('\n  ! scope "gone-*" matches nothing\n  ! skills "typo" matches nothing\n');
+    expect(text.match(/matches nothing/g)).toHaveLength(2);
+  });
+});
+
+describe("startup does not hold up the rules", () => {
+  it("registers configure and the command while the project list never resolves", async () => {
+    const scopeRoot = path.join(base, "scoped");
+    mkdirSync(scopeRoot, { recursive: true });
+    const list = vi.fn(async (_args: { signal: AbortSignal }) => new Promise<never>(() => {}));
+    const { harness } = await load({
+      settings: {
+        rules: JSON.stringify({
+          scopes: [{ name: "r", paths: [scopeRoot] }],
+          rules: [{ instructions: "always" }, { scope: "r", instructions: "scoped" }],
+        }),
+      },
+      sdk: { projects: { list } },
+    });
+    expect(harness.registrations.cli?.name).toBe("model-instructions");
+    expect((await configure(harness)).instructions).toBe("always");
+    // The environment path is always a candidate, so a scope matches through it before the list loads.
+    expect((await configure(harness, { path: scopeRoot })).instructions).toBe("always\n\nscoped");
+    expect((await harness.runCli(["status"])).stdout).toContain("project list not loaded");
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes an abort signal to projects.list", async () => {
+    const list = vi.fn(async (_args: { includePersonal: boolean; signal: AbortSignal }) => []);
+    await load({ sdk: { projects: { list } } });
+    expect(list.mock.calls[0][0].includePersonal).toBe(true);
+    expect(list.mock.calls[0][0].signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
+describe("coalesced refreshes", () => {
+  it("runs exactly one follow-up refresh for any number of calls made during a refresh", async () => {
+    let release: (() => void) | undefined;
+    const world = DEFAULT_WORLD();
+    const list = vi.fn(async () => {
+      if (list.mock.calls.length === 1) await new Promise<void>((resolve) => (release = resolve));
+      return world.projects;
+    });
+    const { harness } = await load({ sdk: { projects: { list } } });
+    expect(list).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 6; i += 1)
+      await harness.emitThreadEvent("thread.created", { thread: makeThreadResponse({ id: `t${i}` }) });
+    expect(list).toHaveBeenCalledTimes(1);
+    release!();
+    await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+    // Every mock settles in microtasks, so a third run would have started by now.
+    await flushMicrotasks();
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(harness.sdk.callsTo("providers.list")).toHaveLength(2);
+    // Idle again: the next call runs at once.
+    await harness.emitThreadEvent("thread.created", { thread: makeThreadResponse({ id: "later" }) });
+    await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(3));
+  });
+});
+
+describe("the dedup set of runtime overflows", () => {
+  it("holds at most 1000 entries and forgets the oldest first", async () => {
+    const { harness } = await load({
+      settings: { rules: rules({ name: "guard", instructions: x(3000) }, { name: "extra", instructions: x(1500) }) },
+    });
+    const lost = () => warnings(harness).filter((line) => line.includes("lost rules")).length;
+    for (let i = 0; i < 1000; i += 1) await configure(harness, { thread: `thr_${i}` });
+    expect(lost()).toBe(1000);
+    await configure(harness, { thread: "thr_999" });
+    await configure(harness, { thread: "thr_0" });
+    expect(lost()).toBe(1000);
+    // The 1001st thread pushes thr_0 out; thr_1 is the oldest left.
+    await configure(harness, { thread: "thr_1000" });
+    expect(lost()).toBe(1001);
+    await configure(harness, { thread: "thr_999" });
+    expect(lost()).toBe(1001);
+    await configure(harness, { thread: "thr_0" });
+    expect(lost()).toBe(1002);
+  });
+});
+
+describe("checkout paths are normalized at refresh", () => {
+  it("resolves a checkout symlink once, and configure does not resolve it again; the environment path is resolved each time", async () => {
+    const scopeRoot = path.join(base, "scoped");
+    const real = path.join(scopeRoot, "real");
+    const elsewhere = path.join(base, "elsewhere");
+    mkdirSync(real, { recursive: true });
+    mkdirSync(elsewhere, { recursive: true });
+    const link = path.join(base, "checkout-link");
+    symlinkSync(real, link);
+    const world = DEFAULT_WORLD();
+    world.projects = [{ id: "proj_1", name: "bb-plugins", sources: [{ path: link, hostId: "h" }] }];
+    const { harness } = await load({
+      world,
+      settings: { rules: JSON.stringify({ scopes: [{ name: "r", paths: [scopeRoot] }], rules: [{ scope: "r", instructions: "scoped" }] }) },
+    });
+    expect((await configure(harness, { path: null })).instructions).toBe("scoped");
+    // Point the link away: only a second resolution at configure time would notice.
+    rmSync(link);
+    symlinkSync(elsewhere, link);
+    expect((await configure(harness, { path: null })).instructions).toBe("scoped");
+    // The environment path is not cached: it is resolved on every call.
+    const envLink = path.join(base, "env-link");
+    symlinkSync(real, envLink);
+    expect((await configure(harness, { project: { id: "no-such" }, path: envLink })).instructions).toBe("scoped");
+    rmSync(envLink);
+    symlinkSync(elsewhere, envLink);
+    expect((await configure(harness, { project: { id: "no-such" }, path: envLink })).instructions).toBeNull();
+  });
+});
+
+describe("the save check and a symlinked checkout", () => {
+  it("still matches a scope through a checkout that is a symlink into it", async () => {
+    const scopeRoot = path.join(base, "scoped");
+    const real = path.join(scopeRoot, "real");
+    mkdirSync(real, { recursive: true });
+    const link = path.join(base, "checkout-link");
+    symlinkSync(real, link);
+    const world = DEFAULT_WORLD();
+    world.projects = [{ id: "proj_1", name: "bb-plugins", sources: [{ path: link, hostId: "h" }] }];
+    const { harness } = await load({ world });
+    const setting = JSON.stringify({
+      scopes: [{ name: "r", paths: [scopeRoot] }],
+      rules: [
+        { name: "a", instructions: x(3000) },
+        { name: "b", scope: "r", instructions: x(3000) },
+      ],
+    });
+    await expect(harness.setSettings({ rules: setting })).rejects.toThrow('project "bb-plugins"');
+  });
+});
+
+describe("the known limit of the save check: the environment path", () => {
+  it("does not count a scope matched only through the environment path, but resolves it at runtime", async () => {
+    const scopeRoot = path.join(base, "scoped");
+    const outside = path.join(base, "outside");
+    mkdirSync(path.join(scopeRoot, "worktree"), { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    const world = DEFAULT_WORLD();
+    world.projects = [{ id: "proj_1", name: "bb-plugins", sources: [{ path: outside, hostId: "h" }] }];
+    const { harness } = await load({ world });
+    const setting = JSON.stringify({
+      scopes: [{ name: "r", paths: [scopeRoot] }],
+      rules: [
+        { name: "a", instructions: x(3000) },
+        { name: "b", scope: "r", instructions: x(3000) },
+      ],
+    });
+    // Saved: no thread type of the project's checkouts matches both rules.
+    await harness.setSettings({ rules: setting });
+    expect(JSON.parse((await harness.runCli(["check", "--all", "--json"])).stdout)).toMatchObject({ ok: true, overflowing: 0 });
+    // A thread whose environment (a worktree) is in the scope does match both: rule b is cut, with the notice.
+    expect((await configure(harness, { path: path.join(scopeRoot, "worktree") })).instructions).toBe(
+      `${x(3000)}\n\n${omittedNotice(1)}`,
+    );
+    expect(warnings(harness).filter((line) => line.includes("lost rules"))).toHaveLength(1);
+    expect((await configure(harness, { path: outside })).instructions).toBe(x(3000));
   });
 });

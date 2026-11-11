@@ -6,8 +6,10 @@ import { runCli, type OverBudgetRecord, type OverflowEvent } from "./src/cli.js"
 import { buildScope, type Scope } from "./src/paths.js";
 import { createCaches } from "./src/projects.js";
 import {
+  activeScopeNamesIn,
+  compose,
+  matchRules,
   parseConfig,
-  resolve,
   ruleLabel,
   unresolvedRefs,
   type Config,
@@ -16,6 +18,7 @@ import { createRulesSettingSchema } from "./src/settings.js";
 import { loadSkills, type SkillEntry } from "./src/skills.js";
 
 const OVERFLOW_EVENTS_KEPT = 20;
+const OVERFLOW_SEEN_KEPT = 1000;
 
 function pluginRoot(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
@@ -53,7 +56,11 @@ export default async function plugin(bb: BbPluginApi) {
     for (const key of [...overBudget.keys()])
       if (!current.has(key)) overBudget.delete(key);
     for (const [key, type] of current) {
-      if (overBudget.has(key)) continue;
+      const known = overBudget.get(key);
+      if (known !== undefined) {
+        overBudget.set(key, { ...type, since: known.since });
+        continue;
+      }
       overBudget.set(key, { ...type, since: new Date().toISOString() });
       bb.log.warn(
         `over budget: ${describeType(type)}; the rules would be cut at runtime`,
@@ -117,24 +124,28 @@ export default async function plugin(bb: BbPluginApi) {
     load(next.rules);
     recheckBudget();
   });
-  await caches.refresh();
 
   bb.agents.configure((context) => {
     const role: Role = context.thread.parentThreadId === null ? "top-level" : "child";
-    const resolved = resolve(config.rules, scopes, skillNames(), {
+    // The paths come back normalized: the checkouts were at the last refresh, the environment path just now.
+    const candidatePaths = caches.candidatesFor(
+      context.environment.path,
+      context.project.id,
+    );
+    const matched = matchRules(config.rules, activeScopeNamesIn(scopes, candidatePaths), {
       provider: context.provider.id,
       model: context.provider.model,
       project: context.project.name,
       parentThreadId: context.thread.parentThreadId,
       title: context.thread.title,
-      candidatePaths: caches.candidatesFor(
-        context.environment.path,
-        context.project.id,
-      ),
+      candidatePaths,
     });
+    const resolved = compose(config.rules, matched, skillNames());
     if (resolved.dropped.length > 0) {
       const key = JSON.stringify([context.thread.id, resolved.dropped]);
       if (!overflowSeen.has(key)) {
+        if (overflowSeen.size >= OVERFLOW_SEEN_KEPT)
+          overflowSeen.delete(overflowSeen.values().next().value!);
         overflowSeen.add(key);
         bb.log.warn(
           `thread ${context.thread.id} (${context.provider.id} ${context.provider.model}, ${role}) lost rules over the limit: ${resolved.dropped.join(", ")}`,
@@ -173,7 +184,7 @@ export default async function plugin(bb: BbPluginApi) {
         name: "check",
         summary: "Show the rules, length and skills a thread would get",
         usage:
-          "bb model-instructions check [--provider P] [--model M] [--child] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json]",
+          "bb model-instructions check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json]",
       },
     ],
     run: (argv, ctx) =>
@@ -186,5 +197,12 @@ export default async function plugin(bb: BbPluginApi) {
         events: () => overflowEvents,
         threads: bb.sdk.threads,
       }),
+  });
+  // Registered first, so the rules apply at once; the first refresh must not hold them up.
+  // Scope matching through project checkouts starts working when the project list loads.
+  caches.refresh().catch((error) => {
+    bb.log.warn(
+      `cache refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
   });
 }

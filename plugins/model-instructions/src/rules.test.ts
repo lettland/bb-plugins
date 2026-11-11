@@ -155,6 +155,29 @@ describe("parseConfig: scopes", () => {
   });
 });
 
+describe("parseConfig: rule names", () => {
+  const named = (...names: Array<string | undefined>) =>
+    names.map((name) => ({ name, instructions: "x" }));
+
+  it("rejects a rule name used twice, in both forms, naming it and where", () => {
+    const rules = named("a", "b", "a");
+    for (const json of [JSON.stringify(rules), JSON.stringify({ rules })]) {
+      expect(() => parseConfig(json)).toThrow('the rule name "a" is used twice');
+      expect(() => parseConfig(json)).toThrow("[2].name");
+    }
+  });
+
+  it("accepts distinct names, and any number of unnamed rules", () => {
+    expect(parseConfig(JSON.stringify(named("a", "b", "c"))).rules).toHaveLength(3);
+    expect(parseConfig(JSON.stringify(named(undefined, undefined, "a"))).rules).toHaveLength(3);
+    expect(parseConfig(JSON.stringify({ rules: named("a", "b") })).rules).toHaveLength(2);
+  });
+
+  it("compares names after trimming", () => {
+    expect(() => parseConfig(JSON.stringify(named("a", " a ")))).toThrow("is used twice");
+  });
+});
+
 describe("parseConfig: rule fields", () => {
   it("accepts a skills-only rule, an instructions-only rule and both", () => {
     expect(() => rulesOf([{ skills: "a-*" }])).not.toThrow();

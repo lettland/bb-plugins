@@ -1,4 +1,4 @@
-import type { PluginCliContext, PluginCliResult } from "@get-bb/plugin-sdk";
+import type { BbPluginApi, PluginCliContext, PluginCliResult } from "@get-bb/plugin-sdk";
 import {
   budgetReport,
   cacheProblem,
@@ -12,7 +12,7 @@ import {
 import type { Scope } from "./paths.js";
 import type { Caches } from "./projects.js";
 import {
-  activeScopeNames,
+  activeScopeNamesIn,
   claimants,
   compose,
   fullLength,
@@ -20,13 +20,14 @@ import {
   matchRules,
   ruleLabel,
   SELF_SKILL,
+  unresolvedRefs,
   type Rule,
 } from "./rules.js";
 import type { SkillEntry } from "./skills.js";
 
 /** A thread type that is over the limit, as `status` lists it. */
 export interface OverBudgetRecord extends ThreadType {
-  /** ISO time of the refresh that first saw it overflow. */
+  /** ISO time of the refresh that first saw it overflow; later refreshes update the length, not this. */
   since: string;
 }
 
@@ -43,11 +44,8 @@ export interface OverflowEvent {
   lengths: number[];
 }
 
-/** The slice of `bb.sdk.threads` the check command reads. */
-export interface ThreadLookup {
-  get(args: { threadId: string; include?: string }): Promise<unknown>;
-  defaultExecutionOptions(args: { threadId: string }): Promise<{ model: string } | null>;
-}
+/** The slice of `bb.sdk.threads` the check command reads, typed by the SDK itself. */
+export type ThreadLookup = Pick<BbPluginApi["sdk"]["threads"], "get" | "defaultExecutionOptions">;
 
 export interface CliDeps {
   rules(): Rule[];
@@ -60,7 +58,7 @@ export interface CliDeps {
 }
 
 export const USAGE =
-  "bb model-instructions status [--json] | check [--provider P] [--model M] [--child] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json]";
+  "bb model-instructions status [--json] | check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json]";
 
 const out = (value: unknown): PluginCliResult => ({
   exitCode: 0,
@@ -87,17 +85,30 @@ function listState(list: { loaded: boolean; failed: boolean }): string {
   return list.failed ? "loaded, last refresh failed" : "loaded";
 }
 
+function uncheckedText(unchecked: ReadonlyArray<{ id: string; reason: string }>): string {
+  return unchecked.map((provider) => `${provider.id} (${provider.reason})`).join(", ");
+}
+
 function status(deps: CliDeps, json: boolean): PluginCliResult {
   const rules = deps.rules();
   const skills = deps.skills();
   const snapshot = deps.caches.snapshot();
+  const scopes = deps.scopes();
+  const unresolved = unresolvedRefs(
+    rules,
+    scopes.map((scope) => scope.name),
+    skills.map((skill) => skill.name),
+  );
   const payload = {
-    scopes: deps.scopes().map((scope) => ({ name: scope.name, paths: scope.paths })),
+    scopes: scopes.map((scope) => ({ name: scope.name, paths: scope.paths })),
     rules: rules.map((rule, index) => ({
       name: ruleLabel(rule, index),
       matchers: matchersOf(rule),
       instructionsLength: rule.instructions?.length ?? null,
       skills: rule.skills ?? [],
+      unresolved: unresolved
+        .filter((ref) => ref.index === index)
+        .map(({ kind, glob }) => ({ kind, glob })),
     })),
     skills: skills.map((skill) => ({
       name: skill.name,
@@ -110,7 +121,11 @@ function status(deps: CliDeps, json: boolean): PluginCliResult {
       .filter((skill) => skill.name !== SELF_SKILL && claimants(rules, skill.name).length === 0)
       .map((skill) => skill.name),
     cache: {
-      providers: { loaded: snapshot.providers.loaded, failed: snapshot.providers.failed },
+      providers: {
+        loaded: snapshot.providers.loaded,
+        failed: snapshot.providers.failed,
+        unchecked: snapshot.providers.unchecked,
+      },
       projects: { loaded: snapshot.projects.loaded, failed: snapshot.projects.failed },
     },
     overBudget: deps.overBudget(),
@@ -133,6 +148,7 @@ function status(deps: CliDeps, json: boolean): PluginCliResult {
           : `instructions=${rule.instructionsLength} chars`) +
         (rule.skills.length > 0 ? `  skills=${rule.skills.join("|")}` : ""),
     );
+    for (const ref of rule.unresolved) lines.push(`  ! ${ref.kind} "${ref.glob}" matches nothing`);
   }
   lines.push("", "skills:");
   for (const skill of payload.skills)
@@ -153,6 +169,9 @@ function status(deps: CliDeps, json: boolean): PluginCliResult {
   lines.push(
     "",
     `cache: provider list ${listState(snapshot.providers)}; project list ${listState(snapshot.projects)}`,
+    snapshot.providers.unchecked.length === 0
+      ? "unchecked providers: none"
+      : `unchecked providers: ${uncheckedText(snapshot.providers.unchecked)}`,
   );
   lines.push("", "over budget:");
   if (payload.overBudget.length === 0) lines.push("  (none)");
@@ -175,6 +194,7 @@ interface CheckFlags {
   path?: string;
   title?: string;
   child: boolean;
+  topLevel: boolean;
   all: boolean;
   json: boolean;
 }
@@ -182,9 +202,13 @@ interface CheckFlags {
 const VALUE_FLAGS = ["provider", "model", "project", "path", "title"] as const;
 
 function parseCheckFlags(args: string[]): CheckFlags | string {
-  const flags: CheckFlags = { child: false, all: false, json: false };
+  const flags: CheckFlags = { child: false, topLevel: false, all: false, json: false };
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
+    if (arg === "--top-level") {
+      flags.topLevel = true;
+      continue;
+    }
     if (arg === "--child" || arg === "--all" || arg === "--json") {
       flags[arg.slice(2) as "child" | "all" | "json"] = true;
       continue;
@@ -196,6 +220,7 @@ function parseCheckFlags(args: string[]): CheckFlags | string {
     flags[name] = value;
     i += 1;
   }
+  if (flags.child && flags.topLevel) return "check: --top-level and --child cannot be used together";
   return flags;
 }
 
@@ -223,30 +248,22 @@ function checkAll(deps: CliDeps, json: boolean): PluginCliResult {
             checked: report.checked,
             overflowing: report.overflowing.length,
             groups,
+            uncheckedProviders: snapshot.providers.unchecked,
           },
           null,
           2,
         ) + "\n",
     };
-  return {
-    exitCode,
-    stdout:
-      (exitCode === 0
-        ? [`no thread type exceeds ${INSTRUCTIONS_LIMIT} characters (${report.checked} checked)`]
-        : [
-            ...formatGroups(groups),
-            `${report.overflowing.length} of ${report.checked} thread types are over the limit`,
-          ]
-      ).join("\n") + "\n",
-  };
-}
-
-interface ThreadInfo {
-  providerId: string;
-  parentThreadId: string | null;
-  projectId: string;
-  title: string | null;
-  environment?: { path: string | null } | null;
+  const lines =
+    exitCode === 0
+      ? [`no thread type exceeds ${INSTRUCTIONS_LIMIT} characters (${report.checked} checked)`]
+      : [
+          ...formatGroups(groups),
+          `${report.overflowing.length} of ${report.checked} thread types are over the limit`,
+        ];
+  if (snapshot.providers.unchecked.length > 0)
+    lines.push(`unchecked providers: ${uncheckedText(snapshot.providers.unchecked)}`);
+  return { exitCode, stdout: lines.join("\n") + "\n" };
 }
 
 type Source = "flag" | "thread" | "context" | "assumed";
@@ -264,14 +281,14 @@ async function check(
     return checkAll(deps, flags.json);
   }
 
-  let thread: ThreadInfo | null = null;
+  let thread: Awaited<ReturnType<ThreadLookup["get"]>> | null = null;
   let threadModel: string | null = null;
   if (ctx.threadId !== undefined) {
     try {
-      thread = (await deps.threads.get({
+      thread = await deps.threads.get({
         threadId: ctx.threadId,
         include: "environment",
-      })) as ThreadInfo;
+      });
       threadModel = (await deps.threads.defaultExecutionOptions({ threadId: ctx.threadId }))?.model ?? null;
     } catch {
       // The thread lookup is a convenience; flags still work without it.
@@ -288,9 +305,14 @@ async function check(
     provider: flags.provider === undefined ? "thread" : "flag",
     model: flags.model === undefined ? "thread" : "flag",
   };
-  const role: Role =
-    flags.child || (thread !== null && thread.parentThreadId !== null) ? "child" : "top-level";
-  sources.role = flags.child ? "flag" : thread === null ? "assumed" : "thread";
+  const role: Role = flags.child
+    ? "child"
+    : flags.topLevel
+      ? "top-level"
+      : thread !== null && thread.parentThreadId !== null
+        ? "child"
+        : "top-level";
+  sources.role = flags.child || flags.topLevel ? "flag" : thread === null ? "assumed" : "thread";
   const title = flags.title ?? thread?.title ?? null;
   sources.title = flags.title !== undefined ? "flag" : thread === null ? "assumed" : "thread";
   const projectId = flags.project ?? ctx.projectId ?? thread?.projectId ?? null;
@@ -306,18 +328,20 @@ async function check(
       };
     projectName = found;
   }
+  // Only the response with includes carries the environment.
+  const threadPath = thread !== null && "environment" in thread ? (thread.environment?.path ?? null) : null;
   const environmentPath =
-    flags.path ?? (flags.project === undefined ? (thread?.environment?.path ?? ctx.cwd ?? null) : null);
+    flags.path ?? (flags.project === undefined ? (threadPath ?? ctx.cwd ?? null) : null);
   sources.path =
     flags.path !== undefined
       ? "flag"
       : environmentPath === null
         ? "assumed"
-        : thread?.environment?.path ? "thread" : "context";
+        : threadPath ? "thread" : "context";
 
   const rules = deps.rules();
   const candidatePaths = deps.caches.candidatesFor(environmentPath, projectId);
-  const matched = matchRules(rules, activeScopeNames(deps.scopes(), candidatePaths), {
+  const matched = matchRules(rules, activeScopeNamesIn(deps.scopes(), candidatePaths), {
     provider,
     model,
     project: projectName,

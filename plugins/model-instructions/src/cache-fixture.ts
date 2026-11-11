@@ -11,6 +11,7 @@ export function snapshotOf(
       loaded: true,
       failed: false,
       list: providers.map(([id, models]) => ({ id, models })),
+      unchecked: [],
       ...state.providers,
     },
     projects: {

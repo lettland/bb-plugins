@@ -1,7 +1,7 @@
 import { type Scope } from "./paths.js";
-import type { CacheSnapshot } from "./projects.js";
+import type { CacheSnapshot, UncheckedProvider } from "./projects.js";
 import {
-  activeScopeNames,
+  activeScopeNamesIn,
   fullLength,
   INSTRUCTIONS_LIMIT,
   matchRules,
@@ -41,15 +41,29 @@ export interface BudgetGroup {
 
 const SHOWN_PER_GROUP = 5;
 
-/** Which cache list stops the budget from being checked, or null when both are usable. */
-export function cacheProblem(snapshot: CacheSnapshot): "provider list" | "project list" | null {
-  if (!snapshot.providers.loaded || snapshot.providers.failed) return "provider list";
-  if (!snapshot.projects.loaded || snapshot.projects.failed) return "project list";
+/** Why the budget cannot be checked: a list that is not loaded or failed, or no provider whose models could be listed. */
+export type CacheProblem =
+  | { kind: "not-loaded" | "refresh-failed"; list: "provider list" | "project list" }
+  | { kind: "no-checked-provider"; unchecked: UncheckedProvider[] };
+
+/** What stops the budget from being checked, or null when the caches are usable. */
+export function cacheProblem(snapshot: CacheSnapshot): CacheProblem | null {
+  const { providers, projects } = snapshot;
+  if (providers.failed) return { kind: "refresh-failed", list: "provider list" };
+  if (!providers.loaded) return { kind: "not-loaded", list: "provider list" };
+  // Every available provider unchecked: nothing would be checked, so a save must not pass.
+  if (providers.list.length === 0 && providers.unchecked.length > 0)
+    return { kind: "no-checked-provider", unchecked: providers.unchecked };
+  if (projects.failed) return { kind: "refresh-failed", list: "project list" };
+  if (!projects.loaded) return { kind: "not-loaded", list: "project list" };
   return null;
 }
 
-export function notCheckable(list: "provider list" | "project list"): string {
-  return `budget not checkable yet: ${list} not loaded; retry`;
+export function notCheckable(problem: CacheProblem): string {
+  if (problem.kind === "no-checked-provider")
+    return `budget not checkable yet: no provider's models could be listed (${problem.unchecked.map(({ id, reason }) => `${id} (${reason})`).join(", ")}); see bb model-instructions status`;
+  const what = problem.kind === "not-loaded" ? "not loaded" : "refresh failed";
+  return `budget not checkable yet: ${problem.list} ${what}; retry after the next refresh (every minute), or see bb model-instructions status`;
 }
 
 /**
@@ -70,7 +84,7 @@ export function budgetReport(
     { name: "", paths: [] as string[] },
   ].map((project) => ({
     ...project,
-    active: activeScopeNames(scopes, project.paths),
+    active: activeScopeNamesIn(scopes, project.paths),
   }));
   let checked = 0;
   const overflowing: ThreadType[] = [];

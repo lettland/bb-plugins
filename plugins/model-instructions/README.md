@@ -19,7 +19,7 @@ Every matching rule applies, in array order.
 | `skipProjects` | no | A project name glob or an array of globs; any match excludes the project, and wins over `project`. Case-sensitive, so renaming a skipped project (or getting its case wrong) makes the rule apply to it again. Omit to skip nothing. |
 | `skipTitles` | no | A thread title glob or an array of globs; any match excludes the thread, and a thread with no title is never skipped. The title is read at each turn, so renaming a thread changes whether the rule applies. Case-sensitive, with `*` as the only special character. Omit to skip nothing. |
 | `threads` | no | `any` (default), `top-level` (no parent thread), or `child` (spawned with a parent thread). |
-| `name` | no | 1–128 characters. Names the rule in `status`, `check`, logs and overflow events; a rule without a name is `rules[<index>]`. |
+| `name` | no | 1–128 characters, unique among the rules. Names the rule in `status`, `check`, logs and overflow events; a rule without a name is `rules[<index>]`. |
 | `scope` | no | A scope name glob or an array of globs (see Scopes). The rule matches only while a scope with a matching name is active for the thread. Omit to match every directory. |
 | `skills` | no | A bundled skill name glob or an array of globs (see Skills). Matching skills are injected into every thread the rule matches. |
 | `instructions` | no | A string, or an array of lines joined with newlines. A rule needs `instructions`, `skills`, or both. |
@@ -126,12 +126,14 @@ a word and without a warning. The plugin makes sure that does not happen.
 **On save** (`bb plugin config model-instructions set rules ...` or the settings
 page) a value is rejected when:
 
-1. it is not valid JSON or does not match the shape above;
+1. it is not valid JSON or does not match the shape above (two rules with the
+   same `name` do not);
 2. a rule's `scope` glob matches no defined scope name;
 3. a rule's `skills` glob matches no bundled skill (not counting `model-instructions`);
 4. one rule's expanded `instructions` are longer than 4096 characters;
 5. any known thread type would get more than 4096 characters. Known thread types
-   are every provider × model that bb lists, as a top-level and as a child
+   are every provider × model that bb lists (a provider whose models cannot be
+   listed is left out, see below), as a top-level and as a child
    thread, for every project (its name and its checkout paths, so `scope` rules
    resolve) and for a thread with no project. Titles are not enumerated: a
    `skipTitles` match can only remove a rule, so a titled thread never gets more
@@ -144,9 +146,27 @@ The budget error groups thread types by the set of rules they match, lists the
 
 If the provider/model list or the project list has not loaded yet, or its last
 refresh failed, a value with instruction text is rejected with
-`budget not checkable yet: <provider list|project list> not loaded; retry`.
-Retry after a minute or after the next thread starts. The lists refresh every
-minute and when a thread is created.
+`budget not checkable yet: <provider list|project list> not loaded; retry after the next refresh (every minute), or see bb model-instructions status`
+(never loaded) or
+`budget not checkable yet: <provider list|project list> refresh failed; retry after the next refresh (every minute), or see bb model-instructions status`
+(last refresh failed). It is also rejected when providers are available but none
+of their model lists could be loaded:
+`budget not checkable yet: no provider's models could be listed (<id> (<reason>), ...); see bb model-instructions status`.
+A loaded list with no available provider has nothing to check and does not block a save.
+The lists refresh every minute and when a thread is created. At most one refresh
+runs at a time; calls made during one share one follow-up refresh.
+
+The provider list counts as failed only when listing the providers fails or
+times out. When the models of one available provider cannot be listed, that
+provider is left out of the known thread types and `status` and `check --all`
+list it as unchecked, with the error. The save is then checked against the other
+providers. When the provider comes back, the next refresh re-checks the stored
+setting and records any overflow.
+
+The save check does not cover everything:
+
+- The save check covers threads whose scope match comes from a project's checkouts. A thread whose environment directory (for example a worktree) is inside a scope while its project's checkouts are not, a provider listed as unchecked, and a model that appears only in a workspace-scoped model catalog are not covered; for those, the runtime fallback applies (whole rules dropped from the end, with the notice).
+- When the matched text is over the limit, the budget for kept rules is 4096 minus the notice; a very long first rule (close to 4096) can then be dropped too, leaving only the notice. Keep guard rules short and first.
 
 These checks run only on save, never when a stored value is loaded. On load only
 the structure can fail the setting. A `scope` or `skills` glob that matches
@@ -173,28 +193,39 @@ one text:
   lengths; never the text) are listed by `status`.
 - After every cache refresh the plugin re-runs the budget check on the stored
   setting. A thread type that is over the limit is logged as a warning and listed
-  by `status` as "over budget since <time>", before or at its first thread.
+  by `status` as "over budget since <time>", before or at its first thread. A
+  thread type that stays over the limit keeps its time; its length and rules
+  are updated.
+- The first refresh runs in the background after the plugin registers its
+  instructions and its command, so the rules apply at once. Scope matching
+  through project checkouts starts working when the project list loads; the
+  environment path of a thread is always a candidate.
 
 ## Inspect and try
 
 ```sh
 bb model-instructions status [--json]
-bb model-instructions check [--provider P] [--model M] [--child] [--project <id>] [--path <dir>] [--title T] [--json]
+bb model-instructions check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json]
 bb model-instructions check --all [--json]
 ```
 
 - `status` lists the scopes, the rules (name or `rules[<index>]`, matchers,
   instructions length, skills), the bundled skills with the rules that claim
-  them and the unclaimed ones, the state of the caches, the thread types that
-  are over budget and the recent overflow events.
+  them and the unclaimed ones, the state of the caches, the providers whose
+  models could not be listed (unchecked, with the reason), the thread types that
+  are over budget and the recent overflow events. A `scope` or `skills` glob that
+  matches nothing is marked under its rule (`! scope "<glob>" matches nothing`;
+  `unresolved` in `--json`).
 - `check` shows what one thread would get: the matched rules, the length out of
   4096, the dropped rules and the skills. Run inside a bb thread, it takes
   provider, model, role, title, project and path from that thread; the output
-  says which values were defaulted. A flag overrides its default. `--project`
+  says which values were defaulted. A flag overrides its default. `--child` and
+  `--top-level` force the role; giving both is a usage error. `--project`
   takes a project id; the name is looked up from it. Without a thread, give
   `--provider` and `--model`.
 - `check --all` prints the save-time budget table, grouped like the budget
-  error. It exits 1 when any thread type is over the limit.
+  error. It exits 1 when any thread type is over the limit. When providers are
+  unchecked it ends with `unchecked providers: <id> (<reason>), ...`.
 - An unknown command exits 2 with a usage line.
 
 ## Example: Opus supervises, Sonnet implements

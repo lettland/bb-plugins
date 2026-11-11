@@ -1,6 +1,6 @@
 import path from "node:path";
 import { z } from "zod";
-import { activeScopes, type Scope } from "./paths.js";
+import { activeScopes, activeScopesIn, type Scope } from "./paths.js";
 
 const THREAD_SCOPES = ["any", "top-level", "child"] as const;
 
@@ -86,7 +86,19 @@ const ruleSchema = z
     error: 'a rule needs "instructions", "skills", or both',
   });
 
-const rulesSchema = z.array(ruleSchema);
+const rulesSchema = z.array(ruleSchema).superRefine((rules, ctx) => {
+  const seen = new Set<string>();
+  rules.forEach((rule, index) => {
+    if (rule.name === undefined) return;
+    if (seen.has(rule.name))
+      ctx.addIssue({
+        code: "custom",
+        path: [index, "name"],
+        message: `the rule name "${rule.name}" is used twice`,
+      });
+    seen.add(rule.name);
+  });
+});
 
 const VAR_NAME_BODY = "[A-Za-z][A-Za-z0-9_-]*";
 const VAR_NAME_REGEXP = new RegExp(`^${VAR_NAME_BODY}$`);
@@ -231,6 +243,11 @@ function matches(rule: Rule, target: Target, activeNames: string[]): boolean {
 /** Names of the scopes whose paths contain one of the candidate paths. */
 export function activeScopeNames(scopes: Scope[], candidatePaths: string[]): string[] {
   return activeScopes(scopes, candidatePaths).map((scope) => scope.name);
+}
+
+/** Like `activeScopeNames`, for directories that are normalized already. */
+export function activeScopeNamesIn(scopes: Scope[], dirs: string[]): string[] {
+  return activeScopesIn(scopes, dirs).map((scope) => scope.name);
 }
 
 /** Indexes of the rules that match the target, in rule order. `activeNames` are the target's active scopes. */

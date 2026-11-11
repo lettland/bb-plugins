@@ -29,7 +29,7 @@ in one plugin setting, `rules`, a JSON array or an object
 | `skipProjects` | no | A project name glob or an array of globs; any match excludes the project, and wins over `project`. Case-sensitive, so renaming a skipped project (or getting its case wrong) makes the rule apply to it again. Omit to skip nothing. |
 | `skipTitles` | no | A thread title glob or an array of globs; any match excludes the thread, and a thread with no title is never skipped. The title is read at each turn, so renaming a thread changes whether the rule applies. Case-sensitive, with `*` as the only special character. Omit to skip nothing. |
 | `threads` | no | `any` (default), `top-level` (no parent thread), or `child` (spawned with a parent thread). |
-| `name` | no | 1–128 characters. Names the rule in `status`, `check`, logs and overflow events; otherwise it is `rules[<index>]`. |
+| `name` | no | 1–128 characters, unique among the rules. Names the rule in `status`, `check`, logs and overflow events; otherwise it is `rules[<index>]`. |
 | `scope` | no | A scope name glob or an array of globs. The rule matches only while a scope with a matching name is active (see Scopes). |
 | `skills` | no | A bundled skill name glob or an array of globs; matching skills are injected into every thread the rule matches (see Skills). |
 | `instructions` | no | A string, or an array of lines joined with newlines. A rule needs `instructions`, `skills`, or both. |
@@ -121,15 +121,20 @@ never dropped for the character limit.
 
 bb cuts a plugin's instructions at 4096 characters per thread, without a warning.
 
-- A save is rejected when: a `scope` glob matches no defined scope; a `skills` glob
+- A save is rejected when: two rules have the same `name`; a `scope` glob matches no defined scope; a `skills` glob
   matches no bundled skill; one rule's expanded `instructions` exceed 4096 characters; or any
   known thread type (every provider × model, top-level and child, every project with its
   checkout paths, and no project) would get more than 4096 characters, `\n\n` separators
   included. The error groups thread types by the rules they match: 5 longest per group,
   then `and <n> more`.
-- If the provider/model list or project list has not loaded or its last refresh failed, a save with
-  instruction text is rejected with `budget not checkable yet: <provider list|project list> not loaded; retry`.
-  Retry shortly.
+- If the provider/model list or project list has not loaded, a save with instruction text is rejected with
+  `budget not checkable yet: <provider list|project list> not loaded; retry after the next refresh (every minute), or see bb model-instructions status`;
+  if its last refresh failed, with `... <provider list|project list> refresh failed; retry ...` (same ending).
+  A provider whose models cannot be listed does not fail the list: it is left out and shown as
+  unchecked by `status` and `check --all`. If every available provider is unchecked, the save is rejected with
+  `budget not checkable yet: no provider's models could be listed (<id> (<reason>), ...); see bb model-instructions status`.
+- The save check covers threads whose scope match comes from a project's checkouts. A thread whose environment directory (for example a worktree) is inside a scope while its project's checkouts are not, a provider listed as unchecked, and a model that appears only in a workspace-scoped model catalog are not covered; for those, the runtime fallback applies (whole rules dropped from the end, with the notice).
+- When the matched text is over the limit, the budget for kept rules is 4096 minus the notice; a very long first rule (close to 4096) can then be dropped too, leaving only the notice. Keep guard rules short and first.
 - A stored value is never rejected for these reasons on load: an unknown `scope` or `skills`
   glob matches nothing and logs one warning per rule.
 - At runtime a thread type that was not known on save loses whole rules, never part of one:
@@ -141,15 +146,17 @@ bb cuts a plugin's instructions at 4096 characters per thread, without a warning
 
 ```sh
 bb model-instructions status [--json]
-bb model-instructions check [--provider P] [--model M] [--child] [--project <id>] [--path <dir>] [--title T] [--json]
+bb model-instructions check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json]
 bb model-instructions check --all [--json]
 ```
 
 `status` lists scopes, rules, bundled skills and the rules that claim them (and the unclaimed
-ones), the cache state, thread types over budget, and recent overflow events. `check` shows the
-matched rules, length out of 4096, dropped rules and skills for one thread; inside a bb thread it
-defaults provider, model, role, title, project and path from that thread and prints what it
-defaulted. `check --all` prints the save-time budget table.
+ones), the cache state, unchecked providers with their reason, thread types over budget, and
+recent overflow events; a `scope` or `skills` glob that matches nothing is marked under its rule.
+`check` shows the matched rules, length out of 4096, dropped rules and skills for one thread;
+inside a bb thread it defaults provider, model, role, title, project and path from that thread and
+prints what it defaulted. `--child` and `--top-level` force the role (both together is a usage
+error). `check --all` prints the save-time budget table and the unchecked providers.
 
 ## Read and change the rules
 

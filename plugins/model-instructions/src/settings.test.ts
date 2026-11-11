@@ -193,18 +193,29 @@ describe("a cache that cannot be trusted yet", () => {
   const rule = [{ instructions: "short" }];
 
   it.each([
-    ["the provider list was never loaded", { providers: { loaded: false } }, "provider list"],
-    ["the provider list's last refresh failed", { providers: { failed: true } }, "provider list"],
-    ["the project list was never loaded", { projects: { loaded: false } }, "project list"],
-    ["the project list's last refresh failed", { projects: { failed: true } }, "project list"],
-  ])("rejects a value with text when %s", (_label, state, list) => {
+    ["the provider list was never loaded", { providers: { loaded: false } }, "provider list not loaded"],
+    ["the provider list's last refresh failed", { providers: { failed: true } }, "provider list refresh failed"],
+    ["the project list was never loaded", { projects: { loaded: false } }, "project list not loaded"],
+    ["the project list's last refresh failed", { projects: { failed: true } }, "project list refresh failed"],
+  ])("rejects a value with text when %s", (_label, state, what) => {
     const snapshot = snapshotOf([["claude-code", ["opus"]]], [["p", []]], state);
-    expect(check(rule, { snapshot })).toBe(`budget not checkable yet: ${list} not loaded; retry`);
+    expect(check(rule, { snapshot })).toBe(`budget not checkable yet: ${what}; retry after the next refresh (every minute), or see bb model-instructions status`);
+  });
+
+  it("rejects a value with text when no available provider's models could be listed, and accepts it when none is available", () => {
+    const unchecked = [{ id: "a", reason: "auth_required" }, { id: "b", reason: "socket closed" }];
+    const none = snapshotOf([], [["p", []]], { providers: { unchecked } });
+    expect(check(rule, { snapshot: none })).toBe(
+      "budget not checkable yet: no provider's models could be listed (a (auth_required), b (socket closed)); see bb model-instructions status",
+    );
+    expect(check(rule, { snapshot: snapshotOf([], [["p", []]]) })).toBeNull();
+    const some = snapshotOf([["c", ["m"]]], [["p", []]], { providers: { unchecked } });
+    expect(check(rule, { snapshot: some })).toBeNull();
   });
 
   it("does not let an empty cache pass", () => {
     const empty = snapshotOf([], [], { providers: { loaded: false }, projects: { loaded: false } });
-    expect(check(rule, { snapshot: empty })).toBe("budget not checkable yet: provider list not loaded; retry");
+    expect(check(rule, { snapshot: empty })).toBe("budget not checkable yet: provider list not loaded; retry after the next refresh (every minute), or see bb model-instructions status");
   });
 
   it("needs no cache for a setting without any instruction text", () => {

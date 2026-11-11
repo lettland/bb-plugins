@@ -24,34 +24,57 @@ const x = (length: number) => "x".repeat(length);
 
 describe("cacheProblem", () => {
   const ok = snapshotOf([], []);
+  const unchecked = [{ id: "a", reason: "auth_required" }];
 
   it("is null when both lists are loaded and the last refresh worked", () => {
     expect(cacheProblem(ok)).toBeNull();
   });
 
   it.each([
-    ["never loaded", { providers: { loaded: false } }, "provider list"],
-    ["last refresh failed", { providers: { failed: true } }, "provider list"],
-  ])("names the provider list when it %s", (_label, over, expected) => {
-    expect(cacheProblem(snapshotOf([], [], over))).toBe(expected);
-  });
-
-  it.each([
-    ["never loaded", { projects: { loaded: false } }],
-    ["last refresh failed", { projects: { failed: true } }],
-  ])("names the project list when it %s", (_label, over) => {
-    expect(cacheProblem(snapshotOf([], [], over))).toBe("project list");
+    ["never loaded", { providers: { loaded: false } }, { kind: "not-loaded", list: "provider list" }],
+    ["last refresh failed", { providers: { failed: true } }, { kind: "refresh-failed", list: "provider list" }],
+    ["never loaded after a failed first refresh", { providers: { loaded: false, failed: true } }, { kind: "refresh-failed", list: "provider list" }],
+    ["never loaded", { projects: { loaded: false } }, { kind: "not-loaded", list: "project list" }],
+    ["last refresh failed", { projects: { failed: true } }, { kind: "refresh-failed", list: "project list" }],
+  ])("names the list that %s", (_label, over, expected) => {
+    expect(cacheProblem(snapshotOf([], [], over))).toEqual(expected);
   });
 
   it("names the provider list first when both are unusable", () => {
     expect(
       cacheProblem(snapshotOf([], [], { providers: { loaded: false }, projects: { loaded: false } })),
-    ).toBe("provider list");
+    ).toEqual({ kind: "not-loaded", list: "provider list" });
   });
 
-  it("words the refusal exactly", () => {
-    expect(notCheckable("provider list")).toBe("budget not checkable yet: provider list not loaded; retry");
-    expect(notCheckable("project list")).toBe("budget not checkable yet: project list not loaded; retry");
+  it("is not checkable when providers are available but none could be listed", () => {
+    expect(cacheProblem(snapshotOf([], [], { providers: { unchecked } }))).toEqual({
+      kind: "no-checked-provider",
+      unchecked,
+    });
+  });
+
+  it("is checkable when at least one provider is checked, or when no provider is available at all", () => {
+    expect(cacheProblem(snapshotOf([["c", ["m"]]], [], { providers: { unchecked } }))).toBeNull();
+    expect(cacheProblem(snapshotOf([], []))).toBeNull();
+  });
+
+  it("reports a failed provider list, not the unchecked providers", () => {
+    expect(cacheProblem(snapshotOf([], [], { providers: { failed: true, unchecked } }))).toEqual({
+      kind: "refresh-failed",
+      list: "provider list",
+    });
+  });
+
+  it("words each refusal exactly", () => {
+    const tail = "retry after the next refresh (every minute), or see bb model-instructions status";
+    expect(notCheckable({ kind: "not-loaded", list: "provider list" })).toBe(`budget not checkable yet: provider list not loaded; ${tail}`);
+    expect(notCheckable({ kind: "refresh-failed", list: "project list" })).toBe(`budget not checkable yet: project list refresh failed; ${tail}`);
+    expect(
+      notCheckable({
+        kind: "no-checked-provider",
+        unchecked: [{ id: "a", reason: "auth_required" }, { id: "b", reason: "socket closed" }],
+      }),
+    ).toBe("budget not checkable yet: no provider's models could be listed (a (auth_required), b (socket closed)); see bb model-instructions status");
   });
 });
 
