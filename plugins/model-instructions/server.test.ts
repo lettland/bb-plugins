@@ -4,7 +4,8 @@ import {
   makePluginAgentConfigurationContext,
 } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server.js";
-import { parseRules, resolveInstructions, rulesSettingSchema } from "./src/rules.js";
+import { parseRules, resolveInstructions } from "./src/rules.js";
+import { createRulesSettingSchema } from "./src/settings.js";
 
 const SUPERVISOR = {
   provider: "claude-code",
@@ -155,7 +156,7 @@ describe("resolveInstructions", () => {
 describe("parseRules", () => {
   it.each([
     ["not json", "not valid JSON"],
-    ["{}", "expected record, received undefined"],
+    ["{}", "at rules"],
     ['[{"instructions": "  "}]', "instructions"],
     ['[{"instructions": "x", "threads": "root"}]', "threads"],
     ['[{"instructions": "x", "modle": "y"}]', "modle"],
@@ -211,12 +212,11 @@ describe("parseRules", () => {
     ['{"vars": {"__proto__": "x"}, "rules": []}', 'invalid variable name "__proto__" at vars'],
     ['{"vars": {"__proto__": "x", "a": "y"}, "rules": [{"instructions": "{{a}}"}]}', 'invalid variable name "__proto__" at vars'],
     ['{"vars": null, "rules": []}', "at vars"],
-    ['{"rules": []}', "at vars"],
     ['{"vars": {}}', "at rules"],
     ['{"vars": {}, "rules": [], "extra": 1}', "Unrecognized key"],
-    ["5", 'expected an array of rules or { "vars": {...}, "rules": [...] }'],
-    ["null", 'expected an array of rules or { "vars": {...}, "rules": [...] }'],
-    ['"x"', 'expected an array of rules or { "vars": {...}, "rules": [...] }'],
+    ["5", 'expected an array of rules or { "vars"?: {...}, "scopes"?: [...], "rules": [...] }'],
+    ["null", 'expected an array of rules or { "vars"?: {...}, "scopes"?: [...], "rules": [...] }'],
+    ['"x"', 'expected an array of rules or { "vars"?: {...}, "scopes"?: [...], "rules": [...] }'],
   ])("rejects form B %s", (json, message) => {
     expect(() => parseRules(json)).toThrow(message);
   });
@@ -283,15 +283,23 @@ describe("parseRules", () => {
   });
 
   it("backs the setting's write validation", () => {
-    expect(rulesSettingSchema.safeParse("[]").success).toBe(true);
-    expect(rulesSettingSchema.safeParse("[{}]").success).toBe(false);
+    const schema = createRulesSettingSchema({
+      skillNames: () => [],
+      scopesFor: (own) => own,
+      caches: () => ({
+        providers: { loaded: true, failed: false, list: [] },
+        projects: { loaded: true, failed: false, list: [] },
+      }),
+    });
+    expect(schema.safeParse("[]").success).toBe(true);
+    expect(schema.safeParse("[{}]").success).toBe(false);
     expect(
-      rulesSettingSchema.safeParse(
+      schema.safeParse(
         JSON.stringify({ vars: { a: "x" }, rules: [{ instructions: "use {{a}}" }] }),
       ).success,
     ).toBe(true);
     expect(
-      rulesSettingSchema.safeParse(
+      schema.safeParse(
         JSON.stringify({ vars: { a: "x" }, rules: [{ instructions: "use {{b}}" }] }),
       ).success,
     ).toBe(false);
@@ -300,7 +308,16 @@ describe("parseRules", () => {
 
 describe("plugin", () => {
   function createHost(settings?: Record<string, string>) {
-    return createFakePluginHost({ pluginId: "model-instructions", agentSkillIds: ["model-instructions"], settings });
+    return createFakePluginHost({
+      pluginId: "model-instructions",
+      agentSkillIds: ["model-instructions"],
+      settings,
+      // The save-time budget check reads the provider and project lists: both load, and are empty.
+      sdk: {
+        providers: { list: async () => [], models: async () => ({ models: [], modelLoadError: null }) },
+        projects: { list: async () => [] },
+      },
+    });
   }
 
   function resolve(

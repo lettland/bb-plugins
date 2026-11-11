@@ -1,13 +1,14 @@
 ---
 name: model-instructions
-description: "Change the custom instructions bb adds to threads by provider, model, project (including skipping projects), and top-level vs child thread (the model-instructions plugin's rules setting)."
+description: "Change the custom instructions and skills bb adds to threads by provider, model, project (including skipping projects), directory scope, and top-level vs child thread (the model-instructions plugin's rules setting)."
 ---
 
 # Model instructions
 
-The `model-instructions` plugin adds instructions to a thread when its provider,
-model, project, and thread position match a rule. Rules live in one plugin setting,
-`rules`, a JSON array. Every matching rule applies, in array order.
+The `model-instructions` plugin adds instructions and skills to a thread when its
+provider, model, project, directory, and thread position match a rule. Rules live
+in one plugin setting, `rules`, a JSON array or an object
+`{ "vars"?, "scopes"?, "rules" }`. Every matching rule applies, in array order.
 
 ```json
 [
@@ -28,7 +29,10 @@ model, project, and thread position match a rule. Rules live in one plugin setti
 | `skipProjects` | no | A project name glob or an array of globs; any match excludes the project, and wins over `project`. Case-sensitive, so renaming a skipped project (or getting its case wrong) makes the rule apply to it again. Omit to skip nothing. |
 | `skipTitles` | no | A thread title glob or an array of globs; any match excludes the thread, and a thread with no title is never skipped. The title is read at each turn, so renaming a thread changes whether the rule applies. Case-sensitive, with `*` as the only special character. Omit to skip nothing. |
 | `threads` | no | `any` (default), `top-level` (no parent thread), or `child` (spawned with a parent thread). |
-| `instructions` | yes | A string, or an array of lines joined with newlines. |
+| `name` | no | 1–128 characters. Names the rule in `status`, `check`, logs and overflow events; otherwise it is `rules[<index>]`. |
+| `scope` | no | A scope name glob or an array of globs. The rule matches only while a scope with a matching name is active (see Scopes). |
+| `skills` | no | A bundled skill name glob or an array of globs; matching skills are injected into every thread the rule matches (see Skills). |
+| `instructions` | no | A string, or an array of lines joined with newlines. A rule needs `instructions`, `skills`, or both. |
 
 Example: everything except a few projects:
 
@@ -79,8 +83,8 @@ flags need not repeat in every rule:
 
 - Substitution happens only in the object form, and only inside `instructions`
   (after an array of lines is joined). `{{name}}` is replaced by the var value.
-- In the object form, both `vars` and `rules` are required, and no other
-  top-level keys are allowed.
+- In the object form `rules` is required; `vars` (default `{}`) and `scopes` are
+  optional. No other top-level keys are allowed.
 - Var names are letters, digits, `_`, `-`, starting with a letter. Any other
   name, including `__proto__`, is rejected on save.
 - Values are inserted exactly as written (no trimming) and must not be blank.
@@ -89,13 +93,63 @@ flags need not repeat in every rule:
   rule index and the var.
 - To keep a literal `{{name}}` in object-form text, define the var as itself,
   for example `"name": "{{name}}"`.
-- The 4096-character truncation (see Constraints) applies to the expanded text; nothing rejects an over-long result on save.
+- The 4096-character limit (see Budget) applies to the expanded text.
 - Var values become part of the instructions sent to the model provider. Do
   not put secrets or personal data in them.
 - Text that does not match `{{name}}` exactly (for example `{{ x }}` with
   spaces, or a single `{`) stays as written.
 - The plain array form keeps working unchanged: its text is never substituted,
   so an existing `{{name}}` there stays as written.
+
+## Scopes
+
+A scope names a set of directories. In the object form, `"scopes": [{ "name": "work", "paths": ["~/workspace/work"] }]`
+(1–16 absolute or `~/` paths each, at most 32 scopes, names unique, 1–128 characters).
+A rule with `"scope": "work"` (a glob or an array of globs over scope names) matches
+only while a matching scope is active: the thread's environment path, or any checkout
+path of its project, is inside one of the scope's paths (symlinks resolved).
+A rule without `scope` matches in every directory.
+
+## Skills
+
+A rule's `skills` globs claim bundled skills by name. A thread gets `model-instructions`
+(always) plus every skill claimed by a rule that matches it, once each. A bundled skill that
+no rule claims is injected nowhere; `*` never lists `model-instructions` twice. Skills are
+never dropped for the character limit.
+
+## Budget
+
+bb cuts a plugin's instructions at 4096 characters per thread, without a warning.
+
+- A save is rejected when: a `scope` glob matches no defined scope; a `skills` glob
+  matches no bundled skill; one rule's expanded `instructions` exceed 4096 characters; or any
+  known thread type (every provider × model, top-level and child, every project with its
+  checkout paths, and no project) would get more than 4096 characters, `\n\n` separators
+  included. The error groups thread types by the rules they match: 5 longest per group,
+  then `and <n> more`.
+- If the provider/model list or project list has not loaded or its last refresh failed, a save with
+  instruction text is rejected with `budget not checkable yet: <provider list|project list> not loaded; retry`.
+  Retry shortly.
+- A stored value is never rejected for these reasons on load: an unknown `scope` or `skills`
+  glob matches nothing and logs one warning per rule.
+- At runtime a thread type that was not known on save loses whole rules, never part of one:
+  rules are added in array order, and the first one that does not fit and every later one are
+  dropped, with `[model-instructions: <n> rule(s) omitted: over the 4096-character limit; tell the user to run bb model-instructions status]`
+  appended. Put role and guard rules first.
+
+## Inspect
+
+```sh
+bb model-instructions status [--json]
+bb model-instructions check [--provider P] [--model M] [--child] [--project <id>] [--path <dir>] [--title T] [--json]
+bb model-instructions check --all [--json]
+```
+
+`status` lists scopes, rules, bundled skills and the rules that claim them (and the unclaimed
+ones), the cache state, thread types over budget, and recent overflow events. `check` shows the
+matched rules, length out of 4096, dropped rules and skills for one thread; inside a bb thread it
+defaults provider, model, role, title, project and path from that thread and prints what it
+defaulted. `check --all` prints the save-time budget table.
 
 ## Read and change the rules
 
@@ -113,10 +167,10 @@ List model ids with `bb provider models <provider>` and project names with
 
 ## Constraints
 
-- The combined instructions for one thread are truncated to 4096 characters.
+- The combined instructions for one thread are limited to 4096 characters: the save check rejects a setting that exceeds it for a known thread type, and at runtime whole rules are dropped (see Budget).
 - Side chats never receive plugin instructions.
 - After saving rules that use `skipProjects` (in any form) or an array `project`, an older plugin version rejects the whole setting and applies no rules.
-- After saving the object form (`vars` + `rules`), an older plugin version rejects the whole setting and applies no rules.
+- After saving the object form (`vars`, `scopes`, `rules`), a rule with `name`, `scope` or `skills`, or a rule without `instructions`, an older plugin version rejects the whole setting and applies no rules.
 - Instructions only guide the model; they do not enforce anything. To stop Claude
   Code delegating through its own Task tool instead of bb threads, turn on the
   Claude Code provider's "Disable provider subagents" setting.
