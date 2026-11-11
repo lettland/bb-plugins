@@ -2,11 +2,9 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type 
 import { definePluginApp, useRpc } from "@get-bb/plugin-sdk/app";
 import type { ConfigState, ModelInstructionsRpcContract, RawConfig } from "./rpc-contract";
 import { globToRegExp } from "./src/glob";
+import * as ui from "./src/ui";
 import { previewLength } from "./src/vars";
 
-const SOFT_INK = "color-mix(in oklch, var(--ink) 68%, var(--canvas))";
-const RULE = "1px solid color-mix(in oklch, var(--ink) 11%, var(--canvas))";
-const DESTRUCTIVE = "var(--destructive-text)";
 // bb's limit for one thread's instructions; the server checks the same number.
 const LIMIT = 4096;
 const IGNORED_NOTE = "Ignored: a profile scope with this name comes from profiles.json";
@@ -189,7 +187,7 @@ function sameRawDrafts(left: Draft, right: Draft): boolean {
 
 function SectionNote(props: { children: string; id?: string }) {
   return (
-    <div id={props.id} style={{ fontSize: 12, color: SOFT_INK }}>
+    <div id={props.id} className={ui.hint}>
       {props.children}
     </div>
   );
@@ -216,13 +214,16 @@ function TextField(props: {
     "aria-describedby": hint === undefined ? undefined : hintId,
   };
   return (
-    <div>
-      <label htmlFor={common.id}>{label}</label>
+    <div className={ui.field}>
+      <label htmlFor={common.id} className={ui.label}>
+        {label}
+      </label>
       {multiline === true ? (
-        <textarea {...common} rows={4} onChange={(event) => onChange(event.target.value)} />
+        <textarea {...common} rows={4} className={ui.textarea} onChange={(event) => onChange(event.target.value)} />
       ) : (
         <input
           {...common}
+          className={ui.input}
           type="text"
           list={suggestions === undefined ? undefined : listId}
           onChange={(event) => onChange(event.target.value)}
@@ -266,22 +267,25 @@ function TagList(props: {
     onPending("");
   };
   return (
-    <div data-tag-list="">
-      <label htmlFor={`${base}-input`}>{label}</label>
+    <div data-tag-list="" className={ui.field}>
+      <label htmlFor={`${base}-input`} className={ui.label}>
+        {label}
+      </label>
       {values.length === 0 ? null : (
-        <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexWrap: "wrap", gap: 4 }}>
+        <ul className="m-0 flex list-none flex-wrap gap-1 p-0">
           {values.map((value, index) => {
             const note = noteFor?.(value);
             return (
-              <li key={index} style={{ border: RULE, borderRadius: 6, padding: "0 4px" }}>
+              <li key={index} className={ui.badge}>
                 <span>{value}</span>{" "}
                 {note === undefined ? null : (
                   <>
-                    <span style={{ fontSize: 12, color: SOFT_INK }}>{note}</span>{" "}
+                    <span className="text-muted-foreground">{note}</span>{" "}
                   </>
                 )}
                 <button
                   type="button"
+                  className={ui.buttonSm.ghost}
                   aria-label={`Remove ${value}`}
                   onClick={() => onChange(values.filter((_, at) => at !== index))}
                 >
@@ -292,9 +296,10 @@ function TagList(props: {
           })}
         </ul>
       )}
-      <div style={{ display: "flex", gap: 8 }}>
+      <div className="flex gap-2">
         <input
           id={`${base}-input`}
+          className={ui.input}
           type="text"
           value={pending}
           list={suggestions === undefined ? undefined : listId}
@@ -307,7 +312,7 @@ function TagList(props: {
             add();
           }}
         />
-        <button type="button" onClick={add}>
+        <button type="button" className={ui.button.outline} onClick={add}>
           Add
         </button>
       </div>
@@ -337,14 +342,15 @@ function PickList(props: {
   const base = useId();
   const names = known.map((entry) => entry.name);
   return (
-    <fieldset style={{ margin: 0, padding: 8, border: RULE, borderRadius: 6 }}>
-      <legend>{legend}</legend>
+    <fieldset className="m-0 flex min-w-0 flex-col gap-2 border-0 p-0">
+      <legend className={ui.cx(ui.label, "mb-2 p-0")}>{legend}</legend>
       {known.map((entry, index) => {
         const id = `${base}-pick-${index}`;
         return (
-          <div key={entry.name}>
+          <div key={entry.name} className="flex items-center gap-2 text-sm">
             <input
               id={id}
+              className="accent-foreground"
               type="checkbox"
               checked={values.includes(entry.name)}
               onChange={(event) =>
@@ -360,7 +366,7 @@ function PickList(props: {
               {entry.description === undefined ? null : (
                 <>
                   {" "}
-                  <span style={{ fontSize: 12, color: SOFT_INK }}>{entry.description}</span>
+                  <span className={ui.hint}>{entry.description}</span>
                 </>
               )}
             </label>
@@ -387,14 +393,14 @@ function SharedTexts(props: {
   onRemove: (index: number) => void;
 }) {
   return (
-    <section aria-labelledby="mi-shared-heading">
-      <h4 id="mi-shared-heading" style={{ margin: "0 0 4px" }}>
+    <section aria-labelledby="mi-shared-heading" className={ui.card}>
+      <h4 id="mi-shared-heading" className={ui.cx(ui.cardTitle, "m-0")}>
         Shared texts
       </h4>
-      <SectionNote>{"Use a shared text as {{name}} in a rule's instructions."}</SectionNote>
-      <ul style={{ listStyle: "none", margin: "8px 0", padding: 0 }}>
+      <div className={ui.cardNote}>{"Use a shared text as {{name}} in a rule's instructions."}</div>
+      <ul className="m-0 flex list-none flex-col gap-3 p-0">
         {props.rows.map((row, index) => (
-          <li key={row.key} style={{ padding: "8px 0", borderTop: RULE }}>
+          <li key={row.key} className="flex flex-col gap-3 border-t border-border pt-3">
             <TextField
               label="Name"
               value={row.name}
@@ -410,6 +416,7 @@ function SharedTexts(props: {
             />
             <button
               type="button"
+              className={ui.cx(ui.buttonSm.ghost, "self-start")}
               aria-label={`Remove shared text ${row.name.trim() === "" ? index + 1 : row.name.trim()}`}
               onClick={() => props.onRemove(index)}
             >
@@ -418,7 +425,7 @@ function SharedTexts(props: {
           </li>
         ))}
       </ul>
-      <button type="button" data-focus="add-var" onClick={props.onAdd}>
+      <button type="button" className={ui.cx(ui.button.outline, "self-start")} data-focus="add-var" onClick={props.onAdd}>
         Add shared text
       </button>
     </section>
@@ -441,14 +448,17 @@ function ScopeCard(props: {
   const noteId = `${base}-note`;
   const hintId = `${base}-hint`;
   return (
-    <li style={{ padding: "8px 0", borderTop: RULE }}>
-      <fieldset style={{ margin: 0, padding: 0, border: "none" }}>
-        <legend style={{ color: "var(--ink)", fontWeight: 500 }}>{title}</legend>
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <div>
-            <label htmlFor={`${base}-name`}>Name</label>
+    <li>
+      <fieldset className={ui.cx(ui.card, "m-0 min-w-0")}>
+        <legend className={ui.cx(ui.cardTitle, "px-1")}>{title}</legend>
+        <div className="flex flex-col gap-3">
+          <div className={ui.field}>
+            <label htmlFor={`${base}-name`} className={ui.label}>
+              Name
+            </label>
             <input
               id={`${base}-name`}
+              className={ui.input}
               data-focus={`scope:${row.key}`}
               type="text"
               value={row.name}
@@ -457,11 +467,14 @@ function ScopeCard(props: {
             />
           </div>
           {ignored ? <SectionNote id={noteId}>{IGNORED_NOTE}</SectionNote> : null}
-          <fieldset style={{ margin: 0, padding: 8, border: RULE, borderRadius: 6 }}>
-            <legend id={`${base}-legend`}>Directories</legend>
+          <fieldset className="m-0 flex min-w-0 flex-col gap-2 border-0 p-0">
+            <legend id={`${base}-legend`} className={ui.cx(ui.label, "mb-2 p-0")}>
+              Directories
+            </legend>
             {row.paths.map((value, index) => (
-              <div key={index} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <div key={index} className="flex items-center gap-2">
                 <input
+                  className={ui.input}
                   data-focus={`path:${row.key}:${index}`}
                   type="text"
                   value={value}
@@ -475,6 +488,7 @@ function ScopeCard(props: {
                 />
                 <button
                   type="button"
+                  className={ui.buttonSm.ghost}
                   aria-label={
                     value.trim() === "" ? "Remove empty directory row" : `Remove directory ${value.trim()}`
                   }
@@ -485,13 +499,19 @@ function ScopeCard(props: {
               </div>
             ))}
             <SectionNote id={hintId}>Absolute or ~/…</SectionNote>
-            <button type="button" data-focus={`add-path:${row.key}`} onClick={onAddPath}>
+            <button
+              type="button"
+              className={ui.cx(ui.button.outline, "self-start")}
+              data-focus={`add-path:${row.key}`}
+              onClick={onAddPath}
+            >
               Add directory
             </button>
           </fieldset>
           <div>
             <button
               type="button"
+              className={ui.buttonSm.ghost}
               aria-label={name === "" ? `Remove ${title}` : `Remove directory scope ${name}`}
               onClick={onRemove}
             >
@@ -516,14 +536,14 @@ function Directories(props: {
 }) {
   const profileNames = props.profileScopes.map((scope) => scope.name);
   return (
-    <section aria-labelledby="mi-directories-heading">
-      <h4 id="mi-directories-heading" style={{ margin: "0 0 4px" }}>
+    <section aria-labelledby="mi-directories-heading" className={ui.card}>
+      <h4 id="mi-directories-heading" className={ui.cx(ui.cardTitle, "m-0")}>
         Directories
       </h4>
-      <SectionNote>
+      <div className={ui.cardNote}>
         A rule limited to a directory applies when the thread's workspace or its project's checkout is inside it.
-      </SectionNote>
-      <ul style={{ listStyle: "none", margin: "8px 0", padding: 0 }}>
+      </div>
+      <ul className="m-0 flex list-none flex-col gap-3 p-0">
         {props.rows.map((row, index) => {
           const name = row.name.trim();
           return (
@@ -540,17 +560,17 @@ function Directories(props: {
           );
         })}
       </ul>
-      <button type="button" data-focus="add-scope" onClick={props.onAdd}>
+      <button type="button" className={ui.cx(ui.button.outline, "self-start")} data-focus="add-scope" onClick={props.onAdd}>
         Add directory scope
       </button>
       {props.profileScopes.length === 0 ? null : (
-        <div style={{ marginTop: 8 }}>
-          <h5 style={{ margin: 0 }}>From profiles.json</h5>
-          <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+        <div className="flex flex-col gap-3">
+          <h5 className={ui.cx(ui.label, "m-0")}>From profiles.json</h5>
+          <ul className="m-0 flex list-none flex-col gap-3 p-0">
             {props.profileScopes.map((scope) => (
-              <li key={scope.name} style={{ padding: "8px 0", borderTop: RULE }}>
-                <strong style={{ color: "var(--ink)" }}>{scope.name}</strong>{" "}
-                <span>{scope.paths.join(", ")}</span>
+              <li key={scope.name} className={ui.cardMuted}>
+                <strong className={ui.label}>{scope.name}</strong>{" "}
+                <span className="text-sm">{scope.paths.join(", ")}</span>
                 <SectionNote>{PROFILE_NOTE}</SectionNote>
               </li>
             ))}
@@ -596,18 +616,18 @@ function RuleCard(props: {
   const matchesNoScope = (value: string) =>
     scopeNames.some((name) => globToRegExp(value).test(name)) ? undefined : NO_SCOPE_NOTE;
   return (
-    <fieldset style={{ margin: "0 0 12px", padding: 12, border: RULE, borderRadius: 8 }}>
-      <legend style={{ color: "var(--ink)", fontWeight: 500 }}>{title}</legend>
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+    <fieldset className={ui.cx(ui.card, "@container m-0 min-w-0")}>
+      <legend className={ui.cx(ui.cardTitle, "px-1")}>{title}</legend>
+      <div className="flex flex-col gap-4">
         <TextField
           label="Name (optional)"
           value={row.name}
           focus={`rule:${row.key}`}
           onChange={(name) => onChange({ name })}
         />
-        <fieldset style={{ margin: 0, padding: 8, border: RULE, borderRadius: 6 }}>
-          <legend>Applies to</legend>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <fieldset className="m-0 min-w-0 border-0 p-0">
+          <legend className={ui.cx(ui.label, "mb-2 p-0")}>Applies to</legend>
+          <div className="grid gap-3 @sm:grid-cols-2">
             <TextField
               label="Provider"
               value={row.provider}
@@ -622,10 +642,13 @@ function RuleCard(props: {
               suggestions={models}
               onChange={(model) => onChange({ model })}
             />
-            <div>
-              <label htmlFor={`${base}-threads`}>Thread</label>
+            <div className={ui.field}>
+              <label htmlFor={`${base}-threads`} className={ui.label}>
+                Thread
+              </label>
               <select
                 id={`${base}-threads`}
+                className={ui.input}
                 value={row.threads}
                 onChange={(event) => onChange({ threads: event.target.value as Threads })}
               >
@@ -676,25 +699,26 @@ function RuleCard(props: {
           onChange={(skills) => onChange({ skills })}
           {...pendingOf("skills")}
         />
-        <div>
+        <div className={ui.field}>
           <TextField
             label="Instructions"
             value={row.instructions}
             multiline
             onChange={(instructions) => onChange({ instructions })}
           />
-          <div id={countId} style={{ fontSize: 12, color: over ? DESTRUCTIVE : SOFT_INK }}>
+          <div id={countId} className={over ? ui.countOver : ui.hint}>
             {over ? `${length} / ${LIMIT} characters — over the limit` : `${length} / ${LIMIT} characters`}
           </div>
           {unknown.map((name) => (
-            <div key={name} style={{ fontSize: 12, color: DESTRUCTIVE }}>
+            <div key={name} className={ui.countOver}>
               {`Unknown shared text {{${name}}}`}
             </div>
           ))}
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className="flex gap-2">
           <button
             type="button"
+            className={ui.buttonSm.ghost}
             data-focus={`up:${row.key}`}
             disabled={position === 1}
             onClick={() => props.onMove(-1)}
@@ -703,16 +727,17 @@ function RuleCard(props: {
           </button>
           <button
             type="button"
+            className={ui.buttonSm.ghost}
             data-focus={`down:${row.key}`}
             disabled={position === count}
             onClick={() => props.onMove(1)}
           >
             Move down
           </button>
-          <button type="button" onClick={props.onDuplicate}>
+          <button type="button" className={ui.buttonSm.ghost} onClick={props.onDuplicate}>
             Duplicate
           </button>
-          <button type="button" aria-label={`Delete ${title}`} onClick={props.onDelete}>
+          <button type="button" className={ui.buttonSm.destructive} aria-label={`Delete ${title}`} onClick={props.onDelete}>
             Delete
           </button>
         </div>
@@ -723,9 +748,9 @@ function RuleCard(props: {
 
 function LoadFailure(props: { error: string; onRetry: () => void }) {
   return (
-    <div role="alert" style={{ color: DESTRUCTIVE }}>
-      <p>Could not load the configuration: {props.error}</p>
-      <button type="button" onClick={props.onRetry}>
+    <div role="alert" className={ui.cx(ui.banner, "flex flex-col gap-2")}>
+      <p className={ui.cx(ui.bannerTitle, "m-0")}>Could not load the configuration: {props.error}</p>
+      <button type="button" className={ui.cx(ui.button.outline, "self-start")} onClick={props.onRetry}>
         Retry
       </button>
     </div>
@@ -738,8 +763,8 @@ function assertNever(value: never): never {
 
 function BannerBox(props: { heading: string; children: ReactNode }) {
   return (
-    <section aria-labelledby="mi-banner-heading" style={{ border: RULE, borderRadius: 8, padding: 12 }}>
-      <h4 id="mi-banner-heading" style={{ margin: "0 0 4px", color: DESTRUCTIVE }}>
+    <section aria-labelledby="mi-banner-heading" className={ui.cx(ui.banner, "flex flex-col gap-2")}>
+      <h4 id="mi-banner-heading" className={ui.cx(ui.bannerTitle, "m-0")}>
         {props.heading}
       </h4>
       {props.children}
@@ -753,27 +778,15 @@ function Banner(props: { error: NonNullable<ConfigState["loadError"]>; onKeep: (
     case "storage":
       return (
         <BannerBox heading="The plugin's storage could not be read">
-          <p style={{ margin: 0 }}>{error.message}</p>
+          <p className="m-0">{error.message}</p>
         </BannerBox>
       );
     case "stored":
       return (
         <BannerBox heading="The saved configuration could not be loaded">
-          <p style={{ margin: "0 0 8px" }}>{error.message}</p>
+          <p className="m-0">{error.message}</p>
           {error.text === "" ? null : (
-            <pre
-              style={{
-                margin: "0 0 8px",
-                padding: 8,
-                border: RULE,
-                borderRadius: 6,
-                overflow: "auto",
-                whiteSpace: "pre-wrap",
-                fontFamily: "ui-monospace, monospace",
-              }}
-            >
-              {error.text}
-            </pre>
+            <pre className={ui.cx(ui.pre, "m-0")}>{error.text}</pre>
           )}
           <SectionNote>{STORED_FIX}</SectionNote>
         </BannerBox>
@@ -781,14 +794,14 @@ function Banner(props: { error: NonNullable<ConfigState["loadError"]>; onKeep: (
     case "migration":
       return (
         <BannerBox heading="Your rules from the previous version were not moved">
-          <p style={{ margin: 0 }}>{error.message}</p>
+          <p className="m-0">{error.message}</p>
         </BannerBox>
       );
     case "conflict":
       return (
         <BannerBox heading="Your rules from the previous version differ from the rules saved here">
-          <p style={{ margin: "0 0 8px" }}>{error.message}</p>
-          <button type="button" onClick={props.onKeep}>
+          <p className="m-0">{error.message}</p>
+          <button type="button" className={ui.cx(ui.button.outline, "self-start")} onClick={props.onKeep}>
             Keep the rules saved here
           </button>
         </BannerBox>
@@ -1002,7 +1015,7 @@ function Instructions() {
   };
 
   if (state === null) {
-    if (loadFailure === null) return <p style={{ color: SOFT_INK }}>Loading…</p>;
+    if (loadFailure === null) return <p className={ui.cx(ui.cardNote, "m-0")}>Loading…</p>;
     return <LoadFailure error={loadFailure} onRetry={() => void load()} />;
   }
 
@@ -1015,13 +1028,13 @@ function Instructions() {
     ]),
   ];
   return (
-    <div ref={rootRef} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+    <div ref={rootRef} className="flex flex-col gap-4">
       {loadFailure === null ? null : <LoadFailure error={loadFailure} onRetry={() => void load()} />}
       {state.loadError === null ? null : (
         <Banner error={state.loadError} onKeep={() => void keepSavedRules()} />
       )}
-      <fieldset disabled={saving} style={{ margin: 0, padding: 0, border: "none" }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <fieldset disabled={saving} className="m-0 min-w-0 border-0 p-0">
+        <div className="flex flex-col gap-4">
           <SharedTexts rows={draft.vars} duplicates={duplicates} onChange={updateVar} onAdd={addVar} onRemove={removeVar} />
           <Directories
             rows={draft.scopes}
@@ -1033,14 +1046,14 @@ function Instructions() {
             onAddPath={addPath}
             onRemovePath={removePath}
           />
-          <section aria-labelledby="mi-rules-heading">
-            <h4 id="mi-rules-heading" style={{ margin: "0 0 4px" }}>
+          <section aria-labelledby="mi-rules-heading" className={ui.card}>
+            <h4 id="mi-rules-heading" className={ui.cx(ui.cardTitle, "m-0")}>
               Rules
             </h4>
-            <SectionNote>
+            <div className={ui.cardNote}>
               Every matching rule applies, top first. When the text is over the limit, earlier rules are kept first.
-            </SectionNote>
-            <div style={{ margin: "8px 0" }}>
+            </div>
+            <div className="flex flex-col gap-3">
               {draft.rules.map((row, index) => (
                 <RuleCard
                   key={row.key}
@@ -1057,22 +1070,23 @@ function Instructions() {
                 />
               ))}
             </div>
-            <button type="button" data-focus="add-rule" onClick={addRule}>
+            <button type="button" className={ui.cx(ui.button.outline, "self-start")} data-focus="add-rule" onClick={addRule}>
               Add rule
             </button>
           </section>
           {saveError === null ? null : (
-            <div role="alert" style={{ color: DESTRUCTIVE }}>
-              <div style={{ whiteSpace: "pre-wrap" }}>{saveError}</div>
+            <div role="alert" className={ui.cx(ui.banner, "text-destructive")}>
+              <div className="whitespace-pre-wrap">{saveError}</div>
               {saveError.startsWith(NOT_CHECKABLE_PREFIX) ? <div>{NOT_CHECKABLE_HINT}</div> : null}
             </div>
           )}
-          <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" disabled={!dirty || saving || duplicates.size > 0} onClick={() => void save()}>
+          <div className="flex gap-2">
+            <button type="button" className={ui.button.primary} disabled={!dirty || saving || duplicates.size > 0} onClick={() => void save()}>
               Save
             </button>
             <button
               type="button"
+              className={ui.button.outline}
               disabled={!edited || saving}
               onClick={() => {
                 focusRef.current = "add-rule";
@@ -1085,7 +1099,7 @@ function Instructions() {
           </div>
         </div>
       </fieldset>
-      <output style={{ display: "block", margin: 0, fontSize: 12, color: SOFT_INK }}>
+      <output className={ui.cx(ui.hint, "m-0 block")}>
         {saved ? "Saved" : ""}
       </output>
     </div>

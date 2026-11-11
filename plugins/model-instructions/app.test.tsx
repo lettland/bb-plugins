@@ -132,6 +132,12 @@ const tags = (scope: HTMLElement, label: string) =>
     .queryAllByRole("listitem")
     .map((item) => item.querySelector("span")!.textContent);
 const subgroup = (card: HTMLElement, name: string) => within(card).getByRole("group", { name });
+// The class strings the form must use, from src/ui.ts.
+const hint = "text-xs text-muted-foreground";
+const countOver = "text-xs text-destructive";
+/** The wrapper of a label and its control: a column, so the label sits above the control and does not run into it. */
+const wrapperOf = (scope: HTMLElement, label: string) => field(scope, label).parentElement as HTMLElement;
+const isField = (element: HTMLElement) => element.className === "flex flex-col gap-1.5";
 
 describe("registration", () => {
   it("registers the Instructions settings section with its description", () => {
@@ -248,6 +254,43 @@ describe("loading", () => {
         "Every matching rule applies, top first. When the text is over the limit, earlier rules are kept first.",
       ),
     ).toBeTruthy();
+  });
+});
+
+describe("the label and its control", () => {
+  it("sit in a field column in every rule, scope and shared text field", async () => {
+    render(
+      state({
+        config: config({
+          vars: { gchat: "Use gchat" },
+          scopes: [{ name: "work", paths: ["/w"] }],
+          rules: [rule({ name: "a" })],
+        }),
+      }),
+    );
+    const card = await screen.findByRole("group", { name: "a" });
+    for (const label of ["Name (optional)", "Provider", "Model", "Thread", "Instructions"]) {
+      expect(isField(wrapperOf(card, label))).toBe(true);
+    }
+    for (const label of ["Projects", "Skip projects", "Skip titles"]) {
+      expect(isField(tagList(card, label))).toBe(true);
+    }
+    expect(isField(tagList(subgroup(card, "Skills"), "Other patterns"))).toBe(true);
+    const vars = within(region("Shared texts")).getAllByRole("listitem")[0]!;
+    expect(isField(wrapperOf(vars, "Name"))).toBe(true);
+    expect(isField(wrapperOf(vars, "Text"))).toBe(true);
+    const scope = within(region("Directories")).getAllByRole("listitem")[0]!;
+    expect(isField(wrapperOf(scope, "Name"))).toBe(true);
+  });
+
+  it("have full-width, bordered controls", async () => {
+    render(withRules(rule({ name: "a" })));
+    const card = await screen.findByRole("group", { name: "a" });
+    for (const label of ["Name (optional)", "Provider", "Thread"]) {
+      expect(field(card, label).classList.contains("w-full")).toBe(true);
+      expect(field(card, label).classList.contains("border-input")).toBe(true);
+    }
+    expect(field(card, "Instructions").classList.contains("min-h-32")).toBe(true);
   });
 });
 
@@ -1118,6 +1161,17 @@ describe("the character count", () => {
     expect(within(card).getByText("4097 / 4096 characters — over the limit")).toBeTruthy();
   });
 
+  it("styles the count with countOver when over the limit and with hint otherwise, never both", async () => {
+    const card = await open();
+    type(field(card, "Instructions"), "a".repeat(4096));
+    const within4096 = within(card).getByText("4096 / 4096 characters");
+    expect(within4096.className).toBe(hint);
+    type(field(card, "Instructions"), "a".repeat(4097));
+    const over = within(card).getByText("4097 / 4096 characters — over the limit");
+    expect(over.className).toBe(countOver);
+    expect(over.classList.contains("text-muted-foreground")).toBe(false);
+  });
+
   it("points the Instructions field at its hint-less count and keeps the count outside the textarea", async () => {
     const card = await open();
     expect(field(card, "Instructions").tagName).toBe("TEXTAREA");
@@ -1214,7 +1268,7 @@ describe("Save and Discard", () => {
     it("names a rule and a directory scope as the cards do, and keeps its line breaks", async () => {
       const rule = await failWith("rules[1]: unknown variable {{nope}}");
       expect(rule.textContent).toBe("Rule 2: unknown variable {{nope}}");
-      expect(rule.style.whiteSpace).toBe("pre-wrap");
+      expect(rule.classList.contains("whitespace-pre-wrap")).toBe(true);
       cleanup();
       const scope = await failWith(
         '✖ expected an absolute path or a path starting with "~/"\n  → at scopes[1].paths[0]',
@@ -1222,7 +1276,7 @@ describe("Save and Discard", () => {
       expect(scope.textContent).toBe(
         '✖ expected an absolute path or a path starting with "~/"\n  → at Directory scope 2.paths[0]',
       );
-      expect(scope.style.whiteSpace).toBe("pre-wrap");
+      expect(scope.classList.contains("whitespace-pre-wrap")).toBe(true);
     });
 
     it("replaces every position in one message, and only a whole rules[n] or scopes[n]", async () => {

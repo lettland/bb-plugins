@@ -49,6 +49,8 @@ import type { SetupDeps } from "./src/setup.js";
 const CONFIG_KEY = "config";
 /** kv key that is `true` once the rules of the previous versions are moved; the setting is then no longer declared. */
 const DONE_KEY = "previousSettingDone";
+/** kv key that is `true` once an `import` succeeded while the move was not finished: the user's own choice, kept across restarts. */
+const IMPORTED_KEY = "previousImported";
 /** kv keys written by v0.1.12, removed once at the start of the move. */
 const V012_RULES_KEY = "legacyRules";
 const V012_DISMISSED_KEY = "legacyDismissed";
@@ -296,10 +298,8 @@ export default async function plugin(bb: BbPluginApi) {
    * the setting with 404 until the factory has finished. Returns what the service and the form need.
    */
   function previousSettingMigration(setting: RulesSetting) {
-    /** True once the move has started in this process. */
-    let moveStarted = false;
-    /** True when an `import` succeeded before the move started: the user's own choice, which the move must not question. */
-    let importedFirst = false;
+    /** True once the flag is set in this process: an `import` after that needs no record. */
+    let settled = false;
 
     /** Step d: empties the setting and reads it back. False, with a warning, when it is not empty. */
     async function emptySetting(): Promise<boolean> {
@@ -315,10 +315,21 @@ export default async function plugin(bb: BbPluginApi) {
       return false;
     }
 
+    /** Sets the flag, then removes the record of an early import. A leftover record does nothing once the flag is set. */
+    async function markDone(): Promise<void> {
+      await bb.storage.kv.set(DONE_KEY, true);
+      settled = true;
+      try {
+        await bb.storage.kv.delete(IMPORTED_KEY);
+      } catch (error) {
+        bb.log.warn(`could not remove the record that the rules were imported: ${(error as Error).message}`);
+      }
+    }
+
     /** Steps d and e: empties the setting, then sets the flag. */
     async function finishMove(backupPath: string, outcome: "moved" | "already saved" | "imported"): Promise<void> {
       if (!(await emptySetting())) return;
-      await bb.storage.kv.set(DONE_KEY, true);
+      await markDone();
       bb.log.info(
         {
           moved: `rules from the previous version moved: backup ${backupPath}`,
@@ -356,7 +367,6 @@ export default async function plugin(bb: BbPluginApi) {
 
     /** Steps a to e, decided from the current state. Runs inside the write queue. */
     async function migrate(): Promise<void> {
-      moveStarted = true;
       if (!(await removeV012Keys())) return;
       const text = (await setting.get()).rules;
       const blank = text.trim() === "";
@@ -374,7 +384,7 @@ export default async function plugin(bb: BbPluginApi) {
       // a. Nothing to move.
       if (blank || (old !== undefined && isEmptyConfig(old))) {
         if (blank || (await emptySetting())) {
-          await bb.storage.kv.set(DONE_KEY, true);
+          await markDone();
           bb.log.debug("no rules from the previous version to move");
         }
         return;
@@ -413,7 +423,7 @@ export default async function plugin(bb: BbPluginApi) {
       } else if (old === undefined) {
         bb.log.warn(NOT_READ(backupPath));
         await finishMove(backupPath, "already saved");
-      } else if (importedFirst) {
+      } else if ((await bb.storage.kv.get<boolean>(IMPORTED_KEY)) === true) {
         await finishMove(backupPath, "imported");
       } else if (sameConfig(old, raw)) {
         await finishMove(backupPath, "already saved");
@@ -424,7 +434,13 @@ export default async function plugin(bb: BbPluginApi) {
 
     /** Settles a pending move after the saved config was replaced or the user chose: the backup exists, so steps d and e run. */
     async function resolve(by: Resolution): Promise<void> {
-      if (by === "import" && !moveStarted) importedFirst = true;
+      if (by === "import" && !settled) {
+        try {
+          await bb.storage.kv.set(IMPORTED_KEY, true);
+        } catch (error) {
+          bb.log.warn(`could not record that the rules were imported: ${(error as Error).message}`);
+        }
+      }
       const current = pending;
       if (current === undefined || current.backupPath === null) return;
       if (current.kind === "migration" ? by === "keep" : by === "form") return;

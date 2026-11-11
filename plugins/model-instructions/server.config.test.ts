@@ -595,6 +595,125 @@ describe("an import that lands before the move is the user's choice", () => {
   });
 });
 
+describe("an import before the move is finished is remembered across a restart", () => {
+  const imported = raw({ rules: [GUARD] });
+  const importIt = async (loaded: Loaded) =>
+    expect((await loaded.harness.runCli(["import", importFile("early.json", imported)])).exitCode).toBe(0);
+  /** The folder for the backups is a file, so the backup of what v0.1.12 kept fails and the move stops. */
+  const blockBackups = () => {
+    mkdirSync(path.dirname(backupDir()), { recursive: true });
+    writeFileSync(backupDir(), "a file where the folder should be");
+  };
+  const V012 = { text: "[{broken" };
+  const WRITE_FAILED = (reason: string) => `could not record that the rules were imported: ${reason}`;
+  const DELETE_FAILED = (reason: string) => `could not remove the record that the rules were imported: ${reason}`;
+
+  it("import, then a move that stops, then a restart: the move runs with no conflict banner, empties the setting, sets the flag and deletes the record", async () => {
+    blockBackups();
+    const loaded = await load({ rules: OLD, v012Rules: V012 });
+    const run = await runMigration(loaded);
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "migration", backupPath: null });
+    await importIt(loaded);
+    expect(await loaded.kv.get("previousImported")).toBe(true);
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    await endRun(run);
+    rmSync(backupDir());
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    await endRun(restarted.harness.runService(SERVICE));
+    expect(((await restarted.harness.callRpc("getState", null)) as ConfigState).loadError).toBeNull();
+    expect(await restarted.bb.storage.kv.get("config")).toEqual(imported);
+    expect(await restarted.bb.storage.kv.get("previousSettingDone")).toBe(true);
+    expect(await restarted.bb.storage.kv.get("previousImported")).toBeUndefined();
+    // finishMove logs this only after the setting was emptied and read back.
+    const files = backupFiles().map((name) => path.join(backupDir(), name));
+    expect(files.map((file) => readFileSync(file, "utf8")).sort()).toEqual(["[{broken", OLD].sort());
+    const oldCopy = files.find((file) => readFileSync(file, "utf8") === OLD)!;
+    expect(logs(restarted, "info")).toContain(`rules from the previous version not moved: rules were imported; backup ${oldCopy}`);
+  });
+
+  it("no import, the same move that stops, then a restart: the conflict banner shows", async () => {
+    blockBackups();
+    const loaded = await load({ rules: OLD, v012Rules: V012, stored: imported });
+    await endRun(await runMigration(loaded));
+    rmSync(backupDir());
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    await endRun(restarted.harness.runService(SERVICE));
+    expect(((await restarted.harness.callRpc("getState", null)) as ConfigState).loadError).toMatchObject({ kind: "conflict" });
+    expect(await restarted.bb.storage.kv.get("previousSettingDone")).toBeUndefined();
+    expect(await restarted.bb.storage.kv.get("previousImported")).toBeUndefined();
+  });
+
+  it("an import while the conflict banner is open: the record is written, the move finishes, the flag is set and the record is deleted", async () => {
+    const loaded = await load({ rules: JSON.stringify([{ name: "old", instructions: "Changed." }]), stored: raw({ rules: [OLD_RULE] }) });
+    const run = await runMigration(loaded);
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "conflict" });
+    const writes: string[] = [];
+    const original = loaded.kv.set.bind(loaded.kv);
+    vi.spyOn(loaded.kv, "set").mockImplementation((async (key: string, value: unknown) => {
+      writes.push(key);
+      return original(key, value);
+    }) as never);
+    await importIt(loaded);
+    expect(writes).toEqual(expect.arrayContaining(["previousImported", "previousSettingDone"]));
+    expect(writes.indexOf("previousImported")).toBeLessThan(writes.indexOf("previousSettingDone"));
+    expect((await state(loaded)).loadError).toBeNull();
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(await loaded.kv.get("previousImported")).toBeUndefined();
+    expect(await loaded.rules()).toBe("");
+    await endRun(run);
+  });
+
+  it("an import after the move finished in the same process: no record is written", async () => {
+    const loaded = await load({ rules: OLD });
+    await endRun(await runMigration(loaded));
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    const set = vi.spyOn(loaded.kv, "set");
+    await importIt(loaded);
+    expect(set.mock.calls.map(([key]) => key)).not.toContain("previousImported");
+    expect(await loaded.kv.get("previousImported")).toBeUndefined();
+  });
+
+  it("a failed write of the record: a warning, and the import still exits 0 and saves the rules", async () => {
+    const loaded = await load({ rules: OLD, prepare: failing("set", "previousImported") });
+    await importIt(loaded);
+    expect(logs(loaded, "warn")).toContain(WRITE_FAILED("disk full"));
+    expect(await loaded.kv.get("config")).toEqual(imported);
+    expect(await loaded.kv.get("previousImported")).toBeUndefined();
+  });
+
+  it("a failed delete of the record: a warning, no failed move, and the flag stays set", async () => {
+    const loaded = await load({ rules: OLD, prepare: failing("delete", "previousImported") });
+    await importIt(loaded);
+    expect(await loaded.kv.get("previousImported")).toBe(true);
+    await endRun(await runMigration(loaded));
+    expect(logs(loaded, "warn")).toContain(DELETE_FAILED("disk full"));
+    expect(logs(loaded, "warn").filter((line) => line.includes("could not be moved"))).toEqual([]);
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect((await state(loaded)).loadError).toBeNull();
+    expect(await loaded.rules()).toBe("");
+  });
+
+  it("a failed read of the record: the failed-move warning, no banner, the flag not set, tried again at the next start", async () => {
+    const loaded = await load({ rules: OLD, stored: imported, prepare: failing("get", "previousImported") });
+    await endRun(await runMigration(loaded));
+    expect(logs(loaded, "warn")).toContain(MOVE_FAILED("disk full"));
+    expect((await state(loaded)).loadError).toBeNull();
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    expect(await loaded.rules()).toBe(OLD);
+  });
+
+  it("the record is deleted on the nothing-to-move path", async () => {
+    const loaded = await load({ rules: "" });
+    await importIt(loaded);
+    expect(await loaded.kv.get("previousImported")).toBe(true);
+    await endRun(await runMigration(loaded));
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(await loaded.kv.get("previousImported")).toBeUndefined();
+  });
+});
+
 describe("the conflict banner is resolved", () => {
   const SAVED = raw({ rules: [OLD_RULE] });
   const CHANGED = JSON.stringify([{ name: "old", instructions: "Changed." }]);
