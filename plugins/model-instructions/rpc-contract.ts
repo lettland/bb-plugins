@@ -49,6 +49,14 @@ const overBudgetSchema = z.strictObject({
 });
 export type OverBudgetRecord = z.infer<typeof overBudgetSchema>;
 
+const loadErrorSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("storage"), message: z.string() }),
+  z.strictObject({ kind: z.literal("stored"), message: z.string(), text: z.string() }),
+  z.strictObject({ kind: z.literal("migration"), message: z.string(), backupPath: z.string().nullable() }),
+  z.strictObject({ kind: z.literal("conflict"), message: z.string(), backupPath: z.string() }),
+]);
+export type LoadError = z.infer<typeof loadErrorSchema>;
+
 const stateSchema = z.strictObject({
   config: rawConfigSchema,
   providers: z.array(z.strictObject({ id: z.string(), models: z.array(z.string()) })),
@@ -61,14 +69,13 @@ const stateSchema = z.strictObject({
   cache: z.strictObject({ providers: listStateSchema, projects: listStateSchema }),
   overBudget: z.array(overBudgetSchema),
   /**
-   * What the form must warn about, or null. `legacy`: the old `rules` setting could not be imported or read;
-   * `legacyText` is its kept text ("" when it could not be read). `stored`: the saved config could not be
-   * loaded at start; `legacyText` is then the stored value as JSON text. `storage`: a read of the plugin's
-   * storage failed at start, so nothing can be saved; `legacyText` is "".
+   * What the form must warn about, or null. `storage`: a read of the plugin's storage failed at start, so
+   * nothing can be saved. `stored`: the saved config could not be loaded at start; `text` is the stored value
+   * as JSON text. `migration`: the rules of the previous version were not moved; `backupPath` is their copy,
+   * or null when no copy could be made. `conflict`: they differ from the rules saved here; `backupPath` is
+   * their copy.
    */
-  loadError: z
-    .strictObject({ kind: z.enum(["legacy", "stored", "storage"]), message: z.string(), legacyText: z.string() })
-    .nullable(),
+  loadError: loadErrorSchema.nullable(),
 });
 export type ConfigState = z.infer<typeof stateSchema>;
 
@@ -83,7 +90,7 @@ export const modelInstructionsRpcContract = {
     input: z.strictObject({ config: z.custom<RawConfig>() }),
     output: stateSchema,
   },
-  dismissLegacy: {
+  keepSavedRules: {
     input: z.null(),
     output: stateSchema,
   },

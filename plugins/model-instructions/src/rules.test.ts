@@ -9,13 +9,16 @@ import {
   expandConfig,
   fullLength,
   INSTRUCTIONS_LIMIT,
+  isEmptyConfig,
   matchRules,
   omittedNotice,
   parseConfig,
   parseLegacyText,
   parseRawConfig,
+  previousForm,
   resolve,
   ruleLabel,
+  sameConfig,
   unresolvedRefs,
   type Target,
 } from "./rules.js";
@@ -689,5 +692,44 @@ describe("parseLegacyText", () => {
   it("applies every check of parseRawConfig", () => {
     expect(() => parseLegacyText('{"rules": [], "extra": 1}')).toThrow("Unrecognized key");
     expect(() => parseLegacyText('[{"instructions": " "}]')).toThrow("instructions");
+  });
+});
+
+describe("previousForm", () => {
+  it("wraps an array as the rules of the object form, and leaves anything else as it is", () => {
+    expect(previousForm([{ instructions: "x" }])).toEqual({ rules: [{ instructions: "x" }] });
+    const object = { rules: [] };
+    expect(previousForm(object)).toBe(object);
+    expect(previousForm(5)).toBe(5);
+    expect(previousForm(null)).toBeNull();
+  });
+});
+
+describe("isEmptyConfig", () => {
+  it("is true for no rules, scopes and vars, and false when any one is there", () => {
+    expect(isEmptyConfig(parseLegacyText("[]"))).toBe(true);
+    expect(isEmptyConfig(parseRawConfig({ rules: [] }))).toBe(true);
+    expect(isEmptyConfig(parseRawConfig({ rules: [{ instructions: "x" }] }))).toBe(false);
+    expect(isEmptyConfig(parseRawConfig({ rules: [], scopes: [{ name: "w", paths: ["/w"] }] }))).toBe(false);
+    expect(isEmptyConfig(parseRawConfig({ rules: [], vars: { a: "A" } }))).toBe(false);
+  });
+});
+
+describe("sameConfig", () => {
+  const config = (vars: Record<string, string>) => parseRawConfig({ vars, rules: [{ name: "r", instructions: "x" }] });
+
+  it("ignores the order of object keys, at any depth", () => {
+    expect(sameConfig(config({ a: "A", b: "B" }), config({ b: "B", a: "A" }))).toBe(true);
+    const a = { vars: {}, scopes: [], rules: [{ threads: "any", name: "r", instructions: "x" }] } as never;
+    const b = { rules: [{ instructions: "x", name: "r", threads: "any" }], scopes: [], vars: {} } as never;
+    expect(sameConfig(a, b)).toBe(true);
+  });
+
+  it("counts the order of arrays and every value", () => {
+    const two = (first: string, second: string) =>
+      parseRawConfig({ rules: [{ instructions: first }, { instructions: second }] });
+    expect(sameConfig(two("a", "b"), two("b", "a"))).toBe(false);
+    expect(sameConfig(config({ a: "A" }), config({ a: "B" }))).toBe(false);
+    expect(sameConfig(config({ a: "A" }), config({}))).toBe(false);
   });
 });

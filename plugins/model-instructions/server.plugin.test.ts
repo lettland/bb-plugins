@@ -93,8 +93,6 @@ async function flushMicrotasks(): Promise<void> {
 interface HostOptions {
   /** The saved config, as JSON text in the old setting's array or object form; stored before the plugin starts. */
   config?: string;
-  /** What `getSettings` returns for the old `rules` setting. */
-  legacyRules?: unknown;
   world?: World;
   sdk?: Record<string, unknown>;
   skills?: string[];
@@ -108,7 +106,7 @@ async function load(options: HostOptions = {}) {
   const host = createFakePluginHost({
     pluginId: "model-instructions",
     agentSkillIds: ["model-instructions", ...skills],
-    sdk: { ...sdkFor(world), ...legacySdk(options.legacyRules), ...options.sdk },
+    sdk: { ...sdkFor(world), ...options.sdk },
   });
   if (options.config !== undefined)
     await host.bb.storage.kv.set("config", parseLegacyText(options.config));
@@ -117,11 +115,6 @@ async function load(options: HostOptions = {}) {
   await create(host.bb);
   await flushMicrotasks();
   return { host, harness: host.harness, world };
-}
-
-/** `bb.sdk.plugins.getSettings` as the host answers it for the removed `rules` setting. */
-function legacySdk(rulesValue: unknown) {
-  return rulesValue === undefined ? {} : { plugins: { getSettings: async () => ({ values: { rules: rulesValue } }) } };
 }
 
 /** A form save: the RPC `saveConfig` with a config given in the old setting's text form. */
@@ -1411,7 +1404,7 @@ describe("bb model-instructions check", () => {
     const result = await harness.runCli(["bogus"]);
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toBe(
-      'unknown command "bogus"\nusage: bb model-instructions status [--json] | check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json] | setup [--dry-run] [--json] | unpin [<thread-id>] | import-dir-skills [--dry-run] [--json] | export [--legacy] | import <file>\n',
+      'unknown command "bogus"\nusage: bb model-instructions status [--json] | check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json] | setup [--dry-run] [--json] | unpin [<thread-id>] | import-dir-skills [--dry-run] [--json] | export | import <file>\n',
     );
   });
 });
@@ -1481,10 +1474,9 @@ describe("registration", () => {
     ]);
   });
 
-  it("defines no setting: the saved config lives in storage, behind the settings form's RPC", async () => {
+  it("registers the settings form's RPC", async () => {
     const { harness } = await load();
-    expect(harness.registrations.settingsDescriptors).toEqual({});
-    expect(harness.registrations.rpcMethods.sort()).toEqual(["dismissLegacy", "getState", "saveConfig"]);
+    expect(harness.registrations.rpcMethods.sort()).toEqual(["getState", "keepSavedRules", "saveConfig"]);
   });
 });
 

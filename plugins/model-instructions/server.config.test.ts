@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createFakePluginHost, makePluginAgentConfigurationContext } from "@get-bb/plugin-sdk/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { modelInstructionsRpcContract, type ConfigState } from "./rpc-contract.js";
-import { parseRawConfig } from "./src/rules.js";
+import { parseLegacyText, parseRawConfig } from "./src/rules.js";
 
 const x = (length: number) => "x".repeat(length);
 
@@ -55,16 +55,28 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 50; i += 1) await Promise.resolve();
 }
 
+interface RulesHandle {
+  get(): Promise<{ rules: string }>;
+  experimental_set(values: { rules: string | null }): Promise<unknown>;
+  onChange(listener: (next: unknown, prev: unknown) => void): void;
+}
+
 interface Options {
-  /** What the host answers for the old `rules` setting; left out, the call is not stubbed and throws. */
-  legacy?: unknown;
+  /** The value of the setting of the previous versions, as bb has it stored. */
+  rules?: string;
+  /** Stored under kv `previousSettingDone` before the plugin starts. */
+  done?: boolean;
   /** Stored under kv `config` before the plugin starts. */
   stored?: unknown;
-  /** Stored under kv `legacyRules` before the plugin starts. */
-  kept?: unknown;
+  /** Stored under kv `legacyRules` before the plugin starts: what v0.1.12 kept. */
+  v012Rules?: unknown;
+  /** Stored under kv `legacyDismissed` before the plugin starts: what v0.1.12 kept. */
+  v012Dismissed?: boolean;
   sdk?: Record<string, unknown>;
   /** Runs on the host's storage before the plugin starts, to make a call fail. */
   prepare?: (kv: ReturnType<typeof createFakePluginHost>["bb"]["storage"]["kv"]) => void;
+  /** Wraps the handle the plugin gets for its setting, to make a call fail or to count calls. */
+  setting?: (handle: RulesHandle) => RulesHandle;
 }
 
 function worldSdk(sdk: Record<string, unknown> = {}) {
@@ -79,22 +91,32 @@ function worldSdk(sdk: Record<string, unknown> = {}) {
 }
 
 async function load(options: Options = {}) {
-  const getSettings = vi.fn(async () => ({ values: { rules: options.legacy } }));
+  const getSettings = vi.fn(async () => ({ values: {} }));
   const host = createFakePluginHost({
     pluginId: "model-instructions",
     agentSkillIds: ["model-instructions", ...SKILLS],
-    sdk: {
-      ...worldSdk(options.sdk),
-      ...("legacy" in options ? { plugins: { getSettings } } : {}),
-    },
+    ...(options.rules === undefined ? {} : { settings: { rules: options.rules } }),
+    sdk: { ...worldSdk(options.sdk), plugins: { getSettings } },
   });
+  // The handles bb gives the plugin for its setting, as they are before any wrapper.
+  const handles: RulesHandle[] = [];
+  const define = host.bb.settings.define.bind(host.bb.settings) as (descriptors: unknown) => RulesHandle;
+  vi.spyOn(host.bb.settings, "define").mockImplementation(((descriptors: unknown) => {
+    const handle = define(descriptors);
+    handles.push(handle);
+    return options.setting?.(handle) ?? handle;
+  }) as never);
   if (options.stored !== undefined) await host.bb.storage.kv.set("config", options.stored);
-  if (options.kept !== undefined) await host.bb.storage.kv.set("legacyRules", options.kept);
+  if (options.done !== undefined) await host.bb.storage.kv.set("previousSettingDone", options.done);
+  if (options.v012Rules !== undefined) await host.bb.storage.kv.set("legacyRules", options.v012Rules);
+  if (options.v012Dismissed !== undefined) await host.bb.storage.kv.set("legacyDismissed", options.v012Dismissed);
   options.prepare?.(host.bb.storage.kv);
   const create = await pluginAt();
   await create(host.bb);
   await flush();
-  return { host, harness: host.harness, kv: host.bb.storage.kv, getSettings, create };
+  /** The value of the setting right now; undefined while it is not declared. */
+  const rules = async () => (handles.length === 0 ? undefined : (await handles[0].get()).rules);
+  return { host, harness: host.harness, kv: host.bb.storage.kv, getSettings, create, rules };
 }
 
 type Loaded = Awaited<ReturnType<typeof load>>;
@@ -124,291 +146,6 @@ function put(file: string, content: unknown): void {
 }
 const profilesPath = () => path.join(home, ".bb", "model-instructions", "profiles.json");
 
-describe("the one-time import of the old rules setting", () => {
-  const SAVED_LINE = (n: number, s: number, v: number) =>
-    `config saved from legacy setting: ${n} rules, ${s} scopes, ${v} vars`;
-
-  it("imports the array form, normalizing it, and logs the one line", async () => {
-    const loaded = await load({
-      legacy: JSON.stringify([
-        { name: "a", provider: "claude-code", project: "bb-*", skipTitles: "Help: *", instructions: ["one", "two"] },
-        { skills: "work-*", threads: "child" },
-      ]),
-    });
-    expect(await loaded.kv.get("config")).toEqual({
-      vars: {},
-      scopes: [],
-      rules: [
-        { name: "a", provider: "claude-code", project: ["bb-*"], skipTitles: ["Help: *"], threads: "any", instructions: "one\ntwo" },
-        { skills: ["work-*"], threads: "child" },
-      ],
-    });
-    expect(logs(loaded, "info")).toContain(SAVED_LINE(2, 0, 0));
-    expect((await configure(loaded)).instructions).toBe("one\ntwo");
-    expect((await state(loaded)).loadError).toBeNull();
-    expect(await loaded.kv.get("legacyRules")).toBeUndefined();
-  });
-
-  it("imports the object form with its vars unexpanded, its scopes and its rules", async () => {
-    const loaded = await load({
-      legacy: JSON.stringify({
-        vars: { gchat: "Chat text." },
-        scopes: [{ name: "work", paths: ["/work"] }],
-        rules: [{ name: "r", scope: "work", skills: ["work-*"], instructions: "Say: {{gchat}}" }],
-      }),
-    });
-    expect(await loaded.kv.get("config")).toEqual({
-      vars: { gchat: "Chat text." },
-      scopes: [{ name: "work", paths: ["/work"] }],
-      rules: [{ name: "r", scope: ["work"], skills: ["work-*"], threads: "any", instructions: "Say: {{gchat}}" }],
-    });
-    expect(logs(loaded, "info")).toContain(SAVED_LINE(1, 1, 1));
-    expect((await configure(loaded, { path: "/work/app" })).instructions).toBe("Say: Chat text.");
-  });
-
-  it("imports an empty list: a new install's default value", async () => {
-    const loaded = await load({ legacy: "[]" });
-    expect(await loaded.kv.get("config")).toEqual({ vars: {}, scopes: [], rules: [] });
-    expect(logs(loaded, "info")).toContain(SAVED_LINE(0, 0, 0));
-  });
-
-  // The save-only gate, both directions: today's rules are carried over as they are, but the same value
-  // is refused when it is saved through the form or `import`.
-  describe.each([
-    {
-      label: "an unresolved scope and skill reference",
-      config: { rules: [{ name: "gchat", scope: "work", skills: "typo-*", instructions: "x" }] },
-      message: 'gchat: scope "work" matches no defined scope',
-      sdk: {},
-    },
-    {
-      label: "a rule set that is over budget",
-      config: { rules: [{ instructions: x(3000) }, { instructions: x(3000) }] },
-      message: "over the 4096-character limit",
-      sdk: {},
-    },
-    {
-      label: "a text rule while the caches are not loaded",
-      config: { rules: [{ instructions: "x" }] },
-      message: "budget not checkable yet: provider list refresh failed",
-      sdk: {
-        providers: {
-          list: async () => {
-            throw new Error("providers down");
-          },
-          models: async () => ({ models: [], modelLoadError: null }),
-        },
-      },
-    },
-  ])("with $label", ({ config, message, sdk }) => {
-    it("is imported, then refused by the RPC and by import, with nothing stored by them", async () => {
-      const loaded = await load({ legacy: JSON.stringify(config), sdk });
-      const stored = await loaded.kv.get("config");
-      expect(stored).toEqual(raw(config));
-      expect(logs(loaded, "info")).toContain(SAVED_LINE(config.rules.length, 0, 0));
-      expect(await state(loaded)).toMatchObject({ loadError: null });
-
-      await expect(save(loaded, raw(config))).rejects.toThrow(message);
-      const file = path.join(base, "same.json");
-      writeFileSync(file, JSON.stringify(raw(config)));
-      const result = await loaded.harness.runCli(["import", file]);
-      expect(result.exitCode).toBe(1);
-      expect(result.stderr).toContain(message);
-      expect(await loaded.kv.get("config")).toEqual(stored);
-    });
-  });
-
-  it("keeps malformed old text and its error, shows them in the banner state and in export --legacy, and runs with no rules", async () => {
-    const text = '[{"instructions": "x", ';
-    const loaded = await load({ legacy: text });
-    expect(await loaded.kv.get("config")).toBeUndefined();
-    const record = (await loaded.kv.get("legacyRules")) as { text: string; error: string };
-    expect(record.text).toBe(text);
-    expect(record.error).toMatch(/^not valid JSON: /);
-    expect(await state(loaded)).toMatchObject({
-      config: { vars: {}, scopes: [], rules: [] },
-      loadError: { kind: "legacy", message: record.error, legacyText: text },
-    });
-    expect(await loaded.harness.runCli(["export", "--legacy"])).toMatchObject({ exitCode: 0, stdout: text + "\n" });
-    expect(logs(loaded, "warn").some((line) => line.startsWith("the old rules setting was not imported: not valid JSON"))).toBe(true);
-    expect((await configure(loaded)).instructions).toBeNull();
-  });
-
-  it.each([
-    ["a rule that fails the structural checks", JSON.stringify([{ name: "r" }]), 'a rule needs "instructions", "skills", or both'],
-    // v0.1.11 kept {{name}} in an array-form rule as literal text; the stored config always expands.
-    ["a {{name}} in the array form, which has no vars", JSON.stringify([{ instructions: "{{literal}} text" }]), "rules[0]: unknown variable {{literal}}"],
-    ["a scope with an unknown key", JSON.stringify({ scopes: [{ name: "w", paths: ["/w"], claudeConfigDir: "/x" }], rules: [] }), "claudeConfigDir"],
-  ])("keeps the text of %s instead of importing it", async (_label, text, message) => {
-    const loaded = await load({ legacy: text });
-    expect(await loaded.kv.get("config")).toBeUndefined();
-    expect(await state(loaded)).toMatchObject({ loadError: { kind: "legacy", message: expect.stringContaining(message), legacyText: text } });
-  });
-
-  it.each([
-    ["a setting with no value", {}, "no old rules setting to import"],
-    ["a blank value", "  \n ", "no old rules setting to import"],
-    ["an empty string", "", "no old rules setting to import"],
-    ["a value that is not text", 5, "no old rules setting to import"],
-  ])("does nothing for %s, and only logs at debug level", async (_label, legacy, message) => {
-    const loaded = await load({ legacy });
-    expect(await loaded.kv.get("config")).toBeUndefined();
-    expect(await loaded.kv.get("legacyRules")).toBeUndefined();
-    expect(loaded.harness.logEntries.filter((entry) => entry.level === "debug").map((entry) => entry.message)).toContain(message);
-    expect(logs(loaded, "info").some((line) => line.startsWith("config saved"))).toBe(false);
-    expect(logs(loaded, "warn")).toEqual([]);
-    expect((await state(loaded)).loadError).toBeNull();
-  });
-
-  describe("when the old setting cannot be read", () => {
-    const MESSAGE =
-      "the old rules setting could not be read: host down. Restart bb or reload the plugin before you save here: once this form saves, the old setting is no longer imported.";
-    const down = { plugins: { getSettings: async () => { throw new Error("host down"); } } };
-
-    it("warns with the reason, keeps it in memory only, and shows it with no old text", async () => {
-      const loaded = await load({ sdk: down });
-      expect(await loaded.kv.get("config")).toBeUndefined();
-      expect(await loaded.kv.get("legacyRules")).toBeUndefined();
-      expect(logs(loaded, "warn")).toEqual([MESSAGE]);
-      expect(logs(loaded, "debug")).not.toContain(MESSAGE);
-      expect((await state(loaded)).loadError).toEqual({ kind: "legacy", message: MESSAGE, legacyText: "" });
-    });
-
-    it("says nothing about the old setting when the host has no plugin settings call at all", async () => {
-      const loaded = await load();
-      expect(await loaded.kv.get("config")).toBeUndefined();
-      expect(logs(loaded, "warn")).toEqual([expect.stringContaining("the old rules setting could not be read: ")]);
-    });
-
-    it("is not kept across a restart: the import is tried again, and a good read leaves no error", async () => {
-      let broken = true;
-      const getSettings = vi.fn(async () => {
-        if (broken) throw new Error("host down");
-        return { values: { rules: JSON.stringify([GUARD]) } };
-      });
-      const first = await load({ sdk: { plugins: { getSettings } } });
-      expect((await state(first)).loadError).toEqual({ kind: "legacy", message: MESSAGE, legacyText: "" });
-      broken = false;
-      const restarted = await first.harness.reload(first.create);
-      await flush();
-      expect(getSettings).toHaveBeenCalledTimes(2);
-      expect(await restarted.bb.storage.kv.get("config")).toEqual(raw({ rules: [GUARD] }));
-      expect(((await restarted.harness.callRpc("getState", null)) as ConfigState).loadError).toBeNull();
-    });
-
-    it("loses to a kept old text", async () => {
-      const loaded = await load({ sdk: down, kept: { text: "old", error: "why" } });
-      expect((await state(loaded)).loadError).toEqual({ kind: "legacy", message: "why", legacyText: "old" });
-    });
-
-    it("is cleared by a successful form save", async () => {
-      const loaded = await load({ sdk: down });
-      expect((await save(loaded, raw({ rules: [GUARD] }))).loadError).toBeNull();
-      expect((await state(loaded)).loadError).toBeNull();
-    });
-
-    it("is kept when the form save is refused", async () => {
-      const loaded = await load({ sdk: down });
-      await expect(save(loaded, { rules: [{ name: "r" }] })).rejects.toThrow();
-      expect((await state(loaded)).loadError).toEqual({ kind: "legacy", message: MESSAGE, legacyText: "" });
-    });
-
-    it("is cleared by a successful import-dir-skills", async () => {
-      put(path.join(home, ".bb", "dir-skills", "scopes.json"), { scopes: [{ name: "prof", paths: ["/srv/prof"], skills: ["work-*"] }] });
-      put(path.join(home, ".bb", "dir-skills", "export.json"), { uiScopes: [], pins: [] });
-      const loaded = await load({ sdk: down });
-      expect((await loaded.harness.runCli(["import-dir-skills"])).exitCode).toBe(0);
-      expect(logs(loaded, "info")).toContain("config saved from import-dir-skills: 1 rules, 1 scopes, 0 vars");
-      expect((await state(loaded)).loadError).toBeNull();
-    });
-
-    it("is cleared by a successful import", async () => {
-      const loaded = await load({ sdk: down });
-      const file = path.join(base, "fixed.json");
-      writeFileSync(file, JSON.stringify(raw({ rules: [GUARD] })));
-      expect((await loaded.harness.runCli(["import", file])).exitCode).toBe(0);
-      expect((await state(loaded)).loadError).toBeNull();
-    });
-  });
-
-  describe("once kv holds a config", () => {
-    it("ignores the old setting: it is not even read, and a different value changes nothing", async () => {
-      const loaded = await load({ legacy: JSON.stringify([{ instructions: "from the old setting" }]) });
-      expect((await configure(loaded)).instructions).toBe("from the old setting");
-      expect(loaded.getSettings).toHaveBeenCalledTimes(1);
-
-      const fresh = await load({ stored: raw({ rules: [{ instructions: "stored" }] }), legacy: JSON.stringify([{ instructions: "changed later" }]) });
-      expect(fresh.getSettings).not.toHaveBeenCalled();
-      expect((await configure(fresh)).instructions).toBe("stored");
-      expect(await fresh.kv.get("config")).toEqual(raw({ rules: [{ instructions: "stored" }] }));
-    });
-
-    it("does not import the old setting again at a restart, after a form save too", async () => {
-      const first = await load({ legacy: JSON.stringify([{ instructions: "old" }]) });
-      await save(first, raw({ rules: [{ instructions: "saved" }] }));
-      const restarted = await first.harness.reload(first.create);
-      await flush();
-      expect(first.getSettings).toHaveBeenCalledTimes(1);
-      expect(await restarted.bb.storage.kv.get("config")).toEqual(raw({ rules: [{ instructions: "saved" }] }));
-    });
-  });
-
-  describe("the kept text (legacyRules)", () => {
-    const text = "[{";
-    const malformed = () => load({ legacy: text });
-
-    it("is retried at every start until a config exists, and then kept until it is dismissed or imported over", async () => {
-      const first = await malformed();
-      expect(await first.kv.get("config")).toBeUndefined();
-      const again = await first.harness.reload(first.create);
-      await flush();
-      expect(await again.bb.storage.kv.get("config")).toBeUndefined();
-      expect(await again.bb.storage.kv.get("legacyRules")).toMatchObject({ text });
-    });
-
-    it("survives a form save, and the banner state keeps showing it", async () => {
-      const loaded = await malformed();
-      const after = await save(loaded, raw({ rules: [GUARD] }));
-      expect(after.loadError).toMatchObject({ legacyText: text });
-      expect(await loaded.kv.get("legacyRules")).toMatchObject({ text });
-      expect((await state(loaded)).loadError).toMatchObject({ legacyText: text });
-    });
-
-    it("is deleted by a successful import, and the banner state follows", async () => {
-      const loaded = await malformed();
-      const file = path.join(base, "fixed.json");
-      writeFileSync(file, JSON.stringify(raw({ rules: [GUARD] })));
-      expect((await loaded.harness.runCli(["import", file])).exitCode).toBe(0);
-      expect(await loaded.kv.get("legacyRules")).toBeUndefined();
-      expect((await state(loaded)).loadError).toBeNull();
-      expect((await loaded.harness.runCli(["export", "--legacy"])).exitCode).toBe(1);
-    });
-
-    it("is kept when the import is refused", async () => {
-      const loaded = await malformed();
-      const file = path.join(base, "bad.json");
-      writeFileSync(file, JSON.stringify({ rules: [{ name: "r" }] }));
-      expect((await loaded.harness.runCli(["import", file])).exitCode).toBe(1);
-      expect(await loaded.kv.get("legacyRules")).toMatchObject({ text });
-      expect((await state(loaded)).loadError).not.toBeNull();
-    });
-
-    it("is deleted by dismissLegacy, which returns the new state; a second dismissal is harmless", async () => {
-      const loaded = await malformed();
-      const after = (await loaded.harness.callRpc("dismissLegacy", null)) as ConfigState;
-      expect(after.loadError).toBeNull();
-      expect(await loaded.kv.get("legacyRules")).toBeUndefined();
-      expect(((await loaded.harness.callRpc("dismissLegacy", null)) as ConfigState).loadError).toBeNull();
-    });
-
-    it("is read from storage at a start, so the banner returns after a restart until it is dismissed", async () => {
-      const loaded = await load({ stored: raw({ rules: [GUARD] }), kept: { text: "old", error: "why" } });
-      expect((await state(loaded)).loadError).toEqual({ kind: "legacy", message: "why", legacyText: "old" });
-      expect(await loaded.harness.runCli(["export", "--legacy"])).toMatchObject({ exitCode: 0, stdout: "old\n" });
-    });
-  });
-});
-
 /** Makes one kv method throw for one key, and leaves every other call alone. */
 function failing(method: "get" | "set" | "delete", key: string, message = "disk full") {
   return (kv: ReturnType<typeof createFakePluginHost>["bb"]["storage"]["kv"]) => {
@@ -420,162 +157,769 @@ function failing(method: "get" | "set" | "delete", key: string, message = "disk 
   };
 }
 
-describe("a kv failure never fails the start (legacy import)", () => {
-  const OLD = JSON.stringify([GUARD]);
-  const SAVE_MESSAGE =
-    "the old rules setting could not be saved: disk full. Restart bb or reload the plugin before you save here: once this form saves, the old setting is no longer imported.";
+const SERVICE = "previous-setting";
+const serviceNames = (loaded: Loaded) => loaded.harness.registrations.services.map((service) => service.name);
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 10));
+const backupDir = () => path.join(home, ".bb", "model-instructions", "backups");
+const backupFiles = () => (existsSync(backupDir()) ? readdirSync(backupDir()) : []);
+const backupPath = (index = 0) => path.join(backupDir(), backupFiles().sort()[index]);
 
-  it("clears the save-failure banner by a successful form save", async () => {
-    const loaded = await load({ legacy: OLD, prepare: failing("set", "config") });
-    expect((await state(loaded)).loadError).toMatchObject({ kind: "legacy", message: SAVE_MESSAGE });
-    vi.restoreAllMocks();
-    expect((await save(loaded, raw({ rules: [GUARD] }))).loadError).toBeNull();
-    expect((await state(loaded)).loadError).toBeNull();
+/** Starts the background service the way bb does once the factory is done, and waits until its work is finished. */
+async function runMigration(loaded: Loaded) {
+  const run = loaded.harness.runService(SERVICE);
+  await settle();
+  return run;
+}
+
+/** Ends a run the way bb does on dispose: abort, and the service resolves. */
+async function endRun(run: Awaited<ReturnType<typeof runMigration>>): Promise<void> {
+  run.controller.abort();
+  await run.done;
+}
+
+const OLD_RULE = { name: "old", instructions: "From the previous version." };
+const OLD = JSON.stringify([OLD_RULE]);
+const BAD_OLD = '[{"instructions": "{{nope}}"}]';
+const parseReason = (text: string) => {
+  try {
+    parseLegacyText(text);
+  } catch (error) {
+    return (error as Error).message;
+  }
+  throw new Error("expected the text not to parse");
+};
+const MOVED = (file: string) => `rules from the previous version moved: backup ${file}`;
+const ALREADY_SAVED = (file: string) => `rules from the previous version already saved; backup ${file}`;
+const NOT_EMPTIED = (reason: string) =>
+  `the setting with the rules from the previous version could not be emptied: ${reason}; it is tried again at the next start`;
+const BACKUP_FAILED = (reason: string) =>
+  `could not back up the rules from the previous version: ${reason}; nothing was changed, it is tried again at the next start`;
+const MOVE_FAILED = (reason: string) =>
+  `the rules from the previous version could not be moved: ${reason}; it is tried again at the next start`;
+const CONFLICT = (file: string) =>
+  `A copy of the previous rules is in ${file}. To use them, run bb model-instructions import ${file}; to keep the rules saved here, press Keep the rules saved here.`;
+
+function importFile(name: string, content: unknown): string {
+  const file = path.join(base, name);
+  writeFileSync(file, typeof content === "string" ? content : JSON.stringify(content));
+  return file;
+}
+
+/** Counts the calls on the setting handle, and the order of the plugin's first calls on its host. */
+function spied() {
+  const get = vi.fn();
+  const set = vi.fn();
+  const wrap = (handle: RulesHandle): RulesHandle => ({
+    ...handle,
+    get: () => {
+      get();
+      return handle.get();
+    },
+    experimental_set: (values) => {
+      set(values);
+      return handle.experimental_set(values);
+    },
   });
+  return { get, set, wrap };
+}
 
-  it("shows no banner when the write works", async () => {
-    const loaded = await load({ legacy: OLD });
-    expect((await state(loaded)).loadError).toBeNull();
-  });
-
-  it("logs a failed write of the imported config, runs with no rules, keeps no old text, and imports again at the next start", async () => {
-    const loaded = await load({ legacy: OLD, prepare: failing("set", "config") });
-    expect(logs(loaded, "warn")).toContain(
-      "the old rules setting could not be saved: disk full; it is imported again at the next start",
-    );
-    expect(await loaded.kv.get("config")).toBeUndefined();
-    expect(await loaded.kv.get("legacyRules")).toBeUndefined();
-    expect((await state(loaded)).loadError).toEqual({ kind: "legacy", message: SAVE_MESSAGE, legacyText: "" });
-    expect((await configure(loaded)).instructions).toBeNull();
-    const restarted = await loaded.harness.reload(loaded.create);
-    await flush();
-    expect(await restarted.bb.storage.kv.get("config")).toEqual(raw({ rules: [GUARD] }));
-  });
-
-  it("is not a parse error: a good setting is not kept as old text when the write fails", async () => {
-    const loaded = await load({ legacy: OLD, prepare: failing("set", "config") });
-    expect(logs(loaded, "warn").some((line) => line.startsWith("the old rules setting was not imported"))).toBe(false);
-    expect((await loaded.harness.runCli(["export", "--legacy"])).exitCode).toBe(1);
-  });
-
-  it("logs a failed save of the kept old text, and keeps the record in memory for this run", async () => {
-    const text = "[{";
-    const loaded = await load({ legacy: text, prepare: failing("set", "legacyRules") });
-    expect(logs(loaded, "warn")).toContain("the old rules setting could not be kept: disk full");
-    expect(await loaded.kv.get("legacyRules")).toBeUndefined();
-    expect((await state(loaded)).loadError).toMatchObject({ kind: "legacy", legacyText: text });
-    expect(await loaded.harness.runCli(["export", "--legacy"])).toMatchObject({ exitCode: 0, stdout: text + "\n" });
-  });
-});
-
-describe("dismissing the kept old text lasts", () => {
-  const text = "[{";
-
-  it("stores the flag, and the banner stays away after a restart", async () => {
-    const loaded = await load({ legacy: text });
-    expect((await state(loaded)).loadError).not.toBeNull();
-    expect(((await loaded.harness.callRpc("dismissLegacy", null)) as ConfigState).loadError).toBeNull();
-    expect(await loaded.kv.get("legacyDismissed")).toBe(true);
-    const restarted = await loaded.harness.reload(loaded.create);
-    await flush();
-    expect(((await restarted.harness.callRpc("getState", null)) as ConfigState).loadError).toBeNull();
-    expect(await restarted.bb.storage.kv.get("legacyRules")).toBeUndefined();
-    expect(restarted.harness.logEntries.filter((entry) => entry.level === "debug").map((entry) => entry.message)).toContain(
-      "the old rules setting was dismissed; not importing it",
-    );
-    expect(loaded.getSettings).toHaveBeenCalledTimes(1);
-  });
-
-  it("without a dismissal the banner returns after a restart", async () => {
-    const loaded = await load({ legacy: text });
-    const restarted = await loaded.harness.reload(loaded.create);
-    await flush();
-    expect(((await restarted.harness.callRpc("getState", null)) as ConfigState).loadError).toMatchObject({ kind: "legacy", legacyText: text });
-    expect(await restarted.bb.storage.kv.get("legacyDismissed")).toBeUndefined();
-  });
-
-  it("is not changed by a successful import", async () => {
-    const loaded = await load({ legacy: text });
-    await loaded.harness.callRpc("dismissLegacy", null);
-    const file = path.join(base, "fixed.json");
-    writeFileSync(file, JSON.stringify(raw({ rules: [GUARD] })));
-    expect((await loaded.harness.runCli(["import", file])).exitCode).toBe(0);
-    expect(await loaded.kv.get("legacyDismissed")).toBe(true);
-  });
-});
-
-describe("the stored old text is validated", () => {
-  it.each([
-    ["a text that is not a string", { text: 5, error: "why" }],
-    ["a missing error", { text: "old" }],
-    ["an extra key", { text: "old", error: "why", more: 1 }],
-    ["a value that is not an object", "old"],
-  ])("ignores and deletes %s", async (_label, kept) => {
-    const loaded = await load({ stored: raw({ rules: [GUARD] }), kept });
-    expect(logs(loaded, "warn")).toContain("stored old setting text ignored: wrong shape");
-    expect(await loaded.kv.get("legacyRules")).toBeUndefined();
-    expect((await state(loaded)).loadError).toBeNull();
-    expect((await loaded.harness.runCli(["export", "--legacy"])).exitCode).toBe(1);
-  });
-
-  it("does not warn for a record of the right shape", async () => {
-    const loaded = await load({ stored: raw({ rules: [GUARD] }), kept: { text: "old", error: "why" } });
-    expect(logs(loaded, "warn")).toEqual([]);
-    expect(await loaded.kv.get("legacyRules")).toEqual({ text: "old", error: "why" });
-  });
-});
-
-describe("an import whose cleanup fails", () => {
-  it("still succeeds with the normal output, and warns", async () => {
-    const loaded = await load({ legacy: "[{", prepare: failing("delete", "legacyRules") });
-    const file = path.join(base, "fixed.json");
-    writeFileSync(file, JSON.stringify(raw({ rules: [GUARD] })));
-    expect(await loaded.harness.runCli(["import", file])).toMatchObject({
-      exitCode: 0,
-      stdout: `imported ${file}: 1 rules, 0 scopes, 0 vars\n`,
+describe("the setting of the previous versions: declared until it is moved", () => {
+  it("is declared with its label, description, multiline box and empty default while the flag is absent, with its service", async () => {
+    const loaded = await load();
+    expect(loaded.harness.registrations.settingsDescriptors).toEqual({
+      rules: expect.objectContaining({
+        type: "string",
+        label: "Rules (previous versions)",
+        description:
+          "Moved into the form below automatically, then removed. A copy is kept in ~/.bb/model-instructions/backups/. Edits here are not read after the move.",
+        experimental_multiline: true,
+        default: "",
+      }),
     });
-    expect(logs(loaded, "warn")).toContain("the kept old setting text could not be removed: disk full");
+    expect(loaded.harness.registrations.settingsDescriptors.rules).not.toHaveProperty("schema");
+    expect(serviceNames(loaded)).toContain(SERVICE);
+  });
+
+  it("is not declared, and has no service, once the flag is set", async () => {
+    const loaded = await load({ done: true, rules: OLD });
+    expect(loaded.harness.registrations.settingsDescriptors).toEqual({});
+    expect(serviceNames(loaded)).not.toContain(SERVICE);
+    expect(loaded.getSettings).not.toHaveBeenCalled();
+  });
+
+  it("is not declared again after the move, at the next start", async () => {
+    const loaded = await load({ rules: OLD });
+    await endRun(await runMigration(loaded));
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    expect(restarted.harness.registrations.settingsDescriptors).toEqual({});
+    expect(serviceNames(restarted)).not.toContain(SERVICE);
+    expect(((await restarted.harness.callRpc("getState", null)) as ConfigState).loadError).toBeNull();
+    expect((await configure(restarted)).instructions).toBe("From the previous version.");
+  });
+
+  it("saves from the form, import and import-dir-skills as before once the flag is set", async () => {
+    const loaded = await load({ done: true });
+    expect((await save(loaded, raw({ rules: [GUARD] }))).loadError).toBeNull();
+    const file = importFile("after.json", raw({ rules: [OLD_RULE] }));
+    expect((await loaded.harness.runCli(["import", file])).exitCode).toBe(0);
+    expect(await loaded.kv.get("config")).toEqual(raw({ rules: [OLD_RULE] }));
+  });
+});
+
+describe("the move: nothing to move (step a)", () => {
+  it.each([
+    ["an empty value", ""],
+    ["a blank value", " \n\t "],
+  ])("sets the flag for %s, makes no backup and does not touch the setting", async (_label, text) => {
+    const probe = spied();
+    const loaded = await load({ rules: text, setting: probe.wrap });
+    await endRun(await runMigration(loaded));
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(probe.set).not.toHaveBeenCalled();
+    expect(backupFiles()).toEqual([]);
+    expect(existsSync(backupDir())).toBe(false);
+    expect(logs(loaded, "debug")).toContain("no rules from the previous version to move");
+    expect(await loaded.kv.get("config")).toBeUndefined();
+  });
+
+  it.each([
+    ["the old default", "[]"],
+    ["the empty object form", '{"vars": {}, "scopes": [], "rules": []}'],
+  ])("empties %s, sets the flag and makes no backup", async (_label, text) => {
+    const loaded = await load({ rules: text });
+    await endRun(await runMigration(loaded));
+    expect(await loaded.rules()).toBe("");
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(backupFiles()).toEqual([]);
+    expect(logs(loaded, "debug")).toContain("no rules from the previous version to move");
+    expect(await loaded.kv.get("config")).toBeUndefined();
+    expect((await state(loaded)).loadError).toBeNull();
+  });
+
+  it("does not set the flag when an empty list cannot be emptied", async () => {
+    const loaded = await load({ rules: "[]", setting: (handle) => ({ ...handle, experimental_set: async () => { throw new Error("host down"); } }) });
+    await endRun(await runMigration(loaded));
+    expect(logs(loaded, "warn")).toContain(NOT_EMPTIED("host down"));
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    expect(logs(loaded, "debug")).not.toContain("no rules from the previous version to move");
+  });
+});
+
+describe("the move: back up (step b)", () => {
+  it("writes the text unchanged to a backup of mode 0600 in a folder of mode 0700, and logs it", async () => {
+    const text = `[\n  ${JSON.stringify(OLD_RULE)}\n]\n`;
+    const loaded = await load({ rules: text });
+    await endRun(await runMigration(loaded));
+    expect(backupFiles()).toHaveLength(1);
+    const file = backupPath();
+    expect(path.basename(file)).toMatch(/^rules-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}-[0-9a-f]{4}\.txt$/);
+    expect(readFileSync(file, "utf8")).toBe(text);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(statSync(backupDir()).mode & 0o777).toBe(0o700);
+    expect(logs(loaded, "info")).toContain(MOVED(file));
+  });
+
+  it("skips the write when a backup with identical content is already in the folder, and names that file", async () => {
+    mkdirSync(backupDir(), { recursive: true });
+    writeFileSync(path.join(backupDir(), "mine.txt"), OLD);
+    const loaded = await load({ rules: OLD });
+    await endRun(await runMigration(loaded));
+    expect(backupFiles()).toEqual(["mine.txt"]);
+    expect(logs(loaded, "info")).toContain(MOVED(path.join(backupDir(), "mine.txt")));
+    expect(await loaded.rules()).toBe("");
+  });
+
+  it("counts a file it cannot read as different, not as a failure", async () => {
+    mkdirSync(path.join(backupDir(), "a-folder"), { recursive: true });
+    const loaded = await load({ rules: OLD });
+    await endRun(await runMigration(loaded));
+    expect(backupFiles().sort()).toHaveLength(2);
+    expect(readFileSync(backupPath(1), "utf8")).toBe(OLD);
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+  });
+
+  it("changes nothing when no backup can be made: a warning, a banner without a path, the setting kept, retried at the next start", async () => {
+    mkdirSync(path.dirname(backupDir()), { recursive: true });
+    writeFileSync(backupDir(), "a file where the folder should be");
+    const loaded = await load({ rules: OLD });
+    await endRun(await runMigration(loaded));
+    const warning = logs(loaded, "warn").find((line) => line.startsWith("could not back up the rules from the previous version: "))!;
+    const reason = warning.slice("could not back up the rules from the previous version: ".length, -"; nothing was changed, it is tried again at the next start".length);
+    expect(warning).toBe(BACKUP_FAILED(reason));
+    expect((await state(loaded)).loadError).toEqual({
+      kind: "migration",
+      message: `${reason}. No copy could be made; the rules are still in the plugin's settings and the move is tried again at the next start.`,
+      backupPath: null,
+    });
+    expect(await loaded.rules()).toBe(OLD);
+    expect(await loaded.kv.get("config")).toBeUndefined();
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    // The next start tries again, and finds the folder usable.
+    rmSync(backupDir());
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    await endRun(restarted.harness.runService(SERVICE));
+    expect(await restarted.bb.storage.kv.get("previousSettingDone")).toBe(true);
+    expect(backupFiles()).toHaveLength(1);
+  });
+});
+
+describe("the move: decide (step c) when no config is stored", () => {
+  it("imports the array form, normalized, with the structural checks, and then empties the setting and sets the flag", async () => {
+    const loaded = await load({ rules: JSON.stringify([{ name: "a", provider: "claude-code", project: "bb-*", skipTitles: "Help: *", instructions: ["one", "two"] }, { skills: "work-*", threads: "child" }]) });
+    await endRun(await runMigration(loaded));
+    expect(await loaded.kv.get("config")).toEqual(
+      raw({
+        rules: [
+          { name: "a", provider: "claude-code", project: ["bb-*"], skipTitles: ["Help: *"], instructions: "one\ntwo" },
+          { skills: ["work-*"], threads: "child" },
+        ],
+      }),
+    );
+    expect(logs(loaded, "info")).toContain("config saved from previous setting: 2 rules, 0 scopes, 0 vars");
+    expect(logs(loaded, "info")).toContain(MOVED(backupPath()));
+    expect(await loaded.rules()).toBe("");
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect((await state(loaded)).loadError).toBeNull();
+  });
+
+  it("imports the object form with its vars unexpanded, its scopes and its rules", async () => {
+    const loaded = await load({
+      rules: JSON.stringify({ vars: { a: "A" }, scopes: [{ name: "w", paths: ["/w"] }], rules: [{ scope: "w", instructions: "{{a}} text" }] }),
+    });
+    await endRun(await runMigration(loaded));
+    expect(await loaded.kv.get("config")).toEqual(
+      raw({ vars: { a: "A" }, scopes: [{ name: "w", paths: ["/w"] }], rules: [{ scope: ["w"], instructions: "{{a}} text" }] }),
+    );
+    expect((await configure(loaded)).instructions).toBeNull();
+  });
+
+  it("applies the imported rules at once", async () => {
+    const loaded = await load({ rules: OLD });
+    await endRun(await runMigration(loaded));
+    expect((await configure(loaded)).instructions).toBe("From the previous version.");
+  });
+
+  it.each([
+    ["not JSON", "[{", () => parseReason("[{")],
+    ["a value that is not a rule list", "5", () => parseReason("5")],
+    ["a rule with a reference to an unknown variable", BAD_OLD, () => "rules[0]: unknown variable {{nope}}"],
+  ])("shows a migration banner with the backup path for %s, and keeps the setting", async (_label, text, why) => {
+    const loaded = await load({ rules: text });
+    await endRun(await runMigration(loaded));
+    const file = backupPath();
+    const reason = why();
+    expect((await state(loaded)).loadError).toEqual({
+      kind: "migration",
+      message: `${reason}. A copy is in ${file}. Fix it there and run bb model-instructions import ${file}.`,
+      backupPath: file,
+    });
+    expect(readFileSync(file, "utf8")).toBe(text);
+    expect(await loaded.rules()).toBe(text);
+    expect(await loaded.kv.get("config")).toBeUndefined();
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    expect((await configure(loaded)).instructions).toBeNull();
+  });
+});
+
+describe("the move: decide (step c) when a config is stored", () => {
+  const SAVED = raw({ rules: [OLD_RULE] });
+
+  it("empties the setting and sets the flag when the stored config equals the old rules, with no write of the config", async () => {
+    const loaded = await load({ rules: JSON.stringify({ rules: [{ instructions: "From the previous version.", name: "old" }], vars: {} }), stored: SAVED });
+    const set = vi.spyOn(loaded.kv, "set");
+    await endRun(await runMigration(loaded));
+    expect(await loaded.rules()).toBe("");
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(set.mock.calls.map(([key]) => key)).toEqual(["previousSettingDone"]);
+    expect(await loaded.kv.get("config")).toEqual(SAVED);
+    expect(logs(loaded, "info")).toContain(ALREADY_SAVED(backupPath()));
+    expect(backupFiles()).toHaveLength(1);
+    expect((await state(loaded)).loadError).toBeNull();
+  });
+
+  it("shows the conflict banner when the stored config differs, and changes nothing else", async () => {
+    const loaded = await load({ rules: JSON.stringify([{ name: "old", instructions: "Changed." }]), stored: SAVED });
+    await endRun(await runMigration(loaded));
+    const file = backupPath();
+    expect((await state(loaded)).loadError).toEqual({ kind: "conflict", message: CONFLICT(file), backupPath: file });
+    expect(await loaded.rules()).toBe(JSON.stringify([{ name: "old", instructions: "Changed." }]));
+    expect(await loaded.kv.get("config")).toEqual(SAVED);
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    expect((await configure(loaded)).instructions).toBe("From the previous version.");
+  });
+
+  it("counts a different order of rules as different", async () => {
+    const two = raw({ rules: [{ instructions: "a" }, { instructions: "b" }] });
+    const loaded = await load({ rules: JSON.stringify([{ instructions: "b" }, { instructions: "a" }]), stored: two });
+    await endRun(await runMigration(loaded));
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "conflict" });
+  });
+
+  it("leaves everything untouched when the stored config is corrupt, and keeps the stored-config banner", async () => {
+    const bad = { rules: [{ name: "r" }] };
+    const loaded = await load({ rules: OLD, stored: bad });
+    await endRun(await runMigration(loaded));
+    expect(await loaded.rules()).toBe(OLD);
+    expect(await loaded.kv.get("config")).toEqual(bad);
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "stored" });
+  });
+
+  it("lets the rules saved here win when the old text cannot be read: empties the setting, warns, shows no banner", async () => {
+    const loaded = await load({ rules: "[{", stored: SAVED });
+    await endRun(await runMigration(loaded));
+    const file = backupPath();
+    expect(readFileSync(file, "utf8")).toBe("[{");
+    expect(logs(loaded, "warn")).toContain(
+      `the rules from the previous version could not be read and rules are already saved here; a copy is in ${file}`,
+    );
+    expect(await loaded.rules()).toBe("");
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(await loaded.kv.get("config")).toEqual(SAVED);
+    expect((await state(loaded)).loadError).toBeNull();
+  });
+
+  it("respects a form save that lands after the factory and before the service: the saved config stays, a conflict is shown", async () => {
+    const loaded = await load({ rules: OLD });
+    const saved = raw({ rules: [GUARD] });
+    await save(loaded, saved);
+    await endRun(await runMigration(loaded));
+    const file = backupPath();
+    expect((await state(loaded)).loadError).toEqual({ kind: "conflict", message: CONFLICT(file), backupPath: file });
+    expect(await loaded.kv.get("config")).toEqual(saved);
+    expect(logs(loaded, "info")).not.toContain("config saved from previous setting: 1 rules, 0 scopes, 0 vars");
+    expect(await loaded.rules()).toBe(OLD);
+    expect((await configure(loaded)).instructions).toBe("Guard.");
+  });
+
+  it("respects an import that lands after the factory and before the service", async () => {
+    const loaded = await load({ rules: OLD });
+    expect((await loaded.harness.runCli(["import", importFile("early.json", raw({ rules: [GUARD] }))])).exitCode).toBe(0);
+    await endRun(await runMigration(loaded));
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "conflict" });
     expect(await loaded.kv.get("config")).toEqual(raw({ rules: [GUARD] }));
   });
+});
 
-  it("leaves no stale banner, and says so on stderr", async () => {
-    const loaded = await load({ legacy: "[{", prepare: failing("delete", "legacyRules") });
-    expect((await state(loaded)).loadError).toMatchObject({ kind: "legacy", legacyText: "[{" });
-    const file = path.join(base, "fixed-stale.json");
-    writeFileSync(file, JSON.stringify(raw({ rules: [GUARD] })));
-    const result = await loaded.harness.runCli(["import", file]);
-    expect(result).toMatchObject({
-      exitCode: 0,
-      stderr: "import: the kept old setting text could not be removed: disk full\n",
-    });
+describe("the conflict banner is resolved", () => {
+  const SAVED = raw({ rules: [OLD_RULE] });
+  const CHANGED = JSON.stringify([{ name: "old", instructions: "Changed." }]);
+  const inConflict = async () => {
+    const loaded = await load({ rules: CHANGED, stored: SAVED });
+    const run = await runMigration(loaded);
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "conflict" });
+    return { loaded, run, file: backupPath() };
+  };
+
+  it("by a successful import: the banner clears, the setting is emptied and the flag is set", async () => {
+    const { loaded, run, file } = await inConflict();
+    const fixed = importFile("fixed.json", [{ name: "chosen", instructions: "Chosen." }]);
+    expect(await loaded.harness.runCli(["import", fixed])).toMatchObject({ exitCode: 0 });
     expect((await state(loaded)).loadError).toBeNull();
-    expect((await loaded.harness.runCli(["export", "--legacy"])).exitCode).toBe(1);
+    expect(await loaded.rules()).toBe("");
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(await loaded.kv.get("config")).toEqual(raw({ rules: [{ name: "chosen", instructions: "Chosen." }] }));
+    expect(logs(loaded, "info")).toContain(MOVED(file));
+    await endRun(run);
   });
 
-  it("prints nothing on stderr when the cleanup works", async () => {
-    const loaded = await load({ legacy: "[{" });
-    const file = path.join(base, "fixed-clean.json");
-    writeFileSync(file, JSON.stringify(raw({ rules: [GUARD] })));
-    const result = await loaded.harness.runCli(["import", file]);
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr ?? "").toBe("");
+  it("by Keep the rules saved here (keepSavedRules): the banner clears, the setting is emptied, the saved config is unchanged", async () => {
+    const { loaded, run, file } = await inConflict();
+    const result = (await loaded.harness.callRpc("keepSavedRules", null)) as ConfigState;
+    expect(result.loadError).toBeNull();
+    expect((await state(loaded)).loadError).toBeNull();
+    expect(await loaded.rules()).toBe("");
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(await loaded.kv.get("config")).toEqual(SAVED);
+    expect(logs(loaded, "info")).toContain(MOVED(file));
+    await endRun(run);
+  });
+
+  it("not by a form save: the banner and the setting stay", async () => {
+    const { loaded, run } = await inConflict();
+    const result = await save(loaded, raw({ rules: [GUARD] }));
+    expect(result.loadError).toMatchObject({ kind: "conflict" });
+    expect(await loaded.rules()).toBe(CHANGED);
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    await endRun(run);
+  });
+
+  it("not by a refused import: the banner and the setting stay", async () => {
+    const { loaded, run } = await inConflict();
+    expect((await loaded.harness.runCli(["import", importFile("refused.json", { rules: [{ name: "r" }] })])).exitCode).toBe(1);
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "conflict" });
+    expect(await loaded.rules()).toBe(CHANGED);
+    await endRun(run);
+  });
+
+  it("by nothing else: after a restart the old setting is read again and the conflict returns", async () => {
+    const { loaded, run } = await inConflict();
+    await endRun(run);
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    expect(restarted.harness.registrations.settingsDescriptors).toHaveProperty("rules");
+    await endRun(restarted.harness.runService(SERVICE));
+    expect(((await restarted.harness.callRpc("getState", null)) as ConfigState).loadError).toMatchObject({ kind: "conflict" });
+    expect(backupFiles()).toHaveLength(1);
+  });
+
+  it("keepSavedRules changes nothing without a conflict banner: before the service runs, and after a move", async () => {
+    const probe = spied();
+    const loaded = await load({ rules: CHANGED, stored: SAVED, setting: probe.wrap });
+    expect(((await loaded.harness.callRpc("keepSavedRules", null)) as ConfigState).loadError).toBeNull();
+    expect(probe.set).not.toHaveBeenCalled();
+    expect(await loaded.rules()).toBe(CHANGED);
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    const done = await load({ done: true });
+    expect(((await done.harness.callRpc("keepSavedRules", null)) as ConfigState).loadError).toBeNull();
+  });
+
+  it("keepSavedRules does nothing while a migration banner is shown", async () => {
+    const loaded = await load({ rules: "[{" });
+    const run = await runMigration(loaded);
+    const result = (await loaded.harness.callRpc("keepSavedRules", null)) as ConfigState;
+    expect(result.loadError).toMatchObject({ kind: "migration" });
+    expect(await loaded.rules()).toBe("[{");
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    await endRun(run);
+  });
+
+  it("keepSavedRules does not hide the stored-config banner, and does not run for it", async () => {
+    const loaded = await load({ rules: OLD, stored: { rules: [{ name: "r" }] } });
+    const run = await runMigration(loaded);
+    expect(((await loaded.harness.callRpc("keepSavedRules", null)) as ConfigState).loadError).toMatchObject({ kind: "stored" });
+    expect(await loaded.rules()).toBe(OLD);
+    await endRun(run);
+  });
+});
+
+describe("the migration banner is resolved", () => {
+  const FIXED = [{ name: "fixed", instructions: "Fixed." }];
+  const stuck = async (options: Options = {}) => {
+    const loaded = await load({ rules: BAD_OLD, ...options });
+    const run = await runMigration(loaded);
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "migration" });
+    return { loaded, run, file: backupPath() };
+  };
+
+  it("by a successful import of a fixed backup (array form): the banner clears, the setting is emptied, the flag is set, a restart shows nothing", async () => {
+    const { loaded, run, file } = await stuck();
+    writeFileSync(file, JSON.stringify(FIXED));
+    expect(await loaded.harness.runCli(["import", file])).toMatchObject({ exitCode: 0 });
+    expect((await state(loaded)).loadError).toBeNull();
+    expect(await loaded.rules()).toBe("");
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(await loaded.kv.get("config")).toEqual(raw({ rules: FIXED }));
+    expect(logs(loaded, "info")).toContain(MOVED(file));
+    await endRun(run);
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    expect(restarted.harness.registrations.settingsDescriptors).toEqual({});
+    expect(((await restarted.harness.callRpc("getState", null)) as ConfigState).loadError).toBeNull();
+  });
+
+  it("by a form save: the banner clears, the setting is emptied, the flag is set, a restart shows nothing", async () => {
+    const { loaded, run, file } = await stuck();
+    const result = await save(loaded, raw({ rules: FIXED }));
+    expect(result.loadError).toBeNull();
+    expect(await loaded.rules()).toBe("");
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+    expect(logs(loaded, "info")).toContain(MOVED(file));
+    await endRun(run);
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    expect(restarted.harness.registrations.settingsDescriptors).toEqual({});
+    expect(((await restarted.harness.callRpc("getState", null)) as ConfigState).loadError).toBeNull();
+  });
+
+  it("not by a refused save: the banner and the setting stay", async () => {
+    const { loaded, run } = await stuck();
+    await expect(save(loaded, { rules: [{ name: "r" }] })).rejects.toThrow();
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "migration" });
+    expect(await loaded.rules()).toBe(BAD_OLD);
+    await endRun(run);
+  });
+
+  it("not by a form save or an import when no copy exists: the banner and the setting stay for the next start", async () => {
+    mkdirSync(path.dirname(backupDir()), { recursive: true });
+    writeFileSync(backupDir(), "a file where the folder should be");
+    const loaded = await load({ rules: OLD });
+    const run = await runMigration(loaded);
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "migration", backupPath: null });
+    expect((await save(loaded, raw({ rules: [GUARD] }))).loadError).toMatchObject({ kind: "migration", backupPath: null });
+    expect((await loaded.harness.runCli(["import", importFile("nocopy.json", raw({ rules: [GUARD] }))])).exitCode).toBe(0);
+    expect((await state(loaded)).loadError).toMatchObject({ kind: "migration", backupPath: null });
+    expect(await loaded.rules()).toBe(OLD);
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    await endRun(run);
+  });
+
+  it("clears the banner even when the flag cannot be set: the next start finds the setting empty and sets it", async () => {
+    const { loaded, run, file } = await stuck({ prepare: failing("set", "previousSettingDone") });
+    expect((await save(loaded, raw({ rules: FIXED }))).loadError).toBeNull();
+    expect(logs(loaded, "warn")).toContain(MOVE_FAILED("disk full"));
+    expect(logs(loaded, "info")).not.toContain(MOVED(file));
+    expect(await loaded.rules()).toBe("");
+    await endRun(run);
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    await endRun(restarted.harness.runService(SERVICE));
+    expect(await restarted.bb.storage.kv.get("previousSettingDone")).toBe(true);
+  });
+
+  it("keeps the config and the backup, with a warning and no flag, when the setting cannot be emptied after a save", async () => {
+    const { loaded, run } = await stuck({ setting: (handle) => ({ ...handle, experimental_set: async () => { throw new Error("host down"); } }) });
+    expect((await save(loaded, raw({ rules: FIXED }))).loadError).toBeNull();
+    expect(logs(loaded, "warn")).toContain(NOT_EMPTIED("host down"));
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    expect(await loaded.kv.get("config")).toEqual(raw({ rules: FIXED }));
+    expect(backupFiles()).toHaveLength(1);
+    expect(await loaded.rules()).toBe(BAD_OLD);
+    await endRun(run);
+  });
+});
+
+describe("the move: empty the setting and set the flag (steps d and e)", () => {
+  it("warns, sets no flag and keeps the config and the backup when the read-back is not blank", async () => {
+    const loaded = await load({ rules: OLD, setting: (handle) => ({ ...handle, experimental_set: async () => ({ rules: "" }) }) });
+    await endRun(await runMigration(loaded));
+    expect(logs(loaded, "warn")).toContain(NOT_EMPTIED("the setting still holds a value"));
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    expect(await loaded.kv.get("config")).toEqual(raw({ rules: [OLD_RULE] }));
+    expect(backupFiles()).toHaveLength(1);
+    expect(logs(loaded, "info").filter((line) => line.startsWith("rules from the previous version"))).toEqual([]);
+  });
+
+  it("warns, sets no flag and keeps the config and the backup when the set throws, and tries again at the next start", async () => {
+    const loaded = await load({ rules: OLD, setting: (handle) => ({ ...handle, experimental_set: async () => { throw new Error("host down"); } }) });
+    await endRun(await runMigration(loaded));
+    expect(logs(loaded, "warn")).toContain(NOT_EMPTIED("host down"));
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    expect(await loaded.kv.get("config")).toEqual(raw({ rules: [OLD_RULE] }));
+    const first = backupFiles();
+    expect(first).toHaveLength(1);
+    // Next start: the config is stored and equal, so it is the equal case, and nothing is backed up twice.
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    await endRun(restarted.harness.runService(SERVICE));
+    expect(await restarted.bb.storage.kv.get("previousSettingDone")).toBe(true);
+    expect(backupFiles()).toEqual(first);
+  });
+
+  it("stops without a flag when the set works but the read-back fails, and the service does not crash", async () => {
+    const loaded = await load({ rules: OLD, setting: (handle) => ({ ...handle, get: vi.fn().mockResolvedValueOnce({ rules: OLD }).mockRejectedValue(new Error("read-back down")) }) });
+    const run = await runMigration(loaded);
+    expect(logs(loaded, "warn")).toContain(NOT_EMPTIED("read-back down"));
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    await endRun(run);
+  });
+
+  it("logs a failed set of the flag as a warning, keeps the setting empty, and retries it at the next start", async () => {
+    const loaded = await load({ rules: OLD, prepare: failing("set", "previousSettingDone") });
+    await endRun(await runMigration(loaded));
+    expect(logs(loaded, "warn")).toContain(MOVE_FAILED("disk full"));
+    expect(await loaded.rules()).toBe("");
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    await endRun(restarted.harness.runService(SERVICE));
+    expect(await restarted.bb.storage.kv.get("previousSettingDone")).toBe(true);
+    expect(logs(restarted, "debug")).toContain("no rules from the previous version to move");
+  });
+
+  it("logs a failed write of the imported config as a warning, and changes nothing else", async () => {
+    const loaded = await load({ rules: OLD, prepare: failing("set", "config") });
+    await endRun(await runMigration(loaded));
+    expect(logs(loaded, "warn")).toContain(MOVE_FAILED("disk full"));
+    expect(await loaded.rules()).toBe(OLD);
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
     expect((await state(loaded)).loadError).toBeNull();
   });
 });
 
-describe("dismissing with no kept old text", () => {
-  it("changes nothing: no flag is stored, and the state comes back", async () => {
-    const loaded = await load({ stored: raw({ rules: [GUARD] }) });
-    const result = (await loaded.harness.callRpc("dismissLegacy", null)) as ConfigState;
-    expect(result).toEqual(await state(loaded));
-    expect(result.loadError).toBeNull();
+describe("the background service", () => {
+  it("resolves only on abort, and runs the move once", async () => {
+    const loaded = await load({ rules: OLD });
+    const run = loaded.harness.runService(SERVICE);
+    await settle();
+    const status = await Promise.race([run.done.then(() => "resolved"), settle().then(() => "pending")]);
+    expect(status).toBe("pending");
+    expect(logs(loaded, "info").filter((line) => line.startsWith("rules from the previous version moved"))).toHaveLength(1);
+    run.controller.abort();
+    await expect(run.done).resolves.toBeUndefined();
+  });
+
+  it("resolves at once for a signal that is already aborted, after the move", async () => {
+    const loaded = await load({ rules: OLD });
+    const service = loaded.harness.registrations.services.find((record) => record.name === SERVICE)!;
+    const controller = new AbortController();
+    controller.abort();
+    await expect(service.start(controller.signal)).resolves.toBeUndefined();
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+  });
+
+  it("never rejects, and warns, when the read of the setting rejects", async () => {
+    const loaded = await load({ rules: OLD, setting: (handle) => ({ ...handle, get: async () => { throw new Error("404 not found"); } }) });
+    const run = loaded.harness.runService(SERVICE);
+    await settle();
+    expect(logs(loaded, "warn")).toContain(MOVE_FAILED("404 not found"));
+    const status = await Promise.race([run.done.then(() => "resolved", () => "rejected"), settle().then(() => "pending")]);
+    expect(status).toBe("pending");
+    run.controller.abort();
+    await expect(run.done).resolves.toBeUndefined();
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+  });
+
+  it("does not stop the next write: a later form save still works after a failed move", async () => {
+    const loaded = await load({ rules: OLD, prepare: failing("set", "config") });
+    await endRun(await runMigration(loaded));
+    vi.restoreAllMocks();
+    expect((await save(loaded, raw({ rules: [GUARD] }))).loadError).toBeNull();
+  });
+});
+
+describe("what v0.1.12 kept in kv is cleaned up once, at the start of the move", () => {
+  it("backs up the kept text, and deletes the record only after that", async () => {
+    const loaded = await load({ rules: "", v012Rules: { text: "[{broken", error: "why" } });
+    const deleted: string[] = [];
+    const original = loaded.kv.delete.bind(loaded.kv);
+    vi.spyOn(loaded.kv, "delete").mockImplementation(async (key: string) => {
+      deleted.push(`${key}:${backupFiles().length}`);
+      return original(key);
+    });
+    await endRun(await runMigration(loaded));
+    expect(deleted).toContain("legacyRules:1");
+    expect(backupFiles()).toHaveLength(1);
+    expect(readFileSync(backupPath(), "utf8")).toBe("[{broken");
+    expect(await loaded.kv.get("legacyRules")).toBeUndefined();
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+  });
+
+  it("deletes the dismissed flag", async () => {
+    const loaded = await load({ rules: "", v012Dismissed: true });
+    await endRun(await runMigration(loaded));
     expect(await loaded.kv.get("legacyDismissed")).toBeUndefined();
   });
 
-  it("sets the flag when old text is kept", async () => {
-    const loaded = await load({ legacy: "[{" });
-    await loaded.harness.callRpc("dismissLegacy", null);
-    expect(await loaded.kv.get("legacyDismissed")).toBe(true);
+  it("does not make a second copy of a text that already has a backup", async () => {
+    mkdirSync(backupDir(), { recursive: true });
+    writeFileSync(path.join(backupDir(), "mine.txt"), "[{broken");
+    const loaded = await load({ rules: "", v012Rules: { text: "[{broken", error: "why" } });
+    await endRun(await runMigration(loaded));
+    expect(backupFiles()).toEqual(["mine.txt"]);
+    expect(await loaded.kv.get("legacyRules")).toBeUndefined();
+  });
+
+  it("keeps the record, warns, and moves nothing else when its backup fails", async () => {
+    mkdirSync(path.dirname(backupDir()), { recursive: true });
+    writeFileSync(backupDir(), "a file where the folder should be");
+    const loaded = await load({ rules: OLD, v012Rules: { text: "[{broken", error: "why" } });
+    await endRun(await runMigration(loaded));
+    expect(logs(loaded, "warn").filter((line) => line.startsWith("could not back up the rules from the previous version: "))).toHaveLength(1);
+    expect(await loaded.kv.get("legacyRules")).toEqual({ text: "[{broken", error: "why" });
+    expect(await loaded.rules()).toBe(OLD);
+    expect(await loaded.kv.get("config")).toBeUndefined();
+    expect((await state(loaded)).loadError).toBeNull();
+  });
+
+  it("leaves a record that has no text alone", async () => {
+    const loaded = await load({ rules: "", v012Rules: { error: "why" } });
+    await endRun(await runMigration(loaded));
+    expect(await loaded.kv.get("legacyRules")).toEqual({ error: "why" });
+    expect(backupFiles()).toEqual([]);
+  });
+
+  it("keeps going when there is nothing of v0.1.12 in kv", async () => {
+    const loaded = await load({ rules: "" });
+    await endRun(await runMigration(loaded));
+    expect(await loaded.kv.get("previousSettingDone")).toBe(true);
+  });
+
+  it("warns and keeps the move for the next start when a delete fails", async () => {
+    const loaded = await load({ rules: OLD, v012Dismissed: true, prepare: failing("delete", "legacyDismissed") });
+    await endRun(await runMigration(loaded));
+    expect(logs(loaded, "warn")).toContain(MOVE_FAILED("disk full"));
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+  });
+
+  it("ignores a stale v0.1.12 key once the flag is set: no banner, no service", async () => {
+    const loaded = await load({ done: true, v012Rules: { text: "old", error: "why" } });
+    expect((await state(loaded)).loadError).toBeNull();
+    expect(serviceNames(loaded)).not.toContain(SERVICE);
+  });
+});
+
+// AGENTS.md quirk ledger: both findings below were learned from the live probe of 2026-11-11 on a real host,
+// which showed why model-instructions v0.1.12 lost its rules on upgrade.
+describe("quirk ledger: what bb does with a setting the plugin has not declared (live probe 2026-11-11, v0.1.12)", () => {
+  // Live finding: `getSettings` for an undeclared setting returns no keys, and during the plugin's own factory it
+  // answers 404. Re-declaring the setting (a `define` placed after an `await` in the async factory is registered)
+  // makes `settings.get()` return the stored value.
+  it("reads the old value only through the declared setting, never through getSettings of an undeclared key", async () => {
+    const order: string[] = [];
+    const probe = spied();
+    const loaded = await load({
+      rules: OLD,
+      setting: (handle) => {
+        order.push("define");
+        const wrapped = probe.wrap(handle);
+        return {
+          ...wrapped,
+          get: () => {
+            order.push("get");
+            return wrapped.get();
+          },
+        };
+      },
+      prepare: (kv) => {
+        const get = kv.get.bind(kv) as (key: string) => Promise<unknown>;
+        vi.spyOn(kv, "get").mockImplementation((async (key: string) => {
+          order.push(`kv.get:${key}`);
+          return get(key);
+        }) as never);
+      },
+    });
+    // The declaration comes after the awaited reads of the factory.
+    expect(order.indexOf("define")).toBeGreaterThan(order.indexOf("kv.get:previousSettingDone"));
+    expect(order.indexOf("define")).toBeGreaterThan(order.indexOf("kv.get:config"));
+    await endRun(await runMigration(loaded));
+    expect(order.indexOf("get")).toBeGreaterThan(order.indexOf("define"));
+    expect(probe.get).toHaveBeenCalled();
+    expect(loaded.getSettings).not.toHaveBeenCalled();
+    expect(await loaded.kv.get("config")).toEqual(raw({ rules: [OLD_RULE] }));
+  });
+
+  // Live finding: `settings.experimental_set({ rules: null })` from a background service empties the setting, and
+  // `settings.get()` then reads "". The factory cannot write it: bb answers 404 until the factory has finished.
+  it("writes the setting only from the background service, after the factory, never inside the factory", async () => {
+    const probe = spied();
+    const loaded = await load({ rules: OLD, setting: probe.wrap });
+    // The factory has finished: it has read nothing of the setting and written nothing.
+    expect(probe.get).not.toHaveBeenCalled();
+    expect(probe.set).not.toHaveBeenCalled();
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+    expect(await loaded.kv.get("config")).toBeUndefined();
+    expect(await loaded.rules()).toBe(OLD);
+    await endRun(await runMigration(loaded));
+    expect(probe.set).toHaveBeenCalledTimes(1);
+    expect(probe.set).toHaveBeenCalledWith({ rules: null });
+    expect(await loaded.rules()).toBe("");
+  });
+
+  // Live finding: a background service whose `start` awaits abort runs once and is not restarted; when the setting
+  // is not declared, bb reports that the plugin declares no settings.
+  it("keeps the service running until abort, so bb does not restart it, and declares nothing after the move", async () => {
+    const loaded = await load({ rules: OLD });
+    const run = loaded.harness.runService(SERVICE);
+    await settle();
+    expect(await Promise.race([run.done.then(() => "returned"), settle().then(() => "running")])).toBe("running");
+    run.controller.abort();
+    await run.done;
+    const restarted = await loaded.harness.reload(loaded.create);
+    await flush();
+    expect(restarted.harness.registrations.settingsDescriptors).toEqual({});
   });
 });
 
@@ -598,31 +942,38 @@ describe("a failed read of the plugin's storage at start", () => {
     }) as never);
   };
 
-  it.each(["config", "legacyRules", "legacyDismissed"])(
+  it.each(["previousSettingDone", "config"])(
     "(%s) still registers configure, RPC and CLI, warns, runs with no rules and shows the storage banner",
     async (key) => {
-      const loaded = await load({ legacy: JSON.stringify([GUARD]), prepare: readFails(key) });
+      const loaded = await load({ rules: JSON.stringify([GUARD]), prepare: readFails(key) });
       expect(logs(loaded, "warn")).toContain(READ(key));
-      expect((await state(loaded)).loadError).toEqual({ kind: "storage", message: MESSAGE(key), legacyText: "" });
+      expect((await state(loaded)).loadError).toEqual({ kind: "storage", message: MESSAGE(key) });
       expect((await configure(loaded)).instructions).toBeNull();
       const status = await loaded.harness.runCli(["status"]);
       expect(status.exitCode).toBe(0);
     },
   );
 
-  it("does not run the legacy import when a read failed", async () => {
-    const loaded = await load({ legacy: JSON.stringify([GUARD]), prepare: readFails("legacyDismissed") });
-    expect(loaded.getSettings).not.toHaveBeenCalled();
-    expect(await loaded.kv.get("config")).toBeUndefined();
-  });
+  it.each(["previousSettingDone", "config"])(
+    "(%s) declares no setting, registers no service and moves nothing",
+    async (key) => {
+      const loaded = await load({ rules: JSON.stringify([GUARD]), prepare: readFails(key) });
+      expect(loaded.harness.registrations.settingsDescriptors).toEqual({});
+      expect(serviceNames(loaded)).not.toContain(SERVICE);
+      expect(loaded.getSettings).not.toHaveBeenCalled();
+      expect(await loaded.kv.get("config")).toBeUndefined();
+      expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
+      expect(backupFiles()).toEqual([]);
+    },
+  );
 
-  it("does not adopt a stored config when the kept-text read failed", async () => {
-    const loaded = await load({ stored: raw({ rules: [GUARD] }), prepare: readFails("legacyRules") });
+  it("does not adopt a stored config when the flag read failed", async () => {
+    const loaded = await load({ stored: raw({ rules: [GUARD] }), prepare: readFails("previousSettingDone") });
     expect((await configure(loaded)).instructions).toBeNull();
   });
 
-  it("beats a stored-config error and a kept old text in the banner", async () => {
-    const loaded = await load({ kept: { text: "old", error: "why" }, prepare: readFails("config") });
+  it("shows the storage banner, not a stored-config error, when the config read failed", async () => {
+    const loaded = await load({ rules: OLD, prepare: readFails("config") });
     expect((await state(loaded)).loadError).toMatchObject({ kind: "storage" });
   });
 
@@ -652,29 +1003,17 @@ describe("a failed read of the plugin's storage at start", () => {
     expect(await loaded.kv.get("config")).toBeUndefined();
   });
 
-  it("refuses dismissLegacy too", async () => {
+  it("changes nothing for keepSavedRules, and keeps the storage banner", async () => {
     const loaded = await load({ prepare: readFails("config") });
-    await expect(loaded.harness.callRpc("dismissLegacy", null)).rejects.toThrow(REFUSAL);
-    expect(await loaded.kv.get("legacyDismissed")).toBeUndefined();
+    const result = (await loaded.harness.callRpc("keepSavedRules", null)) as ConfigState;
+    expect(result.loadError).toMatchObject({ kind: "storage" });
+    expect(await loaded.kv.get("previousSettingDone")).toBeUndefined();
   });
 
   it("is normal without the failure: no banner, saves work", async () => {
-    const loaded = await load({ legacy: "[]" });
+    const loaded = await load({ rules: "[]" });
     expect((await state(loaded)).loadError).toBeNull();
     expect((await save(loaded, raw({ rules: [GUARD] }))).loadError).toBeNull();
-  });
-});
-
-describe("a failed delete of a wrong-shape kept text", () => {
-  it("warns and starts normally", async () => {
-    const loaded = await load({
-      kept: { text: 1 },
-      stored: raw({ rules: [GUARD] }),
-      prepare: failing("delete", "legacyRules"),
-    });
-    expect(logs(loaded, "warn")).toContain("stored old setting text could not be removed: disk full");
-    expect((await state(loaded)).loadError).toBeNull();
-    expect((await configure(loaded)).instructions).toContain("Guard.");
   });
 });
 
@@ -691,7 +1030,7 @@ describe("a stored config that fails to load", () => {
     expect(current.loadError).toEqual({
       kind: "stored",
       message: expect.stringMatching(new RegExp(`^${PREFIX}.+`, "s")),
-      legacyText: JSON.stringify(BAD, null, 2),
+      text: JSON.stringify(BAD, null, 2),
     });
     expect((await configure(loaded)).instructions).toBeNull();
     expect(await loaded.kv.get("config")).toEqual(BAD);
@@ -699,13 +1038,7 @@ describe("a stored config that fails to load", () => {
 
   it("has an empty text when the stored value has no JSON text", async () => {
     const loaded = await load({ prepare: (kv) => void vi.spyOn(kv, "get").mockImplementation((async (key: string) => (key === "config" ? { rules: 1n } : undefined)) as never) });
-    expect((await state(loaded)).loadError).toEqual({ kind: "stored", message: expect.stringContaining(PREFIX), legacyText: "" });
-  });
-
-  it("wins over a kept old text and a read error", async () => {
-    const kept = await load({ stored: BAD, kept: { text: "old", error: "why" } });
-    expect((await state(kept)).loadError).toMatchObject({ kind: "stored" });
-    expect(await kept.harness.runCli(["export", "--legacy"])).toMatchObject({ exitCode: 0, stdout: "old\n" });
+    expect((await state(loaded)).loadError).toEqual({ kind: "stored", message: expect.stringContaining(PREFIX), text: "" });
   });
 
   it("does not show up for a stored config that loads", async () => {
@@ -771,9 +1104,9 @@ describe("a stored config that fails to load", () => {
     expect(((await restarted.harness.callRpc("getState", null)) as ConfigState).loadError).toBeNull();
   });
 
-  it("is not touched by dismissLegacy", async () => {
-    const loaded = await load({ stored: BAD, kept: { text: "old", error: "why" } });
-    expect(((await loaded.harness.callRpc("dismissLegacy", null)) as ConfigState).loadError).toMatchObject({ kind: "stored" });
+  it("is not touched by keepSavedRules", async () => {
+    const loaded = await load({ stored: BAD });
+    expect(((await loaded.harness.callRpc("keepSavedRules", null)) as ConfigState).loadError).toMatchObject({ kind: "stored" });
   });
 });
 
@@ -896,7 +1229,7 @@ describe("the RPC state for the settings form", () => {
     const results = [
       await state(loaded),
       await save(loaded, raw({ scopes: [{ name: "saved", paths: ["/s"] }], rules: [GUARD] })),
-      (await loaded.harness.callRpc("dismissLegacy", null)) as ConfigState,
+      (await loaded.harness.callRpc("keepSavedRules", null)) as ConfigState,
     ];
     for (const result of results) {
       const text = JSON.stringify(result);
@@ -912,7 +1245,7 @@ describe("the RPC state for the settings form", () => {
 
   it("is registered, and not discoverable by agents", async () => {
     const loaded = await load();
-    expect(loaded.harness.registrations.rpcMethods.sort()).toEqual(["dismissLegacy", "getState", "saveConfig"]);
+    expect(loaded.harness.registrations.rpcMethods.sort()).toEqual(["getState", "keepSavedRules", "saveConfig"]);
     expect(loaded.harness.registrations.experimental_publishedRpcMethods).toEqual([]);
   });
 
@@ -935,6 +1268,23 @@ describe("the RPC state for the settings form", () => {
     expect(output.safeParse({ ...valid, config: { ...valid.config, scopes: [{ name: "w", paths: [], claudeConfigDir: "/x" }] } }).success).toBe(false);
     expect(output.safeParse({ ...valid, cache: { providers: { loaded: true }, projects: valid.cache.projects } }).success).toBe(false);
     expect(output.safeParse({ ...valid, loadError: { message: "m" } }).success).toBe(false);
+    for (const loadError of [
+      { kind: "storage", message: "m" },
+      { kind: "stored", message: "m", text: "t" },
+      { kind: "migration", message: "m", backupPath: null },
+      { kind: "migration", message: "m", backupPath: "/b" },
+      { kind: "conflict", message: "m", backupPath: "/b" },
+    ])
+      expect(output.safeParse({ ...valid, loadError }).success).toBe(true);
+    for (const loadError of [
+      { kind: "legacy", message: "m", legacyText: "" },
+      { kind: "storage", message: "m", text: "" },
+      { kind: "stored", message: "m" },
+      { kind: "migration", message: "m" },
+      { kind: "migration", message: "m", backupPath: "/b", extra: 1 },
+      { kind: "conflict", message: "m", backupPath: null },
+    ])
+      expect(output.safeParse({ ...valid, loadError }).success).toBe(false);
     expect(modelInstructionsRpcContract.saveConfig.input.safeParse({ config: {}, extra: 1 }).success).toBe(false);
     expect(modelInstructionsRpcContract.saveConfig.input.safeParse({}).success).toBe(false);
   });
@@ -959,6 +1309,27 @@ describe("export and import", () => {
     expect(await other.kv.get("config")).toEqual(config);
     expect((await other.harness.runCli(["export"])).stdout).toBe(exported.stdout);
     expect(logs(other, "info")).toContain("config saved from import: 2 rules, 1 scopes, 1 vars");
+  });
+
+  it("imports the array form of the previous versions as it is, so a backup file imports", async () => {
+    const loaded = await load();
+    const file = importFile("array.json", [{ name: "r", skills: "work-*", instructions: ["a", "b"] }]);
+    expect(await loaded.harness.runCli(["import", file])).toMatchObject({
+      exitCode: 0,
+      stdout: `imported ${file}: 1 rules, 0 scopes, 0 vars\n`,
+    });
+    expect(await loaded.kv.get("config")).toEqual(raw({ rules: [{ name: "r", skills: ["work-*"], instructions: "a\nb" }] }));
+    expect(logs(loaded, "info")).toContain("config saved from import: 1 rules, 0 scopes, 0 vars");
+  });
+
+  it("fails an import of an invalid file, array form included, and changes nothing", async () => {
+    const stored = raw({ rules: [GUARD] });
+    const loaded = await load({ stored });
+    for (const content of ["[{", '[{"instructions": ""}]', '[{"scope": "nowhere", "instructions": "x"}]', "5"]) {
+      const result = await loaded.harness.runCli(["import", importFile("bad.json", content)]);
+      expect(result.exitCode).toBe(1);
+    }
+    expect(await loaded.kv.get("config")).toEqual(stored);
   });
 
   it("exports the empty config when nothing is stored, and that imports", async () => {

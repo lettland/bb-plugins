@@ -181,7 +181,7 @@ export function expandConfig(raw: RawConfig): Config {
   };
 }
 
-/** The text of the old `rules` setting (an array of rules, or the object form) as a raw config. */
+/** The text of the `rules` setting of the previous versions (an array of rules, or the object form) as a raw config. */
 export function parseLegacyText(json: string): RawConfig {
   let raw: unknown;
   try {
@@ -195,7 +195,32 @@ export function parseLegacyText(json: string): RawConfig {
     throw new Error(
       'expected an array of rules or { "vars"?: {...}, "scopes"?: [...], "rules": [...] }',
     );
-  return parseRawConfig(Array.isArray(raw) ? { rules: raw } : raw);
+  return parseRawConfig(previousForm(raw));
+}
+
+/** The array form of the previous versions (an array of rules) as the object form; anything else as it is. */
+export function previousForm(raw: unknown): unknown {
+  return Array.isArray(raw) ? { rules: raw } : raw;
+}
+
+/** True when the config has no rules, scopes or vars, as the old default `[]`. */
+export function isEmptyConfig(config: RawConfig): boolean {
+  return config.rules.length === 0 && config.scopes.length === 0 && Object.keys(config.vars).length === 0;
+}
+
+function sortedKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortedKeys);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([key, item]) => [key, sortedKeys(item)]),
+  );
+}
+
+/** Deep equality of two raw configs as JSON with object keys sorted; array order counts. */
+export function sameConfig(a: RawConfig, b: RawConfig): boolean {
+  return JSON.stringify(sortedKeys(a)) === JSON.stringify(sortedKeys(b));
 }
 
 /** Kept for the tests: the text form of the old setting, parsed and expanded in one step. */

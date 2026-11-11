@@ -169,7 +169,7 @@ The save check does not cover everything:
 These checks run only on save, never when a stored value is loaded. On load only
 the structure can fail the stored config. A `scope` or `skills` glob that matches
 nothing then matches nothing, and the plugin logs one warning per rule, so a
-renamed skill or a removed scope cannot switch off the other rules. The one-time import of the old `rules` setting is a load in this sense: only its structure is checked.
+renamed skill or a removed scope cannot switch off the other rules. The move of the `rules` setting of versions up to 0.1.11 is a load in this sense: only its structure is checked.
 
 **At runtime**, a thread type that the save check never saw (a new model or a
 new project) can still go over. The plugin then drops whole rules, never part of
@@ -448,27 +448,59 @@ and logs `config saved from <source>: <n> rules, <n> scopes, <n> vars`.
 ```sh
 bb model-instructions export > rules.json      # the saved config as JSON
 bb model-instructions import rules.json        # replace it (same checks as the form)
-bb model-instructions export --legacy          # old setting text that could not be imported
 ```
 
-- `import` takes the object form only. A relative path is read from the
-  directory you run the command in. The file must be a regular file of at most
-  1 MiB.
+- `import` takes the object form or the array form of versions up to 0.1.11
+  (an array of rules), so a backup file imports as it is. A relative path is
+  read from the directory you run the command in. The file must be a regular
+  file of at most 1 MiB.
 - A save from the form replaces the whole config with what the form shows. An
   `import` made while the form has unsaved changes is overwritten by the next
   form save; reload the form first.
-- **Moving from the `rules` setting.** Versions up to 0.1.11 kept the rules in a
-  plugin setting. On first start this version copies that value once into its
-  storage (only its structure is checked) and then ignores the setting;
-  `bb plugin config model-instructions set rules` no longer has an effect. If
-  the old value cannot be read as a config, it is kept: the form shows it with
-  the reason, `export --legacy` prints it, and a successful `import` or
-  **Dismiss old text** in the form removes it.
-- **Rolling back** to 0.1.11 makes it read the old setting again, not your form
-  changes. Run `export` first; after the downgrade run
-  `bb plugin config model-instructions set rules "$(cat rules.json)"`. After
-  upgrading again, the stored config wins, so `import` the setting's value if
-  you changed it in the meantime.
+
+### Upgrading from 0.1.11
+
+Versions up to 0.1.11 kept the rules in a plugin setting called `rules`. The
+plugin moves them by itself, the first time it runs after the upgrade:
+
+1. **Back up.** The setting's text is written unchanged to
+   `~/.bb/model-instructions/backups/rules-<date and time>-<4 hex digits>.txt`
+   (file mode 0600, folder mode 0700). A backup with identical content that is
+   already in the folder is reused, not written again. Backups are kept until you
+   delete them.
+2. **Move.** With no saved config, the text is saved as the config (only its
+   structure is checked). If a config is already saved and equals the old rules,
+   nothing is saved. If it differs, the form shows a banner (see below) and nothing
+   is changed. If the old text cannot be read and a config is already saved, the
+   saved config wins and the plugin logs a warning with the backup path.
+3. **Empty.** The `rules` setting is emptied. While the move is not done, the
+   setting shows in the plugin's settings as **Rules (previous versions)**. After
+   the next start it is no longer declared, so the box is gone.
+
+A value that is blank or an empty list (the old default `[]`) is not backed up;
+the setting is emptied and the move counts as done. If a step fails, the plugin
+logs a warning, keeps the setting, and tries again at the next start.
+
+Two banners can show in the settings form:
+
+- **Your rules from the previous version were not moved.** The old text could not
+  be read as a config (the banner gives the reason), or no backup could be made.
+  With a backup, fix the file and run `bb model-instructions import <backup path>`;
+  a successful `import` or a form save then empties the setting and ends the
+  banner. Without a backup the rules stay in the setting and the move is tried
+  again at the next start.
+- **Your rules from the previous version differ from the rules saved here.** A
+  config is saved and the old rules are different. Run
+  `bb model-instructions import <backup path>` to use the old rules, or press
+  **Keep the rules saved here**. Either one empties the setting and ends the
+  banner. A form save does not end it.
+
+**Rolling back** to 0.1.11 makes it read the `rules` setting again, which is
+empty after the move, not your form changes. Before you upgrade again, write the
+setting's value to a file:
+`bb plugin config model-instructions --json | jq -r .values.rules > rules.json`,
+and `import` that file after the upgrade: the setting is no longer read once it is
+moved, and `import` takes the array or the object text.
 
 ## Inspect and try
 
@@ -479,7 +511,7 @@ bb model-instructions check --all [--json]
 bb model-instructions setup [--dry-run] [--json]
 bb model-instructions unpin [<thread-id>]
 bb model-instructions import-dir-skills [--dry-run] [--json]
-bb model-instructions export [--legacy]
+bb model-instructions export
 bb model-instructions import <file>
 ```
 
@@ -561,7 +593,7 @@ Combine with `project` to narrow to a set first, e.g. `"project": ["opshub-*", "
   The save check rejects a config that would exceed it for a known thread type;
   at runtime the plugin drops whole rules and appends a notice (see Instruction budget).
 - Side chats never receive plugin instructions.
-- An older plugin version (0.1.11 or earlier) reads the old `rules` setting, not the saved config; see Storage, export and import before downgrading.
+- An older plugin version (0.1.11 or earlier) reads the old `rules` setting, not the saved config; see Upgrading from 0.1.11 before downgrading.
 - A `threads: child` rule also reaches devkit `review-code`'s lens and closure-review threads,
   since those are ordinary bb child threads. That skill's review-only brief asks the reviewer to
   ignore whatever this plugin injects into them — a prompt-level ask, not an enforced one (see

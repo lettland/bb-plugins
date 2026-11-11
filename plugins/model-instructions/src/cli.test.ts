@@ -59,7 +59,6 @@ function configFake(over: Partial<ConfigCli> = {}) {
   const imported: unknown[] = [];
   const config: ConfigCli = {
     saved: () => SAVED,
-    legacyText: () => undefined,
     storedText: () => undefined,
     storageFailed: () => false,
     async importConfig(value) {
@@ -77,17 +76,6 @@ describe("export", () => {
   it("prints the saved config as JSON, and nothing else", async () => {
     const result = await runCli(["export"], {}, withConfig(configFake().config));
     expect(result).toEqual({ exitCode: 0, stdout: JSON.stringify(SAVED, null, 2) + "\n" });
-  });
-
-  it("prints the kept old text as stored with --legacy, and ends it with one newline", async () => {
-    const text = '[{"instructions": "{{a}}"';
-    const { config } = configFake({ legacyText: () => text });
-    expect(await runCli(["export", "--legacy"], {}, withConfig(config))).toEqual({ exitCode: 0, stdout: text + "\n" });
-  });
-
-  it("does not add a second newline to a kept old text that already ends with one", async () => {
-    const { config } = configFake({ legacyText: () => "[]\n" });
-    expect(await runCli(["export", "--legacy"], {}, withConfig(config))).toEqual({ exitCode: 0, stdout: "[]\n" });
   });
 
   it("prints the stored value instead of the empty config while the stored config failed to load", async () => {
@@ -109,34 +97,15 @@ describe("export", () => {
     });
   });
 
-  it("--legacy refuses too while the plugin's storage could not be read, instead of saying no text is kept", async () => {
-    const { config } = configFake({ storageFailed: () => true, legacyText: () => undefined });
-    expect(await runCli(["export", "--legacy"], {}, withConfig(config))).toEqual({
-      exitCode: 1,
-      stderr:
-        "export: the plugin's storage could not be read at start; reload the plugin (bb plugin reload model-instructions) first\n",
-    });
-  });
-
   it("prints nothing on stderr when the stored config loaded", async () => {
     expect((await runCli(["export"], {}, withConfig(configFake().config))).stderr).toBeUndefined();
   });
 
-  it("--legacy still prints the kept old text while the stored config failed to load", async () => {
-    const { config } = configFake({ storedText: () => "{}", legacyText: () => "old" });
-    expect(await runCli(["export", "--legacy"], {}, withConfig(config))).toEqual({ exitCode: 0, stdout: "old\n" });
-  });
-
-  it("says so when no old text is kept", async () => {
-    const result = await runCli(["export", "--legacy"], {}, withConfig(configFake().config));
-    expect(result).toEqual({ exitCode: 1, stderr: "export: no old setting text is kept\n" });
-  });
-
   it("rejects any other argument, --json included, with the usage line", async () => {
-    for (const args of [["--json"], ["--legacy", "extra"]]) {
+    for (const args of [["--json"], ["--legacy"]]) {
       const result = await runCli(["export", ...args], {}, withConfig(configFake().config));
       expect(result.exitCode).toBe(2);
-      expect(result.stderr).toBe(`export: unknown argument "${args.find((arg) => arg !== "--legacy")}"\nusage: ${USAGE}\n`);
+      expect(result.stderr).toBe(`export: unknown argument "${args[0]}"\nusage: ${USAGE}\n`);
     }
   });
 });
@@ -198,21 +167,14 @@ describe("import", () => {
     expect(fake.imported).toEqual([]);
   });
 
-  it("exits 0 and prints the cleanup failure on stderr when the kept old text could not be removed", async () => {
-    const file = write("cleanup/config.json", JSON.stringify({ vars: {}, scopes: [], rules: [] }));
-    const fake = configFake({
-      importConfig: async (value) => ({ saved: parseRawConfig(value), keptTextError: "disk full" }),
-    });
+  it("hands the array form of the previous versions to the write path as the object form", async () => {
+    const file = write("array/rules.json", JSON.stringify([{ name: "r", instructions: "x" }]));
+    const fake = configFake();
     expect(await doImport([file], {}, fake)).toEqual({
       exitCode: 0,
-      stdout: `imported ${file}: 0 rules, 0 scopes, 0 vars\n`,
-      stderr: "import: the kept old setting text could not be removed: disk full\n",
+      stdout: `imported ${file}: 1 rules, 0 scopes, 0 vars\n`,
     });
-  });
-
-  it("prints nothing on stderr when the cleanup worked", async () => {
-    const file = write("cleanup/ok.json", JSON.stringify({ vars: {}, scopes: [], rules: [] }));
-    expect((await doImport([file])).stderr).toBeUndefined();
+    expect(fake.imported).toEqual([{ rules: [{ name: "r", instructions: "x" }] }]);
   });
 
   it("reports what the write path rejects", async () => {

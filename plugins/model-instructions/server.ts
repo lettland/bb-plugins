@@ -3,9 +3,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { backupRules } from "./src/backup.js";
 import { budgetReport, cacheProblem, describeType, type Role } from "./src/budget.js";
 import { runCli, type OverBudgetRecord, type OverflowEvent } from "./src/cli.js";
-import { modelInstructionsRpcContract, type ConfigState } from "./rpc-contract.js";
+import { modelInstructionsRpcContract, type ConfigState, type LoadError } from "./rpc-contract.js";
 import { buildScope, type Scope } from "./src/paths.js";
 import {
   isDirectory,
@@ -28,10 +29,12 @@ import {
   activeScopeNamesIn,
   compose,
   expandConfig,
+  isEmptyConfig,
   matchRules,
   parseLegacyText,
   parseRawConfig,
   ruleLabel,
+  sameConfig,
   SELF_SKILL,
   unresolvedRefs,
   type Config,
@@ -44,13 +47,13 @@ import type { SetupDeps } from "./src/setup.js";
 
 /** kv key of the saved config, in the raw form. */
 const CONFIG_KEY = "config";
-/** kv key of the old `rules` setting text that could not be imported, with the reason. */
-const LEGACY_KEY = "legacyRules";
-/** kv key that is `true` once the user dismissed the kept old text: the old setting is not imported again. */
-const LEGACY_DISMISSED_KEY = "legacyDismissed";
+/** kv key that is `true` once the rules of the previous versions are moved; the setting is then no longer declared. */
+const DONE_KEY = "previousSettingDone";
+/** kv keys written by v0.1.12, removed once at the start of the move. */
+const V012_RULES_KEY = "legacyRules";
+const V012_DISMISSED_KEY = "legacyDismissed";
 
-const legacyRecordSchema = z.strictObject({ text: z.string(), error: z.string() });
-type LegacyRecord = z.infer<typeof legacyRecordSchema>;
+const v012RecordSchema = z.looseObject({ text: z.string() });
 
 /** A stored config that failed to load at start: the reason, and the stored value as JSON text ("" if it has none). */
 interface StoredError {
@@ -58,11 +61,25 @@ interface StoredError {
   text: string;
 }
 
-const LEGACY_READ_ERROR = (reason: string) =>
-  `the old rules setting could not be read: ${reason}. Restart bb or reload the plugin before you save here: once this form saves, the old setting is no longer imported.`;
+/** The two banners the move of the previous rules can leave; `migration` without a copy has no backup path. */
+type PendingMove = Exclude<LoadError, { kind: "storage" } | { kind: "stored" }>;
+/** What can settle a pending move: a form save, an import, or the button. */
+type Resolution = "form" | "import" | "keep";
 
-const LEGACY_SAVE_ERROR = (reason: string) =>
-  `the old rules setting could not be saved: ${reason}. Restart bb or reload the plugin before you save here: once this form saves, the old setting is no longer imported.`;
+const BACKUP_FAILED = (reason: string) =>
+  `could not back up the rules from the previous version: ${reason}; nothing was changed, it is tried again at the next start`;
+const MOVE_FAILED = (reason: string) =>
+  `the rules from the previous version could not be moved: ${reason}; it is tried again at the next start`;
+const NOT_EMPTIED = (reason: string) =>
+  `the setting with the rules from the previous version could not be emptied: ${reason}; it is tried again at the next start`;
+const NOT_READ = (backupPath: string) =>
+  `the rules from the previous version could not be read and rules are already saved here; a copy is in ${backupPath}`;
+const NO_COPY_MESSAGE = (reason: string) =>
+  `${reason}. No copy could be made; the rules are still in the plugin's settings and the move is tried again at the next start.`;
+const COPY_MESSAGE = (reason: string, backupPath: string) =>
+  `${reason}. A copy is in ${backupPath}. Fix it there and run bb model-instructions import ${backupPath}.`;
+const CONFLICT_MESSAGE = (backupPath: string) =>
+  `A copy of the previous rules is in ${backupPath}. To use them, run bb model-instructions import ${backupPath}; to keep the rules saved here, press Keep the rules saved here.`;
 
 const STORAGE_READ_ERROR = (reason: string) => `the plugin's storage could not be read: ${reason}`;
 /** What every writer says while a start-path read of the plugin's storage has failed. */
@@ -73,7 +90,7 @@ const STORAGE_REFUSAL =
 const READ_FAILED = Symbol("read failed");
 
 /** Who wrote the config, as the log line names it. */
-type WriteSource = "form" | "import" | "import-dir-skills" | "legacy setting";
+type WriteSource = "form" | "import" | "import-dir-skills" | "previous setting";
 /** `full` is every save check. `structural` is the parse only, for carrying the old setting over. */
 type WriteMode = "full" | "structural";
 
@@ -102,11 +119,12 @@ export default async function plugin(bb: BbPluginApi) {
   /** The saved config as stored (unexpanded), and the expanded one the rules run on. */
   let raw: RawConfig = { vars: {}, scopes: [], rules: [] };
   let config: Config = { rules: [], scopes: [] };
-  let legacy: LegacyRecord | undefined;
+  /** True once a config is stored: at start, or by a write. */
+  let hasStored = false;
   /** Why the stored config could not be loaded; memory only. Cleared by a full replace (form save or import). */
   let storedError: StoredError | undefined;
-  /** Why the old setting could not be read or saved; memory only. Cleared by a full replace (form save or import). */
-  let legacyMemoryError: string | undefined;
+  /** The banner for the rules of the previous version; memory only. */
+  let pending: PendingMove | undefined;
   /** Why a read of the plugin's storage failed at start; memory only. While set, no writer writes. */
   let storageError: string | undefined;
   let scopes: Scope[] = [];
@@ -233,7 +251,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (storageError !== undefined) throw new Error(STORAGE_REFUSAL);
     const { next, parsed } = validate(value, mode, checkEnv);
     await bb.storage.kv.set(CONFIG_KEY, next);
-    legacyMemoryError = undefined;
+    hasStored = true;
     storedError = undefined;
     adopt(next, parsed);
     recheckBudget();
@@ -241,63 +259,6 @@ export default async function plugin(bb: BbPluginApi) {
       `config saved from ${source}: ${next.rules.length} rules, ${next.scopes.length} scopes, ${Object.keys(next.vars).length} vars`,
     );
     return next;
-  }
-
-  /** The only way a config is written. Resolves to what was stored; rejects with the field-specific error. */
-  const writeConfig = (value: unknown, source: WriteSource, mode: WriteMode): Promise<RawConfig> =>
-    enqueue(() => writeStep(value, source, mode));
-
-  /** Forgets the kept old setting text; runs inside the queue. */
-  async function dropLegacy(): Promise<void> {
-    await bb.storage.kv.delete(LEGACY_KEY);
-    legacy = undefined;
-  }
-
-  /** One-time, best effort: moves the old `rules` setting into kv. Structural checks only. Never rejects on a kv failure. */
-  async function importLegacySetting(): Promise<void> {
-    const dismissed = await startRead<boolean>(LEGACY_DISMISSED_KEY);
-    if (dismissed === READ_FAILED) return;
-    if (dismissed === true) {
-      bb.log.debug("the old rules setting was dismissed; not importing it");
-      return;
-    }
-    let text: unknown;
-    try {
-      text = (await bb.sdk.plugins.getSettings({ pluginId: bb.pluginId })).values.rules;
-    } catch (error) {
-      legacyMemoryError = LEGACY_READ_ERROR((error as Error).message);
-      bb.log.warn(legacyMemoryError);
-      return;
-    }
-    if (typeof text !== "string" || text.trim() === "") {
-      bb.log.debug("no old rules setting to import");
-      return;
-    }
-    let value: RawConfig;
-    try {
-      value = parseLegacyText(text);
-      validate(value, "structural", checkEnv);
-    } catch (error) {
-      const message = (error as Error).message;
-      legacy = { text, error: message };
-      bb.log.warn(
-        `the old rules setting was not imported: ${message}; its text is kept (bb model-instructions export --legacy)`,
-      );
-      try {
-        await bb.storage.kv.set(LEGACY_KEY, legacy);
-      } catch (keepError) {
-        bb.log.warn(`the old rules setting could not be kept: ${(keepError as Error).message}`);
-      }
-      return;
-    }
-    try {
-      await writeConfig(value, "legacy setting", "structural");
-    } catch (error) {
-      legacyMemoryError = LEGACY_SAVE_ERROR((error as Error).message);
-      bb.log.warn(
-        `the old rules setting could not be saved: ${(error as Error).message}; it is imported again at the next start`,
-      );
-    }
   }
 
   /** A start-path read. A failure is logged and kept as the storage error, and the caller stops loading. */
@@ -311,46 +272,182 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** The kept old text from kv; a value of the wrong shape is ignored and deleted. False when the read failed. */
-  async function loadKeptLegacy(): Promise<boolean> {
-    const kept = await startRead<unknown>(LEGACY_KEY);
-    if (kept === READ_FAILED) return false;
-    if (kept === undefined) return true;
-    const parsed = legacyRecordSchema.safeParse(kept);
-    if (parsed.success) {
-      legacy = parsed.data;
+  /** The setting of the previous versions. Declared only while its rules are not moved; bb returns a setting only while it is declared. */
+  const defineRulesSetting = () =>
+    bb.settings.define({
+      rules: {
+        type: "string",
+        label: "Rules (previous versions)",
+        description:
+          "Moved into the form below automatically, then removed. A copy is kept in ~/.bb/model-instructions/backups/. Edits here are not read after the move.",
+        experimental_multiline: true,
+        default: "",
+      },
+    });
+  type RulesSetting = ReturnType<typeof defineRulesSetting>;
+
+  const backupDir = path.join(home, ".bb", "model-instructions", "backups");
+
+  /**
+   * The move of the rules of the previous versions into the saved config: back up, move, empty the setting,
+   * set the flag. Everything runs from the background service, never from the factory: bb answers a read of
+   * the setting with 404 until the factory has finished. Returns what the service and the form need.
+   */
+  function previousSettingMigration(setting: RulesSetting) {
+    /** Step d: empties the setting and reads it back. False, with a warning, when it is not empty. */
+    async function emptySetting(): Promise<boolean> {
+      let reason: string;
+      try {
+        await setting.experimental_set({ rules: null });
+        if ((await setting.get()).rules.trim() === "") return true;
+        reason = "the setting still holds a value";
+      } catch (error) {
+        reason = (error as Error).message;
+      }
+      bb.log.warn(NOT_EMPTIED(reason));
+      return false;
+    }
+
+    /** Steps d and e: empties the setting, then sets the flag. */
+    async function finishMove(backupPath: string, outcome: "moved" | "already saved"): Promise<void> {
+      if (!(await emptySetting())) return;
+      await bb.storage.kv.set(DONE_KEY, true);
+      bb.log.info(
+        outcome === "moved"
+          ? `rules from the previous version moved: backup ${backupPath}`
+          : `rules from the previous version already saved; backup ${backupPath}`,
+      );
+    }
+
+    /** Backs up and removes what v0.1.12 kept in kv. False when the move must wait for the next start. */
+    async function removeV012Keys(): Promise<boolean> {
+      const kept = v012RecordSchema.safeParse(await bb.storage.kv.get<unknown>(V012_RULES_KEY));
+      if (kept.success) {
+        try {
+          backupRules(backupDir, kept.data.text);
+        } catch (error) {
+          bb.log.warn(BACKUP_FAILED((error as Error).message));
+          return false;
+        }
+        await bb.storage.kv.delete(V012_RULES_KEY);
+      }
+      await bb.storage.kv.delete(V012_DISMISSED_KEY);
       return true;
     }
-    bb.log.warn("stored old setting text ignored: wrong shape");
-    try {
-      await bb.storage.kv.delete(LEGACY_KEY);
-    } catch (error) {
-      bb.log.warn(`stored old setting text could not be removed: ${(error as Error).message}`);
+
+    /** Steps a to e, decided from the current state. Runs inside the write queue. */
+    async function migrate(): Promise<void> {
+      if (!(await removeV012Keys())) return;
+      const text = (await setting.get()).rules;
+      const blank = text.trim() === "";
+      let old: RawConfig | undefined;
+      let reason = "";
+      if (!blank) {
+        try {
+          const parsed = parseLegacyText(text);
+          validate(parsed, "structural", checkEnv);
+          old = parsed;
+        } catch (error) {
+          reason = (error as Error).message;
+        }
+      }
+      // a. Nothing to move.
+      if (blank || (old !== undefined && isEmptyConfig(old))) {
+        if (blank || (await emptySetting())) {
+          await bb.storage.kv.set(DONE_KEY, true);
+          bb.log.debug("no rules from the previous version to move");
+        }
+        return;
+      }
+      // b. Back up.
+      let backupPath: string;
+      try {
+        backupPath = backupRules(backupDir, text);
+      } catch (error) {
+        const message = (error as Error).message;
+        bb.log.warn(BACKUP_FAILED(message));
+        pending = { kind: "migration", message: NO_COPY_MESSAGE(message), backupPath: null };
+        return;
+      }
+      // c. Decide.
+      if (storedError !== undefined) return;
+      if (!hasStored) {
+        if (old === undefined) {
+          pending = { kind: "migration", message: COPY_MESSAGE(reason, backupPath), backupPath };
+          return;
+        }
+        await writeStep(old, "previous setting", "structural");
+        await finishMove(backupPath, "moved");
+      } else if (old === undefined) {
+        bb.log.warn(NOT_READ(backupPath));
+        await finishMove(backupPath, "moved");
+      } else if (sameConfig(old, raw)) {
+        await finishMove(backupPath, "already saved");
+      } else {
+        pending = { kind: "conflict", message: CONFLICT_MESSAGE(backupPath), backupPath };
+      }
     }
-    return true;
+
+    /** Settles a pending move after the saved config was replaced or the user chose: the backup exists, so steps d and e run. */
+    async function resolve(by: Resolution): Promise<void> {
+      const current = pending;
+      if (current === undefined || current.backupPath === null) return;
+      if (current.kind === "migration" ? by === "keep" : by === "form") return;
+      pending = undefined;
+      try {
+        await finishMove(current.backupPath, "moved");
+      } catch (error) {
+        bb.log.warn(MOVE_FAILED((error as Error).message));
+      }
+    }
+
+    bb.background.service("previous-setting", {
+      async start(signal) {
+        try {
+          await enqueue(migrate);
+        } catch (error) {
+          bb.log.warn(MOVE_FAILED((error as Error).message));
+        }
+        // Returning early or throwing would make bb restart the service.
+        await new Promise<void>((resolveStart) => {
+          if (signal.aborted) resolveStart();
+          else signal.addEventListener("abort", () => resolveStart(), { once: true });
+        });
+      },
+    });
+
+    return resolve;
   }
+
+  /** Settles a pending move of the previous rules; does nothing once they are moved. */
+  let resolvePrevious: (by: Resolution) => Promise<void> = async () => {};
 
   loadProfiles();
   rebuildScopes();
-  const stored = (await loadKeptLegacy()) ? await startRead<unknown>(CONFIG_KEY) : READ_FAILED;
+  const done = await startRead<boolean>(DONE_KEY);
+  const stored = done === READ_FAILED ? READ_FAILED : await startRead<unknown>(CONFIG_KEY);
   if (stored === READ_FAILED) {
-    // The reads stop at the first failure: no rules run, and the legacy import does not.
-  } else if (stored === undefined) await importLegacySetting();
-  else {
-    try {
-      const next = parseRawConfig(stored);
-      adopt(next, expandConfig(next));
-      bb.log.info(`loaded ${config.rules.length} rule(s), ${scopes.length} scope(s)`);
-    } catch (error) {
-      bb.log.warn(`saved config ignored: ${(error as Error).message}`);
-      let text = "";
+    // The reads stop at the first failure: no rules run, and nothing is moved.
+  } else {
+    if (stored !== undefined) {
+      hasStored = true;
       try {
-        text = JSON.stringify(stored, null, 2);
-      } catch {
-        // A value that has no JSON text leaves the text block empty.
+        const next = parseRawConfig(stored);
+        adopt(next, expandConfig(next));
+        bb.log.info(`loaded ${config.rules.length} rule(s), ${scopes.length} scope(s)`);
+      } catch (error) {
+        bb.log.warn(`saved config ignored: ${(error as Error).message}`);
+        let text = "";
+        try {
+          text = JSON.stringify(stored, null, 2);
+        } catch {
+          // A value that has no JSON text leaves the text block empty.
+        }
+        storedError = { message: `the saved config could not be loaded: ${(error as Error).message}`, text };
       }
-      storedError = { message: `the saved config could not be loaded: ${(error as Error).message}`, text };
     }
+    // Declared after the awaits above, so bb has the setting once the factory has finished.
+    if (done !== true) resolvePrevious = previousSettingMigration(defineRulesSetting());
   }
 
   bb.agents.configure((context) => {
@@ -423,19 +520,15 @@ export default async function plugin(bb: BbPluginApi) {
     );
   }
 
-  /** A stored config that failed to load wins over the kept old text, which wins over a read error. */
+  /** The storage error wins over a stored config that failed to load, which wins over the move of the previous rules. */
   function loadError(): ConfigState["loadError"] {
     if (storageError !== undefined)
       return {
         kind: "storage",
         message: `${storageError}. Reload the plugin (bb plugin reload model-instructions) before saving.`,
-        legacyText: "",
       };
-    if (storedError !== undefined)
-      return { kind: "stored", message: storedError.message, legacyText: storedError.text };
-    if (legacy !== undefined) return { kind: "legacy", message: legacy.error, legacyText: legacy.text };
-    if (legacyMemoryError !== undefined) return { kind: "legacy", message: legacyMemoryError, legacyText: "" };
-    return null;
+    if (storedError !== undefined) return { kind: "stored", message: storedError.message, text: storedError.text };
+    return pending ?? null;
   }
 
   /** What the settings form shows. Never carries a Claude config dir. */
@@ -464,17 +557,16 @@ export default async function plugin(bb: BbPluginApi) {
     async getState() {
       return state();
     },
-    async saveConfig({ config: value }) {
-      await writeConfig(value, "form", "full");
-      return state();
-    },
-    dismissLegacy() {
+    saveConfig({ config: value }) {
       return enqueue(async () => {
-        if (storageError !== undefined) throw new Error(STORAGE_REFUSAL);
-        // Nothing kept: nothing to dismiss, and the permanent flag stays unset.
-        if (legacy === undefined) return state();
-        await bb.storage.kv.set(LEGACY_DISMISSED_KEY, true);
-        await dropLegacy();
+        await writeStep(value, "form", "full");
+        await resolvePrevious("form");
+        return state();
+      });
+    },
+    keepSavedRules() {
+      return enqueue(async () => {
+        await resolvePrevious("keep");
         return state();
       });
     },
@@ -551,8 +643,8 @@ export default async function plugin(bb: BbPluginApi) {
       },
       {
         name: "export",
-        summary: "Print the saved config as JSON, or the kept old setting text",
-        usage: "bb model-instructions export [--legacy]",
+        summary: "Print the saved config as JSON",
+        usage: "bb model-instructions export",
       },
       {
         name: "import",
@@ -577,22 +669,13 @@ export default async function plugin(bb: BbPluginApi) {
         importDirSkills: importDeps,
         config: {
           saved: () => raw,
-          legacyText: () => legacy?.text,
           storedText: () => storedError?.text,
           storageFailed: () => storageError !== undefined,
           importConfig: (value) =>
             enqueue(async () => {
-              const stored = await writeStep(value, "import", "full");
-              try {
-                await dropLegacy();
-              } catch (error) {
-                const message = (error as Error).message;
-                bb.log.warn(`the kept old setting text could not be removed: ${message}`);
-                // The import succeeded: the form must not keep a banner for text that no longer matters.
-                legacy = undefined;
-                return { saved: stored, keptTextError: message };
-              }
-              return { saved: stored };
+              const saved = await writeStep(value, "import", "full");
+              await resolvePrevious("import");
+              return { saved };
             }),
         },
       }),

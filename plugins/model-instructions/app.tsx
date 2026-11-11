@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { definePluginApp, useRpc } from "@get-bb/plugin-sdk/app";
 import type { ConfigState, ModelInstructionsRpcContract, RawConfig } from "./rpc-contract";
 import { globToRegExp } from "./src/glob";
@@ -17,7 +17,6 @@ const DUPLICATE_NOTE = "This name is already used above; rename one of them.";
 const NO_SCOPE_NOTE = "Matches no directory scope";
 const STORED_FIX =
   "Saving here replaces it. To keep it, run bb model-instructions export, fix the file, and import it.";
-const LEGACY_FIX = "Fix it, save it to a file and run bb model-instructions import <file>, or dismiss it.";
 
 type RawRule = RawConfig["rules"][number];
 type Threads = RawRule["threads"];
@@ -733,52 +732,70 @@ function LoadFailure(props: { error: string; onRetry: () => void }) {
   );
 }
 
-function Banner(props: { error: NonNullable<ConfigState["loadError"]>; onDismiss: () => void }) {
-  const { error } = props;
-  const stored = error.kind === "stored";
-  if (error.kind === "storage")
-    return (
-      <section aria-labelledby="mi-legacy-heading" style={{ border: RULE, borderRadius: 8, padding: 12 }}>
-        <h4 id="mi-legacy-heading" style={{ margin: "0 0 4px", color: DESTRUCTIVE }}>
-          The plugin's storage could not be read
-        </h4>
-        <p style={{ margin: 0 }}>{error.message}</p>
-      </section>
-    );
-  const hasText = error.legacyText !== "";
+function assertNever(value: never): never {
+  throw new Error(`unexpected load error ${JSON.stringify(value)}`);
+}
+
+function BannerBox(props: { heading: string; children: ReactNode }) {
   return (
-    <section aria-labelledby="mi-legacy-heading" style={{ border: RULE, borderRadius: 8, padding: 12 }}>
-      <h4 id="mi-legacy-heading" style={{ margin: "0 0 4px", color: DESTRUCTIVE }}>
-        {stored ? "The saved configuration could not be loaded" : "The old rules setting could not be imported"}
+    <section aria-labelledby="mi-banner-heading" style={{ border: RULE, borderRadius: 8, padding: 12 }}>
+      <h4 id="mi-banner-heading" style={{ margin: "0 0 4px", color: DESTRUCTIVE }}>
+        {props.heading}
       </h4>
-      <p style={{ margin: hasText || stored ? "0 0 8px" : 0 }}>{error.message}</p>
-      {hasText ? (
-        <pre
-          style={{
-            margin: "0 0 8px",
-            padding: 8,
-            border: RULE,
-            borderRadius: 6,
-            overflow: "auto",
-            whiteSpace: "pre-wrap",
-            fontFamily: "ui-monospace, monospace",
-          }}
-        >
-          {error.legacyText}
-        </pre>
-      ) : null}
-      {stored ? (
-        <SectionNote>{STORED_FIX}</SectionNote>
-      ) : hasText ? (
-        <>
-          <button type="button" onClick={props.onDismiss}>
-            Dismiss old text
-          </button>
-          <SectionNote>{LEGACY_FIX}</SectionNote>
-        </>
-      ) : null}
+      {props.children}
     </section>
   );
+}
+
+function Banner(props: { error: NonNullable<ConfigState["loadError"]>; onKeep: () => void }) {
+  const { error } = props;
+  switch (error.kind) {
+    case "storage":
+      return (
+        <BannerBox heading="The plugin's storage could not be read">
+          <p style={{ margin: 0 }}>{error.message}</p>
+        </BannerBox>
+      );
+    case "stored":
+      return (
+        <BannerBox heading="The saved configuration could not be loaded">
+          <p style={{ margin: "0 0 8px" }}>{error.message}</p>
+          {error.text === "" ? null : (
+            <pre
+              style={{
+                margin: "0 0 8px",
+                padding: 8,
+                border: RULE,
+                borderRadius: 6,
+                overflow: "auto",
+                whiteSpace: "pre-wrap",
+                fontFamily: "ui-monospace, monospace",
+              }}
+            >
+              {error.text}
+            </pre>
+          )}
+          <SectionNote>{STORED_FIX}</SectionNote>
+        </BannerBox>
+      );
+    case "migration":
+      return (
+        <BannerBox heading="Your rules from the previous version were not moved">
+          <p style={{ margin: 0 }}>{error.message}</p>
+        </BannerBox>
+      );
+    case "conflict":
+      return (
+        <BannerBox heading="Your rules from the previous version differ from the rules saved here">
+          <p style={{ margin: "0 0 8px" }}>{error.message}</p>
+          <button type="button" onClick={props.onKeep}>
+            Keep the rules saved here
+          </button>
+        </BannerBox>
+      );
+    default:
+      return assertNever(error);
+  }
 }
 
 function newRule(key: number): RuleRow {
@@ -882,10 +899,10 @@ function Instructions() {
     }
   };
 
-  const dismissLegacy = async () => {
+  const keepSavedRules = async () => {
     try {
       // Only the state changes: unsaved edits in the form are not replaced.
-      setState(await rpc.call("dismissLegacy", null));
+      setState(await rpc.call("keepSavedRules", null));
     } catch (error) {
       setSaveError(cardNames(describeError(error), draft));
     }
@@ -1001,7 +1018,7 @@ function Instructions() {
     <div ref={rootRef} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {loadFailure === null ? null : <LoadFailure error={loadFailure} onRetry={() => void load()} />}
       {state.loadError === null ? null : (
-        <Banner error={state.loadError} onDismiss={() => void dismissLegacy()} />
+        <Banner error={state.loadError} onKeep={() => void keepSavedRules()} />
       )}
       <fieldset disabled={saving} style={{ margin: 0, padding: 0, border: "none" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>

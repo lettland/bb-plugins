@@ -99,7 +99,7 @@ function render(initial: ConfigState = state(), handlers: Handlers = {}) {
       rpc: {
         getState: () => initial,
         saveConfig: (input: { config: RawConfig }) => ({ ...initial, config: input.config }),
-        dismissLegacy: () => ({ ...initial, loadError: null }),
+        keepSavedRules: () => ({ ...initial, loadError: null }),
         ...handlers,
       } as PluginRpcTestHandlers<ModelInstructionsRpcContract>,
     },
@@ -618,7 +618,7 @@ describe("Rules: rendering", () => {
       state({
         skills: [{ name: "evil", description: "<script>alert(1)</script>" }],
         config: config({ rules: [rule({ name: "<b>x</b>", instructions: "<img src=x onerror=alert(1)>" })] }),
-        loadError: { kind: "legacy", message: "<i>bad</i>", legacyText: "<script>alert(2)</script>" },
+        loadError: { kind: "stored", message: "<i>bad</i>", text: "<script>alert(2)</script>" },
       }),
     );
     expect(await screen.findByRole("group", { name: "<b>x</b>" })).toBeTruthy();
@@ -1502,10 +1502,10 @@ describe("a save supersedes loads in flight", () => {
 describe("the saved configuration banner", () => {
   const MESSAGE = "the saved config could not be loaded: ✖ Invalid input\n  → at rules[0]";
   const TEXT = '{\n  "rules": [\n    {\n      "name": "<b>r</b>"\n    }\n  ]\n}';
-  const stored = (legacyText = TEXT) => state({ loadError: { kind: "stored", message: MESSAGE, legacyText } });
+  const stored = (text = TEXT) => state({ loadError: { kind: "stored", message: MESSAGE, text } });
   const NAME = "The saved configuration could not be loaded";
 
-  it("shows the heading, message, stored text and the line to keep it, in that order, with no dismiss button", async () => {
+  it("shows the heading, message, stored text and the line to keep it, in that order, with no button", async () => {
     render(stored());
     const banner = await screen.findByRole("region", { name: NAME });
     expect(Array.from(banner.children).map((child) => child.tagName)).toEqual(["H4", "P", "PRE", "DIV"]);
@@ -1515,7 +1515,6 @@ describe("the saved configuration banner", () => {
       "Saving here replaces it. To keep it, run bb model-instructions export, fix the file, and import it.",
     );
     expect(within(banner).queryAllByRole("button")).toHaveLength(0);
-    expect(screen.queryByText(/Fix it, save it to a file/)).toBeNull();
     expect(banner.querySelector("b")).toBeNull();
   });
 
@@ -1526,13 +1525,9 @@ describe("the saved configuration banner", () => {
     expect(banner.querySelector("pre")).toBeNull();
   });
 
-  it("does not show the legacy heading, and the legacy banner does not show this one", async () => {
-    render(stored());
-    await screen.findByRole("region", { name: NAME });
-    expect(screen.queryByRole("region", { name: "The old rules setting could not be imported" })).toBeNull();
-    cleanup();
-    render(state({ loadError: { kind: "legacy", message: "m", legacyText: "t" } }));
-    await screen.findByRole("region", { name: "The old rules setting could not be imported" });
+  it("is not shown for the other kinds", async () => {
+    render(state({ loadError: { kind: "migration", message: "m", backupPath: null } }));
+    await screen.findByRole("region", { name: "Your rules from the previous version were not moved" });
     expect(screen.queryByRole("region", { name: NAME })).toBeNull();
     expect(screen.queryByText(/Saving here replaces it/)).toBeNull();
   });
@@ -1544,79 +1539,103 @@ describe("the storage banner", () => {
   const NAME = "The plugin's storage could not be read";
 
   it("shows the heading and the message, with no text block and no button", async () => {
-    render(state({ loadError: { kind: "storage", message: MESSAGE, legacyText: "" } }));
+    render(state({ loadError: { kind: "storage", message: MESSAGE } }));
     const banner = await screen.findByRole("region", { name: NAME });
     expect(Array.from(banner.children).map((child) => child.tagName)).toEqual(["H4", "P"]);
     expect(banner.children[1]!.textContent).toBe(MESSAGE);
     expect(within(banner).queryAllByRole("button")).toHaveLength(0);
     expect(banner.querySelector("pre")).toBeNull();
     expect(screen.queryByRole("region", { name: "The saved configuration could not be loaded" })).toBeNull();
-    expect(screen.queryByRole("region", { name: "The old rules setting could not be imported" })).toBeNull();
   });
 
   it("is not shown for the other kinds", async () => {
-    render(state({ loadError: { kind: "legacy", message: "m", legacyText: "" } }));
-    await screen.findByRole("region", { name: "The old rules setting could not be imported" });
+    render(state({ loadError: { kind: "migration", message: "m", backupPath: null } }));
+    await screen.findByRole("region", { name: "Your rules from the previous version were not moved" });
     expect(screen.queryByRole("region", { name: NAME })).toBeNull();
   });
 });
 
-describe("the old rules setting banner", () => {
-  const broken = () =>
-    state({ loadError: { kind: "legacy", message: "rules[2]: bad glob", legacyText: '[{"project": 1}]\n  second line' } });
+describe("a banner kind the form does not know", () => {
+  it("fails loudly instead of showing a wrong banner", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const uncaught = vi.fn((event: ErrorEvent) => event.preventDefault());
+    window.addEventListener("error", uncaught);
+    try {
+      render(state({ loadError: { kind: "bogus", message: "m" } as never }));
+      await waitFor(() => expect(uncaught).toHaveBeenCalled());
+      expect(uncaught.mock.calls[0]![0].error.message).toBe('unexpected load error {"kind":"bogus","message":"m"}');
+    } finally {
+      window.removeEventListener("error", uncaught);
+      errors.mockRestore();
+    }
+  });
+});
 
-  it("shows the heading, message, old text, button and the line to fix it, in that order", async () => {
-    render(broken());
-    const banner = await screen.findByRole("region", { name: "The old rules setting could not be imported" });
-    expect(Array.from(banner.children).map((child) => child.tagName)).toEqual(["H4", "P", "PRE", "BUTTON", "DIV"]);
-    expect(within(banner).getByText("rules[2]: bad glob")).toBeTruthy();
-    const old = banner.querySelector("pre")!;
-    expect(old.textContent).toBe('[{"project": 1}]\n  second line');
-    expect(old.getAttribute("contenteditable")).toBeNull();
-    expect(within(banner).getByText(
-      "Fix it, save it to a file and run bb model-instructions import <file>, or dismiss it.",
-    )).toBeTruthy();
-    expect(within(banner).queryAllByRole("textbox")).toHaveLength(0);
+describe("the migration banner", () => {
+  const NAME = "Your rules from the previous version were not moved";
+  const WITH_COPY =
+    "rules[2]: bad glob. A copy is in /h/.bb/model-instructions/backups/rules-1.txt. Fix it there and run bb model-instructions import /h/.bb/model-instructions/backups/rules-1.txt.";
+  const NO_COPY =
+    "EACCES: permission denied. No copy could be made; the rules are still in the plugin's settings and the move is tried again at the next start.";
+
+  it("shows the heading and the message with a copy, with no button", async () => {
+    render(
+      state({ loadError: { kind: "migration", message: WITH_COPY, backupPath: "/h/.bb/model-instructions/backups/rules-1.txt" } }),
+    );
+    const banner = await screen.findByRole("region", { name: NAME });
+    expect(Array.from(banner.children).map((child) => child.tagName)).toEqual(["H4", "P"]);
+    expect(banner.children[1]!.textContent).toBe(WITH_COPY);
+    expect(within(banner).queryAllByRole("button")).toHaveLength(0);
   });
 
-  it("shows only the heading and the message when no old text was kept", async () => {
-    const message =
-      "the old rules setting could not be read: host down. Restart bb or reload the plugin before you save here: once this form saves, the old setting is no longer imported.";
-    render(state({ loadError: { kind: "legacy", message, legacyText: "" } }));
-    const banner = await screen.findByRole("region", { name: "The old rules setting could not be imported" });
-    expect(Array.from(banner.children).map((child) => child.tagName)).toEqual(["H4", "P"]);
-    expect(within(banner).getByText(message)).toBeTruthy();
-    expect(banner.querySelector("pre")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Dismiss old text" })).toBeNull();
-    expect(screen.queryByText(/Fix it, save it to a file/)).toBeNull();
+  it("shows the heading and the message without a copy", async () => {
+    render(state({ loadError: { kind: "migration", message: NO_COPY, backupPath: null } }));
+    const banner = await screen.findByRole("region", { name: NAME });
+    expect(banner.children[1]!.textContent).toBe(NO_COPY);
+    expect(within(banner).queryAllByRole("button")).toHaveLength(0);
   });
 
   it("is not shown when there is no load error", async () => {
     render();
     await screen.findByRole("button", { name: "Add rule" });
-    expect(screen.queryByRole("button", { name: "Dismiss old text" })).toBeNull();
+    expect(screen.queryByRole("region", { name: NAME })).toBeNull();
+  });
+});
+
+describe("the conflict banner", () => {
+  const NAME = "Your rules from the previous version differ from the rules saved here";
+  const MESSAGE =
+    "A copy of the previous rules is in /b/rules-1.txt. To use them, run bb model-instructions import /b/rules-1.txt; to keep the rules saved here, press Keep the rules saved here.";
+  const conflict = () => state({ loadError: { kind: "conflict", message: MESSAGE, backupPath: "/b/rules-1.txt" } });
+
+  it("shows the heading, the message and the button, in that order", async () => {
+    render(conflict());
+    const banner = await screen.findByRole("region", { name: NAME });
+    expect(Array.from(banner.children).map((child) => child.tagName)).toEqual(["H4", "P", "BUTTON"]);
+    expect(banner.children[1]!.textContent).toBe(MESSAGE);
+    expect(banner.children[2]!.textContent).toBe("Keep the rules saved here");
   });
 
-  it("dismisses the old text without replacing unsaved edits", async () => {
-    const view = render(broken());
-    await screen.findByRole("button", { name: "Dismiss old text" });
+  it("keeps the saved rules without replacing unsaved edits", async () => {
+    const view = render(conflict());
+    await screen.findByRole("button", { name: "Keep the rules saved here" });
     fireEvent.click(screen.getByRole("button", { name: "Add rule" }));
     type(field(ruleCard("Rule 1"), "Name (optional)"), "kept");
-    fireEvent.click(screen.getByRole("button", { name: "Dismiss old text" }));
-    await waitFor(() => expect(screen.queryByRole("button", { name: "Dismiss old text" })).toBeNull());
-    expect(calls(view, "dismissLegacy")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Keep the rules saved here" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Keep the rules saved here" })).toBeNull());
+    expect(calls(view, "keepSavedRules")).toHaveLength(1);
     expect(field(ruleCard("kept"), "Name (optional)").value).toBe("kept");
     expect(save().disabled).toBe(false);
   });
 
-  it("shows an error when the dismiss fails, and keeps the banner", async () => {
-    render(broken(), {
-      dismissLegacy: () => {
+  it("shows an error when keeping fails, and keeps the banner", async () => {
+    render(conflict(), {
+      keepSavedRules: () => {
         throw new Error("storage busy");
       },
     });
-    fireEvent.click(await screen.findByRole("button", { name: "Dismiss old text" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Keep the rules saved here" }));
     expect((await screen.findByRole("alert")).textContent).toBe("storage busy");
-    expect(screen.getByRole("button", { name: "Dismiss old text" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Keep the rules saved here" })).toBeTruthy();
   });
 });

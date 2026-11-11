@@ -192,7 +192,7 @@ bb model-instructions import rules.json     # replace it after editing (same che
 
 Prefer asking the user to make the change in the settings form; use export → edit → import only when asked to change rules yourself.
 
-A config that is not valid JSON or does not match the shape above is rejected on
+`import` takes the object form or an array of rules (the form of versions up to 0.1.11). A config that is not valid JSON or does not match the shape above is rejected on
 import. Changes need no plugin reload; new threads get them, while a running
 thread may keep its old instructions until its provider session restarts.
 List model ids with `bb provider models <provider>` and project names with
@@ -202,7 +202,7 @@ List model ids with `bb provider models <provider>` and project names with
 
 - The combined instructions for one thread are limited to 4096 characters: the save check rejects a config that exceeds it for a known thread type, and at runtime whole rules are dropped (see Budget).
 - Side chats never receive plugin instructions.
-- An older plugin version (0.1.11 or earlier) reads the old `rules` setting, not the saved config; see the README's Storage, export and import section before downgrading.
+- An older plugin version (0.1.11 or earlier) reads the old `rules` setting, not the saved config; see the README's "Upgrading from 0.1.11" section before downgrading.
 - Instructions only guide the model; they do not enforce anything. To stop Claude
   Code delegating through its own Task tool instead of bb threads, turn on the
   Claude Code provider's "Disable provider subagents" setting.
