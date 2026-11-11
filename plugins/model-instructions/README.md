@@ -359,7 +359,11 @@ work profile on its next turn.
 
 `dir-skills` is deprecated: this plugin does what it did (directory scopes, skills,
 Claude profiles, pins). Skills are now claimed by a rule's `skills` globs, so a
-scope's skill patterns become rules. To move your scopes, claims and pins over:
+scope's skill patterns become rules.
+
+The `export` command exists from dir-skills v0.2.8 (git tag `dir-skills/v0.2.8` in this repository); dir-skills is no longer listed in the marketplace, so an older install has to update to that tag first.
+
+To move your scopes, claims and pins over:
 
 1. In dir-skills, run `bb dir-skills export`. It writes
    `~/.bb/dir-skills/export.json` with the scopes from its settings form and every

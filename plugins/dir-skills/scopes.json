@@ -1,9 +1,0 @@
-{
-  "scopes": [
-    {
-      "name": "work",
-      "paths": ["~/workspace/work"],
-      "skills": ["work-*"]
-    }
-  ]
-}

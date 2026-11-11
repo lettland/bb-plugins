@@ -7,7 +7,6 @@
     { "name": "aislop", "source": "./plugins/aislop" },
     { "name": "auto-review", "source": "./plugins/auto-review" },
     { "name": "devkit", "source": "./plugins/devkit" },
-    { "name": "dir-skills", "source": "./plugins/dir-skills" },
     { "name": "github-fork", "source": "./plugins/github-fork" },
     { "name": "model-instructions", "source": "./plugins/model-instructions" },
     { "name": "project-queue", "source": "./plugins/project-queue" },

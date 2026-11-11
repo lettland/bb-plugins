@@ -15,7 +15,6 @@ The root [`.bb/plugins.json`](.bb/plugins.json) collection manifest indexes them
 | [aislop](plugins/aislop) | `aislop` |
 | [Auto review](plugins/auto-review) | `auto-review` |
 | [devkit](plugins/devkit) | `devkit` |
-| [Directory skills](plugins/dir-skills) | `dir-skills` |
 | [GitHub (fork)](plugins/github-fork) | `github-fork` |
 | [Model instructions](plugins/model-instructions) | `model-instructions` |
 | [Project queue](plugins/project-queue) | `project-queue` |
