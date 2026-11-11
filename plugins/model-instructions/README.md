@@ -8,9 +8,7 @@ separate Claude profile per directory (see Claude profiles).
 
 ## Rules
 
-One plugin setting, `rules`, holds a JSON array of rules, or an object
-`{ "vars"?: {...}, "scopes"?: [...], "rules": [...] }` (see Variables and Scopes).
-Every matching rule applies, in array order.
+Rules are edited in Settings → Plugins → Model instructions. The plugin stores them as one object `{ "vars": {...}, "scopes": [...], "rules": [...] }` (see Variables and Scopes); this section describes the fields the form saves. Every matching rule applies, in rule order.
 
 | Field | Required | Meaning |
 |---|---|---|
@@ -25,18 +23,14 @@ Every matching rule applies, in array order.
 | `skills` | no | A bundled skill name glob or an array of globs (see Skills). Matching skills are injected into every thread the rule matches. |
 | `instructions` | no | A string, or an array of lines joined with newlines. A rule needs `instructions`, `skills`, or both. |
 
-Set it in the plugin's settings, or from the CLI:
+To back up or move the config, use `bb model-instructions export` and `bb model-instructions import <file>` (see Storage, export and import).
 
-```sh
-bb plugin config model-instructions set rules "$(cat rules.json)"
-```
-
-An invalid value is rejected on write. `bb provider models <provider>` lists
+An invalid config is rejected on save. `bb provider models <provider>` lists
 model ids; `bb project list --include-personal` lists project names.
 
 ## Variables
 
-The setting can also be a JSON object that names reusable values, so the same
+The config can also name reusable values (`vars`), so the same
 flags need not repeat in every rule:
 
 ```json
@@ -113,8 +107,8 @@ skills by name, and a thread gets every skill claimed by a rule that matches it:
 
 - `model-instructions` is always injected and is never matched by a `skills`
   glob, so `*` is valid and cannot list it twice.
-- A bundled skill that no rule claims is injected nowhere. With the default
-  setting `[]` a thread gets only `model-instructions`. `bb model-instructions
+- A bundled skill that no rule claims is injected nowhere. With no
+  rules a thread gets only `model-instructions`. `bb model-instructions
   status` lists the unclaimed skills.
 - Skills are never dropped for the character limit. Only instruction text is.
 - A skill claimed by several rules is listed once.
@@ -124,8 +118,7 @@ skills by name, and a thread gets every skill claimed by a rule that matches it:
 bb cuts a plugin's instructions at 4096 characters per thread, in the middle of
 a word and without a warning. The plugin makes sure that does not happen.
 
-**On save** (`bb plugin config model-instructions set rules ...` or the settings
-page) a value is rejected when:
+**On save** (the form, `bb model-instructions import`, or `import-dir-skills`) a config is rejected when:
 
 1. it is not valid JSON or does not match the shape above (two rules with the
    same `name` do not);
@@ -143,7 +136,7 @@ page) a value is rejected when:
 
 The budget error groups thread types by the set of rules they match, lists the
 5 longest per group (provider, model, role, project, length) and ends with
-`and <n> more`. A setting that has no `instructions` text skips check 5.
+`and <n> more`. A config that has no `instructions` text skips check 5.
 
 If the provider/model list or the project list has not loaded yet, or its last
 refresh failed, a value with instruction text is rejected with
@@ -162,7 +155,7 @@ times out. When the models of one available provider cannot be listed, that
 provider is left out of the known thread types and `status` and `check --all`
 list it as unchecked, with the error. The save is then checked against the other
 providers. When the provider comes back, the next refresh re-checks the stored
-setting and records any overflow.
+config and records any overflow.
 
 The save check does not cover everything:
 
@@ -170,9 +163,9 @@ The save check does not cover everything:
 - When the matched text is over the limit, the budget for kept rules is 4096 minus the notice; a very long first rule (close to 4096) can then be dropped too, leaving only the notice. Keep guard rules short and first.
 
 These checks run only on save, never when a stored value is loaded. On load only
-the structure can fail the setting. A `scope` or `skills` glob that matches
+the structure can fail the stored config. A `scope` or `skills` glob that matches
 nothing then matches nothing, and the plugin logs one warning per rule, so a
-renamed skill or a removed scope cannot switch off the other rules.
+renamed skill or a removed scope cannot switch off the other rules. The one-time import of the old `rules` setting is a load in this sense: only its structure is checked.
 
 **At runtime**, a thread type that the save check never saw (a new model or a
 new project) can still go over. The plugin then drops whole rules, never part of
@@ -193,7 +186,7 @@ one text:
   events (thread, provider, model, role, project, dropped rule names and their
   lengths; never the text) are listed by `status`.
 - After every cache refresh the plugin re-runs the budget check on the stored
-  setting. A thread type that is over the limit is logged as a warning and listed
+  config. A thread type that is over the limit is logged as a warning and listed
   by `status` as "over budget since <time>", before or at its first thread. A
   thread type that stays over the limit keeps its time; its length and rules
   are updated.
@@ -207,7 +200,7 @@ one text:
 A profile scope is a scope that also sets `claudeConfigDir`, a Claude Code
 config directory (an absolute path or one starting with `~/`). Profile scopes
 live in `~/.bb/model-instructions/profiles.json`, a file you own, not in the
-`rules` setting:
+saved config:
 
 ```json
 {
@@ -219,16 +212,16 @@ live in `~/.bb/model-instructions/profiles.json`, a file you own, not in the
 
 - The file is strict: `scopes` only, each scope has `name`, `paths` and
   `claudeConfigDir` and nothing else. Names, paths and limits are the same as for
-  setting scopes (1–128 character unique names, 1–16 paths, at most 32 scopes).
+  saved scopes (1–128 character unique names, 1–16 paths, at most 32 scopes).
   `claudeConfigDir` may not be your home directory or one of its parents.
 - A profile scope is a full scope: a rule can name it in `scope`, and the save
   check knows its name. A rule can use it to inject text and skills for the same
   directories that select the profile.
-- **The file defines the profile scope.** A scope in the `rules` setting with the
+- **The file defines the profile scope.** A saved scope with the
   same name as a profile scope is ignored: the plugin logs a warning at load, and
-  `status` and `check` show `ignored setting scope "<name>": a profile scope with
+  `status` and `check` show `ignored saved scope "<name>": a profile scope with
   that name comes from profiles.json`. The profile decision uses only the paths in
-  the file, so nothing that can run `bb plugin config` can move or redirect a
+  the file, so nothing that can save the config can move or redirect a
   Claude login.
 - The file is read when the plugin loads, again on `bb plugin reload`, and right
   after `setup` or `import-dir-skills` writes it.
@@ -288,7 +281,7 @@ subagents and hooks natively while other projects keep the default profile.
   own login. Without one, bb threads use the profile's login and refresh it
   alongside any standalone `claude` session using the same directory.
 - `status` shows the state of profiles.json, each profile scope with its
-  directory and whether it exists, the ignored setting scopes and the number of
+  directory and whether it exists, the ignored saved scopes and the number of
   pins. `check` shows which profile the project's checkouts select (all hosts;
   "unknown project" if bb cannot resolve it) and the pin of the calling thread.
 
@@ -409,9 +402,9 @@ absent) and `~/.bb/dir-skills/export.json` (required; without it the command exi
 1 with `import-dir-skills: ~/.bb/dir-skills/export.json not found; run bb
 dir-skills export first`).
 
-- **Setting scopes and skill rules.** Every scope without `claudeConfigDir` (from
+- **Saved scopes and skill rules.** Every scope without `claudeConfigDir` (from
   `scopes.json`) and every settings-form scope (from `export.json`) becomes a
-  scope in the `rules` setting plus a rule `{ "name": "dir-skills:<scope>",
+  scope in the saved config plus a rule `{ "name": "dir-skills:<scope>",
   "scope": "<scope>", "skills": [<the scope's patterns>] }`. A settings-form scope
   replaces a `scopes.json` scope of the same name, except one that has
   `claudeConfigDir`. The example scope dir-skills shipped (`work`, `~/workspace/work`,
@@ -430,18 +423,48 @@ dir-skills export first`).
 - **Names.** A scope whose name, paths or directory break this plugin's rules is
   rejected with a list, nothing is written and the command exits 1; rename it in
   the source file and run again.
-- **The setting** is changed by read-modify-write: it must parse (otherwise exit 1,
-  nothing written), an array is converted to the object form
-  `{ "vars": {}, "scopes": [...], "rules": [...] }`, every existing rule is kept
-  unchanged and in order, and the imported scopes and rules are appended. A scope or
+- **The saved config** is changed by read-modify-write, inside the write queue: every
+  existing rule is kept unchanged and in order, and the imported scopes and rules
+  are appended. A scope or
   rule whose name already exists is skipped and listed. The normal save-time check
   runs; if it rejects, the command prints the reason and exits 1.
-- **Order.** Everything is validated first; then `profiles.json`, then the setting,
+- **Order.** Everything is validated first; then `profiles.json`, then the saved config,
   then the pins. `--dry-run` prints the full plan and writes nothing; `--json`
   prints the same data.
 
 Run it again after a failure part-way: scopes and rules that already exist are
 skipped, and the profile scope already in `profiles.json` is recognised.
+
+## Storage, export and import
+
+The config lives in the plugin's own storage. Every change goes through one
+queue that checks it (see Instruction budget), stores it, applies it at once
+and logs `config saved from <source>: <n> rules, <n> scopes, <n> vars`.
+
+```sh
+bb model-instructions export > rules.json      # the saved config as JSON
+bb model-instructions import rules.json        # replace it (same checks as the form)
+bb model-instructions export --legacy          # old setting text that could not be imported
+```
+
+- `import` takes the object form only. A relative path is read from the
+  directory you run the command in. The file must be a regular file of at most
+  1 MiB.
+- A save from the form replaces the whole config with what the form shows. An
+  `import` made while the form has unsaved changes is overwritten by the next
+  form save; reload the form first.
+- **Moving from the `rules` setting.** Versions up to 0.1.11 kept the rules in a
+  plugin setting. On first start this version copies that value once into its
+  storage (only its structure is checked) and then ignores the setting;
+  `bb plugin config model-instructions set rules` no longer has an effect. If
+  the old value cannot be read as a config, it is kept: the form shows it with
+  the reason, `export --legacy` prints it, and a successful `import` or
+  **Dismiss old text** in the form removes it.
+- **Rolling back** to 0.1.11 makes it read the old setting again, not your form
+  changes. Run `export` first; after the downgrade run
+  `bb plugin config model-instructions set rules "$(cat rules.json)"`. After
+  upgrading again, the stored config wins, so `import` the setting's value if
+  you changed it in the meantime.
 
 ## Inspect and try
 
@@ -455,7 +478,7 @@ bb model-instructions import-dir-skills [--dry-run] [--json]
 ```
 
 - `status` lists the state of profiles.json, the profile scopes, the ignored
-  setting scopes and the pin count (see Claude profiles), the scopes, the rules (name or `rules[<index>]`, matchers,
+  saved scopes and the pin count (see Claude profiles), the scopes, the rules (name or `rules[<index>]`, matchers,
   instructions length, skills), the bundled skills with the rules that claim
   them and the unclaimed ones, the state of the caches, the providers whose
   models could not be listed (unchecked, with the reason), the thread types that
@@ -518,11 +541,10 @@ Combine with `project` to narrow to a set first, e.g. `"project": ["opshub-*", "
 ## Constraints
 
 - The combined instructions for one thread are limited to 4096 characters by bb.
-  The save check rejects a setting that would exceed it for a known thread type;
+  The save check rejects a config that would exceed it for a known thread type;
   at runtime the plugin drops whole rules and appends a notice (see Instruction budget).
 - Side chats never receive plugin instructions.
-- After saving rules that use `skipProjects` or `skipTitles` (in any form) or an array `project`, an older plugin version rejects the whole setting and applies no rules.
-- After saving the object form (`vars`, `scopes`, `rules`), a rule with `name`, `scope` or `skills`, or a rule without `instructions`, an older plugin version rejects the whole setting and applies no rules.
+- An older plugin version (0.1.11 or earlier) reads the old `rules` setting, not the saved config; see Storage, export and import before downgrading.
 - A `threads: child` rule also reaches devkit `review-code`'s lens and closure-review threads,
   since those are ordinary bb child threads. That skill's review-only brief asks the reviewer to
   ignore whatever this plugin injects into them — a prompt-level ask, not an enforced one (see

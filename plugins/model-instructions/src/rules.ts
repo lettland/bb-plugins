@@ -1,6 +1,7 @@
 import path from "node:path";
 import { z } from "zod";
 import { activeScopes, activeScopesIn, type Scope } from "./paths.js";
+import { trimAndExpand, VAR_NAME_BODY } from "./vars.js";
 
 const THREAD_SCOPES = ["any", "top-level", "child"] as const;
 
@@ -100,9 +101,7 @@ const rulesSchema = z.array(ruleSchema).superRefine((rules, ctx) => {
   });
 });
 
-const VAR_NAME_BODY = "[A-Za-z][A-Za-z0-9_-]*";
 const VAR_NAME_REGEXP = new RegExp(`^${VAR_NAME_BODY}$`);
-const VAR_REF_REGEXP = new RegExp(`\\{\\{(${VAR_NAME_BODY})\\}\\}`, "g");
 
 const varsSchema = z.record(
   z.string().regex(VAR_NAME_REGEXP),
@@ -121,8 +120,14 @@ const objectSchema = z
 
 export type Rule = z.infer<typeof ruleSchema>;
 
-/** A scope as written in the setting: paths not normalized yet. */
+/** A scope as saved: paths not normalized yet. */
 export type ScopeDef = z.infer<typeof scopeSchema>;
+
+/**
+ * The config as the plugin stores it: `{{name}}` references unexpanded, instructions one string,
+ * glob fields arrays, an empty field left out.
+ */
+export type RawConfig = z.output<typeof objectSchema>;
 
 export interface Config {
   rules: Rule[];
@@ -139,23 +144,42 @@ export interface Target {
   candidatePaths: string[];
 }
 
-/** One pass, so a var value's own {{...}} text stays literal. */
-function expand(
-  instructions: string,
-  vars: Record<string, string>,
-  ruleIndex: number,
-): string {
-  return instructions.replace(
-    VAR_REF_REGEXP,
-    (ref, name: string) => {
-      if (!Object.hasOwn(vars, name))
-        throw new Error(`rules[${ruleIndex}]: unknown variable ${ref}`);
-      return vars[name];
-    },
-  );
+/**
+ * The one validation of a config value, whoever wrote it: checks it with the strict schemas and
+ * returns the normalized raw config. Throws an Error with the field-specific message.
+ */
+export function parseRawConfig(value: unknown): RawConfig {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new Error('expected { "vars"?: {...}, "scopes"?: [...], "rules": [...] }');
+  // zod's record drops a __proto__ key silently, so reject it loudly first.
+  const { vars } = value as { vars?: unknown };
+  if (
+    typeof vars === "object" &&
+    vars !== null &&
+    Object.hasOwn(vars, "__proto__")
+  )
+    throw new Error('invalid variable name "__proto__" at vars');
+  const parsed = objectSchema.safeParse(value);
+  if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
+  return parsed.data;
 }
 
-export function parseConfig(json: string): Config {
+/** The expanding parse: a raw config with every `{{name}}` replaced. Throws on an unknown variable. */
+export function expandConfig(raw: RawConfig): Config {
+  return {
+    scopes: raw.scopes,
+    rules: raw.rules.map((rule, ruleIndex) => ({
+      ...rule,
+      instructions:
+        rule.instructions === undefined
+          ? undefined
+          : trimAndExpand(rule.instructions, raw.vars, ruleIndex),
+    })),
+  };
+}
+
+/** The text of the old `rules` setting (an array of rules, or the object form) as a raw config. */
+export function parseLegacyText(json: string): RawConfig {
   let raw: unknown;
   try {
     raw = JSON.parse(json);
@@ -164,35 +188,16 @@ export function parseConfig(json: string): Config {
       `not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  if (Array.isArray(raw)) {
-    const parsed = rulesSchema.safeParse(raw);
-    if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
-    return { rules: parsed.data, scopes: [] };
-  }
   if (typeof raw !== "object" || raw === null)
     throw new Error(
       'expected an array of rules or { "vars"?: {...}, "scopes"?: [...], "rules": [...] }',
     );
-  // zod's record drops a __proto__ key silently, so reject it loudly first.
-  const { vars } = raw as { vars?: unknown };
-  if (
-    typeof vars === "object" &&
-    vars !== null &&
-    Object.hasOwn(vars, "__proto__")
-  )
-    throw new Error('invalid variable name "__proto__" at vars');
-  const parsed = objectSchema.safeParse(raw);
-  if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
-  return {
-    scopes: parsed.data.scopes,
-    rules: parsed.data.rules.map((rule, ruleIndex) => ({
-      ...rule,
-      instructions:
-        rule.instructions === undefined
-          ? undefined
-          : expand(rule.instructions, parsed.data.vars, ruleIndex),
-    })),
-  };
+  return parseRawConfig(Array.isArray(raw) ? { rules: raw } : raw);
+}
+
+/** Kept for the tests: the text form of the old setting, parsed and expanded in one step. */
+export function parseConfig(json: string): Config {
+  return expandConfig(parseLegacyText(json));
 }
 
 export function parseRules(json: string): Rule[] {

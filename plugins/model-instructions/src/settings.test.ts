@@ -4,7 +4,8 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { snapshotOf } from "./cache-fixture.js";
 import type { CacheSnapshot } from "./projects.js";
-import { createRulesSettingSchema, type SettingsEnv } from "./settings.js";
+import { parseConfig, type Config } from "./rules.js";
+import { checkConfig, type SettingsEnv } from "./settings.js";
 
 const tmp = realpathSync(mkdtempSync(path.join(tmpdir(), "model-instructions-settings-")));
 afterAll(() => {
@@ -23,12 +24,15 @@ function env(over: Partial<SettingsEnv> & { snapshot?: CacheSnapshot } = {}): Se
   };
 }
 
-/** The error message the schema gives for a value, or null when the value is accepted. */
+/** The message the checks give for a value, or null when the value is accepted. */
 function check(value: unknown, over: Parameters<typeof env>[0] = {}): string | null {
-  const result = createRulesSettingSchema(env(over)).safeParse(
-    typeof value === "string" ? value : JSON.stringify(value),
-  );
-  return result.success ? null : result.error.issues.map((issue) => issue.message).join("\n");
+  let config: Config;
+  try {
+    config = parseConfig(typeof value === "string" ? value : JSON.stringify(value));
+  } catch (error) {
+    return (error as Error).message;
+  }
+  return checkConfig(config, env(over));
 }
 
 describe("structural checks", () => {

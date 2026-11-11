@@ -4,8 +4,7 @@ import {
   makePluginAgentConfigurationContext,
 } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server.js";
-import { parseRules, resolveInstructions } from "./src/rules.js";
-import { createRulesSettingSchema } from "./src/settings.js";
+import { parseLegacyText, parseRules, resolveInstructions } from "./src/rules.js";
 
 const SUPERVISOR = {
   provider: "claude-code",
@@ -266,9 +265,10 @@ describe("parseRules", () => {
     expect(rule.instructions).toBe("[ pad ]");
   });
 
-  it("leaves form A text with {{name}} unchanged", () => {
-    const [rule] = parseRules(JSON.stringify([{ instructions: "{{name}} stays" }]));
-    expect(rule.instructions).toBe("{{name}} stays");
+  it("rejects form A text with {{name}}: the array form has no vars", () => {
+    expect(() => parseRules(JSON.stringify([{ instructions: "{{name}} stays" }]))).toThrow(
+      "rules[0]: unknown variable {{name}}",
+    );
   });
 
   it("wraps a non-Error JSON.parse failure", () => {
@@ -281,47 +281,26 @@ describe("parseRules", () => {
       parse.mockRestore();
     }
   });
-
-  it("backs the setting's write validation", () => {
-    const schema = createRulesSettingSchema({
-      skillNames: () => [],
-      scopesFor: (own) => own,
-      caches: () => ({
-        providers: { loaded: true, failed: false, list: [], unchecked: [] },
-        projects: { loaded: true, failed: false, list: [] },
-      }),
-    });
-    expect(schema.safeParse("[]").success).toBe(true);
-    expect(schema.safeParse("[{}]").success).toBe(false);
-    expect(
-      schema.safeParse(
-        JSON.stringify({ vars: { a: "x" }, rules: [{ instructions: "use {{a}}" }] }),
-      ).success,
-    ).toBe(true);
-    expect(
-      schema.safeParse(
-        JSON.stringify({ vars: { a: "x" }, rules: [{ instructions: "use {{b}}" }] }),
-      ).success,
-    ).toBe(false);
-  });
 });
 
 describe("plugin", () => {
-  function createHost(settings?: Record<string, string>) {
-    return createFakePluginHost({
+  /** `rules` is the saved config as the old setting's JSON text; it is stored before the plugin starts. */
+  async function createHost(rules?: string) {
+    const host = createFakePluginHost({
       pluginId: "model-instructions",
       agentSkillIds: ["model-instructions"],
-      settings,
       // The save-time budget check reads the provider and project lists: both load, and are empty.
       sdk: {
         providers: { list: async () => [], models: async () => ({ models: [], modelLoadError: null }) },
         projects: { list: async () => [] },
       },
     });
+    if (rules !== undefined) await host.bb.storage.kv.set("config", parseLegacyText(rules));
+    return host;
   }
 
   function resolve(
-    host: ReturnType<typeof createHost>,
+    host: Awaited<ReturnType<typeof createHost>>,
     model: string,
     parentThreadId: string | null = null,
     project = "bb-plugins",
@@ -337,7 +316,7 @@ describe("plugin", () => {
   }
 
   it("contributes no instructions by default", async () => {
-    const host = createHost();
+    const host = await createHost();
     await plugin(host.bb);
     expect(await resolve(host, "claude-opus-5-5")).toEqual({
       tools: [],
@@ -347,22 +326,27 @@ describe("plugin", () => {
     await host.harness.dispose();
   });
 
-  it("ignores a stored value that no longer parses", async () => {
-    const host = createHost({ rules: "[{" });
+  it("ignores a stored config that no longer validates, and says so", async () => {
+    const host = await createHost();
+    await host.bb.storage.kv.set("config", { rules: [{}] });
     await plugin(host.bb);
+    expect(host.harness.logEntries).toContainEqual({
+      level: "warn",
+      message: expect.stringContaining("saved config ignored: "),
+    });
     expect((await resolve(host, "claude-opus-5-5")).instructions).toBeNull();
     await host.harness.dispose();
   });
 
-  it("follows a rules change without a reload", async () => {
-    const host = createHost();
+  it("follows a saved change without a reload", async () => {
+    const host = await createHost();
     await plugin(host.bb);
     // The first cache refresh runs in the background; a save is refused until it has loaded the lists.
     await vi.waitFor(async () => {
       const status = JSON.parse((await host.harness.runCli(["status", "--json"])).stdout);
       expect(status.cache.providers.loaded && status.cache.projects.loaded).toBe(true);
     });
-    await host.harness.setSettings({ rules: JSON.stringify([SUPERVISOR, WORKER]) });
+    await host.harness.callRpc("saveConfig", { config: parseLegacyText(JSON.stringify([SUPERVISOR, WORKER])) });
     expect((await resolve(host, "claude-opus-5-5")).instructions).toBe(
       "Plan and supervise.\nSpawn Sonnet workers to implement.",
     );
@@ -371,7 +355,7 @@ describe("plugin", () => {
   });
 
   it("passes the thread's project name to the rules", async () => {
-    const host = createHost({ rules: JSON.stringify([{ project: "opshub", instructions: "OpsHub only." }]) });
+    const host = await createHost(JSON.stringify([{ project: "opshub", instructions: "OpsHub only." }]));
     await plugin(host.bb);
     expect((await resolve(host, "claude-opus-5-5", null, "opshub")).instructions).toBe("OpsHub only.");
     expect((await resolve(host, "claude-opus-5-5")).instructions).toBeNull();
@@ -379,11 +363,9 @@ describe("plugin", () => {
   });
 
   it("applies array project and skipProjects through the plugin", async () => {
-    const host = createHost({
-      rules: JSON.stringify([
+    const host = await createHost(JSON.stringify([
         { project: ["opshub-*", "bb-*"], skipProjects: "opshub-legacy", instructions: "Active projects." },
-      ]),
-    });
+      ]));
     await plugin(host.bb);
     expect((await resolve(host, "claude-opus-5-5", null, "opshub-web")).instructions).toBe("Active projects.");
     expect((await resolve(host, "claude-opus-5-5", null, "opshub-legacy")).instructions).toBeNull();
@@ -391,9 +373,7 @@ describe("plugin", () => {
   });
 
   it("passes the thread's title to skipTitles", async () => {
-    const host = createHost({
-      rules: JSON.stringify([{ threads: "child", skipTitles: "Helpdesk: *", instructions: "Helper." }]),
-    });
+    const host = await createHost(JSON.stringify([{ threads: "child", skipTitles: "Helpdesk: *", instructions: "Helper." }]));
     await plugin(host.bb);
     expect((await resolve(host, "claude-opus-5-5", "parent-1", "bb-plugins", "Helpdesk: Anna 09:14")).instructions).toBeNull();
     expect((await resolve(host, "claude-opus-5-5", "parent-1", "bb-plugins", "Fix the bug")).instructions).toBe("Helper.");
@@ -402,12 +382,10 @@ describe("plugin", () => {
   });
 
   it("resolves form B settings with expanded instructions", async () => {
-    const host = createHost({
-      rules: JSON.stringify({
+    const host = await createHost(JSON.stringify({
         vars: { spawn: "bb thread spawn --parent-self" },
         rules: [{ threads: "top-level", instructions: "Delegate with {{spawn}} and wait." }],
-      }),
-    });
+      }));
     await plugin(host.bb);
     expect((await resolve(host, "claude-opus-5-5")).instructions).toBe(
       "Delegate with bb thread spawn --parent-self and wait.",

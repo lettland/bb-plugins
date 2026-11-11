@@ -11,7 +11,7 @@ import {
   type ProfileScope,
   type ProfilesState,
 } from "./profiles-file.js";
-import { globToRegExp, nameSchema, parseConfig, scopeSchema, SELF_SKILL } from "./rules.js";
+import { globToRegExp, nameSchema, scopeSchema, SELF_SKILL, type RawConfig } from "./rules.js";
 
 /** The fixed files `import-dir-skills` reads, as the messages name them. */
 export const SCOPES_FILE_LABEL = "~/.bb/dir-skills/scopes.json";
@@ -27,12 +27,14 @@ export interface ImportDeps {
   profilesFile: string;
   /** Names of the bundled skills. */
   skillNames(): string[];
-  /** The stored `rules` setting text. */
-  getRules(): Promise<string>;
-  /** Writes the `rules` setting through the SDK; the save-time schema check runs and may throw. */
-  setRules(json: string): Promise<void>;
-  /** The save-time check of a candidate setting, with the profile scopes it would run against. Null when it passes. */
-  validate(json: string, profileScopes: ProfileScope[]): string | null;
+  /** Runs `step` alone in the config write queue: the whole import, plan and writes, is one step. */
+  exclusive<T>(step: () => Promise<T>): Promise<T>;
+  /** The saved config (unexpanded). Read inside the queued step. */
+  current(): RawConfig;
+  /** The full save-time check of a candidate config, with the profile scopes it would run against. Null when it passes. */
+  validate(candidate: RawConfig, profileScopes: ProfileScope[]): string | null;
+  /** Saves a candidate config from inside the queued step: the full checks run and the error is thrown. */
+  save(candidate: RawConfig): Promise<void>;
   /** Re-reads profiles.json into the running plugin. */
   reloadProfiles(): void;
   kv: Pick<BbPluginApi["storage"]["kv"], "get" | "set">;
@@ -52,7 +54,7 @@ export interface ImportReport {
   profileScopes: ProfileDef[];
   settingScopes: Array<{ name: string; paths: string[] }>;
   rules: Array<{ name: string; scope: string; skills: string[] }>;
-  /** Whether the `rules` setting is (or would be) written. */
+  /** Whether the saved config is (or would be) written. */
   settingChanged: boolean;
   pins: {
     imported: Array<{ threadId: string; pin: ConfigDirPin }>;
@@ -166,8 +168,8 @@ interface Plan {
   report: Omit<ImportReport, "dryRun">;
   /** The profile scopes in force after the run, for the validation and the pin check. */
   finalProfileScopes: ProfileScope[];
-  /** The new `rules` setting text, or null when nothing is added. */
-  settingJson: string | null;
+  /** The new saved config, or null when nothing is added. */
+  candidate: RawConfig | null;
 }
 
 async function buildPlan(deps: ImportDeps): Promise<Plan> {
@@ -228,19 +230,10 @@ async function buildPlan(deps: ImportDeps): Promise<Plan> {
       ...problems.map((line) => `  ${line}`),
     ]);
 
-  // The current setting must parse; it is rewritten from its raw JSON so no key or rule changes.
-  const settingText = await deps.getRules();
-  let current;
-  try {
-    current = parseConfig(settingText);
-  } catch (error) {
-    throw new ImportError([
-      `import-dir-skills: the rules setting does not parse (${(error as Error).message}); fix it first (nothing was written)`,
-    ]);
-  }
-  const raw = JSON.parse(settingText) as unknown;
-  const takenScopes = new Set(current.scopes.map((scope) => scope.name));
-  const takenRules = new Set(current.rules.flatMap((rule) => (rule.name === undefined ? [] : [rule.name])));
+  // The saved config is extended as it is, so no key or rule changes.
+  const base = deps.current();
+  const takenScopes = new Set(base.scopes.map((scope) => scope.name));
+  const takenRules = new Set(base.rules.flatMap((rule) => (rule.name === undefined ? [] : [rule.name])));
 
   // Profile scopes: only into a profiles.json that does not exist yet.
   const profilesState = readProfiles(deps.profilesFile, deps.home);
@@ -296,7 +289,7 @@ async function buildPlan(deps: ImportDeps): Promise<Plan> {
         reason: "a profile scope with that name comes from profiles.json, so a setting scope of that name would be ignored",
       });
     else if (takenScopes.has(scope.name))
-      skipped.push({ kind: "scope", name: scope.name, reason: "the rules setting already has a scope with that name" });
+      skipped.push({ kind: "scope", name: scope.name, reason: "the saved config already has a scope with that name" });
     else {
       settingScopes.push({ name: scope.name, paths: scope.paths });
       usable.add(scope.name);
@@ -309,7 +302,7 @@ async function buildPlan(deps: ImportDeps): Promise<Plan> {
     if (!usable.has(scope.name)) continue;
     const name = ruleNameOf(scope.name);
     if (takenRules.has(name)) {
-      skipped.push({ kind: "rule", name, reason: "the rules setting already has a rule with that name" });
+      skipped.push({ kind: "rule", name, reason: "the saved config already has a rule with that name" });
       continue;
     }
     const skills: string[] = [];
@@ -320,24 +313,20 @@ async function buildPlan(deps: ImportDeps): Promise<Plan> {
     if (skills.length > 0) rules.push({ name, scope: scope.name, skills });
   }
 
-  let settingJson: string | null = null;
+  let candidate: RawConfig | null = null;
   if (settingScopes.length > 0 || rules.length > 0) {
-    const base = Array.isArray(raw)
-      ? { vars: {}, scopes: [], rules: raw }
-      : (raw as { scopes?: unknown[]; rules: unknown[] });
-    settingJson = JSON.stringify(
-      {
-        ...base,
-        scopes: [...(base.scopes ?? []), ...settingScopes],
-        rules: [...base.rules, ...rules],
-      },
-      null,
-      2,
-    );
-    const problem = deps.validate(settingJson, finalProfileScopes);
+    candidate = {
+      ...base,
+      scopes: [...base.scopes, ...settingScopes],
+      rules: [
+        ...base.rules,
+        ...rules.map((rule) => ({ name: rule.name, scope: [rule.scope], skills: rule.skills, threads: "any" as const })),
+      ],
+    };
+    const problem = deps.validate(candidate, finalProfileScopes);
     if (problem !== null)
       throw new ImportError([
-        `import-dir-skills: the rules setting would be rejected (nothing was written):`,
+        `import-dir-skills: the saved config would be rejected (nothing was written):`,
         ...problem.split("\n").map((line) => `  ${line}`),
       ]);
   }
@@ -376,16 +365,16 @@ async function buildPlan(deps: ImportDeps): Promise<Plan> {
       profileScopes: profileDefs,
       settingScopes,
       rules,
-      settingChanged: settingJson !== null,
+      settingChanged: candidate !== null,
       pins,
       skipped,
     },
     finalProfileScopes,
-    settingJson,
+    candidate,
   };
 }
 
-/** Order: profiles.json, then the setting, then the pins. */
+/** Order: profiles.json, then the saved config, then the pins. */
 async function apply(deps: ImportDeps, plan: Plan): Promise<void> {
   const { report } = plan;
   if (report.profileScopes.length > 0) {
@@ -399,12 +388,12 @@ async function apply(deps: ImportDeps, plan: Plan): Promise<void> {
       throw new ImportError(["import-dir-skills: profiles.json appeared while importing; nothing was written, run again"]);
     deps.reloadProfiles();
   }
-  if (plan.settingJson !== null) {
+  if (plan.candidate !== null) {
     try {
-      await deps.setRules(plan.settingJson);
+      await deps.save(plan.candidate);
     } catch (error) {
       throw new ImportError([
-        `import-dir-skills: the rules setting was rejected: ${error instanceof Error ? error.message : String(error)}`,
+        `import-dir-skills: the saved config was rejected: ${error instanceof Error ? error.message : String(error)}`,
         report.profileScopes.length > 0
           ? "profiles.json was written; run again to finish (a profile scope already in profiles.json is recognised)"
           : "nothing was written",
@@ -424,7 +413,7 @@ export function formatImport(report: ImportReport): string {
         : `${verb} ${report.profileScopes.length} scope(s): ${report.profileScopes.map((s) => s.name).join(", ")}`
     }`,
   );
-  lines.push(`rules setting: ${report.settingChanged ? `${verb} ${report.settingScopes.length} scope(s), ${report.rules.length} rule(s)` : "unchanged"}`);
+  lines.push(`saved config: ${report.settingChanged ? `${verb} ${report.settingScopes.length} scope(s), ${report.rules.length} rule(s)` : "unchanged"}`);
   for (const scope of report.settingScopes) lines.push(`  scope ${scope.name}: ${scope.paths.join(", ")}`);
   for (const rule of report.rules) lines.push(`  rule ${rule.name}: scope ${rule.scope}, skills ${rule.skills.join(", ")}`);
   const { imported, kept, rejected } = report.pins;
@@ -451,11 +440,13 @@ export async function importCommand(
     return { exitCode: 2, stderr: "usage: bb model-instructions import-dir-skills [--dry-run] [--json]\n" };
   const dryRun = flags.includes("--dry-run");
   try {
-    const plan = await buildPlan(deps);
-    if (!dryRun) await apply(deps, plan);
-    const report: ImportReport = { dryRun, ...plan.report };
-    if (!dryRun) deps.log.info(`import-dir-skills: ${report.settingScopes.length} scope(s), ${report.rules.length} rule(s), ${report.pins.imported.length} pin(s), ${report.profileScopes.length} profile scope(s)`);
-    return { exitCode: 0, stdout: json ? JSON.stringify({ ok: true, ...report }, null, 2) + "\n" : formatImport(report) };
+    return await deps.exclusive(async () => {
+      const plan = await buildPlan(deps);
+      if (!dryRun) await apply(deps, plan);
+      const report: ImportReport = { dryRun, ...plan.report };
+      if (!dryRun) deps.log.info(`import-dir-skills: ${report.settingScopes.length} scope(s), ${report.rules.length} rule(s), ${report.pins.imported.length} pin(s), ${report.profileScopes.length} profile scope(s)`);
+      return { exitCode: 0, stdout: json ? JSON.stringify({ ok: true, ...report }, null, 2) + "\n" : formatImport(report) };
+    });
   } catch (error) {
     if (!(error instanceof ImportError)) throw error;
     return json

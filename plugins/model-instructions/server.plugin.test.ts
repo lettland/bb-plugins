@@ -8,7 +8,7 @@ import {
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { omittedNotice } from "./src/rules.js";
+import { omittedNotice, parseLegacyText } from "./src/rules.js";
 import plugin from "./server.js";
 
 const x = (length: number) => "x".repeat(length);
@@ -91,7 +91,10 @@ async function flushMicrotasks(): Promise<void> {
 }
 
 interface HostOptions {
-  settings?: Record<string, string>;
+  /** The saved config, as JSON text in the old setting's array or object form; stored before the plugin starts. */
+  config?: string;
+  /** What `getSettings` returns for the old `rules` setting. */
+  legacyRules?: unknown;
   world?: World;
   sdk?: Record<string, unknown>;
   skills?: string[];
@@ -105,14 +108,25 @@ async function load(options: HostOptions = {}) {
   const host = createFakePluginHost({
     pluginId: "model-instructions",
     agentSkillIds: ["model-instructions", ...skills],
-    settings: options.settings,
-    sdk: { ...sdkFor(world), ...options.sdk },
+    sdk: { ...sdkFor(world), ...legacySdk(options.legacyRules), ...options.sdk },
   });
+  if (options.config !== undefined)
+    await host.bb.storage.kv.set("config", parseLegacyText(options.config));
   const root = options.root ?? skillsRoot(["model-instructions", ...skills]);
   const create = await pluginAt(root, options.file);
   await create(host.bb);
   await flushMicrotasks();
   return { host, harness: host.harness, world };
+}
+
+/** `bb.sdk.plugins.getSettings` as the host answers it for the removed `rules` setting. */
+function legacySdk(rulesValue: unknown) {
+  return rulesValue === undefined ? {} : { plugins: { getSettings: async () => ({ values: { rules: rulesValue } }) } };
+}
+
+/** A form save: the RPC `saveConfig` with a config given in the old setting's text form. */
+function save(harness: Awaited<ReturnType<typeof load>>["harness"], text: string) {
+  return harness.callRpc("saveConfig", { config: parseLegacyText(text) });
 }
 
 function configure(
@@ -154,13 +168,11 @@ describe("skills through the plugin", () => {
 
   it("injects a skill claimed by a matching rule, once, however many rules claim it", async () => {
     const { harness } = await load({
-      settings: {
-        rules: rules(
+      config: rules(
           { skills: "work-*" },
           { skills: ["work-conventions", "other"], instructions: "x" },
           { skills: "*" },
         ),
-      },
     });
     const configured = await configure(harness);
     expect(configured.skills).toEqual(["model-instructions", "other", "work-conventions"]);
@@ -168,7 +180,7 @@ describe("skills through the plugin", () => {
   });
 
   it("injects an unclaimed bundled skill nowhere", async () => {
-    const { harness } = await load({ settings: { rules: rules({ skills: "other" }) } });
+    const { harness } = await load({ config: rules({ skills: "other" }) });
     expect((await configure(harness)).skills).toEqual(["model-instructions", "other"]);
   });
 
@@ -182,12 +194,10 @@ describe("skills through the plugin", () => {
     ];
     const { harness } = await load({
       world,
-      settings: {
-        rules: JSON.stringify({
+      config: JSON.stringify({
           scopes: [{ name: "work", paths: [root] }],
           rules: [{ scope: "work", skills: "work-*", instructions: "work rule" }],
         }),
-      },
     });
     const inside = await configure(harness, { project: { id: "proj_in" }, path: null });
     expect(inside).toMatchObject({
@@ -205,12 +215,10 @@ describe("skills through the plugin", () => {
   it("expands ~/ scope paths against the user's home", async () => {
     mkdirSync(path.join(home, "work", "app"), { recursive: true });
     const { harness } = await load({
-      settings: {
-        rules: JSON.stringify({
+      config: JSON.stringify({
           scopes: [{ name: "w", paths: ["~/work"] }],
           rules: [{ scope: "w", instructions: "home scope" }],
         }),
-      },
     });
     expect((await configure(harness, { path: path.join(home, "work", "app") })).instructions).toBe("home scope");
     expect((await configure(harness, { path: path.join(home, "play") })).instructions).toBeNull();
@@ -219,7 +227,7 @@ describe("skills through the plugin", () => {
   it("keeps working when the bundled skills cannot be read", async () => {
     const { harness } = await load({
       root: path.join(base, "no-plugin-here"),
-      settings: { rules: rules({ instructions: "still here" }) },
+      config: rules({ instructions: "still here" }),
     });
     expect(warnings(harness).some((line) => line.startsWith("bundled skills not loaded: "))).toBe(true);
     expect(await configure(harness)).toMatchObject({ skills: ["model-instructions"], instructions: "still here" });
@@ -252,54 +260,48 @@ describe("skills through the plugin", () => {
       root: path.join(root, "dist"),
       file: "server.js",
       skills: ["work-conventions"],
-      settings: { rules: rules({ skills: "work-*" }) },
+      config: rules({ skills: "work-*" }),
     });
     expect((await configure(harness)).skills).toEqual(["model-instructions", "work-conventions"]);
   });
 });
 
-describe("the setting: save checks and load", () => {
+describe("the saved config: save checks and load", () => {
   it("rejects an unknown scope glob and an unknown skills glob on save", async () => {
     const { harness } = await load();
     await expect(
-      harness.setSettings({ rules: rules({ name: "gchat", scope: "work", instructions: "x" }) }),
+      save(harness, rules({ name: "gchat", scope: "work", instructions: "x" })),
     ).rejects.toThrow('gchat: scope "work" matches no defined scope');
-    await expect(harness.setSettings({ rules: rules({ skills: "typo-*" }) })).rejects.toThrow(
+    await expect(save(harness, rules({ skills: "typo-*" }))).rejects.toThrow(
       'rules[0]: skills "typo-*" matches no bundled skill',
     );
   });
 
   it("accepts known scope and skills globs on save", async () => {
     const { harness } = await load();
-    await harness.setSettings({
-      rules: JSON.stringify({
+    await save(harness, JSON.stringify({
         scopes: [{ name: "work", paths: ["/work"] }],
         rules: [{ scope: "work", skills: "work-*", instructions: "x" }],
-      }),
-    });
+      }));
     expect((await configure(harness, { path: "/work/app" })).skills).toEqual([
       "model-instructions",
       "work-conventions",
     ]);
   });
 
-  it("accepts the object form without vars and keeps the array form unchanged", async () => {
+  it("accepts the object form without vars", async () => {
     const { harness } = await load();
-    await harness.setSettings({ rules: JSON.stringify({ rules: [{ instructions: "no vars" }] }) });
+    await save(harness, JSON.stringify({ rules: [{ instructions: "no vars" }] }));
     expect((await configure(harness)).instructions).toBe("no vars");
-    await harness.setSettings({ rules: rules({ instructions: "{{literal}} array" }) });
-    expect((await configure(harness)).instructions).toBe("{{literal}} array");
   });
 
   it("loads the same unknown references from storage, with one warning per rule and nothing disabled", async () => {
     const { harness } = await load({
-      settings: {
-        rules: rules(
+      config: rules(
           { name: "guard", instructions: "keep me" },
           { name: "gone-scope", scope: ["work", "also-gone"], skills: ["nope-*"], instructions: "never" },
           { skills: "typo" },
         ),
-      },
     });
     expect(warnings(harness).filter((line) => line.includes("match nothing"))).toEqual([
       'gone-scope: scope "work", scope "also-gone", skills "nope-*" match nothing',
@@ -309,7 +311,7 @@ describe("the setting: save checks and load", () => {
   });
 
   it("loads a stored value that overflows, without failing the setting", async () => {
-    const { harness } = await load({ settings: { rules: rules({ instructions: x(3000) }, { instructions: x(3000) }) } });
+    const { harness } = await load({ config: rules({ instructions: x(3000) }, { instructions: x(3000) }) });
     expect((await configure(harness)).instructions).toBe(`${x(3000)}\n\n${omittedNotice(1)}`);
   });
 
@@ -322,12 +324,12 @@ describe("the setting: save checks and load", () => {
     ];
     const { harness } = await load({ world });
     await expect(
-      harness.setSettings({ rules: rules({ name: "a", instructions: x(2500) }, { name: "b", instructions: x(2500) }) }),
+      save(harness, rules({ name: "a", instructions: x(2500) }, { name: "b", instructions: x(2500) })),
     ).rejects.toThrow(/over the 4096-character limit with a, b:\n {2}claude-code opus top-level project "alpha": 5002/);
     await expect(
-      harness.setSettings({ rules: rules({ name: "a", instructions: x(2500) }, { name: "b", instructions: x(2500) }) }),
+      save(harness, rules({ name: "a", instructions: x(2500) }, { name: "b", instructions: x(2500) })),
     ).rejects.toThrow("and 13 more");
-    await harness.setSettings({ rules: rules({ instructions: x(2000) }, { instructions: x(2000) }) });
+    await save(harness, rules({ instructions: x(2000) }, { instructions: x(2000) }));
     expect((await configure(harness)).instructions).toBe(`${x(2000)}\n\n${x(2000)}`);
   });
 
@@ -345,7 +347,7 @@ describe("the setting: save checks and load", () => {
         },
       },
     });
-    await expect(harness.setSettings({ rules: rules({ instructions: "x" }) })).rejects.toThrow(
+    await expect(save(harness, rules({ instructions: "x" }))).rejects.toThrow(
       "budget not checkable yet: provider list refresh failed; retry after the next refresh (every minute), or see bb model-instructions status",
     );
     expect(warnings(harness)).toContain("provider list refresh failed: providers down");
@@ -356,30 +358,30 @@ describe("the setting: save checks and load", () => {
       expect(harness.sdk.callsTo("providers.list").length).toBeGreaterThan(1),
     );
     await vi.waitFor(async () =>
-      await expect(harness.setSettings({ rules: rules({ instructions: "x" }) })).rejects.toThrow(
+      await expect(save(harness, rules({ instructions: "x" }))).rejects.toThrow(
         "budget not checkable yet: project list refresh failed; retry after the next refresh (every minute), or see bb model-instructions status",
       ),
     );
     projectsFail = false;
     await harness.emitThreadEvent("thread.created", { thread: makeThreadResponse({ id: "thr_y" }) });
     await vi.waitFor(async () => {
-      await harness.setSettings({ rules: rules({ instructions: "now fine" }) });
+      await save(harness, rules({ instructions: "now fine" }));
     });
     expect((await configure(harness)).instructions).toBe("now fine");
     // A later failure keeps the data but makes the budget uncheckable again.
     projectsFail = true;
     await harness.emitThreadEvent("thread.created", { thread: makeThreadResponse({ id: "thr_z" }) });
     await vi.waitFor(async () =>
-      await expect(harness.setSettings({ rules: rules({ instructions: "again" }) })).rejects.toThrow(
+      await expect(save(harness, rules({ instructions: "again" }))).rejects.toThrow(
         "project list refresh failed",
       ),
     );
   });
 
-  it("follows a setting change without a reload and clears stale over-budget records", async () => {
-    const { harness } = await load({ settings: { rules: rules({ instructions: x(3000) }, { instructions: x(3000) }) } });
+  it("follows a saved change without a reload and clears stale over-budget records", async () => {
+    const { harness } = await load({ config: rules({ instructions: x(3000) }, { instructions: x(3000) }) });
     expect(JSON.parse((await harness.runCli(["status", "--json"])).stdout).overBudget).not.toEqual([]);
-    await harness.setSettings({ rules: rules({ instructions: "small" }) });
+    await save(harness, rules({ instructions: "small" }));
     expect(JSON.parse((await harness.runCli(["status", "--json"])).stdout).overBudget).toEqual([]);
   });
 });
@@ -391,7 +393,7 @@ describe("rules left out at runtime", () => {
   );
 
   it("warns once per thread and set of dropped rules", async () => {
-    const { harness } = await load({ settings: { rules: OVERFLOW } });
+    const { harness } = await load({ config: OVERFLOW });
     const lost = () => warnings(harness).filter((line) => line.includes("lost rules"));
     await configure(harness, { thread: "thr_a" });
     await configure(harness, { thread: "thr_a" });
@@ -406,7 +408,7 @@ describe("rules left out at runtime", () => {
 
   it("warns again for the same thread when the dropped set changes", async () => {
     const { harness } = await load({
-      settings: { rules: rules({ name: "g", instructions: x(3000) }, { name: "m", model: "other-*", instructions: x(1200) }, { name: "e", instructions: x(1500) }) },
+      config: rules({ name: "g", instructions: x(3000) }, { name: "m", model: "other-*", instructions: x(1200) }, { name: "e", instructions: x(1500) }),
     });
     await configure(harness, { thread: "thr_a", model: "opus" });
     await configure(harness, { thread: "thr_a", model: "other-1" });
@@ -419,7 +421,7 @@ describe("rules left out at runtime", () => {
 
   it("returns the kept text with the notice and all the skills", async () => {
     const { harness } = await load({
-      settings: { rules: rules({ instructions: x(3000) }, { skills: "other", instructions: x(1500) }) },
+      config: rules({ instructions: x(3000) }, { skills: "other", instructions: x(1500) }),
     });
     const configured = await configure(harness);
     expect(configured.instructions).toBe(`${x(3000)}\n\n${omittedNotice(1)}`);
@@ -427,7 +429,7 @@ describe("rules left out at runtime", () => {
   });
 
   it("keeps the last 20 events with names and lengths, never the text", async () => {
-    const { harness } = await load({ settings: { rules: OVERFLOW } });
+    const { harness } = await load({ config: OVERFLOW });
     for (let i = 0; i < 22; i += 1) await configure(harness, { thread: `thr_${i}`, title: "t" });
     const { overflowEvents } = JSON.parse((await harness.runCli(["status", "--json"])).stdout);
     expect(overflowEvents).toHaveLength(20);
@@ -448,7 +450,7 @@ describe("rules left out at runtime", () => {
   });
 
   it("records a child thread's role and a thread with no project", async () => {
-    const { harness } = await load({ settings: { rules: OVERFLOW } });
+    const { harness } = await load({ config: OVERFLOW });
     await configure(harness, { thread: "thr_c", parent: "thr_p", project: { name: "" } });
     const text = (await harness.runCli(["status"])).stdout;
     expect(text).toContain("thr_c claude-code opus child project (none): extra (1500 chars)");
@@ -473,7 +475,7 @@ describe("the cache refresh and the budget re-check", () => {
   }
 
   it("flags a refresh that adds an overflowing model, and logs each new type once", async () => {
-    const { harness, world } = await load({ settings: { rules: NEW_MODEL_ONLY } });
+    const { harness, world } = await load({ config: NEW_MODEL_ONLY });
     expect(JSON.parse((await harness.runCli(["status", "--json"])).stdout).overBudget).toEqual([]);
     expect(warnings(harness).filter((line) => line.startsWith("over budget"))).toEqual([]);
 
@@ -510,8 +512,7 @@ describe("the cache refresh and the budget re-check", () => {
     const root = path.join(base, "scoped");
     mkdirSync(path.join(root, "checkout"), { recursive: true });
     const { harness, world } = await load({
-      settings: {
-        rules: JSON.stringify({
+      config: JSON.stringify({
           scopes: [{ name: "r", paths: [root] }],
           rules: [
             { name: "a", model: "new-*", instructions: x(3000) },
@@ -519,7 +520,6 @@ describe("the cache refresh and the budget re-check", () => {
             { name: "c", model: "new-*", scope: "r", instructions: x(500) },
           ],
         }),
-      },
     });
     world.providers["claude-code"] = ["opus", "new-1"];
     await refreshed(harness);
@@ -538,7 +538,7 @@ describe("the cache refresh and the budget re-check", () => {
   });
 
   it("records nothing for a refresh without an overflow", async () => {
-    const { harness, world } = await load({ settings: { rules: NEW_MODEL_ONLY } });
+    const { harness, world } = await load({ config: NEW_MODEL_ONLY });
     world.providers["claude-code"] = ["opus", "newer-thing"];
     world.providers.codex = ["gpt"];
     await refreshed(harness);
@@ -548,7 +548,7 @@ describe("the cache refresh and the budget re-check", () => {
 
   it("keeps the records while a list cannot be trusted", async () => {
     const { harness } = await load({
-      settings: { rules: rules({ instructions: x(3000) }, { instructions: x(3000) }) },
+      config: rules({ instructions: x(3000) }, { instructions: x(3000) }),
       sdk: {},
     });
     const before = JSON.parse((await harness.runCli(["status", "--json"])).stdout).overBudget;
@@ -589,7 +589,7 @@ describe("the project and provider caches", () => {
     const root = path.join(base, "repos");
     mkdirSync(path.join(root, "new"), { recursive: true });
     const { harness, world } = await load({
-      settings: { rules: JSON.stringify({ scopes: [{ name: "r", paths: [root] }], rules: [{ scope: "r", instructions: "scoped" }] }) },
+      config: JSON.stringify({ scopes: [{ name: "r", paths: [root] }], rules: [{ scope: "r", instructions: "scoped" }] }),
     });
     expect((await configure(harness, { project: { id: "proj_new" }, path: null })).instructions).toBeNull();
     world.projects = [{ id: "proj_new", name: "new", sources: [{ path: path.join(root, "new"), hostId: "h" }] }];
@@ -611,7 +611,7 @@ describe("the project and provider caches", () => {
     ];
     const { harness } = await load({
       world,
-      settings: { rules: JSON.stringify({ scopes: [{ name: "r", paths: [root] }], rules: [{ scope: "r", instructions: "x" }] }) },
+      config: JSON.stringify({ scopes: [{ name: "r", paths: [root] }], rules: [{ scope: "r", instructions: "x" }] }),
     });
     expect((await configure(harness, { project: { id: "proj_none" }, path: null })).instructions).toBeNull();
     expect((await configure(harness, { project: { id: "proj_empty" }, path: null })).instructions).toBeNull();
@@ -634,7 +634,7 @@ describe("the project and provider caches", () => {
   it("skips providers that are not available and does not ask them for models", async () => {
     const models = vi.fn(async () => ({ models: [{ id: "m", model: "m" }], modelLoadError: null }));
     const { harness } = await load({
-      settings: { rules: rules({ instructions: x(5000) }).replace("5000", "5000") },
+      config: rules({ instructions: x(5000) }).replace("5000", "5000"),
       sdk: {
         providers: {
           list: async () => [
@@ -690,11 +690,11 @@ describe("the project and provider caches", () => {
       const { harness } = await load({ sdk: MIXED });
       expect(warnings(harness)).toContain("provider needs-auth left unchecked: models not loaded (auth_required)");
       expect(warnings(harness)).toContain("provider broken left unchecked: models not loaded (socket closed)");
-      await harness.setSettings({ rules: rules({ instructions: "fits" }) });
+      await save(harness, rules({ instructions: "fits" }));
       expect((await configure(harness, { provider: "good", model: "m" })).instructions).toBe("fits");
       // The provider that loaded is still budget-checked.
       await expect(
-        harness.setSettings({ rules: rules({ instructions: x(2500) }, { instructions: x(2500) }) }),
+        save(harness, rules({ instructions: x(2500) }, { instructions: x(2500) })),
       ).rejects.toThrow("good m top-level");
     });
 
@@ -728,7 +728,7 @@ describe("the project and provider caches", () => {
     it("lists the unchecked providers after an overflow table too", async () => {
       const { harness } = await load({
         sdk: MIXED,
-        settings: { rules: rules({ instructions: x(3000) }, { instructions: x(3000) }) },
+        config: rules({ instructions: x(3000) }, { instructions: x(3000) }),
       });
       const text = await harness.runCli(["check", "--all"]);
       expect(text.exitCode).toBe(1);
@@ -740,7 +740,7 @@ describe("the project and provider caches", () => {
     it("is checked again once it comes back, and an overflow is recorded then", async () => {
       const models: Record<string, string[] | null> = { good: ["m"], late: null };
       const { harness } = await load({
-        settings: { rules: rules({ model: "late-*", instructions: x(3000) }, { model: "late-*", instructions: x(3000) }) },
+        config: rules({ model: "late-*", instructions: x(3000) }, { model: "late-*", instructions: x(3000) }),
         sdk: {
           providers: {
             list: async () => [{ id: "good", available: true }, { id: "late", available: true }],
@@ -770,7 +770,7 @@ describe("the project and provider caches", () => {
       const failing = await load({
         sdk: { providers: { list: async () => { throw new Error("down"); }, models: async () => ({}) } },
       });
-      await expect(failing.harness.setSettings({ rules: rules({ instructions: "x" }) })).rejects.toThrow(
+      await expect(save(failing.harness, rules({ instructions: "x" }))).rejects.toThrow(
         "budget not checkable yet: provider list refresh failed; retry after the next refresh (every minute), or see bb model-instructions status",
       );
     });
@@ -822,7 +822,7 @@ describe("model lookups", () => {
     const started: string[] = [];
     const resolvers: Record<string, () => void> = {};
     const { harness } = await load({
-      settings: { rules: rules({ instructions: x(3000) }, { instructions: x(3000) }) },
+      config: rules({ instructions: x(3000) }, { instructions: x(3000) }),
       sdk: {
         providers: {
           list: async () => ["first", "off", "second"].map((id) => ({ id, available: id !== "off" })),
@@ -882,7 +882,7 @@ describe("a provider that lists no models", () => {
     const { harness } = await load({
       sdk: { providers: { list: async () => [{ id: "empty", available: true }], models: async () => EMPTY } },
     });
-    await expect(harness.setSettings({ rules: rules({ instructions: "x" }) })).rejects.toThrow(
+    await expect(save(harness, rules({ instructions: "x" }))).rejects.toThrow(
       "budget not checkable yet: no provider's models could be listed (empty (no models listed)); see bb model-instructions status",
     );
   });
@@ -897,7 +897,7 @@ describe("a provider that lists no models", () => {
         },
       },
     });
-    await harness.setSettings({ rules: rules({ instructions: "fits" }) });
+    await save(harness, rules({ instructions: "fits" }));
     const json = JSON.parse((await harness.runCli(["status", "--json"])).stdout);
     expect(json.cache.providers.unchecked).toEqual([{ id: "empty", reason: "no models listed" }]);
     expect((await harness.runCli(["status"])).stdout).toContain("unchecked providers: empty (no models listed)");
@@ -920,10 +920,10 @@ describe("a save while no provider's models could be listed", () => {
     const { harness } = await load({ sdk: ALL_UNCHECKED });
     const message =
       "budget not checkable yet: no provider's models could be listed (needs-auth (auth_required), broken (socket closed)); see bb model-instructions status";
-    await expect(harness.setSettings({ rules: rules({ instructions: "x" }) })).rejects.toThrow(message);
+    await expect(save(harness, rules({ instructions: "x" }))).rejects.toThrow(message);
     expect(await harness.runCli(["check", "--all"])).toMatchObject({ exitCode: 1, stderr: `${message}\n` });
     // No instruction text: nothing to check, so the save is accepted.
-    await harness.setSettings({ rules: rules({ skills: "other" }) });
+    await save(harness, rules({ skills: "other" }));
   });
 
   it("accepts a value once one provider could be listed", async () => {
@@ -939,11 +939,11 @@ describe("a save while no provider's models could be listed", () => {
         },
       },
     });
-    await expect(harness.setSettings({ rules: rules({ instructions: "x" }) })).rejects.toThrow("no provider's models could be listed (p (auth_required))");
+    await expect(save(harness, rules({ instructions: "x" }))).rejects.toThrow("no provider's models could be listed (p (auth_required))");
     authed = true;
     await harness.emitThreadEvent("thread.created", { thread: makeThreadResponse({ id: "t" }) });
     await vi.waitFor(async () => {
-      await harness.setSettings({ rules: rules({ instructions: "x" }) });
+      await save(harness, rules({ instructions: "x" }));
     });
   });
 
@@ -951,7 +951,7 @@ describe("a save while no provider's models could be listed", () => {
     const { harness } = await load({
       sdk: { providers: { list: async () => [{ id: "off", available: false }], models: async () => ({}) } },
     });
-    await harness.setSettings({ rules: rules({ instructions: "x" }) });
+    await save(harness, rules({ instructions: "x" }));
     expect((await configure(harness)).instructions).toBe("x");
   });
 
@@ -959,7 +959,7 @@ describe("a save while no provider's models could be listed", () => {
     const { harness } = await load({
       sdk: { providers: { list: () => new Promise(() => {}), models: async () => ({}) } },
     });
-    await expect(harness.setSettings({ rules: rules({ instructions: "x" }) })).rejects.toThrow(
+    await expect(save(harness, rules({ instructions: "x" }))).rejects.toThrow(
       "budget not checkable yet: provider list not loaded; retry after the next refresh (every minute), or see bb model-instructions status",
     );
   });
@@ -979,7 +979,7 @@ describe("a project list lookup that is aborted", () => {
     const { harness } = await load({
       world,
       sdk: { projects: { list } },
-      settings: { rules: JSON.stringify({ scopes: [{ name: "r", paths: [root] }], rules: [{ scope: "r", instructions: "scoped" }] }) },
+      config: JSON.stringify({ scopes: [{ name: "r", paths: [root] }], rules: [{ scope: "r", instructions: "scoped" }] }),
     });
     expect((await configure(harness, { path: null })).instructions).toBe("scoped");
     const realTimeout = AbortSignal.timeout.bind(AbortSignal);
@@ -1035,7 +1035,7 @@ describe("bb model-instructions status", () => {
   });
 
   it("lists scopes, rules, claimed and unclaimed skills and the cache state as JSON", async () => {
-    const { harness } = await load({ settings: { rules: SETTING } });
+    const { harness } = await load({ config: SETTING });
     const result = await harness.runCli(["status", "--json"]);
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({
@@ -1075,7 +1075,7 @@ describe("bb model-instructions status", () => {
   });
 
   it("prints the same as text, and is the default command", async () => {
-    const { harness } = await load({ settings: { rules: SETTING } });
+    const { harness } = await load({ config: SETTING });
     const text = (await harness.runCli([])).stdout;
     expect(text).toBe(
       [
@@ -1187,7 +1187,7 @@ describe("bb model-instructions check", () => {
     };
     const loaded = await load({
       world,
-      settings: { rules: SETTING },
+      config: SETTING,
       sdk: { threads: lookup },
     });
     return { ...loaded, lookup };
@@ -1337,7 +1337,7 @@ describe("bb model-instructions check", () => {
   });
 
   it("reports an empty result when no rule matches", async () => {
-    const { harness } = await load({ settings: { rules: rules({ provider: "codex", instructions: "x" }) } });
+    const { harness } = await load({ config: rules({ provider: "codex", instructions: "x" }) });
     const json = JSON.parse((await harness.runCli(["check", "--provider", "claude-code", "--model", "m", "--json"], {})).stdout);
     expect(json).toMatchObject({ matched: [], length: 0, fullLength: 0, dropped: [], skills: ["model-instructions"] });
     const text = (await harness.runCli(["check", "--provider", "claude-code", "--model", "m"], {})).stdout;
@@ -1369,7 +1369,7 @@ describe("bb model-instructions check", () => {
 
   it("reports a dropped rule and the length with the notice", async () => {
     const { harness } = await load({
-      settings: { rules: rules({ name: "g", instructions: x(3000) }, { name: "e", instructions: x(1500) }) },
+      config: rules({ name: "g", instructions: x(3000) }, { name: "e", instructions: x(1500) }),
       sdk: { threads: { get: async () => ({ providerId: "claude-code", parentThreadId: null, projectId: "proj_1", title: null }), defaultExecutionOptions: async () => null } },
     });
     const result = JSON.parse((await harness.runCli(["check", "--model", "opus", "--json"], ctx)).stdout);
@@ -1411,7 +1411,7 @@ describe("bb model-instructions check", () => {
     const result = await harness.runCli(["bogus"]);
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toBe(
-      'unknown command "bogus"\nusage: bb model-instructions status [--json] | check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json] | setup [--dry-run] [--json] | unpin [<thread-id>] | import-dir-skills [--dry-run] [--json]\n',
+      'unknown command "bogus"\nusage: bb model-instructions status [--json] | check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json] | setup [--dry-run] [--json] | unpin [<thread-id>] | import-dir-skills [--dry-run] [--json] | export [--legacy] | import <file>\n',
     );
   });
 });
@@ -1422,7 +1422,7 @@ describe("bb model-instructions check --all", () => {
     world.providers = { "claude-code": ["opus"], codex: ["a", "b", "c"] };
     const { harness } = await load({
       world,
-      settings: { rules: rules({ name: "a", instructions: x(3000) }, { name: "b", instructions: x(3000) }) },
+      config: rules({ name: "a", instructions: x(3000) }, { name: "b", instructions: x(3000) }),
     });
     const result = await harness.runCli(["check", "--all"]);
     expect(result.exitCode).toBe(1);
@@ -1447,7 +1447,7 @@ describe("bb model-instructions check --all", () => {
   });
 
   it("succeeds when nothing is over the limit", async () => {
-    const { harness } = await load({ settings: { rules: rules({ instructions: "small" }) } });
+    const { harness } = await load({ config: rules({ instructions: "small" }) });
     const text = await harness.runCli(["check", "--all"]);
     expect(text).toMatchObject({ exitCode: 0, stdout: "no thread type exceeds 4096 characters (4 checked)\n" });
     const json = JSON.parse((await harness.runCli(["check", "--all", "--json"])).stdout);
@@ -1476,34 +1476,28 @@ describe("registration", () => {
       "setup",
       "unpin",
       "import-dir-skills",
+      "export",
+      "import",
     ]);
   });
 
-  it("describes the setting briefly and points to the README, status and check", async () => {
+  it("defines no setting: the saved config lives in storage, behind the settings form's RPC", async () => {
     const { harness } = await load();
-    const rulesSetting = harness.registrations.settingsDescriptors.rules as { description?: string; default?: string };
-    expect(rulesSetting.default).toBe("[]");
-    expect(rulesSetting.description).toContain("JSON array of rules");
-    expect(rulesSetting.description).toContain('{ "vars"?, "scopes"?, "rules" }');
-    expect(rulesSetting.description).toContain("README");
-    expect(rulesSetting.description).toContain("bb model-instructions status");
-    expect(rulesSetting.description).toContain("bb model-instructions check");
-    expect(rulesSetting.description!.length).toBeLessThan(300);
+    expect(harness.registrations.settingsDescriptors).toEqual({});
+    expect(harness.registrations.rpcMethods.sort()).toEqual(["dismissLegacy", "getState", "saveConfig"]);
   });
 });
 
 describe("bb model-instructions status: unresolved references", () => {
   it("marks every scope and skills glob that matches nothing, in JSON and in text", async () => {
     const { harness } = await load({
-      settings: {
-        rules: JSON.stringify({
+      config: JSON.stringify({
           scopes: [{ name: "work", paths: ["/work"] }],
           rules: [
             { name: "fine", scope: "work", skills: "work-*", instructions: "ok" },
             { name: "bad", scope: ["work", "gone-*"], skills: ["typo", "other"], instructions: "x" },
           ],
         }),
-      },
     });
     const json = JSON.parse((await harness.runCli(["status", "--json"])).stdout);
     expect(json.rules.map((rule: { unresolved: unknown }) => rule.unresolved)).toEqual([
@@ -1525,12 +1519,10 @@ describe("startup does not hold up the rules", () => {
     mkdirSync(scopeRoot, { recursive: true });
     const list = vi.fn(async (_args: { signal: AbortSignal }) => new Promise<never>(() => {}));
     const { harness } = await load({
-      settings: {
-        rules: JSON.stringify({
+      config: JSON.stringify({
           scopes: [{ name: "r", paths: [scopeRoot] }],
           rules: [{ instructions: "always" }, { scope: "r", instructions: "scoped" }],
         }),
-      },
       sdk: { projects: { list } },
     });
     expect(harness.registrations.cli?.name).toBe("model-instructions");
@@ -1577,7 +1569,7 @@ describe("coalesced refreshes", () => {
 describe("the dedup set of runtime overflows", () => {
   it("holds at most 1000 entries and forgets the oldest first", async () => {
     const { harness } = await load({
-      settings: { rules: rules({ name: "guard", instructions: x(3000) }, { name: "extra", instructions: x(1500) }) },
+      config: rules({ name: "guard", instructions: x(3000) }, { name: "extra", instructions: x(1500) }),
     });
     const lost = () => warnings(harness).filter((line) => line.includes("lost rules")).length;
     for (let i = 0; i < 1000; i += 1) await configure(harness, { thread: `thr_${i}` });
@@ -1608,7 +1600,7 @@ describe("checkout paths are normalized at refresh", () => {
     world.projects = [{ id: "proj_1", name: "bb-plugins", sources: [{ path: link, hostId: "h" }] }];
     const { harness } = await load({
       world,
-      settings: { rules: JSON.stringify({ scopes: [{ name: "r", paths: [scopeRoot] }], rules: [{ scope: "r", instructions: "scoped" }] }) },
+      config: JSON.stringify({ scopes: [{ name: "r", paths: [scopeRoot] }], rules: [{ scope: "r", instructions: "scoped" }] }),
     });
     expect((await configure(harness, { path: null })).instructions).toBe("scoped");
     // Point the link away: only a second resolution at configure time would notice.
@@ -1642,7 +1634,7 @@ describe("the save check and a symlinked checkout", () => {
         { name: "b", scope: "r", instructions: x(3000) },
       ],
     });
-    await expect(harness.setSettings({ rules: setting })).rejects.toThrow('project "bb-plugins"');
+    await expect(save(harness, setting)).rejects.toThrow('project "bb-plugins"');
   });
 });
 
@@ -1663,7 +1655,7 @@ describe("the known limit of the save check: the environment path", () => {
       ],
     });
     // Saved: no thread type of the project's checkouts matches both rules.
-    await harness.setSettings({ rules: setting });
+    await save(harness, setting);
     expect(JSON.parse((await harness.runCli(["check", "--all", "--json"])).stdout)).toMatchObject({ ok: true, overflowing: 0 });
     // A thread whose environment (a worktree) is in the scope does match both: rule b is cut, with the notice.
     expect((await configure(harness, { path: path.join(scopeRoot, "worktree") })).instructions).toBe(

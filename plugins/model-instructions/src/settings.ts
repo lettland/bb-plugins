@@ -1,4 +1,3 @@
-import { z } from "zod";
 import {
   budgetReport,
   cacheProblem,
@@ -10,17 +9,16 @@ import { buildScope, type Scope } from "./paths.js";
 import type { CacheSnapshot } from "./projects.js";
 import {
   INSTRUCTIONS_LIMIT,
-  parseConfig,
   ruleLabel,
   unresolvedRefs,
   type Config,
 } from "./rules.js";
 
-/** What the save-time checks read. All of it is in memory: the schema must be synchronous. */
+/** What the save-time checks read. All of it is in memory, so the checks are synchronous. */
 export interface SettingsEnv {
   /** Names of the bundled skills. */
   skillNames(): string[];
-  /** The scopes a rule may name: the setting's own scopes plus any other source. */
+  /** The scopes a rule may name: the saved scopes plus any other source. */
   scopesFor(own: Scope[]): Scope[];
   caches(): CacheSnapshot;
 }
@@ -54,34 +52,4 @@ export function checkConfig(config: Config, env: SettingsEnv): string | null {
   const report = budgetReport(config.rules, scopes, snapshot);
   if (report.overflowing.length === 0) return null;
   return formatGroups(groupOverflows(report.overflowing, config.rules)).join("\n");
-}
-
-/** The save-time check of a setting text: why it cannot be saved, or null. */
-export function settingProblem(json: string, env: SettingsEnv): string | null {
-  let config: Config;
-  try {
-    config = parseConfig(json);
-  } catch (error) {
-    return (error as Error).message;
-  }
-  return checkConfig(config, env);
-}
-
-/** Validates the setting on write so a broken or over-long value never gets stored. */
-export function createRulesSettingSchema(env: SettingsEnv) {
-  return z.string().superRefine((json, ctx) => {
-    let config: Config;
-    try {
-      config = parseConfig(json);
-    } catch (error) {
-      ctx.addIssue({
-        code: "custom",
-        // v8 ignore next -- @preserve parseConfig only throws Error, so the non-Error arm is unreachable.
-        message: error instanceof Error ? error.message : String(error),
-      });
-      return;
-    }
-    const problem = checkConfig(config, env);
-    if (problem !== null) ctx.addIssue({ code: "custom", message: problem });
-  });
 }

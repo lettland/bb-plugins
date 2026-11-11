@@ -6,11 +6,14 @@ import {
   claimants,
   claimedSkills,
   compose,
+  expandConfig,
   fullLength,
   INSTRUCTIONS_LIMIT,
   matchRules,
   omittedNotice,
   parseConfig,
+  parseLegacyText,
+  parseRawConfig,
   resolve,
   ruleLabel,
   unresolvedRefs,
@@ -66,12 +69,20 @@ describe("parseConfig: object form", () => {
     expect(config.rules[0]).toMatchObject({ name: "r", scope: ["work"], instructions: "A" });
   });
 
-  it("keeps the array form unchanged: no scopes, no substitution", () => {
-    const config = parseConfig(JSON.stringify([{ instructions: "{{a}} stays" }]));
+  it("reads the array form as rules with no scopes and no vars", () => {
+    const config = parseConfig(JSON.stringify([{ instructions: "plain" }]));
     expect(config).toEqual({
       scopes: [],
-      rules: [{ threads: "any", instructions: "{{a}} stays" }],
+      rules: [{ threads: "any", instructions: "plain" }],
     });
+  });
+
+  // v0.1.11 left {{name}} in an array-form rule as literal text. The saved config always expands, and
+  // there is no escape, so the old text cannot be carried over unchanged: it fails loudly instead.
+  it("rejects a {{name}} in the array form: there are no vars to resolve it", () => {
+    expect(() => parseConfig(JSON.stringify([{ instructions: "{{a}} stays" }]))).toThrow(
+      "rules[0]: unknown variable {{a}}",
+    );
   });
 
   it.each([
@@ -544,5 +555,139 @@ describe("unresolvedRefs and claimants", () => {
     expect(claimants(rules, "a-one")).toEqual([0]);
     expect(claimants(rules, "b")).toEqual([]);
     expect(claimants(rules, "model-instructions")).toEqual([]);
+  });
+});
+
+describe("parseRawConfig", () => {
+  it("normalizes: globs to arrays, instructions to one string, vars kept unexpanded, the thread default filled in", () => {
+    const raw = parseRawConfig({
+      vars: { gchat: "Chat." },
+      scopes: [{ name: " work ", paths: [" ~/work "] }],
+      rules: [
+        {
+          name: "r",
+          provider: " claude-code ",
+          project: "bb-*",
+          skipProjects: ["a", " b "],
+          skipTitles: "Helpdesk: *",
+          scope: "work",
+          skills: "work-*",
+          instructions: ["Use {{gchat}}.", "Second line."],
+        },
+        { skills: ["other"] },
+      ],
+    });
+    expect(raw).toEqual({
+      vars: { gchat: "Chat." },
+      scopes: [{ name: "work", paths: ["~/work"] }],
+      rules: [
+        {
+          name: "r",
+          provider: "claude-code",
+          project: ["bb-*"],
+          skipProjects: ["a", "b"],
+          skipTitles: ["Helpdesk: *"],
+          scope: ["work"],
+          skills: ["work-*"],
+          threads: "any",
+          instructions: "Use {{gchat}}.\nSecond line.",
+        },
+        { skills: ["other"], threads: "any" },
+      ],
+    });
+  });
+
+  it("leaves a field that is not given out of the result, and fills vars and scopes when they are missing", () => {
+    const raw = parseRawConfig({ rules: [{ instructions: "x" }] });
+    expect(raw).toEqual({ vars: {}, scopes: [], rules: [{ instructions: "x", threads: "any" }] });
+    expect(Object.keys(raw.rules[0]).sort()).toEqual(["instructions", "threads"]);
+  });
+
+  it("is idempotent: its own result passes again unchanged", () => {
+    const once = parseRawConfig({
+      vars: { a: "A" },
+      scopes: [{ name: "w", paths: ["/w"] }],
+      rules: [{ name: "r", scope: "w", model: "m*", threads: "child", instructions: ["x", "{{a}}"] }],
+    });
+    expect(parseRawConfig(once)).toEqual(once);
+  });
+
+  it("does not expand: a {{name}} with no var is a matter for the expanding parse", () => {
+    expect(parseRawConfig({ rules: [{ instructions: "{{nope}}" }] }).rules[0].instructions).toBe("{{nope}}");
+  });
+
+  it.each([
+    ["an unknown key on a scope, such as claudeConfigDir", { scopes: [{ name: "w", paths: ["/w"], claudeConfigDir: "/x" }], rules: [] }, "claudeConfigDir"],
+    ["an unknown key at the top", { rules: [], profiles: [] }, "Unrecognized key"],
+    ["an unknown key on a rule", { rules: [{ instructions: "x", modle: "y" }] }, "modle"],
+    ["a relative scope path", { scopes: [{ name: "w", paths: ["rel/path"] }], rules: [] }, 'expected an absolute path or a path starting with "~/"'],
+    ["an empty glob", { rules: [{ instructions: "x", scope: [""] }] }, "scope"],
+    ["an empty glob list", { rules: [{ instructions: "x", skills: [] }] }, "skills"],
+    ["an empty provider", { rules: [{ instructions: "x", provider: "" }] }, "provider"],
+    ["a control character in a name", { rules: [{ name: "a\nb", instructions: "x" }] }, "control characters"],
+    ["a rule with neither instructions nor skills", { rules: [{ name: "r" }] }, 'a rule needs "instructions", "skills", or both'],
+    ["a variable name that is not a name", { vars: { "1bad": "x" }, rules: [] }, "vars.1bad"],
+    ["a duplicate scope name", { scopes: [{ name: "w", paths: ["/a"] }, { name: "w", paths: ["/b"] }], rules: [] }, 'the scope name "w" is used twice'],
+  ])("rejects %s", (_label, value, message) => {
+    expect(() => parseRawConfig(value)).toThrow(message);
+  });
+
+  // Upstream quirk (zod 4 z.record drops an own __proto__ key silently), learned in the vars review of
+  // 2026-11-02 (local bb thread, id redacted); parseRawConfig must reject it loudly, for every writer.
+  it("rejects an own __proto__ key in vars", () => {
+    const vars = JSON.parse('{"__proto__": "x", "a": "y"}');
+    expect(() => parseRawConfig({ vars, rules: [] })).toThrow('invalid variable name "__proto__" at vars');
+  });
+
+  it.each([[null], [5], ["x"], [[]], [[{ instructions: "x" }]]])("rejects %j: it is not a config object", (value) => {
+    expect(() => parseRawConfig(value)).toThrow('expected { "vars"?: {...}, "scopes"?: [...], "rules": [...] }');
+  });
+
+  it("does not take vars that are not an object for a guard hit", () => {
+    expect(() => parseRawConfig({ vars: null, rules: [] })).toThrow("at vars");
+  });
+});
+
+describe("expandConfig", () => {
+  it("expands the raw config's references and keeps its scopes", () => {
+    const raw = parseRawConfig({
+      vars: { a: "A" },
+      scopes: [{ name: "w", paths: ["/w"] }],
+      rules: [{ instructions: " use {{a}} " }, { skills: ["x"] }],
+    });
+    expect(expandConfig(raw)).toEqual({
+      scopes: [{ name: "w", paths: ["/w"] }],
+      rules: [
+        { instructions: "use A", threads: "any" },
+        { skills: ["x"], threads: "any", instructions: undefined },
+      ],
+    });
+  });
+
+  it("throws on a reference with no var, naming the rule", () => {
+    const raw = parseRawConfig({ rules: [{ instructions: "ok" }, { instructions: "{{nope}}" }] });
+    expect(() => expandConfig(raw)).toThrow("rules[1]: unknown variable {{nope}}");
+  });
+});
+
+describe("parseLegacyText", () => {
+  it("reads the array form as rules, and the object form as it is", () => {
+    expect(parseLegacyText('[{"instructions": "x"}]')).toEqual({
+      vars: {},
+      scopes: [],
+      rules: [{ instructions: "x", threads: "any" }],
+    });
+    expect(parseLegacyText('{"vars": {"a": "A"}, "rules": [{"instructions": "{{a}}"}]}').vars).toEqual({ a: "A" });
+  });
+
+  it("says when the text is not JSON or not an array or object", () => {
+    expect(() => parseLegacyText("not json")).toThrow(/^not valid JSON: /);
+    expect(() => parseLegacyText("5")).toThrow('expected an array of rules or { "vars"?: {...}, "scopes"?: [...], "rules": [...] }');
+    expect(() => parseLegacyText("null")).toThrow("expected an array of rules or");
+  });
+
+  it("applies every check of parseRawConfig", () => {
+    expect(() => parseLegacyText('{"rules": [], "extra": 1}')).toThrow("Unrecognized key");
+    expect(() => parseLegacyText('[{"instructions": " "}]')).toThrow("instructions");
   });
 });

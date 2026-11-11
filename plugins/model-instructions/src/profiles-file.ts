@@ -125,26 +125,26 @@ export function writeProfilesFile(
 
 export interface MergedScopes {
   scopes: Scope[];
-  /** Names of setting scopes left out because a profile scope has the same name. */
+  /** Names of saved scopes left out because a profile scope has the same name. */
   ignored: string[];
 }
 
 /**
- * The scope list rules see: every profile scope, then the setting's scopes. A setting scope with a
- * profile scope's name is ignored, so nothing that can edit the setting can move a Claude profile.
+ * The scope list rules see: every profile scope, then the saved scopes. A saved scope with a
+ * profile scope's name is ignored, so nothing that can edit the saved config can move a Claude profile.
  */
-export function mergeScopes(setting: Scope[], profiles: ProfileScope[]): MergedScopes {
+export function mergeScopes(saved: Scope[], profiles: ProfileScope[]): MergedScopes {
   const taken = new Set(profiles.map((scope) => scope.name));
-  const ignored = setting.filter((scope) => taken.has(scope.name)).map((scope) => scope.name);
+  const ignored = saved.filter((scope) => taken.has(scope.name)).map((scope) => scope.name);
   return {
     scopes: [
       ...profiles.map(({ name, paths }) => ({ name, paths })),
-      ...setting.filter((scope) => !taken.has(scope.name)),
+      ...saved.filter((scope) => !taken.has(scope.name)),
     ],
     ignored,
   };
 }
 
 export function ignoredScopeText(name: string): string {
-  return `ignored setting scope "${name}": a profile scope with that name comes from profiles.json`;
+  return `ignored saved scope "${name}": a profile scope with that name comes from profiles.json`;
 }

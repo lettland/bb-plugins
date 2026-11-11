@@ -8,6 +8,7 @@ import {
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { parseLegacyText } from "./src/rules.js";
 
 const HOST = "host_local";
 const REMOTE = "https://git.example.com/acme/app.git";
@@ -83,7 +84,8 @@ async function flush(): Promise<void> {
 }
 
 interface LoadOptions {
-  settings?: Record<string, string>;
+  /** The saved config, as JSON text in the old setting's array or object form; stored before the plugin starts. */
+  config?: string;
   world?: World;
   sdk?: Record<string, unknown>;
   kv?: Record<string, unknown>;
@@ -96,7 +98,6 @@ async function load(options: LoadOptions = {}) {
   const host = createFakePluginHost({
     pluginId: "model-instructions",
     agentSkillIds: ["model-instructions", ...skills],
-    settings: options.settings,
     sdk: {
       providers: {
         list: async () => [{ id: "claude-code", available: true }],
@@ -107,6 +108,7 @@ async function load(options: LoadOptions = {}) {
     },
   });
   for (const [key, value] of Object.entries(options.kv ?? {})) await host.bb.storage.kv.set(key, value);
+  if (options.config !== undefined) await host.bb.storage.kv.set("config", parseLegacyText(options.config));
   const create = await pluginAt(skillsRoot(["model-instructions", ...skills]));
   await create(host.bb);
   await flush();
@@ -115,13 +117,17 @@ async function load(options: LoadOptions = {}) {
 
 type Loaded = Awaited<ReturnType<typeof load>>;
 
+/** A form save: the RPC `saveConfig` with a config given in the old setting's text form. */
+const save = (harness: Loaded["harness"], text: string) =>
+  harness.callRpc("saveConfig", { config: parseLegacyText(text) });
+
 const env = (threadId: string, projectId = "proj_w") => ({ threadId, projectId, hostId: HOST });
 const warnings = (loaded: Loaded) =>
   loaded.harness.logEntries.filter((entry) => entry.level === "warn").map((entry) => entry.message);
 const pinOf = (loaded: Loaded, threadId: string) =>
   loaded.host.bb.storage.kv.get(`claude-config-dir:${threadId}`);
 const ignoredText = (name: string) =>
-  `ignored setting scope "${name}": a profile scope with that name comes from profiles.json`;
+  `ignored saved scope "${name}": a profile scope with that name comes from profiles.json`;
 
 function configure(harness: Loaded["harness"], over: { project?: string; path?: string | null; thread?: string } = {}) {
   return harness.resolveAgentConfiguration(
@@ -144,7 +150,7 @@ describe("the 31dcde3 boundary: the file defines the profile scope", () => {
   it("ignores a setting scope named like a profile scope: warns at load, and shows it in status and check", async () => {
     put(profilesPath(), WORK_PROFILE());
     mkdirSync(profileDir());
-    const loaded = await load({ settings: { rules: SETTING_SCOPE_AND_RULE(["/elsewhere"]) } });
+    const loaded = await load({ config: SETTING_SCOPE_AND_RULE(["/elsewhere"]) });
     expect(warnings(loaded)).toContain(ignoredText("work"));
     const { harness } = loaded;
     const status = JSON.parse((await harness.runCli(["status", "--json"])).stdout);
@@ -159,14 +165,14 @@ describe("the 31dcde3 boundary: the file defines the profile scope", () => {
   it("(a) changing the setting scope's paths never changes a profile decision", async () => {
     put(profilesPath(), WORK_PROFILE());
     mkdirSync(profileDir());
-    const loaded = await load({ settings: { rules: SETTING_SCOPE_AND_RULE(["/elsewhere"]) } });
+    const loaded = await load({ config: SETTING_SCOPE_AND_RULE(["/elsewhere"]) });
     const { harness } = loaded;
     const dir = (threadId: string, project: string) =>
       harness.resolveProviderEnv("claude-code", env(threadId, project)).then((entries) => entries.map((e) => e.value));
     expect(await dir("t1", "proj_w")).toEqual([profileDir()]);
     expect(await dir("t2", "proj_e")).toEqual([]);
     for (const paths of [["/w"], ["/elsewhere", "/w"], ["/nowhere"]]) {
-      await harness.setSettings({ rules: SETTING_SCOPE_AND_RULE(paths) });
+      await save(harness, SETTING_SCOPE_AND_RULE(paths));
       expect(await dir(`in-${paths.join("")}`, "proj_w")).toEqual([profileDir()]);
       expect(await dir(`out-${paths.join("")}`, "proj_e")).toEqual([]);
     }
@@ -186,9 +192,7 @@ describe("the 31dcde3 boundary: the file defines the profile scope", () => {
   it("lets rules name a profile scope: the save check accepts it, and the rule matches by the file's paths", async () => {
     put(profilesPath(), WORK_PROFILE());
     const { harness } = await load();
-    await harness.setSettings({
-      rules: JSON.stringify([{ name: "gchat", scope: "work", skills: "work-*", instructions: "Work text." }]),
-    });
+    await save(harness, JSON.stringify([{ name: "gchat", scope: "work", skills: "work-*", instructions: "Work text." }]));
     expect(await configure(harness)).toMatchObject({ instructions: "Work text.", skills: ["model-instructions", "work-conventions"] });
     expect((await configure(harness, { project: "proj_e", path: "/elsewhere/app" })).instructions).toBeNull();
     const status = JSON.parse((await harness.runCli(["status", "--json"])).stdout);
@@ -198,8 +202,8 @@ describe("the 31dcde3 boundary: the file defines the profile scope", () => {
   it("rejects that rule on save while profiles.json is absent, and loads it from storage with a warning", async () => {
     const rule = JSON.stringify([{ name: "gchat", scope: "work", instructions: "Work text." }, { name: "guard", instructions: "Guard." }]);
     const { harness } = await load();
-    await expect(harness.setSettings({ rules: rule })).rejects.toThrow('gchat: scope "work" matches no defined scope');
-    const stored = await load({ settings: { rules: rule } });
+    await expect(save(harness, rule)).rejects.toThrow('gchat: scope "work" matches no defined scope');
+    const stored = await load({ config: rule });
     expect(warnings(stored)).toContain('gchat: scope "work" match nothing');
     expect((await configure(stored.harness)).instructions).toBe("Guard.");
   });
@@ -240,7 +244,7 @@ describe("profiles.json states, at plugin level", () => {
 
     it("keeps rules and skills working", async () => {
       const loaded = await load({
-        settings: { rules: JSON.stringify([{ name: "guard", instructions: "Guard.", skills: "work-*" }]) },
+        config: JSON.stringify([{ name: "guard", instructions: "Guard.", skills: "work-*" }]),
       });
       expect(await configure(loaded.harness)).toMatchObject({ instructions: "Guard.", skills: ["model-instructions", "work-conventions"] });
     });
@@ -517,7 +521,7 @@ describe("import-dir-skills through the plugin", () => {
       ],
     });
     const existing = [{ name: "guard", instructions: "Guard." }];
-    const loaded = await load({ settings: { rules: JSON.stringify(existing) } });
+    const loaded = await load({ config: JSON.stringify(existing) });
     const { harness } = loaded;
     const dry = await harness.runCli(["import-dir-skills", "--dry-run"]);
     expect(dry.exitCode).toBe(0);
@@ -551,15 +555,15 @@ describe("import-dir-skills through the plugin", () => {
   it("reports the setting's rejection, and writes no pin", async () => {
     put(scopesPath(), { scopes: [{ name: "plain", paths: ["/p"], skills: ["work-*"] }] });
     put(exportPath(), { uiScopes: [], pins: [{ threadId: "t1", pin: { dir: null, scope: null } }] });
-    const loaded = await load({ settings: { rules: JSON.stringify([{ instructions: "x" }]) } });
+    const loaded = await load({ config: JSON.stringify([{ instructions: "x" }]) });
     // Break the cache so the save-time budget check cannot run for the existing text rule.
     const failing = await load({
-      settings: { rules: JSON.stringify([{ instructions: "x" }]) },
+      config: JSON.stringify([{ instructions: "x" }]),
       sdk: { providers: { list: async () => { throw new Error("down"); } } },
     });
     const result = await failing.harness.runCli(["import-dir-skills"]);
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toMatch(/the rules setting would be rejected \(nothing was written\):\n  budget not checkable yet/);
+    expect(result.stderr).toMatch(/the saved config would be rejected \(nothing was written\):\n  budget not checkable yet/);
     expect(await pinOf(failing, "t1")).toBeUndefined();
     expect(loaded).toBeDefined();
   });

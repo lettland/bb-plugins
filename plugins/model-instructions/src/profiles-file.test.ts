@@ -181,7 +181,7 @@ describe("mergeScopes", () => {
 
   it("words the warning as status and check show it", () => {
     expect(ignoredScopeText("work")).toBe(
-      'ignored setting scope "work": a profile scope with that name comes from profiles.json',
+      'ignored saved scope "work": a profile scope with that name comes from profiles.json',
     );
   });
 });

@@ -1,14 +1,13 @@
 ---
 name: model-instructions
-description: "Change the custom instructions and skills bb adds to threads by provider, model, project (including skipping projects), directory scope, and top-level vs child thread (the model-instructions plugin's rules setting)."
+description: "Change the custom instructions and skills bb adds to threads by provider, model, project (including skipping projects), directory scope, and top-level vs child thread (the model-instructions plugin's rules, edited in its settings form)."
 ---
 
 # Model instructions
 
 The `model-instructions` plugin adds instructions and skills to a thread when its
 provider, model, project, directory, and thread position match a rule. Rules live
-in one plugin setting, `rules`, a JSON array or an object
-`{ "vars"?, "scopes"?, "rules" }`. Every matching rule applies, in array order.
+in the model-instructions plugin's saved config, an object of `vars`, `scopes` and `rules`, edited in Settings → Plugins → Model instructions. Every matching rule applies, in array order.
 
 ```json
 [
@@ -63,7 +62,7 @@ The match uses the thread title at each turn. A thread with no title is never sk
 
 ## Variables
 
-The setting can also be a JSON object that names reusable values, so the same
+The config can also name reusable values (`vars`), so the same
 flags need not repeat in every rule:
 
 ```json
@@ -122,8 +121,8 @@ never dropped for the character limit.
 `~/.bb/model-instructions/profiles.json` is `{ "scopes": [ { "name", "paths", "claudeConfigDir" } ] }`
 (strict, same name and path rules as scopes). A profile scope is a full scope, so rules can name it
 in `scope`, and Claude Code threads whose project has a checkout under it start with
-`CLAUDE_CONFIG_DIR` set to its directory. A setting scope with the same name is ignored (shown in
-`status` and `check`): the file decides, never the setting. A thread's profile is pinned at its first
+`CLAUDE_CONFIG_DIR` set to its directory. A saved scope with the same name is ignored (shown in
+`status` and `check`): the file decides, never the saved config. A thread's profile is pinned at its first
 turn; an existing pin is always served, even if the file is absent or malformed, and a new pin is
 written only while the file is valid. `bb model-instructions setup [--dry-run] [--json]` creates the
 file when absent, `unpin [<thread-id>]` forgets a pin, and `import-dir-skills [--dry-run] [--json]`
@@ -169,29 +168,29 @@ recent overflow events; a `scope` or `skills` glob that matches nothing is marke
 inside a bb thread it defaults provider, model, role, title, project and path from that thread and
 prints what it defaulted. `--child` and `--top-level` force the role (both together is a usage
 error). `check --all` prints the save-time budget table and the unchecked providers. `status` also shows
-the state of profiles.json, the profile scopes, ignored setting scopes and the pin count; `check`
+the state of profiles.json, the profile scopes, ignored saved scopes and the pin count; `check`
 adds the Claude profile decision and the calling thread's pin.
 
 ## Read and change the rules
 
 ```sh
-bb plugin config model-instructions                      # show the current value
-bb plugin config model-instructions set rules "$(cat rules.json)"
-bb plugin config model-instructions unset rules          # back to [] (no instructions)
+bb model-instructions export > rules.json   # read the saved config
+bb model-instructions import rules.json     # replace it after editing (same checks as the form)
 ```
 
-A value that is not valid JSON or does not match the shape above is rejected on
-write. Changes need no plugin reload; new threads get them, while a running
+Prefer asking the user to make the change in the settings form; use export → edit → import only when asked to change rules yourself.
+
+A config that is not valid JSON or does not match the shape above is rejected on
+import. Changes need no plugin reload; new threads get them, while a running
 thread may keep its old instructions until its provider session restarts.
 List model ids with `bb provider models <provider>` and project names with
 `bb project list --include-personal`.
 
 ## Constraints
 
-- The combined instructions for one thread are limited to 4096 characters: the save check rejects a setting that exceeds it for a known thread type, and at runtime whole rules are dropped (see Budget).
+- The combined instructions for one thread are limited to 4096 characters: the save check rejects a config that exceeds it for a known thread type, and at runtime whole rules are dropped (see Budget).
 - Side chats never receive plugin instructions.
-- After saving rules that use `skipProjects` (in any form) or an array `project`, an older plugin version rejects the whole setting and applies no rules.
-- After saving the object form (`vars`, `scopes`, `rules`), a rule with `name`, `scope` or `skills`, or a rule without `instructions`, an older plugin version rejects the whole setting and applies no rules.
+- An older plugin version (0.1.11 or earlier) reads the old `rules` setting, not the saved config; see the README's Storage, export and import section before downgrading.
 - Instructions only guide the model; they do not enforce anything. To stop Claude
   Code delegating through its own Task tool instead of bb threads, turn on the
   Claude Code provider's "Disable provider subagents" setting.

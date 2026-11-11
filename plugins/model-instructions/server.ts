@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { budgetReport, cacheProblem, describeType, type Role } from "./src/budget.js";
 import { runCli, type OverBudgetRecord, type OverflowEvent } from "./src/cli.js";
+import { modelInstructionsRpcContract, type ConfigState } from "./rpc-contract.js";
 import { buildScope, type Scope } from "./src/paths.js";
 import {
   isDirectory,
@@ -18,22 +19,42 @@ import {
   mergeScopes,
   profilesFile,
   readProfiles,
+  type ProfileScope,
   type ProfilesState,
 } from "./src/profiles-file.js";
 import { createCaches } from "./src/projects.js";
 import {
   activeScopeNamesIn,
   compose,
+  expandConfig,
   matchRules,
-  parseConfig,
+  parseLegacyText,
+  parseRawConfig,
   ruleLabel,
+  SELF_SKILL,
   unresolvedRefs,
   type Config,
+  type RawConfig,
 } from "./src/rules.js";
-import { createRulesSettingSchema, settingProblem, type SettingsEnv } from "./src/settings.js";
+import { checkConfig, type SettingsEnv } from "./src/settings.js";
 import { loadSkills, type SkillEntry } from "./src/skills.js";
 import type { ImportDeps } from "./src/import.js";
 import type { SetupDeps } from "./src/setup.js";
+
+/** kv key of the saved config, in the raw form. */
+const CONFIG_KEY = "config";
+/** kv key of the old `rules` setting text that could not be imported, with the reason. */
+const LEGACY_KEY = "legacyRules";
+
+interface LegacyRecord {
+  text: string;
+  error: string;
+}
+
+/** Who wrote the config, as the log line names it. */
+type WriteSource = "form" | "import" | "import-dir-skills" | "legacy setting";
+/** `full` is every save check. `structural` is the parse only, for carrying the old setting over. */
+type WriteMode = "full" | "structural";
 
 const OVERFLOW_EVENTS_KEPT = 20;
 const OVERFLOW_SEEN_KEPT = 1000;
@@ -57,9 +78,12 @@ export default async function plugin(bb: BbPluginApi) {
   const home = homedir();
   const profilesPath = profilesFile(home);
 
+  /** The saved config as stored (unexpanded), and the expanded one the rules run on. */
+  let raw: RawConfig = { vars: {}, scopes: [], rules: [] };
   let config: Config = { rules: [], scopes: [] };
+  let legacy: LegacyRecord | undefined;
   let scopes: Scope[] = [];
-  /** Setting scopes left out of `scopes` because a profile scope has their name. */
+  /** Saved scopes left out of `scopes` because a profile scope has their name. */
   let ignoredScopes: string[] = [];
   let profiles: ProfilesState = { state: "absent" };
   const overBudget = new Map<string, OverBudgetRecord>();
@@ -94,10 +118,10 @@ export default async function plugin(bb: BbPluginApi) {
 
   const caches = createCaches(bb, recheckBudget);
 
-  /** Profile scopes come only from profiles.json; the `rules` setting never feeds a Claude profile. */
+  /** Profile scopes come only from profiles.json; the saved config never feeds a Claude profile. */
   const profileScopes = () => (profiles.state === "valid" ? profiles.scopes : []);
 
-  /** The scope list rules see: profile scopes first, then the setting's scopes that do not collide with them. */
+  /** The scope list rules see: profile scopes first, then the saved scopes that do not collide with them. */
   function rebuildScopes(): void {
     const merged = mergeScopes(
       config.scopes.map((scope) => buildScope(scope)),
@@ -131,40 +155,17 @@ export default async function plugin(bb: BbPluginApi) {
     recheckBudget();
   }
 
-  const settingsEnv: SettingsEnv = {
+  const checkEnv: SettingsEnv = {
     skillNames,
     scopesFor: (own) => mergeScopes(own, profileScopes()).scopes,
     caches: () => caches.snapshot(),
   };
 
-  const settings = bb.settings.define({
-    rules: {
-      type: "string",
-      label: "Rules",
-      description:
-        'JSON array of rules, or an object { "vars"?, "scopes"?, "rules" }. See the plugin README; run `bb model-instructions status` to inspect and `bb model-instructions check` to try a thread.',
-      experimental_multiline: true,
-      experimental_schema: createRulesSettingSchema(settingsEnv),
-      default: "[]",
-    },
-  });
-
-  function load(json: string): void {
-    try {
-      config = parseConfig(json);
-    } catch (error) {
-      config = { rules: [], scopes: [] };
-      rebuildScopes();
-      bb.log.warn(
-        // v8 ignore next -- @preserve parseConfig only throws Error, so the non-Error arm is unreachable.
-        `rules setting ignored: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return;
-    }
+  /** Takes a config that passed its checks into use; warns for each reference that matches nothing. */
+  function adopt(next: RawConfig, parsed: Config): void {
+    raw = next;
+    config = parsed;
     rebuildScopes();
-    bb.log.info(
-      `loaded ${config.rules.length} rule(s), ${scopes.length} scope(s)`,
-    );
     const unresolved = new Map<number, string[]>();
     for (const ref of unresolvedRefs(
       config.rules,
@@ -181,12 +182,86 @@ export default async function plugin(bb: BbPluginApi) {
       );
   }
 
-  loadProfiles();
-  load((await settings.get()).rules);
-  settings.onChange((next) => {
-    load(next.rules);
+  /** The one validation of a config value, whoever wrote it. Throws the field-specific message. */
+  function validate(value: unknown, mode: WriteMode, env: SettingsEnv): { next: RawConfig; parsed: Config } {
+    const next = parseRawConfig(value);
+    const parsed = expandConfig(next);
+    if (mode === "full") {
+      const problem = checkConfig(parsed, env);
+      if (problem !== null) throw new Error(problem);
+    }
+    return { next, parsed };
+  }
+
+  // Writes run one at a time; a rejected write does not stop the next one.
+  let writes: Promise<unknown> = Promise.resolve();
+  function enqueue<T>(run: () => Promise<T>): Promise<T> {
+    const next = writes.then(run, run);
+    writes = next;
+    return next;
+  }
+
+  /** The write itself: validate, store, apply, re-check the budget, log. Runs inside the queue. */
+  async function writeStep(value: unknown, source: WriteSource, mode: WriteMode): Promise<RawConfig> {
+    const { next, parsed } = validate(value, mode, checkEnv);
+    await bb.storage.kv.set(CONFIG_KEY, next);
+    adopt(next, parsed);
     recheckBudget();
-  });
+    bb.log.info(
+      `config saved from ${source}: ${next.rules.length} rules, ${next.scopes.length} scopes, ${Object.keys(next.vars).length} vars`,
+    );
+    return next;
+  }
+
+  /** The only way a config is written. Resolves to what was stored; rejects with the field-specific error. */
+  const writeConfig = (value: unknown, source: WriteSource, mode: WriteMode): Promise<RawConfig> =>
+    enqueue(() => writeStep(value, source, mode));
+
+  /** Forgets the kept old setting text; runs inside the queue. */
+  async function dropLegacy(): Promise<void> {
+    await bb.storage.kv.delete(LEGACY_KEY);
+    legacy = undefined;
+  }
+
+  /** One-time, best effort: moves the old `rules` setting into kv. Structural checks only. */
+  async function importLegacySetting(): Promise<void> {
+    let text: unknown;
+    try {
+      text = (await bb.sdk.plugins.getSettings({ pluginId: bb.pluginId })).values.rules;
+    } catch (error) {
+      bb.log.debug(`the old rules setting could not be read: ${(error as Error).message}`);
+      return;
+    }
+    if (typeof text !== "string" || text.trim() === "") {
+      bb.log.debug("no old rules setting to import");
+      return;
+    }
+    try {
+      await writeConfig(parseLegacyText(text), "legacy setting", "structural");
+    } catch (error) {
+      const message = (error as Error).message;
+      legacy = { text, error: message };
+      await bb.storage.kv.set(LEGACY_KEY, legacy);
+      bb.log.warn(
+        `the old rules setting was not imported: ${message}; its text is kept (bb model-instructions export --legacy)`,
+      );
+    }
+  }
+
+  loadProfiles();
+  rebuildScopes();
+  legacy = await bb.storage.kv.get<LegacyRecord>(LEGACY_KEY);
+  const stored = await bb.storage.kv.get<unknown>(CONFIG_KEY);
+  if (stored === undefined) await importLegacySetting();
+  else {
+    try {
+      const next = parseRawConfig(stored);
+      adopt(next, expandConfig(next));
+      bb.log.info(`loaded ${config.rules.length} rule(s), ${scopes.length} scope(s)`);
+    } catch (error) {
+      bb.log.warn(`saved config ignored: ${(error as Error).message}`);
+    }
+  }
 
   bb.agents.configure((context) => {
     const role: Role = context.thread.parentThreadId === null ? "top-level" : "child";
@@ -258,6 +333,44 @@ export default async function plugin(bb: BbPluginApi) {
     );
   }
 
+  /** What the settings form shows. Never carries a Claude config dir. */
+  function state(): ConfigState {
+    const snapshot = caches.snapshot();
+    return {
+      config: raw,
+      providers: snapshot.providers.list.map(({ id, models }) => ({ id, models })),
+      projects: snapshot.projects.list.map(({ id, name }) => ({ id, name })),
+      skills: skills
+        .filter((skill) => skill.name !== SELF_SKILL)
+        .map(({ name, description }) => ({ name, description })),
+      profileScopes: profileScopes().map(({ name, paths }) => ({ name, paths })),
+      ignoredScopes,
+      cache: {
+        providers: { loaded: snapshot.providers.loaded, failed: snapshot.providers.failed },
+        projects: { loaded: snapshot.projects.loaded, failed: snapshot.projects.failed },
+      },
+      overBudget: [...overBudget.values()],
+      loadError: legacy === undefined ? null : { message: legacy.error, legacyText: legacy.text },
+    };
+  }
+
+  /** Not discoverable: these methods exist for the settings page, not for agents. */
+  bb.rpc.register(modelInstructionsRpcContract, {
+    async getState() {
+      return state();
+    },
+    async saveConfig({ config: value }) {
+      await writeConfig(value, "form", "full");
+      return state();
+    },
+    dismissLegacy() {
+      return enqueue(async () => {
+        await dropLegacy();
+        return state();
+      });
+    },
+  });
+
   const setupDeps: SetupDeps = {
     home,
     profilesFile: profilesPath,
@@ -273,15 +386,23 @@ export default async function plugin(bb: BbPluginApi) {
     exportFile: path.join(home, ".bb", "dir-skills", "export.json"),
     profilesFile: profilesPath,
     skillNames,
-    getRules: async () => (await settings.get()).rules,
-    setRules: async (json) => {
-      await settings.experimental_set({ rules: json });
+    exclusive: enqueue,
+    current: () => raw,
+    validate(candidate, profileScopes: ProfileScope[]) {
+      try {
+        validate(candidate, "full", {
+          ...checkEnv,
+          scopesFor: (own) => mergeScopes(own, profileScopes).scopes,
+        });
+        return null;
+      } catch (error) {
+        return (error as Error).message;
+      }
     },
-    validate: (json, profileScopes) =>
-      settingProblem(json, {
-        ...settingsEnv,
-        scopesFor: (own) => mergeScopes(own, profileScopes).scopes,
-      }),
+    // Called from inside the import's own queue step, so it must not queue again.
+    async save(candidate) {
+      await writeStep(candidate, "import-dir-skills", "full");
+    },
     reloadProfiles,
     kv: bb.storage.kv,
     log: bb.log,
@@ -317,6 +438,16 @@ export default async function plugin(bb: BbPluginApi) {
         summary: "Import dir-skills scopes, skill claims and pins from ~/.bb/dir-skills",
         usage: "bb model-instructions import-dir-skills [--dry-run] [--json]",
       },
+      {
+        name: "export",
+        summary: "Print the saved config as JSON, or the kept old setting text",
+        usage: "bb model-instructions export [--legacy]",
+      },
+      {
+        name: "import",
+        summary: "Replace the saved config with the config in a JSON file",
+        usage: "bb model-instructions import <file>",
+      },
     ],
     run: (argv, ctx) =>
       runCli(argv, ctx, {
@@ -333,6 +464,16 @@ export default async function plugin(bb: BbPluginApi) {
         profile: profileDeps,
         setup: setupDeps,
         importDirSkills: importDeps,
+        config: {
+          saved: () => raw,
+          legacyText: () => legacy?.text,
+          importConfig: (value) =>
+            enqueue(async () => {
+              const stored = await writeStep(value, "import", "full");
+              await dropLegacy();
+              return stored;
+            }),
+        },
       }),
   });
   // Registered first, so the rules apply at once; the first refresh must not hold them up.

@@ -5,7 +5,8 @@ import { afterAll, describe, expect, it } from "vitest";
 import { snapshotOf } from "./cache-fixture.js";
 import { formatImport, importCommand, type ImportDeps, type ImportReport } from "./import.js";
 import { mergeScopes, readProfiles, type ProfileScope } from "./profiles-file.js";
-import { settingProblem } from "./settings.js";
+import { expandConfig, parseLegacyText, parseRawConfig, type RawConfig } from "./rules.js";
+import { checkConfig } from "./settings.js";
 
 const tmp = realpathSync(mkdtempSync(path.join(tmpdir(), "model-instructions-import-")));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
@@ -44,7 +45,13 @@ function harness(opts: Options = {}) {
     put(files.export, opts.exportData ?? { uiScopes: opts.ui ?? [], pins: opts.pins ?? [] });
   if (opts.profiles !== undefined) put(files.profiles, opts.profiles);
   const kv = new Map<string, unknown>(Object.entries(opts.kv ?? {}));
-  const state = { rules: opts.rules ?? "[]", reloads: 0, sets: [] as string[], logs: [] as string[] };
+  const state = {
+    config: parseLegacyText(opts.rules ?? "[]"),
+    reloads: 0,
+    sets: [] as RawConfig[],
+    steps: 0,
+    logs: [] as string[],
+  };
   const profileScopes = (): ProfileScope[] => {
     const read = readProfiles(files.profiles, home);
     return read.state === "valid" ? read.scopes : [];
@@ -54,22 +61,33 @@ function harness(opts: Options = {}) {
     scopesFor: (own: Parameters<typeof mergeScopes>[0]) => mergeScopes(own, profiles()).scopes,
     caches: () => snapshotOf([["claude-code", ["opus"]]], []),
   });
+  const problemOf = (candidate: RawConfig, profiles: () => ProfileScope[]) => {
+    try {
+      return checkConfig(expandConfig(parseRawConfig(candidate)), env(profiles));
+    } catch (error) {
+      return (error as Error).message;
+    }
+  };
   const deps: ImportDeps = {
     home,
     scopesFile: files.scopes,
     exportFile: files.export,
     profilesFile: files.profiles,
     skillNames: () => SKILLS,
-    getRules: async () => state.rules,
-    async setRules(json) {
-      if (opts.setError !== undefined) throw new Error(opts.setError);
-      // Like the SDK: the save-time check runs against what is loaded now.
-      const problem = settingProblem(json, env(() => profileScopes()));
-      if (problem !== null) throw new Error(problem);
-      state.rules = json;
-      state.sets.push(json);
+    exclusive(step) {
+      state.steps += 1;
+      return step();
     },
-    validate: (json, scopes) => settingProblem(json, env(() => scopes)),
+    current: () => state.config,
+    validate: (candidate, scopes) => problemOf(candidate, () => scopes),
+    async save(candidate) {
+      if (opts.setError !== undefined) throw new Error(opts.setError);
+      // Like the server: the save-time check runs against what is loaded now.
+      const problem = problemOf(candidate, () => profileScopes());
+      if (problem !== null) throw new Error(problem);
+      state.config = parseRawConfig(candidate);
+      state.sets.push(state.config);
+    },
     reloadProfiles() {
       state.reloads += 1;
     },
@@ -178,26 +196,28 @@ describe("the import", () => {
     });
     expect(h.state.reloads).toBe(1);
     expect(h.state.sets).toHaveLength(1);
-    expect(JSON.parse(h.state.rules)).toEqual({
+    expect(h.state.config).toEqual({
       vars: {},
       scopes: [
         { name: "plain", paths: ["~/src/acme"] },
         { name: "ui-only", paths: ["/srv/ui"] },
       ],
       rules: [
-        ...existing,
-        { name: "dir-skills:plain", scope: "plain", skills: ["other"] },
-        { name: "dir-skills:prof", scope: "prof", skills: ["work-*"] },
-        { name: "dir-skills:ui-only", scope: "ui-only", skills: ["work-*", "other"] },
+        ...parseLegacyText(JSON.stringify(existing)).rules,
+        { name: "dir-skills:plain", scope: ["plain"], skills: ["other"], threads: "any" },
+        { name: "dir-skills:prof", scope: ["prof"], skills: ["work-*"], threads: "any" },
+        { name: "dir-skills:ui-only", scope: ["ui-only"], skills: ["work-*", "other"], threads: "any" },
       ],
     });
+    // The whole import ran as one step in the write queue.
+    expect(h.state.steps).toBe(1);
     expect([...h.kv]).toEqual([
       ["claude-config-dir:thr_default", { dir: null, scope: null, reason: "unknown-project" }],
       ["claude-config-dir:thr_prof", { dir: profDir(h), scope: "prof" }],
     ]);
     expect(result.stdout).toContain("import-dir-skills: done");
     expect(result.stdout).toContain("profiles.json (absent before): wrote 1 scope(s): prof");
-    expect(result.stdout).toContain("rules setting: wrote 2 scope(s), 3 rule(s)");
+    expect(result.stdout).toContain("saved config: wrote 2 scope(s), 3 rule(s)");
     expect(result.stdout).toContain("pins: 2 imported, 0 kept, 0 rejected");
     expect(result.stdout).toContain("thr_default: default profile");
     expect(h.state.logs).toContain("import-dir-skills: 2 scope(s), 3 rule(s), 2 pin(s), 1 profile scope(s)");
@@ -212,42 +232,40 @@ describe("the import", () => {
     };
     const h = harness({ rules: JSON.stringify(existing), ui: [scope()] });
     await report(h);
-    expect(JSON.parse(h.state.rules)).toEqual({
+    expect(h.state.config).toEqual({
       vars: existing.vars,
       scopes: [...existing.scopes, { name: "acme", paths: ["~/src/acme"] }],
-      rules: [...existing.rules, { name: "dir-skills:acme", scope: "acme", skills: ["work-*"] }],
+      rules: [
+        { name: "r", scope: ["mine"], instructions: "{{gchat}}", threads: "any" },
+        { name: "dir-skills:acme", scope: ["acme"], skills: ["work-*"], threads: "any" },
+      ],
     });
   });
 
   it("adds a scopes list to an object-form setting that has none", async () => {
     const h = harness({ rules: JSON.stringify({ rules: [GUARD] }), ui: [scope()] });
     await report(h);
-    expect(JSON.parse(h.state.rules)).toEqual({
-      rules: [GUARD, { name: "dir-skills:acme", scope: "acme", skills: ["work-*"] }],
+    expect(h.state.config).toEqual({
+      vars: {},
+      rules: [
+        { ...GUARD, threads: "any" },
+        { name: "dir-skills:acme", scope: ["acme"], skills: ["work-*"], threads: "any" },
+      ],
       scopes: [{ name: "acme", paths: ["~/src/acme"] }],
     });
-  });
-
-  it("refuses an existing setting that does not parse, and writes nothing", async () => {
-    const h = harness({ rules: "{", ui: [scope()], scopes: { scopes: [profiled()] } });
-    const result = await run(h);
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toMatch(/the rules setting does not parse \(not valid JSON[\s\S]*\); fix it first \(nothing was written\)/);
-    expect(existsSync(h.files.profiles)).toBe(false);
-    expect(h.state.sets).toEqual([]);
   });
 
   it("leaves the setting alone and writes no pin or file when there is nothing to add; a second run is a no-op", async () => {
     const h = harness({ rules: "[]", ui: [scope()], pins: [{ threadId: "thr_a", pin: { dir: null, scope: null } }] });
     await report(h);
-    const first = h.state.rules;
+    const first = h.state.config;
     const again = await report(h);
-    expect(h.state.rules).toBe(first);
+    expect(h.state.config).toBe(first);
     expect(h.state.sets).toHaveLength(1);
     expect(again.settingChanged).toBe(false);
     expect(again.pins.kept).toEqual(["thr_a"]);
     expect(again.skipped.map((item) => item.reason)).toEqual([
-      "the rules setting already has a scope with that name",
+      "the saved config already has a scope with that name",
     ]);
   });
 
@@ -257,7 +275,7 @@ describe("the import", () => {
     expect(out.settingChanged).toBe(false);
     expect(h.state.sets).toEqual([]);
     const text = formatImport({ ...out, dryRun: false });
-    expect(text).toContain("rules setting: unchanged");
+    expect(text).toContain("saved config: unchanged");
   });
 });
 
@@ -388,7 +406,7 @@ describe("skill patterns", () => {
     const out = await report(h);
     expect(out.rules).toEqual([]);
     expect(out.settingScopes.map((s) => s.name)).toEqual(["acme", "bare"]);
-    expect(JSON.parse(h.state.rules).rules).toEqual([]);
+    expect(h.state.config.rules).toEqual([]);
   });
 });
 
@@ -402,7 +420,7 @@ describe("collisions", () => {
     expect(out.settingScopes.map((s) => s.name)).toEqual(["fresh"]);
     expect(out.rules.map((r) => r.name)).toEqual(["dir-skills:fresh"]);
     expect(out.skipped).toEqual([
-      { kind: "scope", name: "acme", reason: "the rules setting already has a scope with that name" },
+      { kind: "scope", name: "acme", reason: "the saved config already has a scope with that name" },
     ]);
   });
 
@@ -415,9 +433,9 @@ describe("collisions", () => {
     expect(out.settingScopes.map((s) => s.name)).toEqual(["acme"]);
     expect(out.rules).toEqual([]);
     expect(out.skipped).toEqual([
-      { kind: "rule", name: "dir-skills:acme", reason: "the rules setting already has a rule with that name" },
+      { kind: "rule", name: "dir-skills:acme", reason: "the saved config already has a rule with that name" },
     ]);
-    expect(JSON.parse(h.state.rules).rules[0]).toEqual({ name: "dir-skills:acme", instructions: "mine" });
+    expect(h.state.config.rules[0]).toEqual({ name: "dir-skills:acme", instructions: "mine", threads: "any" });
   });
 
   it("skips a setting scope named like a profile scope that profiles.json has", async () => {
@@ -442,7 +460,7 @@ describe("collisions", () => {
     });
     const result = await run(h);
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toMatch(/the rules setting would be rejected \(nothing was written\):\n  /);
+    expect(result.stderr).toMatch(/the saved config would be rejected \(nothing was written\):\n  /);
     expect(existsSync(h.files.profiles)).toBe(false);
     expect(h.state.sets).toEqual([]);
     expect(h.kv.size).toBe(0);
@@ -478,7 +496,7 @@ describe("profile scopes", () => {
   it("recognise a scope that profiles.json already has (a re-run), and still import its rule", async () => {
     const h = harness({ scopes: { scopes: [profiled()] } });
     await report(h);
-    h.state.rules = "[]";
+    h.state.config = parseLegacyText("[]");
     const again = await report(h);
     expect(again.profileScopes).toEqual([]);
     expect(again.rules).toEqual([{ name: "dir-skills:prof", scope: "prof", skills: ["work-*"] }]);
@@ -536,7 +554,7 @@ describe("profile scopes", () => {
     });
     const result = await run(h);
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("the rules setting was rejected: boom");
+    expect(result.stderr).toContain("the saved config was rejected: boom");
     expect(result.stderr).toContain("profiles.json was written; run again to finish");
     expect(h.kv.size).toBe(0);
     expect(existsSync(h.files.profiles)).toBe(true);
@@ -545,14 +563,14 @@ describe("profile scopes", () => {
   it("report a rejected setting write with nothing written when there was no profile scope", async () => {
     const h = harness({ ui: [scope()], setError: "rejected" });
     const result = await run(h);
-    expect(result.stderr).toBe("import-dir-skills: the rules setting was rejected: rejected\nnothing was written\n");
-    const text = await importCommand({ ...h.deps, setRules: async () => { throw "plain"; } }, [], false);
+    expect(result.stderr).toBe("import-dir-skills: the saved config was rejected: rejected\nnothing was written\n");
+    const text = await importCommand({ ...h.deps, save: async () => { throw "plain"; } }, [], false);
     expect(text.stderr).toContain("was rejected: plain");
   });
 
   it("rethrow an error that is not an import failure", async () => {
     const h = harness({ ui: [scope()] });
-    await expect(importCommand({ ...h.deps, getRules: async () => { throw new Error("storage down"); } }, [], false)).rejects.toThrow("storage down");
+    await expect(importCommand({ ...h.deps, current: () => { throw new Error("storage down"); } }, [], false)).rejects.toThrow("storage down");
   });
 });
 
@@ -619,17 +637,17 @@ describe("--dry-run", () => {
       ui: [scope({ name: "ui" })],
       pins: [{ threadId: "thr_1", pin: { dir: null, scope: null } }],
     });
-    const before = h.state.rules;
+    const before = h.state.config;
     const result = await run(h, ["--dry-run"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("import-dir-skills (dry run): nothing is written");
     expect(result.stdout).toContain("profiles.json (absent before): would write 1 scope(s): prof");
-    expect(result.stdout).toContain("rules setting: would write 2 scope(s), 3 rule(s)");
+    expect(result.stdout).toContain("saved config: would write 2 scope(s), 3 rule(s)");
     expect(result.stdout).toContain("pins: 1 to import, 0 kept, 0 rejected");
     expect(result.stdout).not.toContain("needs `bb model-instructions unpin");
     expect(existsSync(h.files.profiles)).toBe(false);
     expect(readdirSync(path.dirname(h.files.scopes)).sort()).toEqual(["export.json", "scopes.json"]);
-    expect(h.state.rules).toBe(before);
+    expect(h.state.config).toBe(before);
     expect(h.state.sets).toEqual([]);
     expect(h.state.reloads).toBe(0);
     expect(h.kv.size).toBe(0);
@@ -646,7 +664,9 @@ describe("--dry-run", () => {
   });
 
   it("still validates: a setting that would be rejected fails the dry run too", async () => {
-    const h = harness({ rules: "{", ui: [scope()] });
-    expect((await run(h, ["--dry-run"])).exitCode).toBe(1);
+    const h = harness({ rules: JSON.stringify([{ scope: "nowhere", instructions: "x" }]), ui: [scope()] });
+    const result = await run(h, ["--dry-run"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('rules[0]: scope "nowhere" matches no defined scope');
   });
 });

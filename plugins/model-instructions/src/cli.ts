@@ -1,3 +1,6 @@
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
+import path from "node:path";
 import type { BbPluginApi, PluginCliContext, PluginCliResult } from "@get-bb/plugin-sdk";
 import {
   budgetReport,
@@ -30,6 +33,7 @@ import {
   ruleLabel,
   SELF_SKILL,
   unresolvedRefs,
+  type RawConfig,
   type Rule,
 } from "./rules.js";
 import { setupCommand, type SetupDeps } from "./setup.js";
@@ -57,6 +61,16 @@ export interface OverflowEvent {
 /** The slice of `bb.sdk.threads` the check command reads, typed by the SDK itself. */
 export type ThreadLookup = Pick<BbPluginApi["sdk"]["threads"], "get" | "defaultExecutionOptions">;
 
+/** The saved config, as `export` and `import` see it. */
+export interface ConfigCli {
+  /** The saved config as stored. */
+  saved(): RawConfig;
+  /** The old setting text kept after a failed import, or undefined when none is kept. */
+  legacyText(): string | undefined;
+  /** Validates and saves a config value (full checks), drops the kept old text, and returns what was stored. Throws the field-specific error. */
+  importConfig(value: unknown): Promise<RawConfig>;
+}
+
 export interface CliDeps {
   rules(): Rule[];
   scopes(): Scope[];
@@ -68,15 +82,16 @@ export interface CliDeps {
   profiles(): ProfilesState;
   /** Where profiles.json is read from. */
   profilesFile: string;
-  /** Names of setting scopes left out because a profile scope has the same name. */
+  /** Names of saved scopes left out because a profile scope has the same name. */
   ignoredSettingScopes(): string[];
   profile: ClaudeProfileDeps;
   setup: SetupDeps;
   importDirSkills: ImportDeps;
+  config: ConfigCli;
 }
 
 export const USAGE =
-  "bb model-instructions status [--json] | check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json] | setup [--dry-run] [--json] | unpin [<thread-id>] | import-dir-skills [--dry-run] [--json]";
+  "bb model-instructions status [--json] | check [--provider P] [--model M] [--child | --top-level] [--project <id>] [--path <dir>] [--title T] [--json] | check --all [--json] | setup [--dry-run] [--json] | unpin [<thread-id>] | import-dir-skills [--dry-run] [--json] | export [--legacy] | import <file>";
 
 const out = (value: unknown): PluginCliResult => ({
   exitCode: 0,
@@ -447,6 +462,71 @@ async function check(
   return { exitCode: 0, stdout: lines.join("\n") + "\n" };
 }
 
+/** `import` reads at most this many bytes, so a huge file cannot grow the server. */
+const IMPORT_LIMIT_BYTES = 1024 * 1024;
+
+type FileText = { text: string } | { error: string };
+
+/** The text of a regular file of at most 1 MiB. Never waits on a FIFO or reads a special file. */
+async function readImportFile(file: string): Promise<FileText> {
+  try {
+    // O_NONBLOCK: opening a FIFO must not wait for a writer. The type is checked on the open handle, so it cannot change after the check.
+    const handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      if (!(await handle.stat()).isFile()) return { error: `import: ${file} is not a regular file` };
+      const chunks: Buffer[] = [];
+      // `end` is inclusive: one byte past the limit is enough to know the file is too large.
+      for await (const chunk of handle.createReadStream({ start: 0, end: IMPORT_LIMIT_BYTES, autoClose: false }))
+        chunks.push(chunk as Buffer);
+      const bytes = Buffer.concat(chunks);
+      if (bytes.length > IMPORT_LIMIT_BYTES) return { error: `import: ${file} is larger than 1 MiB` };
+      return { text: bytes.toString("utf8") };
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    return { error: `import: could not read ${file}: ${(error as Error).message}` };
+  }
+}
+
+function exportConfig(config: ConfigCli, args: string[]): PluginCliResult {
+  const extra = args.filter((arg) => arg !== "--legacy");
+  if (extra.length > 0) return usageError(`export: unknown argument "${extra[0]}"`);
+  if (!args.includes("--legacy")) return out(config.saved());
+  const text = config.legacyText();
+  return text === undefined
+    ? { exitCode: 1, stderr: "export: no old setting text is kept\n" }
+    : { exitCode: 0, stdout: text };
+}
+
+async function importConfigFile(args: string[], ctx: PluginCliContext, config: ConfigCli): Promise<PluginCliResult> {
+  if (args.length !== 1) return usageError("import: give one file path");
+  let [file] = args;
+  if (!path.isAbsolute(file)) {
+    if (ctx.cwd === undefined)
+      return usageError(`import: ${file} is a relative path and no working directory is known; give an absolute path`);
+    file = path.resolve(ctx.cwd, file);
+  }
+  const read = await readImportFile(file);
+  if ("error" in read) return { exitCode: 1, stderr: read.error + "\n" };
+  let value: unknown;
+  try {
+    value = JSON.parse(read.text);
+  } catch {
+    // The parse error would quote the file's text, so it is not repeated.
+    return { exitCode: 1, stderr: `import: ${file}: not valid JSON\n` };
+  }
+  try {
+    const saved = await config.importConfig(value);
+    return {
+      exitCode: 0,
+      stdout: `imported ${file}: ${saved.rules.length} rules, ${saved.scopes.length} scopes, ${Object.keys(saved.vars).length} vars\n`,
+    };
+  } catch (error) {
+    return { exitCode: 1, stderr: `import: ${(error as Error).message}\n` };
+  }
+}
+
 export async function runCli(
   argv: string[],
   ctx: PluginCliContext,
@@ -464,6 +544,8 @@ export async function runCli(
       rest.includes("--json"),
     );
   }
+  if (command === "export") return exportConfig(deps.config, rest);
+  if (command === "import") return importConfigFile(rest, ctx, deps.config);
   if (command === "status") {
     const json = rest.includes("--json");
     const extra = rest.filter((arg) => arg !== "--json");
