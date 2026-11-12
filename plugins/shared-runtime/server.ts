@@ -12,7 +12,6 @@ import {
   buildAgentConfiguration,
   buildAgentInstructions,
   rehydrateAgentContext,
-  RUNTIME_TOOL_ALIASES,
 } from "./src/configuration.mjs";
 import { readProjectThread } from "./src/thread-read.mjs";
 import { readPluginResource } from "./src/plugin-resource.mjs";
@@ -29,14 +28,6 @@ type ThreadContext = {
 };
 
 type AgentTool = Parameters<BbPluginApi["agents"]["registerTool"]>[0];
-
-function registerRuntimeTool(bb: BbPluginApi, tool: AgentTool): void {
-  bb.agents.registerTool(tool);
-  const alias = RUNTIME_TOOL_ALIASES[tool.name as keyof typeof RUNTIME_TOOL_ALIASES];
-  if (alias) {
-    bb.agents.registerTool({ ...tool, name: alias });
-  }
-}
 
 type Presentation = NonNullable<AgentTool["presentation"]>;
 
@@ -85,7 +76,7 @@ export default async function plugin(bb: BbPluginApi) {
     return { policy, workspace: await resolveWorkspace(policy, context) };
   }
 
-  registerRuntimeTool(bb, {
+  bb.agents.registerTool({
     name: "runtime_container",
     description:
       "Run one named test, lint, static-analysis, formatting, or isolation operation declared by the current project's .bb-runtime.json inside its shared container stack.",
@@ -133,7 +124,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  registerRuntimeTool(bb, {
+  bb.agents.registerTool({
     name: "runtime_search",
     description:
       "Search literal text in the current authorized checkout with a workspace-confined ripgrep invocation.",
@@ -152,7 +143,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  registerRuntimeTool(bb, {
+  bb.agents.registerTool({
     name: "runtime_thread",
     description:
       "Read bounded metadata and the latest assistant output from one same-project BB thread without invoking the host BB CLI.",
@@ -172,7 +163,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  registerRuntimeTool(bb, {
+  bb.agents.registerTool({
     name: "runtime_skill_resource",
     description:
       "Read one bounded UTF-8 resource from an installed agent skill, including agent-wide plugin skills outside the checkout.",
@@ -193,9 +184,8 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  registerRuntimeTool(bb, buildRuntimeGitTool({ workspaceFor }));
-  registerRuntimeTool(
-    bb,
+  bb.agents.registerTool(buildRuntimeGitTool({ workspaceFor }));
+  bb.agents.registerTool(
     buildRuntimeOpsTool({
       workspaceFor,
       // Unreachable arrow: the ops tool deliberately ignores this callback

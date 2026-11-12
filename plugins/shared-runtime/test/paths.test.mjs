@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { buildGitInvocation, buildSearchInvocation, executeSearch } from "../src/runtime.mjs";
 
-const WORKSPACE = "/workspace/platform";
+const WORKSPACE = "/workspace/example";
 const ROOT_FORMS = [".", "./", ".//", "a/..", "a/../", "./.", "././", ".\\", "a\\..\\"];
 
 function addPaths(paths) {
@@ -23,7 +23,7 @@ function searchPath(value) {
 test("relative paths are accepted and normalized", () => {
   const cases = [
     ["a", "a"],
-    ["src/go/a.go", "src/go/a.go"],
+    ["src/worker/a.go", "src/worker/a.go"],
     ["./a", "a"],
     ["a//b", "a/b"],
     ["a/./b", "a/b"],
@@ -67,7 +67,7 @@ test("search maps every workspace-root form to dot", () => {
 });
 
 test("absolute paths are rejected for add and search", () => {
-  const absolutes = ["/etc/passwd", "/", "/workspace/platform/a", "\\", "\\etc\\passwd", "\\\\server\\share"];
+  const absolutes = ["/etc/passwd", "/", "/workspace/example/a", "\\", "\\etc\\passwd", "\\\\server\\share"];
   for (const value of absolutes) {
     assert.throws(() => addPaths([value]), /relative and may not be an option/, value);
     assert.throws(() => searchPath(value), /relative and may not be an option/, value);

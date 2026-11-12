@@ -45,7 +45,7 @@ import { assertAbsoluteContainerPath } from "../src/manifest-primitives.mjs";
 import { manifestDigest, validateManifest } from "../src/manifest.mjs";
 
 const fixtureManifestPath = new URL(
-  "./fixtures/platform.bb-runtime.json",
+  "./fixtures/example.bb-runtime.json",
   import.meta.url,
 );
 const fixtureManifestContent = readFileSync(fixtureManifestPath);
@@ -56,16 +56,16 @@ const manifest = validateManifest(
 
 function basePolicy(overrides = {}) {
   return {
-    projectId: "proj_platform",
+    projectId: "proj_example",
     trustedHostId: "host_vairogs",
-    primaryRoot: "/workspace/platform",
+    primaryRoot: "/workspace/example",
     worktreeRoot: "/bb/worktrees",
-    worktreeDirectoryName: "platform",
-    gitCommonDir: "/workspace/platform/.git",
+    worktreeDirectoryName: "example",
+    gitCommonDir: "/workspace/example/.git",
     containers: {
-      go: "pform_dev_tracigo_go",
-      sveltekit: "pform_dev_sveltekit",
-      symfony: "pform_dev_zts",
+      worker: "example_dev_worker",
+      web: "example_dev_web",
+      api: "example_dev_api",
     },
     dockerPath: "/usr/local/bin/docker",
     manifestSha256: fixtureManifestDigest,
@@ -80,9 +80,9 @@ function basePolicy(overrides = {}) {
 function baseWorkspace(overrides = {}) {
   return {
     branchName: "bb/example",
-    containerRoot: "/bb-worktrees/env_abc123/platform",
+    containerRoot: "/bb-worktrees/env_abc123/example",
     environmentId: "env_abc123",
-    hostRoot: "/bb/worktrees/env_abc123/platform",
+    hostRoot: "/bb/worktrees/env_abc123/example",
     kind: "managed-worktree",
     ...overrides,
   };
@@ -93,24 +93,24 @@ const memoryLocks = () => ({ lockAdapter: new Map() });
 
 test("workspace validation denies primary provision, unmanaged, and stray worktrees", () => {
   const policy = basePolicy();
-  const resolvedGitCommonDir = "/workspace/platform/.git";
+  const resolvedGitCommonDir = "/workspace/example/.git";
   for (const [contextOverrides, resolvedEnvironmentPath, expected] of [
     [
       {
         environmentId: "env_primary",
-        environmentPath: "/workspace/platform",
+        environmentPath: "/workspace/example",
         workspaceProvisionType: "managed-worktree",
       },
-      "/workspace/platform",
+      "/workspace/example",
       /invalid provision type/,
     ],
     [
       {
         environmentId: "env_abc123",
-        environmentPath: "/bb/worktrees/env_abc123/platform",
+        environmentPath: "/bb/worktrees/env_abc123/example",
         workspaceProvisionType: "unmanaged",
       },
-      "/bb/worktrees/env_abc123/platform",
+      "/bb/worktrees/env_abc123/example",
       /not a managed worktree/,
     ],
     [
@@ -128,7 +128,7 @@ test("workspace validation denies primary provision, unmanaged, and stray worktr
         validateWorkspace({
           policy,
           context: {
-            projectId: "proj_platform",
+            projectId: "proj_example",
             hostId: "host_vairogs",
             ...contextOverrides,
           },
@@ -144,7 +144,7 @@ test("container roles without an installed name are denied at plan time", () => 
   const policy = basePolicy();
   assert.throws(
     () => buildContainerPlan({ ...policy, containers: {} }, baseWorkspace(), "go_vet"),
-    /container role "go" is not installed/,
+    /container role "worker" is not installed/,
   );
   const smallManifest = validateManifest({
     version: 1,
@@ -165,12 +165,12 @@ test("primary-only paths resolve through mounts and refuse unmounted escapes", (
   const policy = basePolicy();
   const primaryWorkspace = { ...baseWorkspace(), containerRoot: null };
   assert.equal(
-    containerPathFor(policy, primaryWorkspace, "go", "src/go/main.go"),
-    "/app/src/go/main.go",
+    containerPathFor(policy, primaryWorkspace, "worker", "src/worker/main.go"),
+    "/app/src/worker/main.go",
   );
   for (const hostPath of ["/etc/passwd", "/bb/worktrees"]) {
     assert.throws(
-      () => hostPathInContainer(policy, hostPath, "go"),
+      () => hostPathInContainer(policy, hostPath, "worker"),
       /Shared runtime denied/,
       hostPath,
     );
@@ -189,7 +189,7 @@ test("primary-only paths resolve through mounts and refuse unmounted escapes", (
     () =>
       hostPathInContainer(
         basePolicy({ manifest: smallManifest }),
-        "/workspace/platform/unmounted/file",
+        "/workspace/example/unmounted/file",
         "app",
       ),
     /is not mounted in container app/,
@@ -207,7 +207,7 @@ test("targets are validated before a plan is built", () => {
     [42, /target is invalid/],
   ]) {
     assert.throws(
-      () => buildContainerPlan(policy, workspace, "symfony_unit", { target }),
+      () => buildContainerPlan(policy, workspace, "api_unit", { target }),
       expected,
       JSON.stringify(target),
     );
@@ -391,7 +391,7 @@ test("runtime status surfaces reload status read failures other than ENOENT", as
 test("runtime logs report an empty compose project without container reads", async () => {
   const runs = [];
   const results = await executeRuntimeOperation(
-    basePolicy({ composeProject: "pform_dev" }),
+    basePolicy({ composeProject: "example_dev" }),
     baseWorkspace(),
     "logs",
     {
@@ -456,7 +456,7 @@ test("thread reads deny oversized metadata and invalid output payloads", async (
     async get() {
       return {
         id: "thr_big",
-        projectId: "proj_platform",
+        projectId: "proj_example",
         visibility: "visible",
         title: hugeTitle,
       };
@@ -484,7 +484,7 @@ test("thread reads deny oversized metadata and invalid output payloads", async (
       {
         threads: {
           async get() {
-            return { id: "thr_type", projectId: "proj_platform", visibility: "visible" };
+            return { id: "thr_type", projectId: "proj_example", visibility: "visible" };
           },
           async output() {
             return { output: 42 };
@@ -505,7 +505,7 @@ test("thread reads truncate long plain output at the byte limit", async () => {
     {
       threads: {
         async get() {
-          return { id: "thr_long", projectId: "proj_platform", visibility: "visible" };
+          return { id: "thr_long", projectId: "proj_example", visibility: "visible" };
         },
         async output() {
           return { output };
@@ -530,7 +530,7 @@ test("agent instructions truncate to the hard limit", () => {
 
 test("agent context rehydration denies lookup failures and incomplete threads", async () => {
   const policy = basePolicy();
-  const registry = { policyFor: (id) => (id === "proj_platform" ? policy : null) };
+  const registry = { policyFor: (id) => (id === "proj_example" ? policy : null) };
   assert.equal(
     await rehydrateAgentContext(
       registry,
@@ -565,7 +565,7 @@ test("agent context rehydration denies lookup failures and incomplete threads", 
       {
         threads: {
           async get() {
-            return { projectId: "proj_platform", environmentId: "env_abc123" };
+            return { projectId: "proj_example", environmentId: "env_abc123" };
           },
         },
         environments: {
@@ -757,7 +757,7 @@ test("agent instructions fall back through the project label chain", () => {
   const withoutName = buildAgentInstructions(
     basePolicy({ manifest: { operations: {}, lifecycle: {} } }),
   );
-  assert.match(withoutName, /^This platform thread /);
+  assert.match(withoutName, /^This example thread /);
   const withoutAnything = buildAgentInstructions(
     basePolicy({ manifest: undefined, worktreeDirectoryName: undefined }),
   );
@@ -766,13 +766,13 @@ test("agent instructions fall back through the project label chain", () => {
 
 test("agent configuration denies contexts without a project", () => {
   const policy = basePolicy();
-  const registry = { policyFor: (id) => (id === "proj_platform" ? policy : null) };
+  const registry = { policyFor: (id) => (id === "proj_example" ? policy : null) };
   const denied = buildAgentConfiguration(registry, {
     thread: { id: "thr_noproj" },
     host: { id: "host_vairogs" },
     environment: {
       id: "env_abc123",
-      path: "/bb/worktrees/env_abc123/platform",
+      path: "/bb/worktrees/env_abc123/example",
       workspaceProvisionType: "managed-worktree",
       branchName: "bb/example",
     },
@@ -783,16 +783,16 @@ test("agent configuration denies contexts without a project", () => {
 test("a root mount resolves the primary root itself to the mount point", () => {
   const policy = basePolicy();
   const primaryWorkspace = { ...baseWorkspace(), containerRoot: null };
-  assert.equal(containerPathFor(policy, primaryWorkspace, "go", "."), "/app");
+  assert.equal(containerPathFor(policy, primaryWorkspace, "worker", "."), "/app");
   assert.equal(
-    hostPathInContainer(policy, path.posix.join(policy.primaryRoot, "src/sveltekit"), "sveltekit"),
+    hostPathInContainer(policy, path.posix.join(policy.primaryRoot, "src/web"), "web"),
     "/app",
   );
   assert.equal(
     hostPathInContainer(
       policy,
-      path.posix.join(policy.primaryRoot, "src/sveltekit/packages/api-client"),
-      "sveltekit",
+      path.posix.join(policy.primaryRoot, "src/web/packages/api-client"),
+      "web",
     ),
     "/app/packages/api-client",
   );

@@ -49,7 +49,6 @@ import {
   buildAgentConfiguration,
   buildAgentInstructions,
   rehydrateAgentContext,
-  RUNTIME_TOOL_ALIASES,
 } from "../src/configuration.mjs";
 import { readPluginResource } from "../src/plugin-resource.mjs";
 import { buildRuntimeGitTool, gitOperations } from "../src/git-tool.mjs";
@@ -74,7 +73,7 @@ import {
 } from "../src/registry.mjs";
 
 const fixtureManifestPath = new URL(
-  "./fixtures/platform.bb-runtime.json",
+  "./fixtures/example.bb-runtime.json",
   import.meta.url,
 );
 const fixtureManifestContent = readFileSync(fixtureManifestPath);
@@ -82,27 +81,18 @@ const fixtureManifestDigest = manifestDigest(fixtureManifestContent);
 const manifest = validateManifest(
   JSON.parse(fixtureManifestContent.toString("utf8")),
 );
-const productionManifestPath = new URL(
-  "../manifests/platform.bb-runtime.json",
-  import.meta.url,
-);
-const productionManifestContent = readFileSync(productionManifestPath);
-const productionManifestDigest = manifestDigest(productionManifestContent);
-const productionManifest = validateManifest(
-  JSON.parse(productionManifestContent.toString("utf8")),
-);
 
 const policy = Object.freeze({
-  projectId: "proj_platform",
+  projectId: "proj_example",
   trustedHostId: "host_vairogs",
-  primaryRoot: "/workspace/platform",
+  primaryRoot: "/workspace/example",
   worktreeRoot: "/bb/worktrees",
-  worktreeDirectoryName: "platform",
-  gitCommonDir: "/workspace/platform/.git",
+  worktreeDirectoryName: "example",
+  gitCommonDir: "/workspace/example/.git",
   containers: Object.freeze({
-    go: "pform_dev_tracigo_go",
-    sveltekit: "pform_dev_sveltekit",
-    symfony: "pform_dev_zts",
+    worker: "example_dev_worker",
+    web: "example_dev_web",
+    api: "example_dev_api",
   }),
   dockerPath: "/usr/local/bin/docker",
   manifestSha256: fixtureManifestDigest,
@@ -111,13 +101,6 @@ const policy = Object.freeze({
   manifestStale: false,
   manifestError: null,
 });
-const productionPolicy = Object.freeze({
-  ...policy,
-  manifestSha256: productionManifestDigest,
-  manifest: productionManifest,
-  manifestDigest: productionManifestDigest,
-});
-
 function registryFor(...policies) {
   const map = new Map(policies.map((entry) => [entry.projectId, entry]));
   return { policyFor: (id) => map.get(id) ?? null };
@@ -375,13 +358,13 @@ function isolatedArgs(
     container,
     launcher,
     "--workspace",
-    "/bb-worktrees/env_abc123/platform",
+    "/bb-worktrees/env_abc123/example",
     "--scratch",
     "/var/tmp/bb-runtime-go-cache-env_abc123",
     "--scratch",
     "/var/tmp/bb-runtime-go-mod-env_abc123",
     "--scratch",
-    "/var/tmp/bb-runtime-ttsc-cache-env_abc123",
+    "/var/tmp/bb-runtime-web-cache-env_abc123",
     "--scratch",
     "/tmp/bb-runtime-env_abc123",
     "--scratch",
@@ -396,10 +379,10 @@ function isolatedArgs(
 
 function context(overrides = {}) {
   return {
-    projectId: "proj_platform",
+    projectId: "proj_example",
     hostId: "host_vairogs",
     environmentId: "env_abc123",
-    environmentPath: "/bb/worktrees/env_abc123/platform",
+    environmentPath: "/bb/worktrees/env_abc123/example",
     workspaceProvisionType: "managed-worktree",
     branchName: "bb/example",
     ...overrides,
@@ -411,14 +394,14 @@ test("maps one direct BB worktree into the shared container mount", () => {
     validateWorkspace({
       policy,
       context: context(),
-      resolvedEnvironmentPath: "/bb/worktrees/env_abc123/platform",
-      resolvedGitCommonDir: "/workspace/platform/.git",
+      resolvedEnvironmentPath: "/bb/worktrees/env_abc123/example",
+      resolvedGitCommonDir: "/workspace/example/.git",
     }),
     {
       branchName: "bb/example",
-      containerRoot: "/bb-worktrees/env_abc123/platform",
+      containerRoot: "/bb-worktrees/env_abc123/example",
       environmentId: "env_abc123",
-      hostRoot: "/bb/worktrees/env_abc123/platform",
+      hostRoot: "/bb/worktrees/env_abc123/example",
       kind: "managed-worktree",
     },
   );
@@ -429,16 +412,16 @@ test("maps the primary checkout without pretending it is a worktree", () => {
     policy,
     context: context({
       environmentId: "env_primary",
-      environmentPath: "/workspace/platform",
+      environmentPath: "/workspace/example",
       workspaceProvisionType: "unmanaged",
       branchName: "master",
     }),
-    resolvedEnvironmentPath: "/workspace/platform",
-    resolvedGitCommonDir: "/workspace/platform/.git",
+    resolvedEnvironmentPath: "/workspace/example",
+    resolvedGitCommonDir: "/workspace/example/.git",
   });
   assert.equal(workspace.containerRoot, null);
   assert.throws(
-    () => buildContainerPlan(policy, workspace, "svelte_format"),
+    () => buildContainerPlan(policy, workspace, "web_format"),
     /isolated managed worktree/i,
   );
 });
@@ -447,38 +430,38 @@ for (const [name, overrides, resolvedPath, commonDir] of [
   [
     "wrong project",
     { projectId: "proj_other" },
-    "/bb/worktrees/env_abc123/platform",
-    "/workspace/platform/.git",
+    "/bb/worktrees/env_abc123/example",
+    "/workspace/example/.git",
   ],
   [
     "wrong host",
     { hostId: "host_other" },
-    "/bb/worktrees/env_abc123/platform",
-    "/workspace/platform/.git",
+    "/bb/worktrees/env_abc123/example",
+    "/workspace/example/.git",
   ],
   [
     "missing environment",
     { environmentPath: null },
     "",
-    "/workspace/platform/.git",
+    "/workspace/example/.git",
   ],
   [
     "nested checkout",
     {},
-    "/bb/worktrees/env_abc123/platform/nested",
-    "/workspace/platform/.git",
+    "/bb/worktrees/env_abc123/example/nested",
+    "/workspace/example/.git",
   ],
   [
     "sibling checkout",
     {},
-    "/bb/worktrees/env_other/platform",
-    "/workspace/platform/.git",
+    "/bb/worktrees/env_other/example",
+    "/workspace/example/.git",
   ],
-  ["symlink escape", {}, "/private/tmp/platform", "/workspace/platform/.git"],
+  ["symlink escape", {}, "/private/tmp/example", "/workspace/example/.git"],
   [
     "foreign repository",
     {},
-    "/bb/worktrees/env_abc123/platform",
+    "/bb/worktrees/env_abc123/example",
     "/private/tmp/other/.git",
   ],
 ]) {
@@ -500,16 +483,16 @@ test("builds only fixed Docker exec plans", () => {
   const workspace = validateWorkspace({
     policy,
     context: context(),
-    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/platform",
-    resolvedGitCommonDir: "/workspace/platform/.git",
+    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/example",
+    resolvedGitCommonDir: "/workspace/example/.git",
   });
-  assert.deepEqual(buildContainerPlan(policy, workspace, "symfony_tests"), [
+  assert.deepEqual(buildContainerPlan(policy, workspace, "api_tests"), [
     {
       command: "/usr/local/bin/docker",
       args: isolatedArgs(
-        "/bb-worktrees/env_abc123/platform/src/symfony",
-        "pform_dev_zts",
-        "/workspace/platform/.bb-runtime/landlock-run",
+        "/bb-worktrees/env_abc123/example/src/api",
+        "example_dev_api",
+        "/workspace/example/.bb-runtime/landlock-run",
         "bin/run-all",
         [],
         { TEST_TOKEN: "_env_abc123" },
@@ -518,18 +501,18 @@ test("builds only fixed Docker exec plans", () => {
     },
   ]);
   assert.deepEqual(
-    buildContainerPlan(policy, workspace, "symfony_unit", {
-      target: "valksor/src/Valksor/Component/Redis",
+    buildContainerPlan(policy, workspace, "api_unit", {
+      target: "example/src/Example/Component/Redis",
     }),
     [
       {
         command: "/usr/local/bin/docker",
         args: isolatedArgs(
-          "/bb-worktrees/env_abc123/platform/src/symfony",
-          "pform_dev_zts",
-          "/workspace/platform/.bb-runtime/landlock-run",
+          "/bb-worktrees/env_abc123/example/src/api",
+          "example_dev_api",
+          "/workspace/example/.bb-runtime/landlock-run",
           "bin/unit",
-          ["valksor/src/Valksor/Component/Redis"],
+          ["example/src/Example/Component/Redis"],
           { TEST_TOKEN: "_env_abc123" },
         ),
         rejectNonEmptyStdout: false,
@@ -537,75 +520,56 @@ test("builds only fixed Docker exec plans", () => {
     ],
   );
   assert.throws(
-    () => buildContainerPlan(policy, workspace, "symfony_unit"),
-    /symfony_unit requires a target/i,
+    () => buildContainerPlan(policy, workspace, "api_unit"),
+    /api_unit requires a target/i,
   );
   assert.throws(
     () =>
-      buildContainerPlan(policy, workspace, "symfony_unit", {
-        target: "../primary/src/symfony",
+      buildContainerPlan(policy, workspace, "api_unit", {
+        target: "../primary/src/api",
       }),
     /target does not match/i,
   );
   assert.throws(
     () =>
-      buildContainerPlan(policy, workspace, "go_tests", { target: "valksor" }),
+      buildContainerPlan(policy, workspace, "go_tests", { target: "example" }),
     /go_tests target must be one of/i,
   );
   assert.deepEqual(
     buildContainerPlan(policy, workspace, "go_tests", {
-      target: "tracigo_timeline_context_postgres",
+      target: "timeline_postgres",
     }),
     [
       {
         command: "/bin/bash",
         args: [
-          "/workspace/platform/scripts/test-tracigo-integration-postgres.sh",
+          "/workspace/example/scripts/test-integration.sh",
         ],
-        containers: ["go", "symfony"],
-        cwd: "/bb/worktrees/env_abc123/platform",
+        containers: ["worker", "api"],
+        cwd: "/bb/worktrees/env_abc123/example",
         environment: {
-          PRODUCT_E2E_DOCKER_BIN: "/usr/local/bin/docker",
-          PRODUCT_E2E_GO_CACHE: "/var/tmp/bb-runtime-go-cache-env_abc123",
-          PRODUCT_E2E_GO_ISOLATION_LAUNCHER: "/app/.bb-runtime/landlock-run",
-          PRODUCT_E2E_GO_WORKDIR: "/bb-worktrees/env_abc123/platform/src/go",
-          PRODUCT_E2E_ISOLATION_WORKSPACE: "/bb-worktrees/env_abc123/platform",
-          PRODUCT_E2E_ROOT: "/bb/worktrees/env_abc123/platform",
-          PRODUCT_E2E_TMP: "/tmp/bb-runtime-env_abc123",
-          PRODUCT_E2E_ZTS_ISOLATION_LAUNCHER:
-            "/workspace/platform/.bb-runtime/landlock-run",
-          PRODUCT_E2E_ZTS_WORKDIR:
-            "/bb-worktrees/env_abc123/platform/src/symfony",
-          TRACIGO_IT_PACKAGES:
-            "./apps/tracigo.com/internal/features/content/narrativetimeline",
-          TRACIGO_IT_PARALLEL: "1",
-          TRACIGO_IT_RUN: "^TestListContextEvents",
-          TRACIGO_IT_TIMEOUT: "120s",
+          EXAMPLE_E2E_API_ISOLATION_LAUNCHER:
+            "/workspace/example/.bb-runtime/landlock-run",
+          EXAMPLE_E2E_API_WORKDIR:
+            "/bb-worktrees/env_abc123/example/src/api",
+          EXAMPLE_E2E_DOCKER_BIN: "/usr/local/bin/docker",
+          EXAMPLE_E2E_ISOLATION_WORKSPACE: "/bb-worktrees/env_abc123/example",
+          EXAMPLE_E2E_ROOT: "/bb/worktrees/env_abc123/example",
+          EXAMPLE_E2E_TMP: "/tmp/bb-runtime-env_abc123",
+          EXAMPLE_E2E_WORKER_CACHE: "/var/tmp/bb-runtime-go-cache-env_abc123",
+          EXAMPLE_E2E_WORKER_ISOLATION_LAUNCHER: "/app/.bb-runtime/landlock-run",
+          EXAMPLE_E2E_WORKER_WORKDIR:
+            "/bb-worktrees/env_abc123/example/src/worker",
+          EXAMPLE_IT_PACKAGES: "./internal/features/orders/timeline",
+          EXAMPLE_IT_PARALLEL: "1",
+          EXAMPLE_IT_RUN: "^TestListEvents",
+          EXAMPLE_IT_TIMEOUT: "120s",
+          // ${envSlug} turns the environment id's underscores into dashes.
+          EXAMPLE_REDIS_TEST_PREFIX: "bb:env-abc123:timeline:v1",
         },
         rejectNonEmptyStdout: false,
       },
     ],
-  );
-  const [postgresPlan] = buildContainerPlan(
-    productionPolicy,
-    workspace,
-    "go_tests",
-    {
-      target: "tracigo_write_through_postgres",
-    },
-  );
-  assert.deepEqual(postgresPlan.containers, ["go", "symfony"]);
-  assert.equal(
-    postgresPlan.environment.TRACIGO_IT_PACKAGES,
-    "./apps/tracigo.com/internal/server ./apps/tracigo.com/internal/writethrough/publication ./apps/tracigo.com/internal/writethrough/reconcile ./apps/tracigo.com/internal/writethrough/typedrepo ./apps/tracigo.com/internal/features/platform/cachepublications ./apps/tracigo.com/internal/features/knowledge/core",
-  );
-  assert.equal(
-    postgresPlan.environment.TRACIGO_IT_RUN,
-    "^(TestExecute|TestWriteThrough|TestPostgres|TestRepositoryReadInsideProjectTransaction|TestRepositoryWriteInsideProjectTransaction|TestFactoryRefusesKeyRetirement|TestPublicationSetMigration|TestReconciliationMigration)",
-  );
-  assert.equal(
-    postgresPlan.environment.TRACIGO_REDIS_TEST_PREFIX,
-    "bb:env-abc123:write-through:v2",
   );
   assert.throws(
     () => buildContainerPlan(policy, workspace, "docker_run"),
@@ -624,11 +588,11 @@ test("builds only fixed Docker exec plans", () => {
   assert.deepEqual(
     shellSyntaxPlan.map((invocation) => invocation.args.at(-1)),
     [
-      "scripts/dev.sh",
-      "scripts/stop.sh",
+      "scripts/up.sh",
+      "scripts/down.sh",
       "scripts/lib/primary-checkout.sh",
-      "scripts/test-tracigo-integration-postgres.sh",
-      "scripts/tests/test-extracted-products-absent.sh",
+      "scripts/test-integration.sh",
+      "scripts/tests/test-layout.sh",
     ],
   );
   assert.throws(
@@ -638,7 +602,7 @@ test("builds only fixed Docker exec plans", () => {
   );
   assert.throws(
     () =>
-      buildContainerPlan(policy, workspace, "symfony_tests", { target: "x" }),
+      buildContainerPlan(policy, workspace, "api_tests", { target: "x" }),
     /does not accept a target/i,
   );
 });
@@ -659,15 +623,15 @@ test("builds malicious isolation probes without accepting commands or refs", () 
   const workspace = validateWorkspace({
     policy,
     context: context(),
-    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/platform",
-    resolvedGitCommonDir: "/workspace/platform/.git",
+    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/example",
+    resolvedGitCommonDir: "/workspace/example/.git",
   });
   assert.deepEqual(
     buildIsolationSelfTestInvocation(
       policy,
       workspace,
-      "/bb-worktrees/env_abc123/platform/.selected/probe",
-      "/workspace/platform/.bb-runtime/primary/probe",
+      "/bb-worktrees/env_abc123/example/.selected/probe",
+      "/workspace/example/.bb-runtime/primary/probe",
       "/bb-worktrees/.sibling/probe",
       "/tmp/bb-runtime-env_other/unchanged.txt",
     ),
@@ -684,17 +648,17 @@ test("builds malicious isolation probes without accepting commands or refs", () 
         "--env",
         "GOCACHE=/var/tmp/bb-runtime-go-cache-env_abc123",
         "--workdir",
-        "/bb-worktrees/env_abc123/platform",
-        "pform_dev_zts",
-        "/workspace/platform/.bb-runtime/landlock-run",
+        "/bb-worktrees/env_abc123/example",
+        "example_dev_api",
+        "/workspace/example/.bb-runtime/landlock-run",
         "--workspace",
-        "/bb-worktrees/env_abc123/platform",
+        "/bb-worktrees/env_abc123/example",
         "--scratch",
         "/var/tmp/bb-runtime-go-cache-env_abc123",
         "--scratch",
         "/var/tmp/bb-runtime-go-mod-env_abc123",
         "--scratch",
-        "/var/tmp/bb-runtime-ttsc-cache-env_abc123",
+        "/var/tmp/bb-runtime-web-cache-env_abc123",
         "--scratch",
         "/tmp/bb-runtime-env_abc123",
         "--scratch",
@@ -703,15 +667,15 @@ test("builds malicious isolation probes without accepting commands or refs", () 
         "/dev/shm/bb-runtime-env_abc123",
         "--self-test",
         "--allow-write",
-        "/bb-worktrees/env_abc123/platform/.selected/probe",
+        "/bb-worktrees/env_abc123/example/.selected/probe",
         "--deny-write",
-        "/workspace/platform/.bb-runtime/primary/probe",
+        "/workspace/example/.bb-runtime/primary/probe",
         "--deny-write",
         "/bb-worktrees/.sibling/probe",
         "--deny-write",
         "/tmp/bb-runtime-env_other/unchanged.txt",
         "--git-workspace",
-        "/bb-worktrees/env_abc123/platform",
+        "/bb-worktrees/env_abc123/example",
         "--git-ref",
         "refs/heads/bb/example",
       ],
@@ -724,7 +688,7 @@ test("builds malicious isolation probes without accepting commands or refs", () 
         policy,
         workspace,
         "relative",
-        "/workspace/platform/probe",
+        "/workspace/example/probe",
         "/bb-worktrees/sibling/probe",
         "/tmp/bb-runtime-env_other/probe",
       ),
@@ -736,8 +700,8 @@ test("pre-commit generators are isolated and fixed", () => {
   const workspace = validateWorkspace({
     policy,
     context: context(),
-    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/platform",
-    resolvedGitCommonDir: "/workspace/platform/.git",
+    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/example",
+    resolvedGitCommonDir: "/workspace/example/.git",
   });
   const plan = buildPrecommitGenerationPlan(policy, workspace);
   assert.equal(plan.length, 2);
@@ -755,18 +719,18 @@ test("pre-commit generators are isolated and fixed", () => {
     plan.map(({ invocation }) => invocation.args),
     [
       isolatedArgs(
-        "/bb-worktrees/env_abc123/platform",
-        "pform_dev_zts",
-        "/workspace/platform/.bb-runtime/landlock-run",
+        "/bb-worktrees/env_abc123/example",
+        "example_dev_api",
+        "/workspace/example/.bb-runtime/landlock-run",
         "php",
         ["scripts/generate-components.php", "--modified"],
       ),
       isolatedArgs(
-        "/bb-worktrees/env_abc123/platform",
-        "pform_dev_zts",
-        "/workspace/platform/.bb-runtime/landlock-run",
+        "/bb-worktrees/env_abc123/example",
+        "example_dev_api",
+        "/workspace/example/.bb-runtime/landlock-run",
         "php",
-        ["scripts/generate-platform-registry.php"],
+        ["scripts/generate-registry.php"],
       ),
     ],
   );
@@ -776,8 +740,8 @@ test("full operations are explicit sequences, never shell strings", () => {
   const workspace = validateWorkspace({
     policy,
     context: context(),
-    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/platform",
-    resolvedGitCommonDir: "/workspace/platform/.git",
+    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/example",
+    resolvedGitCommonDir: "/workspace/example/.git",
   });
   const plan = buildContainerPlan(policy, workspace, "go_full");
   assert.equal(plan.length, 3);
@@ -788,61 +752,61 @@ test("full operations are explicit sequences, never shell strings", () => {
     assert.ok(!invocation.args.includes("-c"));
   }
   for (const operation of [
-    "svelte_format_check",
-    "svelte_format",
-    "svelte_full",
+    "web_format_check",
+    "web_format",
+    "web_full",
   ]) {
     const formatter = buildContainerPlan(policy, workspace, operation)[0];
     assert.equal(
       formatter.args.at(-3),
-      "/bb-worktrees/env_abc123/platform/src/sveltekit/packages/config/node_modules/.bin/prettier",
+      "/bb-worktrees/env_abc123/example/src/web/packages/config/node_modules/.bin/prettier",
     );
     assert.deepEqual(formatter.args.slice(-2), [
-      operation === "svelte_format" ? "--write" : "--check",
+      operation === "web_format" ? "--write" : "--check",
       ".",
     ]);
     assert.equal(formatter.args.includes("pnpm"), false);
   }
 });
 
-test("ttsc checks load the scratch-confined Node copy compatibility", () => {
+test("tsc checks load the scratch-confined Node copy compatibility", () => {
   const workspace = validateWorkspace({
     policy,
     context: context(),
-    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/platform",
-    resolvedGitCommonDir: "/workspace/platform/.git",
+    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/example",
+    resolvedGitCommonDir: "/workspace/example/.git",
   });
-  for (const operation of ["svelte_check", "svelte_full"]) {
+  for (const operation of ["web_check", "web_full"]) {
     const invocation = buildContainerPlan(policy, workspace, operation).find(
       (item) => item.args.includes("check"),
     );
     assert.ok(invocation, `${operation} must include a check invocation`);
     assert.ok(
       invocation.args.includes(
-        "NODE_OPTIONS=--require=/platform-primary/.bb-runtime/assets/node-copy-compat-preload.cjs",
+        "NODE_OPTIONS=--require=/example-primary/.bb-runtime/assets/node-copy-compat-preload.cjs",
       ),
       `${operation} must load the Node copy compatibility preload`,
     );
     assert.ok(
-      invocation.args.includes("BB_NODE_COPY_COMPAT_COMMANDS=ttsc,ttsc.js"),
-      `${operation} must enable copy compatibility for ttsc only`,
+      invocation.args.includes("BB_NODE_COPY_COMPAT_COMMANDS=tsc,tsc.js"),
+      `${operation} must enable copy compatibility for tsc only`,
     );
     assert.ok(
       invocation.args.includes("GOPATH=/var/tmp/bb-runtime-go-mod-env_abc123"),
-      `${operation} must keep the ttsc Go module and checksum state in per-worktree scratch`,
+      `${operation} must keep the tsc Go module and checksum state in per-worktree scratch`,
     );
     assert.ok(
       invocation.args.includes(
-        "TTSC_CACHE_DIR=/var/tmp/bb-runtime-ttsc-cache-env_abc123/ttsc",
+        "TSC_CACHE_DIR=/var/tmp/bb-runtime-web-cache-env_abc123/tsc",
       ),
-      `${operation} must publish the ttsc plugin cache inside per-worktree scratch`,
+      `${operation} must publish the tsc plugin cache inside per-worktree scratch`,
     );
     for (const name of ["TEMP", "TMP", "TMPDIR"]) {
       assert.ok(
         invocation.args.includes(
-          `${name}=/var/tmp/bb-runtime-ttsc-cache-env_abc123`,
+          `${name}=/var/tmp/bb-runtime-web-cache-env_abc123`,
         ),
-        `${operation} must keep ttsc temporary files beside its isolated cache`,
+        `${operation} must keep tsc temporary files beside its isolated cache`,
       );
     }
   }
@@ -918,29 +882,29 @@ test("Node copy compatibility preload patches only the listed commands", async (
     ).stdout;
   try {
     assert.equal(await run("other-tool, fake-tool.js"), "chmodWithinIsolation");
-    assert.equal(await run("ttsc,ttsc.js"), "chmodSync");
+    assert.equal(await run("tsc,tsc.js"), "chmodSync");
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
 });
 
-test("Svelte tests confine Node copy compatibility to the selected worktree", () => {
+test("Web tests confine Node copy compatibility to the selected worktree", () => {
   const workspace = validateWorkspace({
     policy,
     context: context(),
-    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/platform",
-    resolvedGitCommonDir: "/workspace/platform/.git",
+    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/example",
+    resolvedGitCommonDir: "/workspace/example/.git",
   });
-  for (const operation of ["svelte_tests", "svelte_full"]) {
+  for (const operation of ["web_tests", "web_full"]) {
     const invocation = buildContainerPlan(policy, workspace, operation).find(
       (item) => item.args.includes("test"),
     );
     assert.ok(invocation, `${operation} must include a test invocation`);
     assert.ok(
       invocation.args.includes(
-        "BB_NODE_COPY_ROOTS=/bb-worktrees/env_abc123/platform/src/sveltekit",
+        "BB_NODE_COPY_ROOTS=/bb-worktrees/env_abc123/example/src/web",
       ),
-      `${operation} must limit compatibility copies to the selected Svelte worktree`,
+      `${operation} must limit compatibility copies to the selected web worktree`,
     );
     assert.ok(
       invocation.args.includes("BB_NODE_COPY_COMPAT=1"),
@@ -948,7 +912,7 @@ test("Svelte tests confine Node copy compatibility to the selected worktree", ()
     );
     assert.ok(
       invocation.args.includes(
-        "NODE_OPTIONS=--require=/platform-primary/.bb-runtime/assets/node-copy-compat-preload.cjs",
+        "NODE_OPTIONS=--require=/example-primary/.bb-runtime/assets/node-copy-compat-preload.cjs",
       ),
       `${operation} must load the Node copy compatibility preload`,
     );
@@ -958,9 +922,9 @@ test("Svelte tests confine Node copy compatibility to the selected worktree", ()
 test("Go test operations finish within the tool request boundary", () => {
   const testWorkspace = Object.freeze({
     branchName: "bb/example",
-    containerRoot: "/bb-worktrees/env_abc123/platform",
+    containerRoot: "/bb-worktrees/env_abc123/example",
     environmentId: "env_abc123",
-    hostRoot: "/bb/worktrees/env_abc123/platform",
+    hostRoot: "/bb/worktrees/env_abc123/example",
     kind: "managed-worktree",
   });
   for (const operation of ["go_tests", "go_full"]) {
@@ -982,7 +946,7 @@ test("Go test operations finish within the tool request boundary", () => {
 });
 
 test("search accepts ripgrep no-match without weakening other invocations", () => {
-  const search = buildSearchInvocation("/tmp/platform-worktree", {
+  const search = buildSearchInvocation("/tmp/example-worktree", {
     query: "cowriting.chapter_generate",
   });
 
@@ -1006,7 +970,7 @@ test("search accepts ripgrep no-match without weakening other invocations", () =
 test("search treats blank paths as the default source root", () => {
   for (const path of ["", " \t "]) {
     const invocation = buildSearchInvocation(
-      "/workspace/platform",
+      "/workspace/example",
       {
         query: "type Router struct",
         path,
@@ -1016,7 +980,7 @@ test("search treats blank paths as the default source root", () => {
 
     assert.equal(invocation.args.at(-1), "src");
     assert.equal(
-      buildSearchInvocation("/workspace/platform", {
+      buildSearchInvocation("/workspace/example", {
         query: "x",
         path,
       }).args.at(-1),
@@ -1027,9 +991,9 @@ test("search treats blank paths as the default source root", () => {
 
 test("search keeps metacharacters literal and confines paths", () => {
   assert.deepEqual(
-    buildSearchInvocation("/workspace/platform", {
+    buildSearchInvocation("/workspace/example", {
       query: "needle; docker run --privileged",
-      path: "src/symfony",
+      path: "src/api",
     }),
     {
       acceptedExitCodes: [0, 1],
@@ -1040,14 +1004,14 @@ test("search keeps metacharacters literal and confines paths", () => {
         "--fixed-strings",
         "--",
         "needle; docker run --privileged",
-        "src/symfony",
+        "src/api",
       ],
-      cwd: "/workspace/platform",
+      cwd: "/workspace/example",
     },
   );
   for (const path of ["../outside", "/etc", "src/../../etc", "src\0bad"]) {
     assert.throws(
-      () => buildSearchInvocation("/workspace/platform", { query: "x", path }),
+      () => buildSearchInvocation("/workspace/example", { query: "x", path }),
       /path/i,
     );
   }
@@ -1055,24 +1019,24 @@ test("search keeps metacharacters literal and confines paths", () => {
 
 test("git operations cannot inject options, paths, or commit control text", () => {
   assert.deepEqual(
-    buildGitInvocation("/workspace/platform", { operation: "status" }),
+    buildGitInvocation("/workspace/example", { operation: "status" }),
     {
       command: "git",
       args: [...gitSafetyArgs, "status", "--short", "--branch"],
-      cwd: "/workspace/platform",
+      cwd: "/workspace/example",
     },
   );
   assert.deepEqual(
-    buildGitInvocation("/workspace/platform", {
+    buildGitInvocation("/workspace/example", {
       operation: "add",
-      paths: ["src/go/a.go", "src/symfony/a.php"],
+      paths: ["src/worker/a.go", "src/api/a.php"],
     }).args,
-    [...gitSafetyArgs, "--literal-pathspecs", "add", "--", "src/go/a.go", "src/symfony/a.php"],
+    [...gitSafetyArgs, "--literal-pathspecs", "add", "--", "src/worker/a.go", "src/api/a.php"],
   );
   for (const paths of [["--all"], ["../outside"], ["src/a\0b"]]) {
     assert.throws(
       () =>
-        buildGitInvocation("/workspace/platform", { operation: "add", paths }),
+        buildGitInvocation("/workspace/example", { operation: "add", paths }),
       /path/i,
     );
   }
@@ -1084,7 +1048,7 @@ test("git operations cannot inject options, paths, or commit control text", () =
   ]) {
     assert.throws(
       () =>
-        buildGitInvocation("/workspace/platform", {
+        buildGitInvocation("/workspace/example", {
           operation: "commit",
           message,
         }),
@@ -1097,8 +1061,8 @@ test("git operations use the host-side fixed executor", () => {
   const workspace = validateWorkspace({
     policy,
     context: context(),
-    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/platform",
-    resolvedGitCommonDir: "/workspace/platform/.git",
+    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/example",
+    resolvedGitCommonDir: "/workspace/example/.git",
   });
   assert.deepEqual(
     buildGitInvocation(workspace.hostRoot, { operation: "status" }),
@@ -1114,19 +1078,19 @@ test("primary landing is a fixed fast-forward of the authorized worktree branch"
   const workspace = validateWorkspace({
     policy,
     context: context(),
-    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/platform",
-    resolvedGitCommonDir: "/workspace/platform/.git",
+    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/example",
+    resolvedGitCommonDir: "/workspace/example/.git",
   });
   assert.deepEqual(buildFastForwardPrimaryPlan(policy, workspace), [
     {
       command: "git",
       args: [...gitSafetyArgs, "symbolic-ref", "--quiet", "--short", "HEAD"],
-      cwd: "/workspace/platform",
+      cwd: "/workspace/example",
     },
     {
       command: "git",
       args: [...gitSafetyArgs, "merge", "--ff-only", "refs/heads/bb/example"],
-      cwd: "/workspace/platform",
+      cwd: "/workspace/example",
     },
   ]);
   for (const deniedWorkspace of [
@@ -1143,7 +1107,7 @@ test("primary landing is a fixed fast-forward of the authorized worktree branch"
 });
 
 test("dependency links must resolve to the exact shared-container target", async (t) => {
-  const root = await mkdtemp(path.join(tmpdir(), "bb-platform-runtime-test-"));
+  const root = await mkdtemp(path.join(tmpdir(), "bb-example-runtime-test-"));
   t.after(async () => {
     await import("node:fs/promises").then(({ rm }) =>
       rm(root, { recursive: true, force: true }),
@@ -1171,18 +1135,18 @@ test("dependency links must resolve to the exact shared-container target", async
 
 test("worktree dependency prep keeps root tool caches off the shared install", async (t) => {
   const fixtureRoot = await mkdtemp(
-    path.join(tmpdir(), "platform-dependency-mirror-"),
+    path.join(tmpdir(), "example-dependency-mirror-"),
   );
   t.after(() => rm(fixtureRoot, { recursive: true, force: true }));
   const primaryRoot = path.join(fixtureRoot, "primary");
   const worktreeRoot = path.join(fixtureRoot, "worktree");
-  const primaryModules = path.join(primaryRoot, "src/sveltekit/node_modules");
-  const worktreeModules = path.join(worktreeRoot, "src/sveltekit/node_modules");
+  const primaryModules = path.join(primaryRoot, "src/web/node_modules");
+  const worktreeModules = path.join(worktreeRoot, "src/web/node_modules");
   await mkdir(path.join(primaryModules, "@playwright"), { recursive: true });
-  await mkdir(path.join(primaryRoot, "src/sveltekit/apps"), {
+  await mkdir(path.join(primaryRoot, "src/web/apps"), {
     recursive: true,
   });
-  await mkdir(path.join(primaryRoot, "src/sveltekit/packages"), {
+  await mkdir(path.join(primaryRoot, "src/web/packages"), {
     recursive: true,
   });
   await mkdir(path.dirname(worktreeModules), { recursive: true });
@@ -1210,26 +1174,26 @@ test("worktree dependency prep keeps root tool caches off the shared install", a
   assert.equal((await lstat(toolCache)).isDirectory(), true);
   assert.equal((await lstat(toolCache)).isSymbolicLink(), false);
   await writeFile(
-    path.join(toolCache, "ttsc-lint-config.mjs"),
+    path.join(toolCache, "tsc-lint-config.mjs"),
     "export default {}\n",
   );
 });
 
 test("worktree package dependency mirrors keep Vite caches writable and dependencies shared", async (t) => {
   const fixtureRoot = await mkdtemp(
-    path.join(tmpdir(), "platform-package-mirror-"),
+    path.join(tmpdir(), "example-package-mirror-"),
   );
   t.after(() => rm(fixtureRoot, { recursive: true, force: true }));
   const primaryRoot = path.join(fixtureRoot, "primary");
   const worktreeRoot = path.join(fixtureRoot, "worktree");
-  const primaryModules = path.join(primaryRoot, "src/sveltekit/node_modules");
+  const primaryModules = path.join(primaryRoot, "src/web/node_modules");
   const primaryPackageModules = path.join(
     primaryRoot,
-    "src/sveltekit/packages/api-client/node_modules",
+    "src/web/packages/api-client/node_modules",
   );
   const worktreePackageModules = path.join(
     worktreeRoot,
-    "src/sveltekit/packages/api-client/node_modules",
+    "src/web/packages/api-client/node_modules",
   );
 
   await mkdir(primaryModules, { recursive: true });
@@ -1238,7 +1202,7 @@ test("worktree package dependency mirrors keep Vite caches writable and dependen
   await mkdir(path.join(primaryPackageModules, ".vite-temp"), {
     recursive: true,
   });
-  await mkdir(path.join(primaryRoot, "src/sveltekit/apps"), {
+  await mkdir(path.join(primaryRoot, "src/web/apps"), {
     recursive: true,
   });
   await mkdir(path.dirname(worktreePackageModules), { recursive: true });
@@ -1266,32 +1230,32 @@ test("worktree package dependency mirrors keep Vite caches writable and dependen
   }
 });
 
-test("worktree app dependency mirrors keep the generated SvelteKit package writable", async (t) => {
+test("worktree app dependency mirrors keep the generated web package writable", async (t) => {
   const fixtureRoot = await mkdtemp(
-    path.join(tmpdir(), "platform-app-mirror-"),
+    path.join(tmpdir(), "example-app-mirror-"),
   );
   t.after(() => rm(fixtureRoot, { recursive: true, force: true }));
   const primaryRoot = path.join(fixtureRoot, "primary");
   const worktreeRoot = path.join(fixtureRoot, "worktree");
-  const primaryModules = path.join(primaryRoot, "src/sveltekit/node_modules");
+  const primaryModules = path.join(primaryRoot, "src/web/node_modules");
   const primaryAppModules = path.join(
     primaryRoot,
-    "src/sveltekit/apps/tracigo.com/node_modules",
+    "src/web/apps/site/node_modules",
   );
   const worktreeAppModules = path.join(
     worktreeRoot,
-    "src/sveltekit/apps/tracigo.com/node_modules",
+    "src/web/apps/site/node_modules",
   );
 
   await mkdir(primaryModules, { recursive: true });
   await mkdir(path.join(primaryAppModules, "svelte"), { recursive: true });
   await mkdir(path.join(primaryAppModules, "$app"), { recursive: true });
-  await mkdir(path.join(primaryRoot, "src/sveltekit/packages"), {
+  await mkdir(path.join(primaryRoot, "src/web/packages"), {
     recursive: true,
   });
   await mkdir(path.dirname(worktreeAppModules), { recursive: true });
   await symlink(
-    "/app/apps/tracigo.com/node_modules",
+    "/app/apps/site/node_modules",
     worktreeAppModules,
     "dir",
   );
@@ -1303,7 +1267,7 @@ test("worktree app dependency mirrors keep the generated SvelteKit package writa
 
   assert.equal(
     await readlink(path.join(worktreeAppModules, "svelte")),
-    "/app/apps/tracigo.com/node_modules/svelte",
+    "/app/apps/site/node_modules/svelte",
   );
   const generatedPackage = path.join(worktreeAppModules, "$app");
   assert.equal((await lstat(generatedPackage)).isDirectory(), true);
@@ -1320,7 +1284,7 @@ test("exclusive project locks serialize overlapping operations", async () => {
   const lockAdapter = new Map();
 
   const first = withProjectLock(
-    "platform",
+    "example",
     async () => {
       events.push("first:start");
       await firstGate;
@@ -1330,7 +1294,7 @@ test("exclusive project locks serialize overlapping operations", async () => {
   );
   await new Promise((resolve) => setImmediate(resolve));
   const second = withProjectLock(
-    "platform",
+    "example",
     async () => {
       events.push("second:start");
       events.push("second:end");
@@ -1363,7 +1327,7 @@ test("shared project locks overlap while a queued writer blocks later readers", 
   const waits = [];
 
   const first = withProjectLock(
-    "platform",
+    "example",
     async () => {
       events.push("first:start");
       await firstGate;
@@ -1377,7 +1341,7 @@ test("shared project locks overlap while a queued writer blocks later readers", 
   );
   await new Promise((resolve) => setImmediate(resolve));
   const overlapping = withProjectLock(
-    "platform",
+    "example",
     async () => {
       events.push("overlapping:start");
       events.push("overlapping:end");
@@ -1385,12 +1349,12 @@ test("shared project locks overlap while a queued writer blocks later readers", 
     {
       lockAdapter,
       mode: "shared",
-      owner: { environmentId: "env_second", operation: "svelte_tests" },
+      owner: { environmentId: "env_second", operation: "web_tests" },
     },
   );
   await overlapping;
   const writer = withProjectLock(
-    "platform",
+    "example",
     async () => {
       events.push("writer:start");
       await writerGate;
@@ -1406,7 +1370,7 @@ test("shared project locks overlap while a queued writer blocks later readers", 
   );
   await new Promise((resolve) => setImmediate(resolve));
   const laterReader = withProjectLock(
-    "platform",
+    "example",
     async () => {
       events.push("later:start");
       events.push("later:end");
@@ -1442,7 +1406,7 @@ test("shared project locks overlap while a queued writer blocks later readers", 
 });
 
 test("filesystem project locks allow readers and make lifecycle contention visible", async (t) => {
-  const lockRoot = await mkdtemp(path.join(tmpdir(), "platform-rw-lock-"));
+  const lockRoot = await mkdtemp(path.join(tmpdir(), "example-rw-lock-"));
   t.after(() => rm(lockRoot, { recursive: true, force: true }));
   const events = [];
   let markFirstStarted;
@@ -1492,7 +1456,7 @@ test("filesystem project locks allow readers and make lifecycle contention visib
     {
       lockRoot,
       mode: "shared",
-      owner: { environmentId: "env_second", operation: "svelte_tests" },
+      owner: { environmentId: "env_second", operation: "web_tests" },
     },
   );
   const writer = withProjectLock(
@@ -1529,7 +1493,7 @@ test("filesystem project locks allow readers and make lifecycle contention visib
 
 test("filesystem project locks replace an ownerless state directory", async (t) => {
   const lockRoot = await mkdtemp(
-    path.join(tmpdir(), "platform-ownerless-state-"),
+    path.join(tmpdir(), "example-ownerless-state-"),
   );
   const lockPath = path.join(lockRoot, "ownerless-state.lock");
   t.after(() => rm(lockRoot, { recursive: true, force: true }));
@@ -1554,7 +1518,7 @@ test("filesystem project locks replace an ownerless state directory", async (t) 
 
 test("filesystem project locks replace an ownerless state gate", async (t) => {
   const lockRoot = await mkdtemp(
-    path.join(tmpdir(), "platform-ownerless-gate-"),
+    path.join(tmpdir(), "example-ownerless-gate-"),
   );
   const lockPath = path.join(lockRoot, "ownerless-gate.lock");
   t.after(() => rm(lockRoot, { recursive: true, force: true }));
@@ -1581,7 +1545,7 @@ test("filesystem project locks replace an ownerless state gate", async (t) => {
 });
 
 test("stale claim recovery cannot unlink an ABA replacement", async (t) => {
-  const lockRoot = await mkdtemp(path.join(tmpdir(), "platform-claim-aba-"));
+  const lockRoot = await mkdtemp(path.join(tmpdir(), "example-claim-aba-"));
   const claimPath = path.join(lockRoot, "state.lock.owner.json");
   t.after(() => rm(lockRoot, { recursive: true, force: true }));
   await writeFile(
@@ -1623,7 +1587,7 @@ test("stale claim recovery cannot unlink an ABA replacement", async (t) => {
 
 test("stale claim recovery discards an abandoned recovery contender", async (t) => {
   const lockRoot = await mkdtemp(
-    path.join(tmpdir(), "platform-claim-recovery-"),
+    path.join(tmpdir(), "example-claim-recovery-"),
   );
   const claimPath = path.join(lockRoot, "state.lock.owner.json");
   t.after(() => rm(lockRoot, { recursive: true, force: true }));
@@ -1658,7 +1622,7 @@ test("stale claim recovery discards an abandoned recovery contender", async (t) 
 
 test("stale claim recovery preserves a live recovery contender", async (t) => {
   const lockRoot = await mkdtemp(
-    path.join(tmpdir(), "platform-live-recovery-"),
+    path.join(tmpdir(), "example-live-recovery-"),
   );
   const claimPath = path.join(lockRoot, "state.lock.owner.json");
   t.after(() => rm(lockRoot, { recursive: true, force: true }));
@@ -1695,7 +1659,7 @@ test("stale claim recovery preserves a live recovery contender", async (t) => {
 
 test("concurrent stale claim recovery elects one remover", async (t) => {
   const lockRoot = await mkdtemp(
-    path.join(tmpdir(), "platform-recovery-election-"),
+    path.join(tmpdir(), "example-recovery-election-"),
   );
   const claimPath = path.join(lockRoot, "state.lock.owner.json");
   t.after(() => rm(lockRoot, { recursive: true, force: true }));
@@ -1720,7 +1684,7 @@ test("concurrent stale claim recovery elects one remover", async (t) => {
 });
 
 test("claim recovery rejects a reused live pid", async (t) => {
-  const lockRoot = await mkdtemp(path.join(tmpdir(), "platform-reused-pid-"));
+  const lockRoot = await mkdtemp(path.join(tmpdir(), "example-reused-pid-"));
   const claimPath = path.join(lockRoot, "reused-pid.lock.owner.json");
   t.after(() => rm(lockRoot, { recursive: true, force: true }));
   await writeFile(
@@ -1744,7 +1708,7 @@ test("claim recovery rejects a reused live pid", async (t) => {
 });
 
 test("filesystem lock setup scavenges abandoned initialization debris", async (t) => {
-  const lockRoot = await mkdtemp(path.join(tmpdir(), "platform-init-debris-"));
+  const lockRoot = await mkdtemp(path.join(tmpdir(), "example-init-debris-"));
   const debrisPath = path.join(lockRoot, ".orphan.lock.init-abandoned");
   const retiredPath = path.join(lockRoot, "orphan.lock.retired-abandoned");
   t.after(() => rm(lockRoot, { recursive: true, force: true }));
@@ -1758,7 +1722,7 @@ test("filesystem lock setup scavenges abandoned initialization debris", async (t
 });
 
 test("new state setup waits for a live legacy ownerless publisher", async (t) => {
-  const lockRoot = await mkdtemp(path.join(tmpdir(), "platform-legacy-state-"));
+  const lockRoot = await mkdtemp(path.join(tmpdir(), "example-legacy-state-"));
   const lockPath = path.join(lockRoot, "legacy-state.lock");
   const claimPath = `${lockPath}.owner.json`;
   t.after(() => rm(lockRoot, { recursive: true, force: true }));
@@ -1792,7 +1756,7 @@ test("new state setup waits for a live legacy ownerless publisher", async (t) =>
 });
 
 test("new gate setup waits for a live legacy ownerless publisher", async (t) => {
-  const lockRoot = await mkdtemp(path.join(tmpdir(), "platform-legacy-gate-"));
+  const lockRoot = await mkdtemp(path.join(tmpdir(), "example-legacy-gate-"));
   const lockPath = path.join(lockRoot, "legacy-gate.lock");
   const gatePath = path.join(lockPath, "gate.lock");
   const claimPath = `${gatePath}.owner.json`;
@@ -1831,7 +1795,7 @@ test("new gate setup waits for a live legacy ownerless publisher", async (t) => 
 
 test("stale state claim recovery preserves a live legacy owner", async (t) => {
   const lockRoot = await mkdtemp(
-    path.join(tmpdir(), "platform-stale-state-claim-"),
+    path.join(tmpdir(), "example-stale-state-claim-"),
   );
   const lockPath = path.join(lockRoot, "stale-state-claim.lock");
   t.after(() => rm(lockRoot, { recursive: true, force: true }));
@@ -1870,7 +1834,7 @@ test("stale state claim recovery preserves a live legacy owner", async (t) => {
 
 test("stale gate claim recovery preserves a live legacy owner", async (t) => {
   const lockRoot = await mkdtemp(
-    path.join(tmpdir(), "platform-stale-gate-claim-"),
+    path.join(tmpdir(), "example-stale-gate-claim-"),
   );
   const lockPath = path.join(lockRoot, "stale-gate-claim.lock");
   const gatePath = path.join(lockPath, "gate.lock");
@@ -1910,7 +1874,7 @@ test("stale gate claim recovery preserves a live legacy owner", async (t) => {
 
 test("JavaScript retries when the gate parent retires after claiming", async (t) => {
   const lockRoot = await mkdtemp(
-    path.join(tmpdir(), "platform-retired-gate-parent-"),
+    path.join(tmpdir(), "example-retired-gate-parent-"),
   );
   const lockPath = path.join(lockRoot, "retired-gate-parent.lock");
   const gatePath = path.join(lockPath, "gate.lock");
@@ -1946,16 +1910,16 @@ test("quality operations overlap across worktrees but serialize within one workt
     releaseFirst = resolve;
   });
   const workspaceA = {
-    containerRoot: "/bb-worktrees/env_a/platform",
+    containerRoot: "/bb-worktrees/env_a/example",
     environmentId: "env_a",
-    hostRoot: "/bb/worktrees/env_a/platform",
+    hostRoot: "/bb/worktrees/env_a/example",
     kind: "managed-worktree",
   };
   const workspaceB = {
     ...workspaceA,
-    containerRoot: "/bb-worktrees/env_b/platform",
+    containerRoot: "/bb-worktrees/env_b/example",
     environmentId: "env_b",
-    hostRoot: "/bb/worktrees/env_b/platform",
+    hostRoot: "/bb/worktrees/env_b/example",
   };
   const first = _testing.withQualityOperationLocks(
     policy,
@@ -1972,7 +1936,7 @@ test("quality operations overlap across worktrees but serialize within one workt
   const otherWorktree = _testing.withQualityOperationLocks(
     policy,
     workspaceB,
-    "svelte_check",
+    "web_check",
     async () => {
       events.push("b:start");
       events.push("b:end");
@@ -2010,15 +1974,15 @@ test("lifecycle writers wait for quality readers while runtime status stays lock
     releaseQuality = resolve;
   });
   const workspace = {
-    containerRoot: "/bb-worktrees/env_quality/platform",
+    containerRoot: "/bb-worktrees/env_quality/example",
     environmentId: "env_quality",
-    hostRoot: "/bb/worktrees/env_quality/platform",
+    hostRoot: "/bb/worktrees/env_quality/example",
     kind: "managed-worktree",
   };
   const quality = _testing.withQualityOperationLocks(
     policy,
     workspace,
-    "svelte_check",
+    "web_check",
     async () => {
       events.push("quality:start");
       await qualityGate;
@@ -2050,7 +2014,7 @@ test("lifecycle writers wait for quality readers while runtime status stays lock
   });
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(events, ["quality:start", "status"]);
-  assert.match(waits[0], /env_quality running svelte_check since 20/);
+  assert.match(waits[0], /env_quality running web_check since 20/);
 
   releaseQuality();
   const [, ensureResults] = await Promise.all([quality, ensure]);
@@ -2062,7 +2026,7 @@ test("lifecycle writers wait for quality readers while runtime status stays lock
   ]);
   assert.match(
     formatResults(ensureResults),
-    /env_quality running svelte_check since 20/,
+    /env_quality running web_check since 20/,
   );
 });
 
@@ -2070,8 +2034,8 @@ test("git operations serialize within one worktree", async () => {
   const workspace = validateWorkspace({
     policy,
     context: context(),
-    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/platform",
-    resolvedGitCommonDir: "/workspace/platform/.git",
+    resolvedEnvironmentPath: "/bb/worktrees/env_abc123/example",
+    resolvedGitCommonDir: "/workspace/example/.git",
   });
   const events = [];
   let releaseFirst;
@@ -2132,11 +2096,11 @@ test("git operations serialize within one worktree", async () => {
 test("agent tools are selected only for the authorized project and machine", () => {
   const allowed = buildAgentConfiguration(registry, {
     thread: { id: "thr_allowed" },
-    project: { id: "proj_platform" },
+    project: { id: "proj_example" },
     host: { id: "host_vairogs" },
     environment: {
       id: "env_abc123",
-      path: "/bb/worktrees/env_abc123/platform",
+      path: "/bb/worktrees/env_abc123/example",
       workspaceProvisionType: "managed-worktree",
       branchName: "bb/example",
     },
@@ -2148,15 +2112,8 @@ test("agent tools are selected only for the authorized project and machine", () 
     "runtime_ops",
     "runtime_search",
     "runtime_thread",
-    "platform_container",
-    "platform_git",
-    "platform_plugin_resource",
-    "platform_runtime",
-    "platform_search",
-    "platform_thread",
   ]);
-  assert.deepEqual(Object.values(RUNTIME_TOOL_ALIASES), allowed.tools.slice(6));
-  assert.equal(allowed.context.projectId, "proj_platform");
+  assert.equal(allowed.context.projectId, "proj_example");
 
   const instructions = buildAgentInstructions(policy);
   assert.match(instructions, /Provider lifecycle hooks/);
@@ -2167,7 +2124,7 @@ test("agent tools are selected only for the authorized project and machine", () 
   assert.match(instructions, /Never push, tag, force-update, reset, delete/);
   assert.match(instructions, /Installed agent skills are agent-wide/);
   assert.match(instructions, /runtime_skill_resource/);
-  assert.match(instructions, /symfony_unit \(requires target matching/);
+  assert.match(instructions, /api_unit \(requires target matching/);
   assert.match(instructions, /isolation_self_test/);
   assert.match(instructions, /optional bounded reader/);
   assert.match(instructions, /runtime_ops/);
@@ -2191,11 +2148,11 @@ test("agent tools are selected only for the authorized project and machine", () 
     }),
     {
       thread: { id: "thr_codegraph" },
-      project: { id: "proj_platform" },
+      project: { id: "proj_example" },
       host: { id: "host_vairogs" },
       environment: {
         id: "env_abc123",
-        path: "/bb/worktrees/env_abc123/platform",
+        path: "/bb/worktrees/env_abc123/example",
         workspaceProvisionType: "managed-worktree",
         branchName: "bb/example",
       },
@@ -2208,7 +2165,7 @@ test("agent tools are selected only for the authorized project and machine", () 
 
   for (const [projectId, hostId] of [
     ["proj_other", "host_vairogs"],
-    ["proj_platform", "host_other"],
+    ["proj_example", "host_other"],
   ]) {
     const denied = buildAgentConfiguration(registry, {
       thread: { id: "thr_denied" },
@@ -2216,7 +2173,7 @@ test("agent tools are selected only for the authorized project and machine", () 
       host: { id: hostId },
       environment: {
         id: "env_abc123",
-        path: "/bb/worktrees/env_abc123/platform",
+        path: "/bb/worktrees/env_abc123/example",
         workspaceProvisionType: "managed-worktree",
         branchName: "bb/example",
       },
@@ -2234,7 +2191,7 @@ test("agent context is rehydrated after a plugin reload", async () => {
         calls.push(["thread", input]);
         return {
           id: input.threadId,
-          projectId: "proj_platform",
+          projectId: "proj_example",
           environmentId: "env_abc123",
         };
       },
@@ -2244,9 +2201,9 @@ test("agent context is rehydrated after a plugin reload", async () => {
         calls.push(["environment", input]);
         return {
           id: input.environmentId,
-          projectId: "proj_platform",
+          projectId: "proj_example",
           hostId: "host_vairogs",
-          path: "/bb/worktrees/env_abc123/platform",
+          path: "/bb/worktrees/env_abc123/example",
           workspaceProvisionType: "managed-worktree",
           branchName: "bb/example",
         };
@@ -2269,7 +2226,7 @@ test("agent context rehydration preserves project and host authorization", async
     threads: {
       async get() {
         return {
-          projectId: "proj_platform",
+          projectId: "proj_example",
           environmentId: "env_abc123",
         };
       },
@@ -2278,7 +2235,7 @@ test("agent context rehydration preserves project and host authorization", async
       async get() {
         return {
           id: "env_abc123",
-          projectId: "proj_platform",
+          projectId: "proj_example",
           hostId: "host_other",
         };
       },
@@ -2291,7 +2248,7 @@ test("agent context rehydration preserves project and host authorization", async
 
 test("installed skill resources are readable only below an anchored skill root", async (t) => {
   const fixtureRoot = await realpath(
-    await mkdtemp(path.join(tmpdir(), "platform-plugin-resource-")),
+    await mkdtemp(path.join(tmpdir(), "example-plugin-resource-")),
   );
   t.after(async () => {
     await import("node:fs/promises").then(({ rm }) =>
@@ -2317,7 +2274,7 @@ test("installed skill resources are readable only below an anchored skill root",
     ".codex",
     "plugins",
     "cache",
-    "valksor-k0d3",
+    "example-org",
     "k0d3",
     "1.0.0",
     "skills",
@@ -2398,7 +2355,7 @@ test("thread read returns bounded same-project output", async () => {
         calls.push(["get", input]);
         return {
           id: input.threadId,
-          projectId: "proj_platform",
+          projectId: "proj_example",
           title: "Strict chapter plan",
           status: "idle",
           providerId: "codex",
@@ -2470,7 +2427,7 @@ test("thread read rejects hidden same-project targets before reading output", as
       async get({ threadId }) {
         return {
           id: threadId,
-          projectId: "proj_platform",
+          projectId: "proj_example",
           visibility: "hidden",
         };
       },
@@ -2495,7 +2452,7 @@ test("thread read bounds the serialized result without splitting a code point", 
       async get({ threadId }) {
         return {
           id: threadId,
-          projectId: "proj_platform",
+          projectId: "proj_example",
           visibility: "visible",
         };
       },
@@ -2524,7 +2481,7 @@ test("thread read result limit includes JSON escaping expansion", async () => {
       async get({ threadId }) {
         return {
           id: threadId,
-          projectId: "proj_platform",
+          projectId: "proj_example",
           visibility: "visible",
         };
       },
@@ -2551,7 +2508,7 @@ test("thread read preserves an explicit no-output result", async () => {
       async get({ threadId }) {
         return {
           id: threadId,
-          projectId: "proj_platform",
+          projectId: "proj_example",
           visibility: "visible",
         };
       },
@@ -2575,7 +2532,7 @@ test("thread read preserves a small escaped lone surrogate", async () => {
       async get({ threadId }) {
         return {
           id: threadId,
-          projectId: "proj_platform",
+          projectId: "proj_example",
           visibility: "visible",
         };
       },
@@ -2617,23 +2574,23 @@ test("policy loading verifies the protected policy descriptor", async (t) => {
   t.after(() => rm(fixtureRoot, { recursive: true, force: true }));
   const runtimeRoot = path.join(fixtureRoot, "runtime");
   const projectsRoot = path.join(runtimeRoot, "projects");
-  const policyPath = path.join(projectsRoot, "proj_platform.json");
+  const policyPath = path.join(projectsRoot, "proj_example.json");
   await mkdir(projectsRoot, { recursive: true, mode: 0o700 });
   const policyDocument = {
-    projectId: "proj_platform",
+    projectId: "proj_example",
     trustedHostId: "host_vairogs",
     primaryRoot: path.join(fixtureRoot, "primary"),
     worktreeRoot: path.join(fixtureRoot, "worktrees"),
-    worktreeDirectoryName: "platform",
+    worktreeDirectoryName: "example",
     gitCommonDir: path.join(fixtureRoot, "primary", ".git"),
     dockerPath: path.join(fixtureRoot, "docker"),
     dockerSocket: path.join(fixtureRoot, "docker.sock"),
     manifestPath: fixtureManifestPath.pathname,
     manifestSha256: fixtureManifestDigest,
     containers: {
-      go: "pform_dev_tracigo_go",
-      sveltekit: "pform_dev_sveltekit",
-      symfony: "pform_dev_zts",
+      worker: "example_dev_worker",
+      web: "example_dev_web",
+      api: "example_dev_api",
     },
   };
   await writeFile(policyPath, `${JSON.stringify(policyDocument)}\n`, {
@@ -2702,7 +2659,7 @@ test("policy loading verifies the protected policy descriptor", async (t) => {
   });
   await assert.rejects(
     loadPolicy(misnamed),
-    /policy file name must be proj_platform.json/,
+    /policy file name must be proj_example.json/,
   );
 
   let configuredManifestPath;
@@ -2713,24 +2670,24 @@ test("policy loading verifies the protected policy descriptor", async (t) => {
   const registry = await loadRegistry(runtimeRoot, {
     readManifestFile: readConfiguredManifest,
   });
-  assert.deepEqual([...registry.policies.keys()], ["proj_platform"]);
+  assert.deepEqual([...registry.policies.keys()], ["proj_example"]);
   assert.equal(configuredManifestPath, fixtureManifestPath.pathname);
-  assert.equal(registry.policies.get("proj_platform").manifestStale, false);
+  assert.equal(registry.policies.get("proj_example").manifestStale, false);
   assert.equal(registry.problems.length, 1);
   assert.match(registry.problems[0].message, /policy file name/);
 
   const stale = await loadRegistry(runtimeRoot, {
     readManifestFile: async () => ({ manifest, digest: "0".repeat(64) }),
   });
-  assert.equal(stale.policies.get("proj_platform").manifestStale, true);
+  assert.equal(stale.policies.get("proj_example").manifestStale, true);
   const missing = await loadRegistry(runtimeRoot, {
     readManifestFile: async () => {
       throw new Error("manifest missing");
     },
   });
-  assert.equal(missing.policies.get("proj_platform").manifest, null);
+  assert.equal(missing.policies.get("proj_example").manifest, null);
   assert.match(
-    missing.policies.get("proj_platform").manifestError,
+    missing.policies.get("proj_example").manifestError,
     /manifest missing/,
   );
   assert.deepEqual(
@@ -2748,7 +2705,7 @@ test("policy loading rejects symlinked and hard-linked trust anchors", async (t)
     const runtimeRoot = path.join(fixtureRoot, "runtime");
     const projectsRoot = path.join(runtimeRoot, "projects");
     const outsidePolicy = path.join(fixtureRoot, "outside-policy.json");
-    const policyPath = path.join(projectsRoot, "proj_platform.json");
+    const policyPath = path.join(projectsRoot, "proj_example.json");
     await mkdir(projectsRoot, { recursive: true, mode: 0o700 });
     await writeFile(outsidePolicy, "{}\n", { mode: 0o600 });
     if (linkType === "symlink") {
@@ -2770,11 +2727,11 @@ test("policy loading rejects symlinked and hard-linked trust anchors", async (t)
   const looseProjects = path.join(looseRoot, "projects");
   await mkdir(looseProjects, { recursive: true, mode: 0o755 });
   await chmod(looseProjects, 0o755);
-  await writeFile(path.join(looseProjects, "proj_platform.json"), "{}\n", {
+  await writeFile(path.join(looseProjects, "proj_example.json"), "{}\n", {
     mode: 0o600,
   });
   await assert.rejects(
-    loadPolicy(path.join(looseProjects, "proj_platform.json")),
+    loadPolicy(path.join(looseProjects, "proj_example.json")),
     /unsafe identity or permissions/,
   );
 });
@@ -2783,13 +2740,13 @@ test("primary rebase is fixed to the clean managed branch and mainline ref", () 
   const workspace = {
     branchName: "bb/example",
     environmentId: "env_abc123",
-    hostRoot: "/bb/worktrees/env_abc123/platform",
+    hostRoot: "/bb/worktrees/env_abc123/example",
     kind: "managed-worktree",
   };
   assert.deepEqual(buildRebasePrimaryInvocation(policy, workspace, "master"), {
     command: "git",
     args: [...gitSafetyArgs, "rebase", "refs/heads/master"],
-    cwd: "/bb/worktrees/env_abc123/platform",
+    cwd: "/bb/worktrees/env_abc123/example",
   });
   const { branchName, invocations } = buildRebasePrimaryPreflightPlan(
     policy,
@@ -2813,7 +2770,7 @@ test("primary rebase is fixed to the clean managed branch and mainline ref", () 
     "--short",
     "HEAD",
   ]);
-  assert.equal(worktreeBranch.cwd, "/bb/worktrees/env_abc123/platform");
+  assert.equal(worktreeBranch.cwd, "/bb/worktrees/env_abc123/example");
   assert.deepEqual(status.args.slice(-2), ["status", "--porcelain"]);
   assert.throws(
     () => buildRebasePrimaryInvocation(policy, workspace, "release"),
@@ -2853,7 +2810,7 @@ test("primary rebase preflights branch identity and cleanliness", async () => {
   const workspace = {
     branchName: "bb/example",
     environmentId: "env_abc123",
-    hostRoot: "/bb/worktrees/env_abc123/platform",
+    hostRoot: "/bb/worktrees/env_abc123/example",
     kind: "managed-worktree",
   };
   const calls = [];
@@ -2864,7 +2821,7 @@ test("primary rebase preflights branch identity and cleanliness", async () => {
         code: 0,
         signal: null,
         stdout:
-          invocation.cwd === "/workspace/platform"
+          invocation.cwd === "/workspace/example"
             ? "master\n"
             : "bb/example\n",
         stderr: "",
@@ -2902,7 +2859,7 @@ test("primary rebase preflights branch identity and cleanliness", async () => {
               code: 0,
               signal: null,
               stdout:
-                invocation.cwd === "/workspace/platform"
+                invocation.cwd === "/workspace/example"
                   ? "master\n"
                   : "bb/example\n",
               stderr: "",
@@ -2927,7 +2884,7 @@ test("rebase recovery operations dispatch without a primary-checkout preflight",
   const workspace = {
     branchName: "bb/example",
     environmentId: "env_abc123",
-    hostRoot: "/bb/worktrees/env_abc123/platform",
+    hostRoot: "/bb/worktrees/env_abc123/example",
     kind: "managed-worktree",
   };
   const calls = [];
@@ -2965,8 +2922,8 @@ test("rebase recovery operations dispatch without a primary-checkout preflight",
 test("runtime lifecycle plans target only the configured primary stack", () => {
   const runtimePolicy = {
     ...policy,
-    composeProject: "pform_dev",
-    manifestPath: "/trusted/platform.bb-runtime.json",
+    composeProject: "example_dev",
+    manifestPath: "/trusted/example.bb-runtime.json",
     dockerSocket: "/Users/operator/.colima/default/docker.sock",
   };
   assert.deepEqual(buildRuntimeInvocation(runtimePolicy, "status"), {
@@ -2975,9 +2932,9 @@ test("runtime lifecycle plans target only the configured primary stack", () => {
       "inspect",
       "--format",
       "{{.Name}} {{.State.Running}}",
-      policy.containers.go,
-      policy.containers.sveltekit,
-      policy.containers.symfony,
+      policy.containers.worker,
+      policy.containers.web,
+      policy.containers.api,
     ],
     cwd: policy.primaryRoot,
   });
@@ -2987,7 +2944,7 @@ test("runtime lifecycle plans target only the configured primary stack", () => {
       "ps",
       "--all",
       "--filter",
-      "label=com.docker.compose.project=pform_dev",
+      "label=com.docker.compose.project=example_dev",
       "--format",
       '{{.Names}}\t{{.Status}}\t{{.Label "com.docker.compose.service"}}',
     ],
@@ -2999,7 +2956,7 @@ test("runtime lifecycle plans target only the configured primary stack", () => {
       "ps",
       "--all",
       "--filter",
-      "label=com.docker.compose.project=pform_dev",
+      "label=com.docker.compose.project=example_dev",
       "--format",
       "{{.Names}}",
     ],
@@ -3007,17 +2964,17 @@ test("runtime lifecycle plans target only the configured primary stack", () => {
   });
   assert.deepEqual(buildRuntimeInvocation(runtimePolicy, "ensure"), {
     command: "/bin/bash",
-    args: [path.join(policy.primaryRoot, "scripts", "dev.sh")],
+    args: [path.join(policy.primaryRoot, "scripts", "up.sh")],
     cwd: policy.primaryRoot,
   });
   assert.deepEqual(buildRuntimeInvocation(runtimePolicy, "recreate"), {
     command: "/bin/bash",
-    args: [path.join(policy.primaryRoot, "scripts", "dev.sh"), "--override"],
+    args: [path.join(policy.primaryRoot, "scripts", "up.sh"), "--override"],
     cwd: policy.primaryRoot,
   });
   assert.deepEqual(buildRuntimeInvocation(runtimePolicy, "stop"), {
     command: "/bin/bash",
-    args: [path.join(policy.primaryRoot, "scripts", "stop.sh")],
+    args: [path.join(policy.primaryRoot, "scripts", "down.sh")],
     cwd: policy.primaryRoot,
   });
   assert.deepEqual(buildRuntimeInvocation(runtimePolicy, "sync"), {
@@ -3028,7 +2985,7 @@ test("runtime lifecycle plans target only the configured primary stack", () => {
       "--project-id",
       policy.projectId,
       "--manifest",
-      "/trusted/platform.bb-runtime.json",
+      "/trusted/example.bb-runtime.json",
       "--no-reload",
     ],
     cwd: policy.primaryRoot,
@@ -3060,14 +3017,14 @@ test("runtime lifecycle operations must be declared by the project manifest", ()
 test("runtime synchronization is locked and schedules reload without requiring the stack", async () => {
   const runtimePolicy = {
     ...policy,
-    composeProject: "pform_dev",
+    composeProject: "example_dev",
     dockerSocket: "/Users/operator/.colima/default/docker.sock",
   };
   const calls = [];
   let reloadPolicy;
   const results = await executeRuntimeOperation(
     runtimePolicy,
-    { hostRoot: "/bb/worktrees/env_test/platform" },
+    { hostRoot: "/bb/worktrees/env_test/example" },
     "sync",
     {
       lockAdapter: new Map(),
@@ -3096,22 +3053,22 @@ test("runtime synchronization is locked and schedules reload without requiring t
 test("runtime diagnostics and logs are limited to the configured Compose project", async () => {
   const runtimePolicy = {
     ...policy,
-    composeProject: "pform_dev",
+    composeProject: "example_dev",
     dockerSocket: "/Users/operator/.colima/default/docker.sock",
   };
   assert.deepEqual(
-    buildRuntimeLogInvocation(runtimePolicy, "pform_dev_frankenphp"),
+    buildRuntimeLogInvocation(runtimePolicy, "example_dev_proxy"),
     {
       command: runtimePolicy.dockerPath,
-      args: ["logs", "--tail", "200", "pform_dev_frankenphp"],
+      args: ["logs", "--tail", "200", "example_dev_proxy"],
       cwd: policy.primaryRoot,
     },
   );
   assert.deepEqual(
-    buildRuntimeLogInvocation(runtimePolicy, "pform_narrative_check"),
+    buildRuntimeLogInvocation(runtimePolicy, "example_check"),
     {
       command: runtimePolicy.dockerPath,
-      args: ["logs", "--tail", "200", "pform_narrative_check"],
+      args: ["logs", "--tail", "200", "example_check"],
       cwd: policy.primaryRoot,
     },
   );
@@ -3123,7 +3080,7 @@ test("runtime diagnostics and logs are limited to the configured Compose project
   const calls = [];
   const results = await executeRuntimeOperation(
     runtimePolicy,
-    { hostRoot: "/bb/worktrees/env_test/platform" },
+    { hostRoot: "/bb/worktrees/env_test/example" },
     "logs",
     {
       lockAdapter: new Map(),
@@ -3132,7 +3089,7 @@ test("runtime diagnostics and logs are limited to the configured Compose project
         if (invocation.args[0] === "ps") {
           return {
             stdout:
-              "pform_dev_zts\npform_dev_frankenphp\npform_narrative_check\n",
+              "example_dev_api\nexample_dev_proxy\nexample_check\n",
             stderr: "",
           };
         }
@@ -3142,23 +3099,23 @@ test("runtime diagnostics and logs are limited to the configured Compose project
   );
   assert.deepEqual(
     calls.slice(1).map((invocation) => invocation.args.at(-1)),
-    ["pform_dev_zts", "pform_dev_frankenphp", "pform_narrative_check"],
+    ["example_dev_api", "example_dev_proxy", "example_check"],
   );
-  assert.match(formatResults(results), /pform_dev_frankenphp log/);
+  assert.match(formatResults(results), /example_dev_proxy log/);
 });
 
 test("runtime status reports the last asynchronous plugin reload result", async () => {
   const results = await executeRuntimeOperation(
     policy,
-    { hostRoot: "/bb/worktrees/env_test/platform" },
+    { hostRoot: "/bb/worktrees/env_test/example" },
     "status",
     {
       lockAdapter: new Map(),
-      readFile: async () => "ok\nReloaded platform-runtime\n",
-      run: async () => ({ stdout: "/pform_dev_zts true\n", stderr: "" }),
+      readFile: async () => "ok\nReloaded example-runtime\n",
+      run: async () => ({ stdout: "/example_dev_api true\n", stderr: "" }),
     },
   );
-  assert.match(formatResults(results), /pform_dev_zts true/);
+  assert.match(formatResults(results), /example_dev_api true/);
   assert.match(formatResults(results), /Last plugin reload: ok/);
 });
 
@@ -3251,7 +3208,7 @@ test("plugin reload is delegated to a fixed detached primary-checkout helper", a
 
 test("detached plugin reload waits for the project operation lock", async () => {
   const fixtureRoot = await mkdtemp(
-    path.join(tmpdir(), "platform-runtime-reload-lock-"),
+    path.join(tmpdir(), "example-runtime-reload-lock-"),
   );
   const projectId = `reload-${process.pid}-${Date.now()}`;
   const helper = path.join(fixtureRoot, "scripts", "reload.sh");
@@ -3813,7 +3770,7 @@ test("shell gate setup waits for a live legacy ownerless publisher", async () =>
 
 test("detached plugin reload recovers an abandoned reader-writer lock", async () => {
   const fixtureRoot = await mkdtemp(
-    path.join(tmpdir(), "platform-runtime-reload-rw-lock-"),
+    path.join(tmpdir(), "example-runtime-reload-rw-lock-"),
   );
   const projectId = `reload-rw-${process.pid}-${Date.now()}`;
   const helper = path.join(fixtureRoot, "scripts", "reload.sh");
@@ -3854,7 +3811,7 @@ test("detached plugin reload recovers an abandoned reader-writer lock", async ()
         environmentId: "env_abandoned",
         id: "abandoned",
         mode: "shared",
-        operation: "svelte_check",
+        operation: "web_check",
         pid: 2_147_483_647,
       })}\n`,
     );
@@ -3884,7 +3841,7 @@ test("detached plugin reload recovers an abandoned reader-writer lock", async ()
 test("registered Git tool accepts primary rebase and recovery", async () => {
   const workspace = {
     branchName: "bb/example",
-    hostRoot: "/bb/worktrees/env_abc123/platform",
+    hostRoot: "/bb/worktrees/env_abc123/example",
     kind: "managed-worktree",
   };
   const calls = [];

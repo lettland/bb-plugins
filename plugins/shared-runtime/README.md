@@ -15,8 +15,6 @@ The plugin gives agent threads a small set of typed tools:
 | `runtime_thread` | Read bounded output from one same-project thread. |
 | `runtime_skill_resource` | Read one file from an installed agent skill. |
 
-The legacy `platform_*` names remain registered as aliases so active threads can move from Platform Runtime without restarting or reinstalling the retired plugin.
-
 Agents never receive Docker, a shell, or a host toolchain. Every command is an argument array
 compiled from the manifest; targets are validated against a declared pattern or variant list.
 
@@ -52,7 +50,7 @@ compiled from the manifest; targets are validated against a declared pattern or 
    This resolves the BB project and host from `bb project list`, derives container names from
    the Compose project, writes the registry entry, and installs or reloads the plugin.
    Pass `--manifest /absolute/path/to/manifest.json` when a trusted updater owns the manifest
-   outside the repository, such as migration from the retired Platform Runtime plugin.
+   outside the repository.
 4. Run `bb-shared-runtime doctor` to verify the registration, manifest hash, containers, and
    mounts. Run `bb-shared-runtime validate` on any checkout to check a manifest without touching
    the registry.
@@ -65,45 +63,45 @@ registered project; `bb-shared-runtime uninstall` removes one.
 ```json
 {
   "version": 1,
-  "name": "Platform",
+  "name": "Example",
   "compose": { "envFile": "docker/dev/.env", "projectVariable": "PROJECT" },
   "lifecycle": {
-    "ensure": ["bash", "scripts/dev.sh"],
-    "recreate": ["bash", "scripts/dev.sh", "--override"],
-    "stop": ["bash", "scripts/stop.sh"]
+    "ensure": ["bash", "scripts/up.sh"],
+    "recreate": ["bash", "scripts/up.sh", "--override"],
+    "stop": ["bash", "scripts/down.sh"]
   },
   "worktrees": { "containerRoot": "/bb-worktrees" },
-  "isolation": { "builder": "go", "probe": "symfony" },
+  "isolation": { "builder": "worker", "probe": "api" },
   "search": { "defaultPath": "src" },
   "containers": {
-    "symfony": {
-      "service": "zts",
-      "root": "src/symfony",
+    "api": {
+      "service": "api",
+      "root": "src/api",
       "mounts": [
         { "host": ".", "container": "${primaryRoot}" },
-        { "host": "src/symfony", "container": "/var/www/html" }
+        { "host": "src/api", "container": "/srv/api" }
       ]
     }
   },
   "scratch": { "go-cache": { "env": ["GOCACHE"] } },
   "dependencies": [
-    { "path": "src/symfony/vendor", "link": "/var/www/html/vendor" },
-    { "path": "src/sveltekit/apps/*/node_modules", "mirror": "/app/apps/*/node_modules", "local": [".vite"] }
+    { "path": "src/api/vendor", "link": "/srv/api/vendor" },
+    { "path": "src/web/apps/*/node_modules", "mirror": "/app/apps/*/node_modules", "local": [".vite"] }
   ],
   "operations": {
-    "symfony_static": { "container": "symfony", "argv": ["bin/stan"] },
-    "symfony_unit": {
-      "container": "symfony",
+    "api_static": { "container": "api", "argv": ["bin/stan"] },
+    "api_unit": {
+      "container": "api",
       "argv": ["bin/unit", "${target}"],
       "target": { "required": true, "pattern": "^[a-z][a-z0-9/_-]*$" }
     },
-    "symfony_full": { "steps": ["symfony_static", "symfony_unit_all"] }
+    "api_full": { "steps": ["api_static", "api_unit_all"] }
   },
   "git": {
     "prepareCommit": {
       "generators": [
         {
-          "container": "symfony",
+          "container": "api",
           "cwd": ".",
           "argv": ["php", "scripts/generate-components.php", "--modified"],
           "requires": "scripts/generate-components.php",
@@ -111,7 +109,7 @@ registered project; `bb-shared-runtime uninstall` removes one.
           "tolerateMissingExecutable": true
         }
       ],
-      "hardlinks": [{ "source": "profile/public/README.md", "target": "profile/private/README.md" }]
+      "hardlinks": [{ "source": "docs/public/README.md", "target": "docs/private/README.md" }]
     }
   }
 }
@@ -160,7 +158,7 @@ enabled:
 ```json
 "env": {
   "NODE_OPTIONS": "--require=${runtime}/node-copy-compat-preload.cjs",
-  "BB_NODE_COPY_COMPAT_COMMANDS": "ttsc,ttsc.js"
+  "BB_NODE_COPY_COMPAT_COMMANDS": "tsc,tsc.js"
 }
 ```
 
@@ -177,14 +175,14 @@ plugin refuses entries with other permissions, symlinks, or hard links.
 {
   "projectId": "proj_97vy956k9w",
   "trustedHostId": "host_e7kdfsvum6",
-  "primaryRoot": "/Users/me/workspace/platform",
+  "primaryRoot": "/Users/me/workspace/example",
   "worktreeRoot": "/Users/me/.bb/worktrees",
-  "worktreeDirectoryName": "platform",
-  "gitCommonDir": "/Users/me/workspace/platform/.git",
+  "worktreeDirectoryName": "example",
+  "gitCommonDir": "/Users/me/workspace/example/.git",
   "dockerPath": "/opt/homebrew/bin/docker",
   "dockerSocket": "/Users/me/.colima/default/docker.sock",
-  "composeProject": "pform_dev",
-  "containers": { "go": "pform_dev_tracigo_go", "sveltekit": "pform_dev_sveltekit", "symfony": "pform_dev_zts" },
+  "composeProject": "example_dev",
+  "containers": { "worker": "example_dev_worker", "web": "example_dev_web", "api": "example_dev_api" },
   "manifestSha256": "…",
   "bbCli": "/Applications/bb.app/…/bb"
 }
@@ -196,7 +194,7 @@ plugin refuses entries with other permissions, symlinks, or hard links.
 node --test test/
 ```
 
-The suite covers workspace mapping, plan compilation from the Platform fixture manifest,
+The suite covers workspace mapping, plan compilation from the example fixture manifest,
 target validation, isolation probes, dependency preparation, the reader-writer project locks
 (including the shell reload helper), agent configuration, registry loading, thread reads, and
 the CLI's registry-free commands.

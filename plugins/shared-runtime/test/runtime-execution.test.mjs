@@ -92,7 +92,7 @@ async function createFixture(t, overrides = {}) {
   t.after(() => rm(fixtureRoot, { recursive: true, force: true }));
   const primaryRoot = path.join(fixtureRoot, "primary");
   const worktreeRoot = path.join(fixtureRoot, "worktrees");
-  const hostRoot = path.join(worktreeRoot, "env_abc123", "platform");
+  const hostRoot = path.join(worktreeRoot, "env_abc123", "example");
   await mkdir(path.join(primaryRoot, "node_modules", ".cache"), { recursive: true });
   await mkdir(path.join(primaryRoot, "node_modules", "left-pad"), { recursive: true });
   await mkdir(path.join(primaryRoot, "node_modules", "react"), { recursive: true });
@@ -105,7 +105,7 @@ async function createFixture(t, overrides = {}) {
     trustedHostId: "host_fixture",
     primaryRoot,
     worktreeRoot,
-    worktreeDirectoryName: "platform",
+    worktreeDirectoryName: "example",
     gitCommonDir: path.join(primaryRoot, ".git"),
     containers: Object.freeze({ app: "fixture_app", probe: "fixture_probe" }),
     dockerPath: DOCKER,
@@ -448,7 +448,7 @@ test("the isolation self-test proves writes stay inside the selected worktree", 
   assert.equal(deny[2], "/tmp/bb-runtime-env_sibling/unchanged.txt");
   assert.match(
     probe[probe.indexOf("--allow-write") + 1],
-    /^\/bb-worktrees\/env_abc123\/platform\/\.bb-runtime-isolation-selected-[^/]+\/selected\.txt$/,
+    /^\/bb-worktrees\/env_abc123\/example\/\.bb-runtime-isolation-selected-[^/]+\/selected\.txt$/,
   );
   assert.equal(probe[probe.indexOf("--git-ref") + 1], "refs/heads/bb/fixture");
 
@@ -876,7 +876,7 @@ test("memory locks report waits and release queued requests on abort", async () 
     lockAdapter,
     mode: "shared",
     onWait: (message) => waits.push(message),
-    owner: { environmentId: "env_waiter", operation: "svelte_check" },
+    owner: { environmentId: "env_waiter", operation: "web_check" },
     signal: controller.signal,
   });
   await new Promise((resolve) => setImmediate(resolve));

@@ -79,7 +79,7 @@ const fixtureRoot = await realpath(await mkdtemp(path.join(tmpdir(), "shared-run
 const bin = path.join(fixtureRoot, "bin");
 const primaryRoot = path.join(fixtureRoot, "primary");
 const worktreeRoot = path.join(fixtureRoot, "worktrees");
-const worktreePath = path.join(worktreeRoot, "env_abc123", "platform");
+const worktreePath = path.join(worktreeRoot, "env_abc123", "example");
 const runtimeRoot = path.join(fixtureHome, ".bb", "shared-runtime");
 const projectsRoot = path.join(runtimeRoot, "projects");
 await mkdir(bin, { recursive: true });
@@ -108,15 +108,15 @@ const { manifestDigest, validateManifest } = await import("../src/manifest.mjs")
 const { ensureIsolationLauncher } = await import("../src/runtime.mjs");
 const manifestContent = JSON.stringify(manifestDocument);
 const digest = manifestDigest(Buffer.from(manifestContent));
-const policyPath = path.join(projectsRoot, "proj_platform.json");
+const policyPath = path.join(projectsRoot, "proj_example.json");
 await writeFile(
   policyPath,
   `${JSON.stringify({
-    projectId: "proj_platform",
+    projectId: "proj_example",
     trustedHostId: "host_server",
     primaryRoot,
     worktreeRoot,
-    worktreeDirectoryName: "platform",
+    worktreeDirectoryName: "example",
     gitCommonDir: path.join(primaryRoot, ".git"),
     dockerPath: path.join(bin, "docker"),
     manifestSha256: digest,
@@ -150,7 +150,7 @@ const sdk = {
       }
       return {
         id: threadId,
-        projectId: "proj_platform",
+        projectId: "proj_example",
         environmentId: "env_abc123",
         visibility: "visible",
         title: "Server fixture thread",
@@ -169,7 +169,7 @@ const sdk = {
       environmentLookups.push(environmentId);
       return {
         id: environmentId,
-        projectId: environmentId === "env_broken" ? "proj_broken" : "proj_platform",
+        projectId: environmentId === "env_broken" ? "proj_broken" : "proj_example",
         hostId: "host_server",
         path: primaryRoot,
         workspaceProvisionType: "unmanaged",
@@ -201,7 +201,7 @@ await writeFile(
     trustedHostId: "host_server",
     primaryRoot,
     worktreeRoot,
-    worktreeDirectoryName: "platform",
+    worktreeDirectoryName: "example",
     gitCommonDir: path.join(primaryRoot, ".git"),
     dockerPath: path.join(bin, "docker"),
     manifestSha256: digest,
@@ -212,14 +212,14 @@ await writeFile(
 );
 
 const { default: plugin } = await import("../server.ts");
-const { RUNTIME_TOOL_ALIASES } = await import("../src/configuration.mjs");
+const { RUNTIME_TOOL_NAMES } = await import("../src/configuration.mjs");
 
 await plugin(bb);
 
 const toolsByName = new Map(registeredTools.map((tool) => [tool.name, tool]));
 const authorizedContext = {
   thread: { id: "thr_cache" },
-  project: { id: "proj_platform" },
+  project: { id: "proj_example" },
   host: { id: "host_server" },
   environment: {
     id: "env_abc123",
@@ -230,21 +230,11 @@ const authorizedContext = {
 };
 
 
-test("the plugin registers every runtime tool with an alias and wires configuration", () => {
-  const baseNames = registeredTools
-    .map((tool) => tool.name)
-    .filter(
-      (name) =>
-        name.startsWith("runtime_") &&
-        !Object.values(RUNTIME_TOOL_ALIASES).includes(name),
-    );
-  // Canary for the alias guard in registerRuntimeTool: more than one runtime
-  // tool is registered and every base name must have an alias.
-  assert.ok(baseNames.length > 1, "the plugin registers several runtime tools");
-  for (const name of baseNames) {
-    assert.ok(name in RUNTIME_TOOL_ALIASES, `${name} must have a registered alias`);
-    assert.ok(toolsByName.has(RUNTIME_TOOL_ALIASES[name]), `${name} alias is registered`);
-  }
+test("the plugin registers exactly the runtime tools and wires configuration", () => {
+  assert.deepEqual(
+    registeredTools.map((tool) => tool.name).sort(),
+    [...RUNTIME_TOOL_NAMES].sort(),
+  );
 
   const configured = configureCallback(authorizedContext);
   assert.equal(configured.tools.length, registeredTools.length);
@@ -354,11 +344,11 @@ test("the launcher builds through the default host executor when none is injecte
   await rm(launcherPath);
   await rm(path.join(primaryRoot, ".bb-runtime", "landlock-run.sha256"));
   const policyForLauncher = {
-    projectId: "proj_platform",
+    projectId: "proj_example",
     trustedHostId: "host_server",
     primaryRoot,
     worktreeRoot,
-    worktreeDirectoryName: "platform",
+    worktreeDirectoryName: "example",
     gitCommonDir: path.join(primaryRoot, ".git"),
     dockerPath: path.join(bin, "docker"),
     manifestSha256: digest,

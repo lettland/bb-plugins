@@ -21,8 +21,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const fixturePath = path.join(pluginRoot, "test", "fixtures", "platform.bb-runtime.json");
-const productionManifestPath = path.join(pluginRoot, "manifests", "platform.bb-runtime.json");
+const fixturePath = path.join(pluginRoot, "test", "fixtures", "example.bb-runtime.json");
 
 async function fixtureDocument() {
   return JSON.parse(await readFile(fixturePath, "utf8"));
@@ -42,43 +41,20 @@ function minimal(overrides = {}) {
   };
 }
 
-test("the Platform fixture manifest validates and describes every operation", async () => {
+test("the example fixture manifest validates and describes every operation", async () => {
   const manifest = validateManifest(await fixtureDocument());
-  assert.equal(manifest.isolation.builder, "go");
-  assert.equal(manifest.isolation.probe, "symfony");
-  assert.deepEqual(Object.keys(manifest.containers), ["go", "sveltekit", "symfony"]);
-  assert.equal(manifest.containers.symfony.root, "src/symfony");
+  assert.equal(manifest.isolation.builder, "worker");
+  assert.equal(manifest.isolation.probe, "api");
+  assert.deepEqual(Object.keys(manifest.containers), ["worker", "web", "api"]);
+  assert.equal(manifest.containers.api.root, "src/api");
   assert.equal(manifest.worktrees.containerRoot, "/bb-worktrees");
   assert.equal(manifest.search.defaultPath, "src");
   const described = describeOperations(manifest);
-  assert.ok(described.some((line) => line.startsWith("symfony_unit (requires target matching")));
+  assert.ok(described.some((line) => line.startsWith("api_unit (requires target matching")));
   assert.ok(described.some((line) => line === "go_full (sequence: go_format_check, go_vet, go_tests)"));
-  assert.ok(described.some((line) => line.includes('go_tests (target one of "tracigo_timeline_context_postgres")')));
+  assert.ok(described.some((line) => line.includes('go_tests (target one of "timeline_postgres")')));
   assert.equal(manifest.git.generators.length, 2);
   assert.equal(manifest.git.hardlinks.length, 1);
-});
-
-test("the bundled Platform manifest preserves every legacy Go test target", async () => {
-  const manifest = validateManifest(JSON.parse(await readFile(productionManifestPath, "utf8")));
-  assert.deepEqual(Object.keys(manifest.operations.go_tests.target.variants), [
-    "tracigo_write_through_inventory_generate",
-    "tracigo_write_through_inventory_require_zero",
-    "tracigo_timeline_context_postgres",
-    "tracigo_write_through_unit",
-    "tracigo_write_through_postgres",
-    "tracigo_write_through_redis_required",
-    "tracigo_write_through_race",
-    "tracigo_e2e",
-    "tracigo_write_through_knowledge",
-    "tracigo_write_through_sources",
-    "tracigo_write_through_content",
-    "tracigo_write_through_automation_developer",
-    "tracigo_write_through_ai",
-    "tracigo_write_through_sre",
-    "tracigo_write_through_platform",
-    "tracigo_write_through_secondary",
-    "tracigo_write_through_background",
-  ]);
 });
 
 test("manifest validation refuses shell evaluation and unknown placeholders", () => {
@@ -313,7 +289,7 @@ test("readManifest accepts a trusted manifest outside the repository root", asyn
     await mkdtemp(path.join(tmpdir(), "shared-runtime-external-manifest-")),
   );
   try {
-    const manifestPath = path.join(manifestRoot, "platform.json");
+    const manifestPath = path.join(manifestRoot, "example.json");
     const content = `${JSON.stringify(minimal(), null, 2)}\n`;
     await writeFile(manifestPath, content);
     const loaded = await readManifest(root, manifestPath);
@@ -333,13 +309,13 @@ test("the CLI validates a manifest and prints a compose overlay without a regist
     const cli = path.join(pluginRoot, "bin", "bb-shared-runtime.mjs");
     const validated = await execFileAsync(process.execPath, [cli, "validate", "--json"], { cwd: root });
     const summary = JSON.parse(validated.stdout);
-    assert.deepEqual(summary.containers, ["go", "sveltekit", "symfony"]);
-    assert.ok(summary.operations.includes("symfony_static"));
+    assert.deepEqual(summary.containers, ["worker", "web", "api"]);
+    assert.ok(summary.operations.includes("api_static"));
     const overlay = await execFileAsync(process.execPath, [cli, "compose-overlay"], { cwd: root });
     assert.match(overlay.stdout, /^services:$/m);
-    assert.match(overlay.stdout, /^  zts:$/m);
+    assert.match(overlay.stdout, /^  api:$/m);
     assert.match(overlay.stdout, /BB_WORKTREES_ROOT[^\n]*:\/bb-worktrees$/m);
-    assert.match(overlay.stdout, /BB_PRIMARY_ROOT[^\n]*\/src\/symfony:\/var\/www\/html$/m);
+    assert.match(overlay.stdout, /BB_PRIMARY_ROOT[^\n]*\/src\/api:\/srv\/api$/m);
     const help = await execFileAsync(process.execPath, [cli], { cwd: root });
     assert.match(help.stdout, /Usage: bb-shared-runtime/);
     await assert.rejects(

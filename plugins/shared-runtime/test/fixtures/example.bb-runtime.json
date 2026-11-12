@@ -1,0 +1,230 @@
+{
+  "version": 1,
+  "name": "Example",
+  "compose": {
+    "envFile": "docker/dev/.env",
+    "projectVariable": "PROJECT"
+  },
+  "lifecycle": {
+    "ensure": ["bash", "scripts/up.sh"],
+    "recreate": ["bash", "scripts/up.sh", "--override"],
+    "stop": ["bash", "scripts/down.sh"]
+  },
+  "worktrees": {
+    "containerRoot": "/bb-worktrees"
+  },
+  "isolation": {
+    "builder": "worker",
+    "probe": "api"
+  },
+  "search": {
+    "defaultPath": "src"
+  },
+  "containers": {
+    "worker": {
+      "service": "worker",
+      "root": "src/worker",
+      "mounts": [{ "host": ".", "container": "/app" }]
+    },
+    "web": {
+      "service": "web",
+      "root": "src/web",
+      "mounts": [
+        { "host": ".", "container": "/example-primary" },
+        { "host": "src/web", "container": "/app" }
+      ]
+    },
+    "api": {
+      "service": "api",
+      "root": "src/api",
+      "mounts": [
+        { "host": ".", "container": "${primaryRoot}" },
+        { "host": "src/api", "container": "/srv/api" }
+      ]
+    }
+  },
+  "scratch": {
+    "go-cache": { "env": ["GOCACHE"] },
+    "go-mod": { "env": [] },
+    "web-cache": { "env": [] }
+  },
+  "dependencies": [
+    { "path": "src/api/vendor", "link": "/srv/api/vendor" },
+    {
+      "path": "src/web/node_modules",
+      "mirror": "/app/node_modules",
+      "local": [".cache", ".pnpm-task-run-state-v1"]
+    },
+    {
+      "path": "src/web/apps/*/node_modules",
+      "mirror": "/app/apps/*/node_modules",
+      "local": ["$app", ".vite", ".vite-temp"]
+    },
+    {
+      "path": "src/web/packages/*/node_modules",
+      "mirror": "/app/packages/*/node_modules",
+      "local": [".vite", ".vite-temp"]
+    }
+  ],
+  "operations": {
+    "shell_syntax": {
+      "steps": [
+        { "container": "api", "cwd": ".", "argv": ["bash", "-n", "scripts/up.sh"] },
+        { "container": "api", "cwd": ".", "argv": ["bash", "-n", "scripts/down.sh"] },
+        { "container": "api", "cwd": ".", "argv": ["bash", "-n", "scripts/lib/primary-checkout.sh"] },
+        { "container": "api", "cwd": ".", "argv": ["bash", "-n", "scripts/test-integration.sh"] },
+        { "container": "api", "cwd": ".", "argv": ["bash", "-n", "scripts/tests/test-layout.sh"] }
+      ]
+    },
+    "shell_tests": {
+      "container": "api",
+      "cwd": ".",
+      "argv": ["bash", "scripts/tests/test-layout.sh"]
+    },
+    "api_tests": {
+      "container": "api",
+      "argv": ["bin/run-all"],
+      "env": { "TEST_TOKEN": "_${env}" }
+    },
+    "api_unit": {
+      "container": "api",
+      "argv": ["bin/unit", "${target}"],
+      "env": { "TEST_TOKEN": "_${env}" },
+      "target": {
+        "required": true,
+        "pattern": "^(?:infrastructure|apps/[a-z0-9][a-z0-9.-]*|example(?:-dev|-plugin)?(?:/[a-zA-Z0-9][a-zA-Z0-9._-]*)*)$",
+        "description": "API-relative component or app directory"
+      }
+    },
+    "api_static": {
+      "container": "api",
+      "argv": ["bin/stan"]
+    },
+    "api_format_and_tests": {
+      "container": "api",
+      "argv": ["composer", "done"],
+      "env": { "TEST_TOKEN": "_${env}" }
+    },
+    "api_full": {
+      "steps": ["api_format_and_tests", "api_static"]
+    },
+    "web_check": {
+      "container": "web",
+      "argv": ["pnpm", "-r", "--stream", "--workspace-concurrency=1", "check"],
+      "env": {
+        "BB_NODE_COPY_COMPAT_COMMANDS": "tsc,tsc.js",
+        "GOPATH": "${scratch.go-mod}",
+        "NODE_OPTIONS": "--require=${runtime}/node-copy-compat-preload.cjs",
+        "TEMP": "${scratch.web-cache}",
+        "TMP": "${scratch.web-cache}",
+        "TMPDIR": "${scratch.web-cache}",
+        "TSC_CACHE_DIR": "${scratch.web-cache}/tsc"
+      }
+    },
+    "web_lint": {
+      "container": "web",
+      "argv": ["pnpm", "-r", "--workspace-concurrency=1", "lint"]
+    },
+    "web_tests": {
+      "container": "web",
+      "argv": ["pnpm", "-r", "--workspace-concurrency=1", "test"],
+      "env": {
+        "BB_NODE_COPY_COMPAT": "1",
+        "BB_NODE_COPY_ROOTS": "${cwd}",
+        "NODE_OPTIONS": "--require=${runtime}/node-copy-compat-preload.cjs"
+      }
+    },
+    "web_format_check": {
+      "container": "web",
+      "argv": ["${cwd}/packages/config/node_modules/.bin/prettier", "--check", "."]
+    },
+    "web_format": {
+      "container": "web",
+      "argv": ["${cwd}/packages/config/node_modules/.bin/prettier", "--write", "."]
+    },
+    "web_full": {
+      "steps": ["web_format_check", "web_check", "web_lint", "web_tests"]
+    },
+    "go_format": {
+      "container": "worker",
+      "argv": ["go", "fmt", "./..."]
+    },
+    "go_format_check": {
+      "container": "worker",
+      "argv": ["gofmt", "-l", "."],
+      "failOnStdout": true
+    },
+    "go_vet": {
+      "container": "worker",
+      "argv": ["go", "vet", "./..."]
+    },
+    "go_tests": {
+      "container": "worker",
+      "argv": ["go", "test", "-timeout=120s", "./..."],
+      "target": {
+        "variants": {
+          "timeline_postgres": {
+            "kind": "host",
+            "argv": ["bash", "scripts/test-integration.sh"],
+            "containers": ["worker", "api"],
+            "env": {
+              "EXAMPLE_E2E_API_ISOLATION_LAUNCHER": "${launcher.api}",
+              "EXAMPLE_E2E_API_WORKDIR": "${root.api}/src/api",
+              "EXAMPLE_E2E_DOCKER_BIN": "${docker}",
+              "EXAMPLE_E2E_ISOLATION_WORKSPACE": "${root.worker}",
+              "EXAMPLE_E2E_ROOT": "${hostRoot}",
+              "EXAMPLE_E2E_TMP": "${tmp}",
+              "EXAMPLE_E2E_WORKER_CACHE": "${scratch.go-cache}",
+              "EXAMPLE_E2E_WORKER_ISOLATION_LAUNCHER": "${launcher.worker}",
+              "EXAMPLE_E2E_WORKER_WORKDIR": "${root.worker}/src/worker",
+              "EXAMPLE_IT_PACKAGES": "./internal/features/orders/timeline",
+              "EXAMPLE_IT_PARALLEL": "1",
+              "EXAMPLE_IT_RUN": "^TestListEvents",
+              "EXAMPLE_IT_TIMEOUT": "120s",
+              "EXAMPLE_REDIS_TEST_PREFIX": "bb:${envSlug}:timeline:v1"
+            }
+          }
+        }
+      }
+    },
+    "go_full": {
+      "steps": ["go_format_check", "go_vet", "go_tests"]
+    }
+  },
+  "git": {
+    "prepareCommit": {
+      "generators": [
+        {
+          "container": "api",
+          "cwd": ".",
+          "argv": ["php", "scripts/generate-components.php", "--modified"],
+          "requires": "scripts/generate-components.php",
+          "stages": [".github/deploy/components-modified.json"],
+          "tolerateMissingExecutable": true
+        },
+        {
+          "container": "api",
+          "cwd": ".",
+          "argv": ["php", "scripts/generate-registry.php"],
+          "requires": "scripts/generate-registry.php",
+          "stages": [
+            "config/web-runtime-apps.tsv",
+            "config/worker-runtime-products.tsv",
+            "config/suspended-apps.tsv",
+            "src/api/config/catalog.json",
+            "src/web/packages/config/src/registry.generated.ts",
+            "src/api/apps/admin.example.com/src/Content/Sites.php",
+            "src/worker/registry/registry.go"
+          ],
+          "tolerateMissingExecutable": true
+        }
+      ],
+      "hardlinks": [
+        {
+          "source": "docs/public/README.md",
+          "target": "docs/private/README.md"
+        }
+      ]
+    }
+  }
+}

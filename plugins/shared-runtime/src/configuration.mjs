@@ -1,26 +1,12 @@
 import { describeOperations } from "./manifest.mjs";
 
-const PRIMARY_RUNTIME_TOOL_NAMES = Object.freeze([
+export const RUNTIME_TOOL_NAMES = Object.freeze([
   "runtime_container",
   "runtime_git",
   "runtime_skill_resource",
   "runtime_ops",
   "runtime_search",
   "runtime_thread",
-]);
-
-export const RUNTIME_TOOL_ALIASES = Object.freeze({
-  runtime_container: "platform_container",
-  runtime_git: "platform_git",
-  runtime_skill_resource: "platform_plugin_resource",
-  runtime_ops: "platform_runtime",
-  runtime_search: "platform_search",
-  runtime_thread: "platform_thread",
-});
-
-export const RUNTIME_TOOL_NAMES = Object.freeze([
-  ...PRIMARY_RUNTIME_TOOL_NAMES,
-  ...Object.values(RUNTIME_TOOL_ALIASES),
 ]);
 
 const INSTRUCTION_LIMIT = 4000;

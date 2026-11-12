@@ -5,7 +5,7 @@
 // destination). Inside the writable copy roots this preload copies by
 // read + write-with-mode instead and skips chmod. It is inert unless
 // BB_NODE_COPY_COMPAT=1 (every Node process) or BB_NODE_COPY_COMPAT_COMMANDS
-// (comma-separated command basenames, e.g. "ttsc,ttsc.js") enables it.
+// (comma-separated command basenames, e.g. "tsc,tsc.js") enables it.
 
 const fs = require("node:fs");
 const path = require("node:path");

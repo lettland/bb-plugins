@@ -22,7 +22,7 @@ import { manifestDigest } from "../src/manifest.mjs";
 const execFileAsync = promisify(execFile);
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cliPath = path.join(pluginRoot, "bin", "bb-shared-runtime.mjs");
-const fixtureManifestPath = path.join(pluginRoot, "test", "fixtures", "platform.bb-runtime.json");
+const fixtureManifestPath = path.join(pluginRoot, "test", "fixtures", "example.bb-runtime.json");
 
 const fakeBbSource = `#!${process.execPath}
 const fs = require("node:fs");
@@ -118,7 +118,7 @@ async function createFixture(t, { projects, plugins = [], manifest = true, gitUs
     );
     await writeFile(
       path.join(repo, "docker", "dev", ".env.local"),
-      'PROJECT = pform_dev   # local override\nQUOTED="kept # hash"\n',
+      'PROJECT = example_dev   # local override\nQUOTED="kept # hash"\n',
     );
   }
   const state = path.join(fixtureRoot, "bb-state.json");
@@ -129,8 +129,8 @@ async function createFixture(t, { projects, plugins = [], manifest = true, gitUs
     JSON.stringify({
       projects: projects ?? [
         {
-          id: "proj_platform",
-          name: "platform",
+          id: "proj_example",
+          name: "example",
           sources: [
             { type: "remote", path: repo, hostId: "host_other" },
             { type: "local_path", path: 42 },
@@ -201,9 +201,9 @@ async function createFixture(t, { projects, plugins = [], manifest = true, gitUs
     runtimeRoot,
     worktreeRoot,
     run,
-    policyPath: (projectId = "proj_platform", root = runtimeRoot) =>
+    policyPath: (projectId = "proj_example", root = runtimeRoot) =>
       path.join(root, "projects", `${projectId}.json`),
-    readPolicy: async (projectId = "proj_platform", root = runtimeRoot) =>
+    readPolicy: async (projectId = "proj_example", root = runtimeRoot) =>
       JSON.parse(await readFile(path.join(root, "projects", `${projectId}.json`), "utf8")),
     bbCalls: async () =>
       (await readFile(log, "utf8"))
@@ -249,22 +249,22 @@ test("install registers the checkout, pins the manifest, and installs the plugin
   assert.equal(
     installed.stdout,
     [
-      `Registered platform (proj_platform) on host host_fixture with manifest ${digest.slice(0, 12)}; plugin installed.`,
-      "Containers: go=pform_dev_tracigo_go, sveltekit=pform_dev_sveltekit, symfony=pform_dev_zts",
+      `Registered example (proj_example) on host host_fixture with manifest ${digest.slice(0, 12)}; plugin installed.`,
+      "Containers: worker=example_dev_worker, web=example_dev_web, api=example_dev_api",
       "",
     ].join("\n"),
   );
 
   const policy = await fixture.readPolicy();
-  assert.equal(policy.projectId, "proj_platform");
+  assert.equal(policy.projectId, "proj_example");
   assert.equal(policy.trustedHostId, "host_fixture");
   assert.equal(policy.primaryRoot, fixture.repo);
   assert.equal(policy.worktreeRoot, fixture.worktreeRoot);
-  assert.equal(policy.worktreeDirectoryName, "platform");
+  assert.equal(policy.worktreeDirectoryName, "example");
   assert.equal(policy.gitCommonDir, path.join(fixture.repo, ".git"));
   assert.equal(policy.dockerPath, path.join(fixture.bin, "docker"));
   assert.equal(policy.dockerSocket, "/fixture/docker.sock");
-  assert.equal(policy.composeProject, "pform_dev");
+  assert.equal(policy.composeProject, "example_dev");
   assert.equal(policy.manifestSha256, digest);
   assert.equal(policy.manifestPath, undefined);
   assert.equal("codegraphCommand" in policy, false, "CodeGraph is retired and never pinned");
@@ -308,7 +308,7 @@ test("install honours explicit options and docker contexts", async (t) => {
   );
   const externalManifest = path.join(fixture.fixtureRoot, "trusted.json");
   const document = JSON.parse(await readFile(fixtureManifestPath, "utf8"));
-  document.containers.go.containerName = "explicit-go";
+  document.containers.worker.containerName = "explicit-worker";
   delete document.compose;
   await writeFile(externalManifest, JSON.stringify(document));
   const otherRuntime = path.join(fixture.fixtureRoot, "custom-runtime");
@@ -330,7 +330,7 @@ test("install honours explicit options and docker contexts", async (t) => {
       "--runtime-root",
       otherRuntime,
       "--project-id",
-      "proj_platform",
+      "proj_example",
     ],
     { cwd: fixture.fixtureRoot },
   );
@@ -338,9 +338,9 @@ test("install honours explicit options and docker contexts", async (t) => {
   assert.match(result.stdout, /plugin reloaded\./);
   assert.match(
     result.stdout,
-    /Containers: go=explicit-go, sveltekit=custom_sveltekit, symfony=custom_zts/,
+    /Containers: worker=explicit-worker, web=custom_web, api=custom_api/,
   );
-  const policy = await fixture.readPolicy("proj_platform", otherRuntime);
+  const policy = await fixture.readPolicy("proj_example", otherRuntime);
   assert.equal(policy.manifestPath, externalManifest);
   assert.equal(policy.manifestSha256, manifestDigest(await readFile(externalManifest)));
   assert.equal(policy.composeProject, "custom");
@@ -446,7 +446,7 @@ test("install refuses checkouts and projects it cannot trust", async (t) => {
     "no compose project to derive names",
     ["install"],
     {},
-    /^containers\.go needs a Compose project name to derive its container name; pass --compose-project or declare compose\.envFile and compose\.projectVariable\n$/,
+    /^containers\.worker needs a Compose project name to derive its container name; pass --compose-project or declare compose\.envFile and compose\.projectVariable\n$/,
   );
   await expectFailure(
     "invalid manifest",
@@ -547,7 +547,7 @@ test("list, env, validate, and uninstall manage the host registry", async (t) =>
   assert.equal(
     result.stdout,
     [
-      `proj_platform  ${fixture.repo}  compose=pform_dev  ok`,
+      `proj_example  ${fixture.repo}  compose=example_dev  ok`,
       `skipped ${path.join(fixture.runtimeRoot, "projects", "proj_bad.json")}: Shared runtime denied: policy projectId is missing or invalid`,
       "",
     ].join("\n"),
@@ -556,14 +556,14 @@ test("list, env, validate, and uninstall manage the host registry", async (t) =>
   const listed = JSON.parse(result.stdout);
   assert.deepEqual(listed.projects, [
     {
-      projectId: "proj_platform",
+      projectId: "proj_example",
       hostId: "host_fixture",
       primaryRoot: fixture.repo,
-      composeProject: "pform_dev",
+      composeProject: "example_dev",
       containers: {
-        go: "pform_dev_tracigo_go",
-        sveltekit: "pform_dev_sveltekit",
-        symfony: "pform_dev_zts",
+        worker: "example_dev_worker",
+        web: "example_dev_web",
+        api: "example_dev_api",
       },
       manifestStale: false,
       manifestError: null,
@@ -575,10 +575,10 @@ test("list, env, validate, and uninstall manage the host registry", async (t) =>
   const original = await readFile(manifestPath, "utf8");
   await writeFile(manifestPath, `${original}\n`);
   result = await fixture.run(["list"]);
-  assert.match(result.stdout, /compose=pform_dev {2}manifest changed \(run sync\)/);
+  assert.match(result.stdout, /compose=example_dev {2}manifest changed \(run sync\)/);
   await rm(manifestPath);
   result = await fixture.run(["list"]);
-  assert.match(result.stdout, /compose=pform_dev {2}manifest error: Shared runtime manifest missing/);
+  assert.match(result.stdout, /compose=example_dev {2}manifest error: Shared runtime manifest missing/);
   await writeFile(manifestPath, original);
 
   result = await fixture.run(["env"]);
@@ -596,7 +596,7 @@ test("list, env, validate, and uninstall manage the host registry", async (t) =>
     result.stdout,
     new RegExp(`^${escapeRegExp(manifestPath)} is valid \\(sha256 ${digest.slice(0, 12)}\\)\\.\\n`),
   );
-  assert.match(result.stdout, /^Containers: go, sveltekit, symfony$/m);
+  assert.match(result.stdout, /^Containers: worker, web, api$/m);
   assert.match(result.stdout, /^Lifecycle: ensure, recreate, stop$/m);
   assert.match(result.stdout, /^ {2}go_full \(sequence: go_format_check, go_vet, go_tests\)$/m);
 
@@ -613,31 +613,31 @@ test("list, env, validate, and uninstall manage the host registry", async (t) =>
 
   result = await fixture.run(["uninstall", "--no-reload"]);
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(result.stdout, "Removed registration proj_platform.\n");
+  assert.equal(result.stdout, "Removed registration proj_example.\n");
   await assert.rejects(stat(fixture.policyPath()), { code: "ENOENT" });
   assert.equal((await fixture.bbState()).reloads, undefined);
 
   assert.equal((await fixture.run(["install", "--no-reload"])).code, 0);
   result = await fixture.run(["uninstall"]);
-  assert.equal(result.stdout, "Removed registration proj_platform.\n");
+  assert.equal(result.stdout, "Removed registration proj_example.\n");
   assert.equal((await fixture.bbState()).reloads, 1);
 
   assert.equal((await fixture.run(["install", "--no-reload"])).code, 0);
   await rm(path.join(fixture.runtimeRoot, "projects", "proj_bad.json"));
   result = await fixture.run(["uninstall", "--remove-plugin"]);
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(result.stdout, "Removed registration proj_platform and the shared-runtime plugin.\n");
+  assert.equal(result.stdout, "Removed registration proj_example and the shared-runtime plugin.\n");
   assert.deepEqual((await fixture.bbState()).plugins, []);
   const removeCalls = (await fixture.bbCalls()).map(({ args }) => args.join(" "));
   assert.equal(removeCalls.at(-1), "plugin remove shared-runtime");
 
-  result = await fixture.run(["uninstall", "--project-id", "proj_platform", "--remove-plugin"]);
+  result = await fixture.run(["uninstall", "--project-id", "proj_example", "--remove-plugin"]);
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(result.stdout, "Removed registration proj_platform and the shared-runtime plugin.\n");
+  assert.equal(result.stdout, "Removed registration proj_example and the shared-runtime plugin.\n");
   assert.equal((await fixture.bbCalls()).map(({ args }) => args.join(" ")).at(-1), "plugin list --json");
 
-  result = await fixture.run(["uninstall", "--project-id", "proj_platform"]);
-  assert.equal(result.stdout, "Removed registration proj_platform.\n");
+  result = await fixture.run(["uninstall", "--project-id", "proj_example"]);
+  assert.equal(result.stdout, "Removed registration proj_example.\n");
 });
 
 test("uninstall refuses to guess between registrations for one checkout", async (t) => {
@@ -654,7 +654,7 @@ test("uninstall refuses to guess between registrations for one checkout", async 
   assert.equal(result.stderr, "More than one registration matches this checkout; pass --project-id\n");
   const targeted = await fixture.run(["uninstall", "--project-id", "proj_copy", "--no-reload"]);
   assert.equal(targeted.stdout, "Removed registration proj_copy.\n");
-  assert.equal((await fixture.readPolicy()).projectId, "proj_platform");
+  assert.equal((await fixture.readPolicy()).projectId, "proj_example");
 });
 
 test("doctor verifies registration, manifest, and container mounts", async (t) => {
@@ -671,20 +671,20 @@ test("doctor verifies registration, manifest, and container mounts", async (t) =
   const worktreeAlias = path.join(fixture.fixtureRoot, "worktrees-alias");
   await symlink(fixture.worktreeRoot, worktreeAlias);
   const healthy = {
-    pform_dev_tracigo_go: [
+    example_dev_worker: [
       { Destination: "/bb-worktrees", Source: worktreeAlias },
       { Destination: "/app", Source: fixture.repo },
     ],
-    pform_dev_sveltekit: [
+    example_dev_web: [
       { Destination: "/bb-worktrees", Name: fixture.worktreeRoot },
-      { Destination: "/platform-primary", Source: fixture.repo },
-      { Destination: "/app", Source: path.join(fixture.repo, "src", "sveltekit") },
+      { Destination: "/example-primary", Source: fixture.repo },
+      { Destination: "/app", Source: path.join(fixture.repo, "src", "web") },
     ],
-    pform_dev_zts: [
+    example_dev_api: [
       { Destination: "/bb-worktrees", Source: fixture.worktreeRoot },
       { Destination: fixture.repo, Source: fixture.repo },
       { Destination: fixture.worktreeRoot, Source: fixture.worktreeRoot },
-      { Destination: "/var/www/html", Source: path.join(fixture.repo, "src", "symfony") },
+      { Destination: "/srv/api", Source: path.join(fixture.repo, "src", "api") },
     ],
   };
   await fixture.setMounts(healthy);
@@ -694,13 +694,13 @@ test("doctor verifies registration, manifest, and container mounts", async (t) =
   assert.equal(
     result.stdout,
     [
-      "ok    registration proj_platform on host host_fixture",
+      "ok    registration proj_example on host host_fixture",
       `ok    manifest hash ${digest.slice(0, 12)} matches`,
       "ok    policy file permissions verified",
       "warn  isolation launcher not built yet (built on first quality operation)",
-      `ok    container go: /bb-worktrees is mounted from ${worktreeAlias}`,
-      `ok    container sveltekit: /bb-worktrees is mounted from ${fixture.worktreeRoot}`,
-      `ok    container symfony: /bb-worktrees is mounted from ${fixture.worktreeRoot}`,
+      `ok    container worker: /bb-worktrees is mounted from ${worktreeAlias}`,
+      `ok    container web: /bb-worktrees is mounted from ${fixture.worktreeRoot}`,
+      `ok    container api: /bb-worktrees is mounted from ${fixture.worktreeRoot}`,
       "",
     ].join("\n"),
   );
@@ -708,11 +708,11 @@ test("doctor verifies registration, manifest, and container mounts", async (t) =
   await mkdir(path.join(fixture.repo, ".bb-runtime"));
   await writeFile(path.join(fixture.repo, ".bb-runtime", "landlock-run"), "");
   await fixture.setMounts({
-    pform_dev_sveltekit: [
+    example_dev_web: [
       { Destination: "/bb-worktrees", Source: "/elsewhere/worktrees" },
       { Destination: "/app", Source: "/x" },
     ],
-    pform_dev_zts: [{ Destination: "/var/www/html", Source: "/x" }],
+    example_dev_api: [{ Destination: "/srv/api", Source: "/x" }],
   });
   result = await fixture.run(["doctor", "--json"]);
   assert.equal(result.code, 1);
@@ -720,20 +720,20 @@ test("doctor verifies registration, manifest, and container mounts", async (t) =
   const { findings } = JSON.parse(result.stdout);
   assert.deepEqual(findings.slice(3), [
     { level: "ok", message: "isolation launcher is built" },
-    { level: "error", message: "container go (pform_dev_tracigo_go) is not running or not created" },
-    { level: "warn", message: "container sveltekit: /bb-worktrees is mounted from /elsewhere/worktrees" },
+    { level: "error", message: "container worker (example_dev_worker) is not running or not created" },
+    { level: "warn", message: "container web: /bb-worktrees is mounted from /elsewhere/worktrees" },
     {
       level: "error",
-      message: "container sveltekit (pform_dev_sveltekit) does not mount . at /platform-primary",
+      message: "container web (example_dev_web) does not mount . at /example-primary",
     },
-    { level: "error", message: "container symfony (pform_dev_zts) does not mount /bb-worktrees" },
+    { level: "error", message: "container api (example_dev_api) does not mount /bb-worktrees" },
     {
       level: "error",
-      message: `container symfony (pform_dev_zts) does not mount . at ${fixture.repo}`,
+      message: `container api (example_dev_api) does not mount . at ${fixture.repo}`,
     },
     {
       level: "error",
-      message: `container symfony (pform_dev_zts) must also mount ${fixture.worktreeRoot} at the identical path for Git worktree metadata`,
+      message: `container api (example_dev_api) must also mount ${fixture.worktreeRoot} at the identical path for Git worktree metadata`,
     },
   ]);
 
@@ -752,7 +752,7 @@ test("doctor verifies registration, manifest, and container mounts", async (t) =
   result = await fixture.run(["doctor", "--json"]);
   assert.equal(result.code, 1);
   assert.deepEqual(JSON.parse(result.stdout).findings, [
-    { level: "ok", message: "registration proj_platform on host host_fixture" },
+    { level: "ok", message: "registration proj_example on host host_fixture" },
     {
       level: "error",
       message: `manifest: Shared runtime manifest invalid: ${manifestPath} is not valid JSON`,
@@ -765,9 +765,9 @@ test("doctor reports unresolved mount sources and a vanished worktree root", asy
   assert.equal((await fixture.run(["install", "--no-reload"])).code, 0);
   await rm(fixture.worktreeRoot, { recursive: true, force: true });
   await fixture.setMounts({
-    pform_dev_tracigo_go: [{ Destination: "/bb-worktrees", Source: "/gone/worktrees" }],
-    pform_dev_sveltekit: [{ Destination: "/bb-worktrees", Source: "/gone/worktrees" }],
-    pform_dev_zts: [{ Destination: "/bb-worktrees", Source: "/gone/worktrees" }],
+    example_dev_worker: [{ Destination: "/bb-worktrees", Source: "/gone/worktrees" }],
+    example_dev_web: [{ Destination: "/bb-worktrees", Source: "/gone/worktrees" }],
+    example_dev_api: [{ Destination: "/bb-worktrees", Source: "/gone/worktrees" }],
   });
   const result = await fixture.run(["doctor", "--json"]);
   assert.equal(result.code, 1);
@@ -776,10 +776,10 @@ test("doctor reports unresolved mount sources and a vanished worktree root", asy
   assert.ok(launcherFinding, "expected an isolation launcher warn finding");
   assert.equal(launcherFinding.level, "warn");
   assert.equal(launcherFinding.message, "isolation launcher not built yet (built on first quality operation)");
-  const goMount = findings.find((finding) => /container go: \/bb-worktrees is mounted from \/gone\/worktrees/.test(finding.message));
-  assert.ok(goMount, "expected a container go mount warn finding");
+  const goMount = findings.find((finding) => /container worker: \/bb-worktrees is mounted from \/gone\/worktrees/.test(finding.message));
+  assert.ok(goMount, "expected a container worker mount warn finding");
   assert.equal(goMount.level, "warn");
-  assert.equal(goMount.message, "container go: /bb-worktrees is mounted from /gone/worktrees");
+  assert.equal(goMount.message, "container worker: /bb-worktrees is mounted from /gone/worktrees");
 });
 
 test("install derives the worktree root from the home directory without BB_WORKTREES_ROOT", async (t) => {
@@ -816,7 +816,7 @@ test("list and doctor honour --runtime-root and render compose-less policies", a
   const customRoot = path.join(fixture.fixtureRoot, "custom-runtime");
   const installed = await fixture.run(["install", "--runtime-root", customRoot, "--no-reload"]);
   assert.equal(installed.code, 0, installed.stderr);
-  const policy = await fixture.readPolicy("proj_platform", customRoot);
+  const policy = await fixture.readPolicy("proj_example", customRoot);
   delete policy.composeProject;
   const noComposePath = path.join(customRoot, "projects", "proj_plain.json");
   await writeFile(
@@ -827,36 +827,36 @@ test("list and doctor honour --runtime-root and render compose-less policies", a
 
   const list = await fixture.run(["list", "--runtime-root", customRoot]);
   assert.equal(list.code, 0, list.stderr);
-  assert.match(list.stdout, /^proj_platform  .*  compose=pform_dev  ok$/m);
+  assert.match(list.stdout, /^proj_example  .*  compose=example_dev  ok$/m);
   assert.match(list.stdout, /^proj_plain  .*  compose=-  ok$/m);
 
   const validated = await fixture.run(["validate", "--json"]);
   assert.equal(validated.code, 0, validated.stderr);
   const validatedDocument = JSON.parse(validated.stdout);
-  assert.equal(validatedDocument.containers.join(", "), "go, sveltekit, symfony");
+  assert.equal(validatedDocument.containers.join(", "), "worker, web, api");
 
   await fixture.setMounts({
-    pform_dev_tracigo_go: [{ Destination: "/bb-worktrees" }],
-    pform_dev_sveltekit: [{ Destination: "/bb-worktrees" }],
-    pform_dev_zts: [{ Destination: "/bb-worktrees" }],
+    example_dev_worker: [{ Destination: "/bb-worktrees" }],
+    example_dev_web: [{ Destination: "/bb-worktrees" }],
+    example_dev_api: [{ Destination: "/bb-worktrees" }],
   });
   const doctor = await fixture.run(["doctor", "--runtime-root", customRoot, "--json"]);
   assert.equal(doctor.code, 1);
   const { findings } = JSON.parse(doctor.stdout);
-  const registration = findings.find((finding) => /registration proj_platform /.test(finding.message));
+  const registration = findings.find((finding) => /registration proj_example /.test(finding.message));
   assert.equal(registration.level, "ok");
-  const goMount = findings.find((finding) => /container go: \/bb-worktrees is mounted from /.test(finding.message));
+  const goMount = findings.find((finding) => /container worker: \/bb-worktrees is mounted from /.test(finding.message));
   assert.equal(goMount.level, "warn");
-  assert.equal(goMount.message, "container go: /bb-worktrees is mounted from ");
+  assert.equal(goMount.message, "container worker: /bb-worktrees is mounted from ");
 
   const removed = await fixture.run([
     "uninstall",
     "--runtime-root",
     customRoot,
     "--project-id",
-    "proj_platform",
+    "proj_example",
     "--no-reload",
   ]);
   assert.equal(removed.code, 0, removed.stderr);
-  assert.match(removed.stdout, /Removed registration proj_platform\./);
+  assert.match(removed.stdout, /Removed registration proj_example\./);
 });
