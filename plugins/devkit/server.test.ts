@@ -135,6 +135,13 @@ describe("buildToolSpecs", () => {
     expect(bare!.description).not.toContain("Domains covered");
   });
 
+  // Regression: Codex gpt-6-luna called devkit_load_skill for a bb user skill (bb thread thr_bdq24xner5, 2026-11-12).
+  it("tells the model that devkit_load_skill loads devkit skills only", () => {
+    const load = buildToolSpecs(INDEX, dataRoot)[1]!;
+    expect(load.description).toContain("Devkit skills only");
+    expect(load.description).toContain("your provider's skill tool");
+  });
+
   it("find_skills returns ranked hits", async () => {
     const find = buildToolSpecs(INDEX, dataRoot)[0]!;
     const out = await find.execute({ topic: "golang", limit: 5 });
@@ -151,7 +158,7 @@ describe("buildToolSpecs", () => {
   it("find_skills gives a guidance message on zero match", async () => {
     const find = buildToolSpecs(INDEX, dataRoot)[0]!;
     const out = await find.execute({ topic: "zzz-nope", limit: 5 });
-    expect(out).toBe('No devkit skill matched "zzz-nope". Try a broader term. Domains: go, database.');
+    expect(out).toBe('No devkit skill matched "zzz-nope". Try a broader term. Domains: go, database. A skill from your own skills list is not in devkit: load it the way that list says.');
   });
 
   it("find_skills flags an empty index in the zero-match message", async () => {

@@ -11,6 +11,8 @@ export const MAX_BODY_BYTES = 60_000;
 
 const FIND_HINT = "Use devkit_find_skills to discover valid slugs.";
 const REF_HINT = "Reference names come from the skill body that cites them.";
+const NATIVE_HINT = "This tool loads devkit skills only. If the name is in your own skills list, load it the way that list says: read the SKILL.md path it gives, or use your provider's skill tool.";
+const DEVKIT_FIND_HINT = "For a devkit skill, use devkit_find_skills to discover valid slugs.";
 
 /** Codepoint-safe truncation to a UTF-8 byte budget (never splits a multi-byte char). */
 export function truncateToBytes(str, maxBytes) {
@@ -49,7 +51,7 @@ export async function loadSkill(dataRoot, slug, reference) {
       return { ok: false, code: "invalid_slug", message: `Provide a slug or a reference. ${FIND_HINT}` };
     }
     if (!SLUG_RE.test(slug)) {
-      return { ok: false, code: "invalid_slug", message: `Invalid slug '${slug}'. ${FIND_HINT}` };
+      return { ok: false, code: "invalid_slug", message: `Invalid slug '${slug}'. ${NATIVE_HINT} ${DEVKIT_FIND_HINT}` };
     }
   }
 
@@ -71,7 +73,7 @@ export async function loadSkill(dataRoot, slug, reference) {
     if (code === "ENOENT") {
       const what = loadingReference
         ? `Reference '${reference}' not found. ${REF_HINT}`
-        : `Skill '${slug}' not found. ${FIND_HINT}`;
+        : `Skill '${slug}' not found in devkit. ${NATIVE_HINT} ${DEVKIT_FIND_HINT}`;
       return { ok: false, code: "not_found", message: what };
     }
     const what = loadingReference ? `reference '${reference}'` : `skill '${slug}'`;

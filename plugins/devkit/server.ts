@@ -110,7 +110,7 @@ export function buildToolSpecs(index: SkillIndex, dataRoot: string): ToolSpec[] 
         const hits = rankSkills(index.skills, topic, limit ?? 8);
         if (hits.length === 0) {
           const domains = index.categories.length > 0 ? ` Domains: ${index.categories.join(", ")}.` : "";
-          return `No devkit skill matched "${topic}"${emptyIndexNote}. Try a broader term.${domains}`;
+          return `No devkit skill matched "${topic}"${emptyIndexNote}. Try a broader term.${domains} A skill from your own skills list is not in devkit: load it the way that list says.`;
         }
         const lines = hits.map((h) => `- ${h.slug}: ${h.description}`);
         return `devkit skills for "${topic}" (load with devkit_load_skill):\n${lines.join("\n")}`;
@@ -120,6 +120,7 @@ export function buildToolSpecs(index: SkillIndex, dataRoot: string): ToolSpec[] 
       name: "devkit_load_skill",
       description:
         "Load one devkit skill body by slug, or one named shared reference file (pass `reference`). " +
+        "Devkit skills only: load a skill from your own skills list the way that list says (read its SKILL.md path, or use your provider's skill tool). " +
         "Discover slugs with devkit_find_skills first.",
       instructions:
         "After devkit_find_skills names a slug, call devkit_load_skill to read its body before acting; " +

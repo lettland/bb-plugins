@@ -75,11 +75,26 @@ describe("loadSkill", () => {
     if (!r.ok) expect(r.code).toBe("invalid_reference");
   });
 
+  // Regression: Codex gpt-6-luna called devkit_load_skill for a bb user skill (bb thread thr_bdq24xner5, 2026-11-12).
   it("returns an actionable not_found for an unknown slug", async () => {
     const r = await loadSkill(dataRoot, "nonexistent-skill");
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.code).toBe("not_found");
+      expect(r.message).toContain("devkit_find_skills");
+      expect(r.message).toContain("This tool loads devkit skills only");
+      expect(r.message).toContain("read the SKILL.md path it gives");
+      expect(r.message).toContain("use your provider's skill tool");
+    }
+  });
+
+  // Regression: Codex gpt-6-luna called devkit_load_skill for a bb user skill (bb thread thr_bdq24xner5, 2026-11-12).
+  it("points a namespaced provider skill name to the provider's own skills list", async () => {
+    const r = await loadSkill(dataRoot, "bb-global-skills:google-chat-work");
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("invalid_slug");
+      expect(r.message).toContain("This tool loads devkit skills only");
       expect(r.message).toContain("devkit_find_skills");
     }
   });
