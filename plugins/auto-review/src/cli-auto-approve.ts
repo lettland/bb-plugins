@@ -43,7 +43,7 @@ export async function setAutoApprove(
   const threadId = context.threadId ?? null;
   if (value === "on" && threadId !== null) {
     return autoApproveError(
-      "Turning plan auto-approve on is only allowed from the settings page (Tools → Auto review → Plan auto-approve) or a terminal outside a bb thread.",
+      "Turning plan auto-approve on is only allowed from the settings page (Tools → Auto review → Per-project settings) or a terminal outside a bb thread.",
       wantsJson,
       { projectId },
     );
@@ -53,12 +53,17 @@ export async function setAutoApprove(
     return autoApproveError(`Project ${projectId} not found.`, wantsJson, { projectId });
   }
   const autoApprovePlans = value === "on";
-  await setAutoApprovePlans(
-    bb,
-    projectId,
-    autoApprovePlans,
-    `cli (${threadId === null ? "terminal" : `thread ${threadId}`})`,
-  );
+  try {
+    await setAutoApprovePlans(
+      bb,
+      projectId,
+      autoApprovePlans,
+      `cli (${threadId === null ? "terminal" : `thread ${threadId}`})`,
+    );
+  } catch (error) {
+    // A malformed stored record is refused rather than overwritten.
+    return autoApproveError((error as Error).message, wantsJson, { projectId });
+  }
   return wantsJson
     ? json({ ok: true, scope: "project", projectId, autoApprovePlans })
     : { exitCode: 0, stdout: `Plan auto-approve ${value} for project ${projectId}.\n` };

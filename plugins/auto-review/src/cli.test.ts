@@ -353,10 +353,32 @@ describe("auto-review cli: auto-approve", () => {
     });
   });
 
+  it("refuses a malformed stored record in its own error format and leaves it unchanged", async () => {
+    await withHost({}, async (host) => {
+      const malformed = { enabled: "yes", reviewMode: "self" };
+      await host.kv.set("project:project-9", malformed);
+      const message =
+        "stored auto-review config for project project-9 is malformed; not overwriting. Run `bb auto-review enable|disable --project project-9` to replace it (this discards the stored record).";
+
+      const text = await host.run(["auto-approve", "on", "--project", "project-9"]);
+      expect(text).toMatchObject({ exitCode: 2, stderr: `${message}\n` });
+
+      const json = await host.run(["auto-approve", "off", "--project", "project-9", "--json"]);
+      expect(json.exitCode).toBe(2);
+      expect(parse(json.stdout)).toEqual({
+        ok: false,
+        command: "auto-approve",
+        projectId: "project-9",
+        error: message,
+      });
+      expect(await host.kv.get("project:project-9")).toEqual(malformed);
+    });
+  });
+
   it("refuses to turn it on from inside a thread, but lets off through", async () => {
     await withHost({}, async (host) => {
       const refusal =
-        "Turning plan auto-approve on is only allowed from the settings page (Tools → Auto review → Plan auto-approve) or a terminal outside a bb thread.";
+        "Turning plan auto-approve on is only allowed from the settings page (Tools → Auto review → Per-project settings) or a terminal outside a bb thread.";
       const on = await host.run(["auto-approve", "on", "--project", PROJECT_ID], THREAD_ID);
       expect(on).toMatchObject({ exitCode: 2, stderr: `${refusal}\n` });
       expect(await host.kv.get(`project:${PROJECT_ID}`)).toBeUndefined();
