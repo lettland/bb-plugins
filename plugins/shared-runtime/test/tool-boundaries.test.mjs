@@ -57,7 +57,7 @@ const manifest = validateManifest(
 function basePolicy(overrides = {}) {
   return {
     projectId: "proj_example",
-    trustedHostId: "host_vairogs",
+    trustedHostId: "host_example",
     primaryRoot: "/workspace/example",
     worktreeRoot: "/bb/worktrees",
     worktreeDirectoryName: "example",
@@ -129,7 +129,7 @@ test("workspace validation denies primary provision, unmanaged, and stray worktr
           policy,
           context: {
             projectId: "proj_example",
-            hostId: "host_vairogs",
+            hostId: "host_example",
             ...contextOverrides,
           },
           resolvedEnvironmentPath,
@@ -880,7 +880,7 @@ test("agent configuration denies contexts without a project", () => {
   const registry = { policyFor: (id) => (id === "proj_example" ? policy : null) };
   const denied = buildAgentConfiguration(registry, {
     thread: { id: "thr_noproj" },
-    host: { id: "host_vairogs" },
+    host: { id: "host_example" },
     environment: {
       id: "env_abc123",
       path: "/bb/worktrees/env_abc123/example",
