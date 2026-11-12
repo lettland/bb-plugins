@@ -384,7 +384,7 @@ test("a symlinked runtime directory is refused before anything is written or rem
   await mkdir(elsewhere);
   await writeFile(path.join(elsewhere, "landlock-run.go"), "must survive");
   await symlink(elsewhere, fixture.runtimeDirectory);
-  const expected = `Shared runtime denied: ${fixture.runtimeDirectory} must be a directory owned by you, not a symlink; if the repository commits .bb-runtime, do not run it, otherwise remove it and run the operation again`;
+  const expected = `Shared runtime denied: ${fixture.runtimeDirectory} must be a directory owned by you, not a symlink; if the repository commits .bb-runtime, do not run operations in it, otherwise remove it and run the operation again`;
   await assert.rejects(ensureRuntimeAssets(fixture.policy), { message: expected });
   await assert.rejects(
     ensureIsolationLauncher(fixture.policy, { run: recordingRun(fixture).run }),

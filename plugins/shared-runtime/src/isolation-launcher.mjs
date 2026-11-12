@@ -30,14 +30,14 @@ export function runtimeDirectoryPath(policy) {
 }
 
 // Reads one file without following a link or blocking on a special file. readdir said it was
-// regular, but a repository or container process can swap it before it is opened; null means it
-// no longer is.
+// regular, but a repository or container process can swap or remove it before it is opened; null
+// means it no longer is a readable regular file.
 async function readRegularFile(file) {
   let handle;
   try {
     handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
-    if (error?.code === "ELOOP") {
+    if (error?.code === "ELOOP" || error?.code === "ENOENT") {
       return null;
     }
     throw error;
@@ -47,6 +47,14 @@ async function readRegularFile(file) {
   } finally {
     await handle.close();
   }
+}
+
+// Each file is framed as: name byte length, name, content byte length, content, with the lengths
+// as 8-byte big-endian integers, so no pair of file sets can produce the same hash input.
+function frameLength(length) {
+  const buffer = Buffer.alloc(8);
+  buffer.writeBigUInt64BE(BigInt(length));
+  return buffer;
 }
 
 async function directoryDigest(directory) {
@@ -65,12 +73,13 @@ async function directoryDigest(directory) {
     .map((entry) => entry.name)
     .sort();
   for (const name of files) {
+    // A swapped-in link or special file, or a file removed after the listing, contributes a marker
+    // no bundled file hashes to, so the digest differs and the set is reinstalled.
+    const content = (await readRegularFile(path.join(directory, name))) ?? "\0swapped-after-listing";
+    hash.update(frameLength(Buffer.byteLength(name)));
     hash.update(name);
-    hash.update("\0");
-    // A swapped-in link or special file contributes a marker no bundled file hashes to, so the
-    // digest differs and the set is reinstalled.
-    hash.update((await readRegularFile(path.join(directory, name))) ?? "\0swapped-after-listing");
-    hash.update("\0");
+    hash.update(frameLength(Buffer.byteLength(content)));
+    hash.update(content);
   }
   return { digest: hash.digest("hex"), files };
 }
@@ -89,13 +98,14 @@ async function assertRuntimeDirectory(runtimeDirectory) {
     throw error;
   }
   if (!info.isDirectory() || info.uid !== process.getuid()) {
-    deny(`${runtimeDirectory} must be a directory owned by you, not a symlink; if the repository commits .bb-runtime, do not run it, otherwise remove it and run the operation again`);
+    deny(`${runtimeDirectory} must be a directory owned by you, not a symlink; if the repository commits .bb-runtime, do not run operations in it, otherwise remove it and run the operation again`);
   }
 }
 
 // True only for a real directory (not a symlink) owned by the current user whose regular files
-// hash to `digest`. directoryDigest skips non-regular entries, so a symlinked file inside makes
-// the digests differ.
+// hash to `digest`. Only the bundled file names are verified: extra entries under other names are
+// ignored because manifests reach assets by name. directoryDigest skips non-regular entries, so a
+// symlinked file inside makes the digests differ.
 async function installedAssetsMatch(target, digest) {
   let info;
   try {
@@ -142,7 +152,15 @@ async function installRuntimeAssets(policy) {
   const { digest, files } = await directoryDigest(assetsSourceDirectory);
   // An older release wrote assets.sha256 here. It is never read or written now (a repository can
   // commit it as a symlink); rm unlinks a symlink without following it.
-  await rm(path.join(runtimeDirectory, `${runtimeAssetsDirectoryName}.sha256`), { force: true });
+  const staleMarker = path.join(runtimeDirectory, `${runtimeAssetsDirectoryName}.sha256`);
+  try {
+    await rm(staleMarker, { force: true });
+  } catch (error) {
+    if (error?.code === "ERR_FS_EISDIR") {
+      deny(`${staleMarker} is a directory; remove it and run the operation again`);
+    }
+    throw error;
+  }
   if (await installedAssetsMatch(target, digest)) {
     return target;
   }

@@ -320,7 +320,29 @@ test("a symlink swapped in after the listing is not read through, and the set is
   assert.deepEqual(await fsPromises.readFile(outside), bundled, "the link target is untouched");
 });
 
-test("a special file swapped in after the listing neither blocks nor matches", async (t) => {
+test("a file removed after the listing leads to a reinstall, not an error", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const target = path.join(root, ".bb-runtime", "assets");
+  await ensureRuntimeAssets(policyFor(root));
+  const [name] = await bundledAssetNames();
+  const swapped = await swapAfterListing(target, name, (file) => fsPromises.rm(file));
+  assert.equal(await ensureRuntimeAssets(policyFor(root)), target);
+  assert.equal(swapped(), true);
+  assert.equal((await fsPromises.lstat(path.join(target, name))).isFile(), true, "the removed file is back");
+});
+
+test("a directory at the stale marker path is refused with a clear message", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const marker = path.join(root, ".bb-runtime", "assets.sha256");
+  await fsPromises.mkdir(marker, { recursive: true });
+  await assert.rejects(ensureRuntimeAssets(policyFor(root)), {
+    message: `Shared runtime denied: ${marker} is a directory; remove it and run the operation again`,
+  });
+});
+
+test("a special file swapped in after the listing neither blocks nor matches", { timeout: 10000 }, async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const target = path.join(root, ".bb-runtime", "assets");
@@ -387,7 +409,7 @@ test("a runtime directory that cannot be inspected, or that someone else owns, i
     const info = await fsPromises.lstat(filePath, ...rest);
     return filePath === runtimeDirectory ? Object.create(info, { uid: { value: process.getuid() + 1 } }) : info;
   };
-  const expected = `Shared runtime denied: ${runtimeDirectory} must be a directory owned by you, not a symlink; if the repository commits .bb-runtime, do not run it, otherwise remove it and run the operation again`;
+  const expected = `Shared runtime denied: ${runtimeDirectory} must be a directory owned by you, not a symlink; if the repository commits .bb-runtime, do not run operations in it, otherwise remove it and run the operation again`;
   await assert.rejects(ensureRuntimeAssets(policyFor(root)), { message: expected });
   await assert.rejects(ensureIsolationLauncher(policyFor(root), { run: daemon("arm64") }), { message: expected });
   assert.deepEqual(await fsPromises.readdir(runtimeDirectory), []);
