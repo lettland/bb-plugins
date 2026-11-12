@@ -198,39 +198,101 @@ function recordingRun(fixture, handlers = {}) {
   return { calls, run, labels: () => calls.map(({ label }) => label) };
 }
 
-test("runtime assets are copied once and refreshed when their marker disappears", async (t) => {
+const assetSourceNames = async () =>
+  (await readdir(path.join(pluginRoot, "assets"))).filter((name) => !name.startsWith(".")).sort();
+
+test("runtime assets are installed once, reused when they match, and replaced when they do not", async (t) => {
   const fixture = await createFixture(t);
   const target = await ensureRuntimeAssets(fixture.policy);
   assert.equal(target, path.join(fixture.runtimeDirectory, "assets"));
-  const sourceNames = (await readdir(path.join(pluginRoot, "assets"))).filter(
-    (name) => !name.startsWith("."),
-  );
-  assert.deepEqual((await readdir(target)).sort(), sourceNames.sort());
+  const sourceNames = await assetSourceNames();
+  assert.deepEqual((await readdir(target)).sort(), sourceNames);
   const copied = path.join(target, sourceNames[0]);
   assert.equal((await stat(copied)).mode & 0o777, 0o644);
-  const marker = path.join(fixture.runtimeDirectory, "assets.sha256");
-  assert.match(await readFile(marker, "utf8"), /^[0-9a-f]{64}\n$/);
-  assert.equal((await stat(marker)).mode & 0o777, 0o600);
+  assert.deepEqual(
+    (await readdir(fixture.runtimeDirectory)).filter((name) => name.includes("sha256")),
+    [],
+    "no marker file is written",
+  );
 
-  await chmod(copied, 0o644);
+  // Matching installed assets are reused without a rewrite.
+  const before = await stat(copied);
+  const directoryBefore = await stat(target);
+  assert.equal(await ensureRuntimeAssets(fixture.policy), target);
+  const after = await stat(copied);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.mtimeMs, before.mtimeMs);
+  assert.equal((await stat(target)).ino, directoryBefore.ino);
+
+  // The same file names with altered content are replaced with the bundled content.
+  const bundled = await readFile(path.join(pluginRoot, "assets", sourceNames[0]), "utf8");
   await writeFile(copied, "tampered");
   assert.equal(await ensureRuntimeAssets(fixture.policy), target);
-  assert.equal(await readFile(copied, "utf8"), "tampered", "a matching marker skips the copy");
+  assert.equal(await readFile(copied, "utf8"), bundled);
 
-  await rm(marker);
+  // A missing file is restored.
+  await rm(copied);
   await ensureRuntimeAssets(fixture.policy);
-  assert.equal(
-    await readFile(copied, "utf8"),
-    await readFile(path.join(pluginRoot, "assets", sourceNames[0]), "utf8"),
-  );
+  assert.equal(await readFile(copied, "utf8"), bundled);
   assert.deepEqual(
     (await readdir(fixture.runtimeDirectory)).filter((name) => name.includes(".tmp")),
     [],
   );
+});
 
-  await rm(marker);
-  await mkdir(marker);
-  await assert.rejects(ensureRuntimeAssets(fixture.policy), { code: "EISDIR" });
+test("a symlinked entry inside the installed assets is replaced and its target is left alone", async (t) => {
+  const fixture = await createFixture(t);
+  const target = await ensureRuntimeAssets(fixture.policy);
+  const [name] = await assetSourceNames();
+  const bundled = await readFile(path.join(pluginRoot, "assets", name), "utf8");
+  const outside = path.join(fixture.fixtureRoot, "outside-file");
+  await writeFile(outside, bundled);
+  await rm(path.join(target, name));
+  await symlink(outside, path.join(target, name));
+  await ensureRuntimeAssets(fixture.policy);
+  const replaced = await lstat(path.join(target, name));
+  assert.equal(replaced.isSymbolicLink(), false);
+  assert.equal(replaced.isFile(), true);
+  assert.equal(await readFile(outside, "utf8"), bundled);
+  assert.equal(await readFile(path.join(target, name), "utf8"), bundled);
+});
+
+test("an installed assets directory that is a symlink is replaced, not followed", async (t) => {
+  const fixture = await createFixture(t);
+  const outside = path.join(fixture.fixtureRoot, "outside-assets");
+  await mkdir(outside);
+  for (const name of await assetSourceNames()) {
+    await writeFile(path.join(outside, name), await readFile(path.join(pluginRoot, "assets", name)));
+  }
+  await mkdir(fixture.runtimeDirectory);
+  const target = path.join(fixture.runtimeDirectory, "assets");
+  await symlink(outside, target);
+  await ensureRuntimeAssets(fixture.policy);
+  assert.equal((await lstat(target)).isSymbolicLink(), false);
+  assert.equal((await lstat(target)).isDirectory(), true);
+  assert.deepEqual((await readdir(outside)).sort(), await assetSourceNames(), "the link target is untouched");
+});
+
+test("a committed assets.sha256 symlink is unlinked and never followed", async (t) => {
+  // Regression: the marker was read and then written through the link, so a repository that
+  // committed .bb-runtime/assets.sha256 as a symlink truncated or created an arbitrary file.
+  // The hole predates the shared-runtime launcher commits.
+  const fixture = await createFixture(t);
+  await mkdir(fixture.runtimeDirectory);
+  const marker = path.join(fixture.runtimeDirectory, "assets.sha256");
+  const outside = path.join(fixture.fixtureRoot, "outside-secret");
+  await writeFile(outside, "must survive");
+  await symlink(outside, marker);
+  await ensureRuntimeAssets(fixture.policy);
+  assert.equal(await readFile(outside, "utf8"), "must survive");
+  await assert.rejects(lstat(marker), { code: "ENOENT" }, "the symlink is gone");
+
+  // Through the launcher install, with a dangling link: the missing target is not created.
+  const dangling = path.join(fixture.fixtureRoot, "never-created");
+  await symlink(dangling, marker);
+  await ensureIsolationLauncher(fixture.policy, { run: recordingRun(fixture).run });
+  await assert.rejects(lstat(dangling), { code: "ENOENT" });
+  await assert.rejects(lstat(marker), { code: "ENOENT" });
 });
 
 test("the SHA256SUMS source line is the digest of native/landlock-run.go", async () => {
@@ -322,7 +384,7 @@ test("a symlinked runtime directory is refused before anything is written or rem
   await mkdir(elsewhere);
   await writeFile(path.join(elsewhere, "landlock-run.go"), "must survive");
   await symlink(elsewhere, fixture.runtimeDirectory);
-  const expected = `Shared runtime denied: ${fixture.runtimeDirectory} must be a directory owned by you, not a symlink; remove it and run the operation again`;
+  const expected = `Shared runtime denied: ${fixture.runtimeDirectory} must be a directory owned by you, not a symlink; if the repository commits .bb-runtime, do not run it, otherwise remove it and run the operation again`;
   await assert.rejects(ensureRuntimeAssets(fixture.policy), { message: expected });
   await assert.rejects(
     ensureIsolationLauncher(fixture.policy, { run: recordingRun(fixture).run }),

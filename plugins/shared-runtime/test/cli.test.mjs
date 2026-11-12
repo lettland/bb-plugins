@@ -1251,6 +1251,12 @@ test("doctor reports the manifest source, the script root, the trust result and 
   await rm(fixture.manifestPath);
   findings = await findingsOf();
   assert.deepEqual(findings[3], notLoaded);
+  // Valid JSON with the wrong shape is a schema error, not a trust failure.
+  await writeFile(fixture.manifestPath, JSON.stringify({ version: 1, containers: "wrong" }), { mode: 0o600 });
+  findings = await findingsOf();
+  assert.deepEqual(findings[3], notLoaded);
+  assert.notEqual(findings[3].message, "host directory trust check failed (see the manifest finding below)");
+  assert.ok(findings.some((finding) => finding.level === "error" && finding.message.startsWith("manifest: ")));
   await writeFile(fixture.manifestPath, JSON.stringify(hostManifest), { mode: 0o600 });
   assert.equal((await findingsOf())[3].level, "ok");
 

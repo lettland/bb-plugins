@@ -20,7 +20,6 @@ import {
   runtimeAssetsDirectoryName,
   deny,
   normalizeAbsolute,
-  pathExists,
 } from "./runtime-common.mjs";
 import { runInvocation } from "./invocation-runner.mjs";
 
@@ -66,7 +65,34 @@ async function assertRuntimeDirectory(runtimeDirectory) {
     throw error;
   }
   if (!info.isDirectory() || info.uid !== process.getuid()) {
-    deny(`${runtimeDirectory} must be a directory owned by you, not a symlink; remove it and run the operation again`);
+    deny(`${runtimeDirectory} must be a directory owned by you, not a symlink; if the repository commits .bb-runtime, do not run it, otherwise remove it and run the operation again`);
+  }
+}
+
+// True only for a real directory (not a symlink) owned by the current user whose regular files
+// hash to `digest`. directoryDigest skips non-regular entries, so a symlinked file inside makes
+// the digests differ.
+async function installedAssetsMatch(target, digest) {
+  let info;
+  try {
+    info = await lstat(target);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+  if (!info.isDirectory() || info.uid !== process.getuid()) {
+    return false;
+  }
+  try {
+    return (await directoryDigest(target)).digest === digest;
+  } catch (error) {
+    // Another call removed a file while it was being read: the set is not the bundled one.
+    if (error?.code === "ENOENT") {
+      return false;
+    }
+    throw error;
   }
 }
 
@@ -74,16 +100,12 @@ export async function ensureRuntimeAssets(policy) {
   const runtimeDirectory = runtimeDirectoryPath(policy);
   await assertRuntimeDirectory(runtimeDirectory);
   const target = path.join(runtimeDirectory, runtimeAssetsDirectoryName);
-  const marker = path.join(runtimeDirectory, `${runtimeAssetsDirectoryName}.sha256`);
   const { digest, files } = await directoryDigest(assetsSourceDirectory);
-  try {
-    if ((await readFile(marker, "utf8")).trim() === digest && (await pathExists(target))) {
-      return target;
-    }
-  } catch (error) {
-    if (error?.code !== "ENOENT") {
-      throw error;
-    }
+  // An older release wrote assets.sha256 here. It is never read or written now (a repository can
+  // commit it as a symlink); rm unlinks a symlink without following it.
+  await rm(path.join(runtimeDirectory, `${runtimeAssetsDirectoryName}.sha256`), { force: true });
+  if (await installedAssetsMatch(target, digest)) {
+    return target;
   }
   await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
   // Unique per call: two operations in one process (a shared project lock, two worktrees)
@@ -98,17 +120,24 @@ export async function ensureRuntimeAssets(policy) {
       await copyFile(path.join(assetsSourceDirectory, name), path.join(temporary, name));
       await chmod(path.join(temporary, name), 0o644);
     }
+    // A concurrent call may have published the bundled set while we copied; removing it would
+    // break a third call that is reading it.
+    if (await installedAssetsMatch(target, digest)) {
+      return target;
+    }
     await rm(target, { recursive: true, force: true });
     try {
       await rename(temporary, target);
     } catch (error) {
-      // A concurrent call published the same asset set between our rm and rename; renaming a
-      // directory onto a non-empty one fails, and what is there is complete and identical.
+      // A concurrent call published a directory between our rm and rename; renaming a directory
+      // onto a non-empty one fails. Accept it only if it matches the bundled assets.
       if (error?.code !== "ENOTEMPTY" && error?.code !== "EEXIST") {
         throw error;
       }
+      if (!(await installedAssetsMatch(target, digest))) {
+        deny(`${target} was published by another process and does not match the bundled assets; remove it and run the operation again`);
+      }
     }
-    await writeFile(marker, `${digest}\n`, { mode: 0o600 });
     return target;
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -218,7 +247,7 @@ export async function ensureIsolationLauncher(policy, options = {}) {
   const run = options.run ?? runInvocation;
   const runtimeDirectory = runtimeDirectoryPath(policy);
   const launcher = path.join(runtimeDirectory, isolationLauncherName);
-  await assertRuntimeDirectory(runtimeDirectory);
+  // ensureRuntimeAssets checks the runtime directory before anything is written or removed.
   await ensureRuntimeAssets(policy);
   const architecture = await dockerHostArchitecture(policy, run, options.signal);
   const { binary, expected } = await readBundledLauncher(architecture, await readPrebuiltDigests());
