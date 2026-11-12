@@ -35,6 +35,12 @@ compiled from the manifest; targets are validated against a declared pattern or 
   one, so it also runs natively in a container whose image is another architecture. The install
   is verified on every use: it must be a regular file with mode `0555` and the SHA-256 recorded
   in `native/prebuilt/SHA256SUMS`, or the plugin reinstalls it.
+  The seccomp filter makes metadata-changing syscalls (`chmod`, `chown`, `utimes`, xattr writes)
+  fail with `EPERM`. It first checks the syscall ABI: a foreign-ABI syscall (i386, x32, AArch32)
+  is killed with `SIGSYS` (exit 159), so 32-bit tools cannot run under the launcher. Exit 159
+  under `landlock-run` means a 32-bit (foreign-ABI) binary was killed. The metadata guard is
+  best-effort, not complete: for example, `io_uring` xattr operations are not covered. Landlock
+  is what confines writes.
 - **Trust anchors.** The manifest describes *what* a project can do. The host registry under
   `~/.bb/shared-runtime/projects/<projectId>.json` records *which* BB project, on *which* host,
   at *which* primary checkout is allowed to do it, and pins the manifest's SHA-256. A manifest
@@ -243,8 +249,9 @@ It runs the pinned `golang` image in Docker (no network, source mounted read-onl
 `CGO_ENABLED=0`, `GOTOOLCHAIN=local`, `-trimpath`, `-buildvcs=false`, and a stripped, buildid-free
 link, for both architectures. It then rewrites the `source` and binary lines of
 `native/prebuilt/SHA256SUMS`. Commit the binaries and `SHA256SUMS` together with the source.
-`sh build/launcher.sh verify` rebuilds into a temporary directory and compares the result with
-`SHA256SUMS` and with the committed binaries; `npm test` runs it first. When you change the
+`sh build/launcher.sh verify` first runs the Go tests in `native/landlock-run_test.go` in the same
+pinned image (no network, read-only mounts), then rebuilds into a temporary directory and compares
+the result with `SHA256SUMS` and with the committed binaries; `npm test` runs it first. When you change the
 toolchain, update the version named in `THIRD_PARTY_NOTICES.md` and its Go license text from
 the new image. Both files are maintainer tools and notices, not shipped code:
 `build/` is not in the npm tarball, and `THIRD_PARTY_NOTICES.md` is.

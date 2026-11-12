@@ -35,15 +35,23 @@ const (
 	accessRefer      = uint64(1 << 13)
 	accessTruncate   = uint64(1 << 14)
 
-	sysLandlockCreateRuleset = uintptr(444)
-	sysLandlockAddRule       = uintptr(445)
-	sysLandlockRestrictSelf  = uintptr(446)
-	oPath                    = 0x200000
-	bpfLoadWordAbsolute      = 0x20
-	bpfJumpEqualConstant     = 0x15
-	bpfReturnConstant        = 0x06
-	seccompReturnAllow       = 0x7fff0000
-	seccompReturnErrno       = 0x00050000
+	sysLandlockCreateRuleset    = uintptr(444)
+	sysLandlockAddRule          = uintptr(445)
+	sysLandlockRestrictSelf     = uintptr(446)
+	oPath                       = 0x200000
+	bpfLoadWordAbsolute         = 0x20
+	bpfJumpEqualConstant        = 0x15
+	bpfJumpGreaterEqualConstant = 0x35
+	bpfReturnConstant           = 0x06
+	seccompReturnAllow          = 0x7fff0000
+	seccompReturnErrno          = 0x00050000
+	seccompReturnKillProcess    = 0x80000000
+
+	// seccomp_data.arch values of the native ABIs, and the bit that marks an x32 syscall number
+	// on amd64 (an x32 call carries AUDIT_ARCH_X86_64 with nr | x32SyscallBit).
+	auditArchX8664   = 0xC000003E
+	auditArchAarch64 = 0xC00000B7
+	x32SyscallBit    = 0x40000000
 )
 
 type rulesetAttr struct {
@@ -113,37 +121,83 @@ func writableFileAccess(abi int) uint64 {
 	return access
 }
 
-func metadataMutationSyscalls() ([]uint32, error) {
-	switch runtime.GOARCH {
+func metadataMutationSyscalls(goarch string) ([]uint32, error) {
+	switch goarch {
 	case "amd64":
 		return []uint32{
 			90, 91, 92, 93, 94, 132,
 			188, 189, 190, 197, 198, 199,
 			235, 260, 261, 268, 280, 452,
+			463, 466, 469,
 		}, nil
 	case "arm64":
 		return []uint32{
 			5, 6, 7, 14, 15, 16,
 			52, 53, 54, 55, 88, 452,
+			463, 466, 469,
 		}, nil
 	default:
-		return nil, fmt.Errorf("unsupported architecture for metadata isolation: %s", runtime.GOARCH)
+		return nil, fmt.Errorf("unsupported architecture for metadata isolation: %s", goarch)
 	}
 }
 
+// metadataFilter builds the seccomp program. Layout:
+//
+//	ld [4]                         seccomp_data.arch
+//	jeq native arch, else KILL
+//	ld [0]                         seccomp_data.nr
+//	jge x32 bit -> KILL            amd64 only
+//	jeq <nr> -> ERRNO|EPERM        one per native metadata syscall
+//	ret ALLOW
+//	ret ERRNO|EPERM
+//	ret KILL_PROCESS
+//
+// Jump offsets are computed from this layout. A call from a foreign ABI (i386, x32, AArch32)
+// carries numbers from another table, so it cannot be matched against the native list; it is
+// killed instead.
+func metadataFilter(goarch string) ([]socketFilter, error) {
+	syscalls, err := metadataMutationSyscalls(goarch)
+	if err != nil {
+		return nil, err
+	}
+	nativeArch := uint32(auditArchX8664)
+	if goarch == "arm64" {
+		nativeArch = auditArchAarch64
+	}
+	x32Check := goarch == "amd64"
+	prefix := 3
+	if x32Check {
+		prefix++
+	}
+	allow := prefix + len(syscalls)
+	errno := allow + 1
+	kill := allow + 2
+	jump := func(from int, target int) uint8 { return uint8(target - (from + 1)) }
+
+	filters := []socketFilter{
+		{Code: bpfLoadWordAbsolute, K: 4},
+		{Code: bpfJumpEqualConstant, JF: jump(1, kill), K: nativeArch},
+		{Code: bpfLoadWordAbsolute, K: 0},
+	}
+	if x32Check {
+		filters = append(filters, socketFilter{Code: bpfJumpGreaterEqualConstant, JT: jump(3, kill), K: x32SyscallBit})
+	}
+	for _, number := range syscalls {
+		filters = append(filters, socketFilter{Code: bpfJumpEqualConstant, JT: jump(len(filters), errno), K: number})
+	}
+	filters = append(filters,
+		socketFilter{Code: bpfReturnConstant, K: seccompReturnAllow},
+		socketFilter{Code: bpfReturnConstant, K: seccompReturnErrno | uint32(syscall.EPERM)},
+		socketFilter{Code: bpfReturnConstant, K: seccompReturnKillProcess},
+	)
+	return filters, nil
+}
+
 func restrictMetadataMutations() error {
-	syscalls, err := metadataMutationSyscalls()
+	filters, err := metadataFilter(runtime.GOARCH)
 	if err != nil {
 		return err
 	}
-	filters := []socketFilter{{Code: bpfLoadWordAbsolute, K: 0}}
-	for _, number := range syscalls {
-		filters = append(filters,
-			socketFilter{Code: bpfJumpEqualConstant, JF: 1, K: number},
-			socketFilter{Code: bpfReturnConstant, K: seccompReturnErrno | uint32(syscall.EPERM)},
-		)
-	}
-	filters = append(filters, socketFilter{Code: bpfReturnConstant, K: seccompReturnAllow})
 	program := socketFilterProgram{
 		Length: uint16(len(filters)),
 		Filter: &filters[0],
@@ -381,6 +435,9 @@ func runSelfTest(allowWrites []string, denyWrites []string, gitWorkspace string,
 }
 
 func main() {
+	// Landlock, no_new_privs and seccomp apply only to the calling OS thread. Keep this goroutine
+	// on one thread, never unlocked, so the thread that installs them is the thread that execs.
+	runtime.LockOSThread()
 	var workspace string
 	var scratches stringList
 	var allowWrites stringList
