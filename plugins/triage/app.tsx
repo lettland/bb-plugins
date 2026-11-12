@@ -204,12 +204,16 @@ function TriageBoard() {
    * A drafted card shows in To Do while its stored stage says otherwise, so a move
    * to another column always writes, even to the stored stage, and also reopens a
    * settled card; a move to To Do changes nothing the user can see. Once open, the
-   * card renders in its stored (new) column. A failed card that is not settled stays
-   * drafted after the move and keeps showing in To Do, because the board shows
-   * failed cards only through the draft overlay.
+   * card renders in its stored (new) column. A failed drafted card stays failed after
+   * any move except to the done stage, so it would land back in To Do with its
+   * failure reason cleared; that move is refused with a toast instead.
    */
   const move = async (task: Task, stageId: string, drafted = false, intakeId = "") => {
     if (drafted ? stageId === intakeId : task.stageId === stageId) return;
+    if (drafted && task.runState === "failed" && snapshot?.stages.find((stage) => stage.id === stageId)?.systemRole !== "done") {
+      toast.error("This failed card stays in To Do while its session has an unsent draft. Move it to Completed, or send or clear the draft first.");
+      return;
+    }
     patchTaskStage(task.number, stageId);
     try {
       await rpc.call("moveTask", { number: task.number, stageId });

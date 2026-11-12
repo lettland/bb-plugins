@@ -777,21 +777,45 @@ describe("sidebar drafts", () => {
     expect(rpcMethods(view, "moveTask")).toStrictEqual([
       { method: "moveTask", input: { number: 10, stageId: "stage-progress" } },
     ]);
-    // An unsettled drafted card (failed, so the draft is what shows it) moves without a reopen.
+    // A failed drafted card would stay failed and land back in To Do, so a move outside Completed is refused.
+    const errorSpy = vi.spyOn(toast, "error").mockReturnValue("t");
     fireEvent.dragStart(cardElement("Failed draft card"), { dataTransfer: dragTransfer() });
     fireEvent.drop(columnOf("Human Review"), { dataTransfer: dragTransfer() });
-    await waitFor(() => expect(rpcMethods(view, "moveTask")).toHaveLength(2));
-    expect(rpcMethods(view, "setTaskSettled")).toHaveLength(1);
+    await flushBoard();
+    expect(rpcMethods(view, "moveTask")).toHaveLength(1);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("stays in To Do while its session has an unsent draft"));
+    expect(within(columnOf("To Do")).getByText("Failed draft card")).toBeTruthy();
+    expect(within(columnOf("Human Review")).queryByText("Failed draft card")).toBe(null);
+    errorSpy.mockRestore();
     // Dropping back on To Do changes nothing.
     fireEvent.dragStart(cardElement("Failed draft card"), { dataTransfer: dragTransfer() });
     fireEvent.drop(columnOf("To Do"), { dataTransfer: dragTransfer() });
     await flushBoard();
-    expect(rpcMethods(view, "moveTask")).toHaveLength(2);
-    // The card menu follows the same rule.
+    expect(rpcMethods(view, "moveTask")).toHaveLength(1);
+    // The card menu follows the same rule, and Completed is allowed.
     await openCardMenu(11);
     fireEvent.pointerMove(screen.getByRole("menuitem", { name: "Move to" }), { pointerType: "mouse" });
     fireEvent.click(await screen.findByRole("menuitemradio", { name: "Completed" }));
-    await waitFor(() => expect(rpcMethods(view, "moveTask")).toHaveLength(3));
+    await waitFor(() => expect(rpcMethods(view, "moveTask")).toStrictEqual([
+      { method: "moveTask", input: { number: 10, stageId: "stage-progress" } },
+      { method: "moveTask", input: { number: 11, stageId: "stage-completed" } },
+    ]));
+  });
+
+  test("a failed drafted card moved to Completed renders there once its run state is completed", async () => {
+    let moved = false;
+    renderBoard({
+      snapshot: () => snapshotOf([mirrorCard({
+        number: 11, title: "Failed to done", threadId: "thr-d2", readAt: 5,
+        ...(moved ? { stageId: "stage-completed", runState: "completed" } : { runState: "failed", attentionReason: "boom" }),
+      })])(),
+      moveTask: () => { moved = true; return { ok: true }; },
+    }, undefined, drafted(["thr-d2"]));
+    await screen.findByText("Failed to done");
+    fireEvent.dragStart(cardElement("Failed to done"), { dataTransfer: dragTransfer() });
+    fireEvent.drop(columnOf("Completed"), { dataTransfer: dragTransfer() });
+    await waitFor(() => expect(within(columnOf("Completed")).getByText("Failed to done")).toBeTruthy());
+    expect(within(columnOf("To Do")).queryByText("Failed to done")).toBe(null);
   });
 
   test("a settled drafted card dragged out of To Do renders in its new column once reopened", async () => {
