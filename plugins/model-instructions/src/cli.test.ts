@@ -52,7 +52,7 @@ afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 const SAVED: RawConfig = parseRawConfig({
   vars: { a: "A" },
   scopes: [{ name: "w", paths: ["/w"] }],
-  rules: [{ name: "r", instructions: "use {{a}}" }],
+  rules: [{ name: "r", plugins: ["example-*"], instructions: "use {{a}}" }],
 });
 
 function configFake(over: Partial<ConfigCli> = {}) {

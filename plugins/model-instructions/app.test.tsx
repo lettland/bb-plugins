@@ -147,6 +147,20 @@ describe("registration", () => {
   });
 });
 
+describe("plugin selectors", () => {
+  it("shows, edits and saves plugin claim patterns", async () => {
+    const view = render(withRules(rule({ name: "selection", plugins: ["example-*"] })));
+    const card = await screen.findByRole("group", { name: "selection" });
+    expect(tags(card, "Plugins")).toEqual(["example-*"]);
+    addTag(card, "Plugins", "consumer-*");
+    fireEvent.click(save());
+    await screen.findByText("Saved");
+    expect(savedConfig(view)).toMatchObject({
+      rules: [{ name: "selection", plugins: ["example-*", "consumer-*"] }],
+    });
+  });
+});
+
 describe("loading", () => {
   it("shows a loading note while the first load is in flight", () => {
     render(state(), { getState: () => new Promise(() => {}) });

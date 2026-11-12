@@ -19,10 +19,17 @@ const STORED_FIX =
 type RawRule = RawConfig["rules"][number];
 type Threads = RawRule["threads"];
 /** The rule fields that are lists with a typing box, and so can hold text that was typed but not added. */
-type ListField = "project" | "skipProjects" | "skipTitles" | "scope" | "skills";
+type ListField = "project" | "skipProjects" | "skipTitles" | "scope" | "skills" | "plugins";
 type Pending = Record<ListField, string>;
 
-const noPending = (): Pending => ({ project: "", skipProjects: "", skipTitles: "", scope: "", skills: "" });
+const noPending = (): Pending => ({
+  project: "",
+  skipProjects: "",
+  skipTitles: "",
+  scope: "",
+  skills: "",
+  plugins: "",
+});
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -58,7 +65,7 @@ interface ScopeRow {
   paths: string[];
 }
 
-/** One rule card. `scope` and `skills` hold every entry, checked names and globs alike, in stored order. */
+/** One rule card. Glob fields hold every entry in stored order. */
 interface RuleRow {
   key: number;
   name: string;
@@ -70,6 +77,7 @@ interface RuleRow {
   skipTitles: string[];
   scope: string[];
   skills: string[];
+  plugins: string[];
   instructions: string;
   /** Text typed in a list's box and not added yet. */
   pending: Pending;
@@ -105,6 +113,7 @@ function fromConfig(config: RawConfig, previous: Draft, nextKey: () => number): 
       skipTitles: rule.skipTitles ?? [],
       scope: rule.scope ?? [],
       skills: rule.skills ?? [],
+      plugins: rule.plugins ?? [],
       instructions: rule.instructions ?? "",
       pending: noPending(),
     })),
@@ -137,6 +146,7 @@ function ruleToPayload(rule: RuleRow): RawRule {
     skipTitles: listOrUndefined([...rule.skipTitles, rule.pending.skipTitles]),
     scope: listOrUndefined([...rule.scope, rule.pending.scope]),
     skills: listOrUndefined([...rule.skills, rule.pending.skills]),
+    plugins: listOrUndefined([...rule.plugins, rule.pending.plugins]),
     threads: rule.threads,
     // The server trims before it expands, so the text goes as typed.
     instructions: rule.instructions.trim() === "" ? undefined : rule.instructions,
@@ -699,6 +709,13 @@ function RuleCard(props: {
           onChange={(skills) => onChange({ skills })}
           {...pendingOf("skills")}
         />
+        <TagList
+          label="Plugins"
+          values={row.plugins}
+          hint="Select capabilities from participating BB plugins by ID or * pattern."
+          onChange={(plugins) => onChange({ plugins })}
+          {...pendingOf("plugins")}
+        />
         <div className={ui.field}>
           <TextField
             label="Instructions"
@@ -823,6 +840,7 @@ function newRule(key: number): RuleRow {
     skipTitles: [],
     scope: [],
     skills: [],
+    plugins: [],
     instructions: "",
     pending: noPending(),
   };

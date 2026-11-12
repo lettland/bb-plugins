@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   claimants,
+  claimsPlugin,
   claimedSkills,
   compose,
   expandConfig,
@@ -193,15 +194,16 @@ describe("parseConfig: rule names", () => {
 });
 
 describe("parseConfig: rule fields", () => {
-  it("accepts a skills-only rule, an instructions-only rule and both", () => {
+  it("accepts a skills-only rule, a plugins-only rule, an instructions-only rule and combinations", () => {
     expect(() => rulesOf([{ skills: "a-*" }])).not.toThrow();
+    expect(() => rulesOf([{ plugins: "example-*" }])).not.toThrow();
     expect(() => rulesOf([{ instructions: "x" }])).not.toThrow();
-    expect(() => rulesOf([{ skills: ["a", "b"], instructions: "x" }])).not.toThrow();
+    expect(() => rulesOf([{ skills: ["a", "b"], plugins: "example-*", instructions: "x" }])).not.toThrow();
   });
 
-  it("rejects a rule with neither instructions nor skills", () => {
+  it("rejects a rule with no outputs", () => {
     expect(() => rulesOf([{ provider: "claude-code" }])).toThrow(
-      'a rule needs "instructions", "skills", or both',
+      'a rule needs "instructions", "skills", "plugins", or a combination',
     );
     expect(() => rulesOf([{}])).toThrow('a rule needs "instructions"');
   });
@@ -214,6 +216,9 @@ describe("parseConfig: rule fields", () => {
     ['[{"instructions": "x", "skills": []}]', "skills"],
     ['[{"instructions": "x", "skills": [""]}]', "skills"],
     ['[{"instructions": "x", "skills": 5}]', "expected a glob or an array of globs"],
+    ['[{"instructions": "x", "plugins": []}]', "plugins"],
+    ['[{"instructions": "x", "plugins": [""]}]', "plugins"],
+    ['[{"instructions": "x", "plugins": 5}]', "expected a glob or an array of globs"],
     ['[{"skills": "a", "instructions": ""}]', "instructions"],
     ['[{"skills": "a", "instructions": "  "}]', "instructions"],
     [`[{"instructions": "x", "name": "${"n".repeat(129)}"}]`, "name"],
@@ -221,13 +226,25 @@ describe("parseConfig: rule fields", () => {
     expect(() => parseConfig(json)).toThrow(message);
   });
 
-  it("takes scope and skills as a glob or an array of globs", () => {
+  it("takes scope, skills and plugins as a glob or an array of globs", () => {
     const [one, many] = rulesOf([
-      { scope: "work", skills: "a-*" },
-      { scope: ["w-*", "x"], skills: ["a", "b-*"] },
+      { scope: "work", skills: "a-*", plugins: "example-*" },
+      { scope: ["w-*", "x"], skills: ["a", "b-*"], plugins: ["one", "two-*"] },
     ]);
-    expect(one).toMatchObject({ scope: ["work"], skills: ["a-*"] });
-    expect(many).toMatchObject({ scope: ["w-*", "x"], skills: ["a", "b-*"] });
+    expect(one).toMatchObject({ scope: ["work"], skills: ["a-*"], plugins: ["example-*"] });
+    expect(many).toMatchObject({ scope: ["w-*", "x"], skills: ["a", "b-*"], plugins: ["one", "two-*"] });
+  });
+
+  it("selects a plugin when any matching rule claims it", () => {
+    const rules = rulesOf([
+      { plugins: "example-*" },
+      { model: "other", plugins: "other-plugin" },
+      { plugins: ["second", "example-plugin"] },
+    ]);
+    expect(claimsPlugin(rules, matchRules(rules, [], base), "example-plugin")).toBe(true);
+    expect(claimsPlugin(rules, matchRules(rules, [], base), "other-plugin")).toBe(false);
+    expect(claimsPlugin(rules, matchRules(rules, [], base), "missing")).toBe(false);
+    expect(claimsPlugin(rulesOf([{ instructions: "text only" }]), [0], "example-plugin")).toBe(false);
   });
 
   it("expands {{vars}} only in rules that have instructions", () => {
@@ -575,6 +592,7 @@ describe("parseRawConfig", () => {
           skipTitles: "Helpdesk: *",
           scope: "work",
           skills: "work-*",
+          plugins: "example-*",
           instructions: ["Use {{gchat}}.", "Second line."],
         },
         { skills: ["other"] },
@@ -592,6 +610,7 @@ describe("parseRawConfig", () => {
           skipTitles: ["Helpdesk: *"],
           scope: ["work"],
           skills: ["work-*"],
+          plugins: ["example-*"],
           threads: "any",
           instructions: "Use {{gchat}}.\nSecond line.",
         },
@@ -628,7 +647,7 @@ describe("parseRawConfig", () => {
     ["an empty glob list", { rules: [{ instructions: "x", skills: [] }] }, "skills"],
     ["an empty provider", { rules: [{ instructions: "x", provider: "" }] }, "provider"],
     ["a control character in a name", { rules: [{ name: "a\nb", instructions: "x" }] }, "control characters"],
-    ["a rule with neither instructions nor skills", { rules: [{ name: "r" }] }, 'a rule needs "instructions", "skills", or both'],
+    ["a rule with no outputs", { rules: [{ name: "r" }] }, 'a rule needs "instructions", "skills", "plugins", or a combination'],
     ["a variable name that is not a name", { vars: { "1bad": "x" }, rules: [] }, "vars.1bad"],
     ["a duplicate scope name", { scopes: [{ name: "w", paths: ["/a"] }, { name: "w", paths: ["/b"] }], rules: [] }, 'the scope name "w" is used twice'],
   ])("rejects %s", (_label, value, message) => {

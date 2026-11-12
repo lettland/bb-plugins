@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { experimental_PluginRpcRefusal, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { backupRules } from "./src/backup.js";
 import { budgetReport, cacheProblem, describeType, type Role } from "./src/budget.js";
@@ -27,6 +27,7 @@ import {
 import { createCaches } from "./src/projects.js";
 import {
   activeScopeNamesIn,
+  claimsPlugin,
   compose,
   expandConfig,
   isEmptyConfig,
@@ -89,6 +90,8 @@ const STORAGE_READ_ERROR = (reason: string) => `the plugin's storage could not b
 /** What every writer says while a start-path read of the plugin's storage has failed. */
 const STORAGE_REFUSAL =
   "the plugin's storage could not be read at start; reload the plugin (bb plugin reload model-instructions) before saving";
+const CONFIG_UNAVAILABLE =
+  "Model instructions configuration is unavailable. Open its settings to resolve the reported error.";
 
 /** What a start-path read returns when the storage failed; the failure is already recorded. */
 const READ_FAILED = Symbol("read failed");
@@ -609,7 +612,7 @@ export default async function plugin(bb: BbPluginApi) {
     };
   }
 
-  /** Not discoverable: these methods exist for the settings page, not for agents. */
+  /** Settings-page methods read and write configuration. They do not resolve plugin claims. */
   bb.rpc.register(modelInstructionsRpcContract, {
     async getState() {
       return state();
@@ -626,6 +629,34 @@ export default async function plugin(bb: BbPluginApi) {
         await resolvePrevious("keep");
         return state();
       });
+    },
+    async resolvePluginSelection({ target }, context) {
+      if (context.experimental_caller.kind !== "plugin")
+        throw new experimental_PluginRpcRefusal({
+          code: "forbidden",
+          message: "Only loaded plugins can resolve plugin selection.",
+        });
+      if (storageError !== undefined || storedError !== undefined)
+        throw new Error(CONFIG_UNAVAILABLE);
+      if (caches.sourcesOf(target.project.id) === undefined)
+        await withTimeout(caches.refresh(), PROJECT_LOOKUP_TIMEOUT_MS);
+      const candidatePaths = caches.candidatesFor(target.environment.path, target.project.id);
+      const matched = matchRules(
+        config.rules,
+        activeScopeNamesIn(scopes, candidatePaths),
+        {
+          provider: target.provider.id,
+          model: target.provider.model,
+          project: target.project.name,
+          parentThreadId: target.thread.parentThreadId,
+          title: target.thread.title,
+          candidatePaths,
+        },
+      );
+      return {
+        version: 1 as const,
+        selected: claimsPlugin(config.rules, matched, context.experimental_caller.pluginId),
+      };
     },
   });
 

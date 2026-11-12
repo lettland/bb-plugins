@@ -1487,7 +1487,12 @@ describe("the RPC state for the settings form", () => {
 
   it("is registered, and not discoverable by agents", async () => {
     const loaded = await load();
-    expect(loaded.harness.registrations.rpcMethods.sort()).toEqual(["getState", "keepSavedRules", "saveConfig"]);
+    expect(loaded.harness.registrations.rpcMethods.sort()).toEqual([
+      "getState",
+      "keepSavedRules",
+      "resolvePluginSelection",
+      "saveConfig",
+    ]);
     expect(loaded.harness.registrations.experimental_publishedRpcMethods).toEqual([]);
   });
 
@@ -1666,7 +1671,9 @@ describe("the write queue", () => {
     const first = save(loaded, raw({ rules: [{ instructions: "one" }] }));
     await flush();
     const refused = save(loaded, { rules: [{ name: "r" }] });
-    const refusedResult = expect(refused).rejects.toThrow('a rule needs "instructions", "skills", or both');
+    const refusedResult = expect(refused).rejects.toThrow(
+      'a rule needs "instructions", "skills", "plugins", or a combination',
+    );
     const third = save(loaded, raw({ rules: [{ instructions: "three" }] }));
     await flush();
     expect(await loaded.kv.get("config")).toBeUndefined();
@@ -1694,5 +1701,28 @@ describe("the write queue", () => {
     expect(JSON.parse(readFileSync(profilesPath(), "utf8")).scopes[0]).toMatchObject({ name: "prof" });
     expect((await state(loaded)).profileScopes).toEqual([{ name: "prof", paths: ["/srv/prof"] }]);
     expect(logs(loaded, "info")).toContain("config saved from import-dir-skills: 2 rules, 0 scopes, 0 vars");
+  });
+});
+
+describe("plugin selection with unavailable stored configuration", () => {
+  it("fails without returning a selection result", async () => {
+    const loaded = await load({ stored: { rules: [{ plugins: [] }] } });
+    await expect(
+      loaded.harness.callRpc(
+        "resolvePluginSelection",
+        {
+          version: 1,
+          target: {
+            provider: { id: "claude-code", model: "opus" },
+            thread: { id: "thr_1", title: null, parentThreadId: null },
+            project: { id: "proj_1", name: "bb-plugins" },
+            environment: { id: "env_1", path: "/tmp/none" },
+          },
+        },
+        { experimental_caller: { kind: "plugin", pluginId: "example-plugin" } },
+      ),
+    ).rejects.toThrow(
+      "Model instructions configuration is unavailable. Open its settings to resolve the reported error.",
+    );
   });
 });

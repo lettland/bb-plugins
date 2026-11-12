@@ -35,7 +35,8 @@ in the model-instructions plugin's saved config, an object of `vars`, `scopes` a
 | `name` | no | 1–128 characters, unique among the rules. Names the rule in `status`, `check`, logs and overflow events; otherwise it is `rules[<index>]`. |
 | `scope` | no | A scope name glob or an array of globs. The rule matches only while a scope with a matching name is active (see Scopes). |
 | `skills` | no | A bundled skill name glob or an array of globs; matching skills are injected into every thread the rule matches (see Skills). |
-| `instructions` | no | A string, or an array of lines joined with newlines. A rule needs `instructions`, `skills`, or both. |
+| `plugins` | no | A participating plugin id glob or an array of globs; matching rules select that consumer plugin (see Plugin selection). |
+| `instructions` | no | A string, or an array of lines joined with newlines. A rule needs `instructions`, `skills`, `plugins`, or a combination. |
 
 Example: everything except a few projects:
 
@@ -128,6 +129,35 @@ A rule's `skills` globs claim bundled skills by name. A thread gets `model-instr
 no rule claims is injected nowhere; `*` never lists `model-instructions` twice. Skills are
 never dropped for the character limit.
 
+## Plugin selection
+
+A rule's `plugins` globs select capabilities from participating BB plugins. The
+same `*` glob behavior applies. A consumer is selected if at least one matching
+rule claims its authenticated plugin id. No matching claim means unselected.
+
+```json
+{
+  "scopes": [{ "name": "work", "paths": ["~/work"] }],
+  "rules": [{ "scope": "work", "plugins": ["example-*"] }]
+}
+```
+
+Claims can name consumers that are installed later, so the settings form does
+not show an installed-consumer list. Plugin claims do not change bundled-skill
+ownership or existing `skills` selector behavior. Ordinary plugin installation
+and enablement are unchanged. Only participating consumers call
+`resolvePluginSelection`.
+
+The RPC input is `{ version: 1, target }`. The strict target contains provider
+`id` and `model`; thread `id`, `title`, and `parentThreadId`; project `id` and
+`name`; and environment `id` and `path`. The result is
+`{ version: 1, selected: boolean }`. The consumer id comes only from the
+authenticated loaded-plugin RPC caller. It is not an input field. A malformed
+or unavailable central configuration fails the call instead of selecting a
+consumer.
+
+Configuration changes apply at BB's existing safe runtime and session boundaries.
+
 ## Claude profiles
 
 `~/.bb/model-instructions/profiles.json` is `{ "scopes": [ { "name", "paths", "claudeConfigDir" } ] }`
@@ -173,10 +203,11 @@ bb model-instructions check [--provider P] [--model M] [--child | --top-level] [
 bb model-instructions check --all [--json]
 ```
 
-`status` lists scopes, rules, bundled skills and the rules that claim them (and the unclaimed
-ones), the cache state, unchecked providers with their reason, thread types over budget, and
-recent overflow events; a `scope` or `skills` glob that matches nothing is marked under its rule.
-`check` shows the matched rules, length out of 4096, dropped rules and skills for one thread;
+`status` lists scopes, rules, configured plugin claim patterns, bundled skills and the rules that
+claim them (and the unclaimed ones), the cache state, unchecked providers with their reason,
+thread types over budget, and recent overflow events; a `scope` or `skills` glob that matches
+nothing is marked under its rule. `check` shows the matched rules, matching plugin claim patterns,
+length out of 4096, dropped rules and skills for one thread;
 inside a bb thread it defaults provider, model, role, title, project and path from that thread and
 prints what it defaulted. `--child` and `--top-level` force the role (both together is a usage
 error). `check --all` prints the save-time budget table and the unchecked providers. `status` also shows

@@ -78,6 +78,7 @@ const ruleSchema = z
     skipTitles: globs.optional(),
     scope: globs.optional(),
     skills: globs.optional(),
+    plugins: globs.optional(),
     threads: z.enum(THREAD_SCOPES).default("any"),
     instructions: z
       .union([z.string(), z.array(z.string())])
@@ -86,9 +87,15 @@ const ruleSchema = z
       .optional(),
   })
   .strict()
-  .refine((rule) => rule.instructions !== undefined || rule.skills !== undefined, {
-    error: 'a rule needs "instructions", "skills", or both',
-  });
+  .refine(
+    (rule) =>
+      rule.instructions !== undefined ||
+      rule.skills !== undefined ||
+      rule.plugins !== undefined,
+    {
+      error: 'a rule needs "instructions", "skills", "plugins", or a combination',
+    },
+  );
 
 const rulesSchema = z.array(ruleSchema).superRefine((rules, ctx) => {
   const seen = new Set<string>();
@@ -317,6 +324,15 @@ export function claimedSkills(
       for (const name of skills)
         if (name !== SELF_SKILL && globToRegExp(glob).test(name)) claimed.add(name);
   return [...claimed].sort();
+}
+
+/** True when any matching rule claims the plugin id. */
+export function claimsPlugin(
+  rules: Rule[],
+  matched: number[],
+  pluginId: string,
+): boolean {
+  return matched.some((index) => anyGlobMatches(rules[index].plugins ?? [], pluginId));
 }
 
 /**

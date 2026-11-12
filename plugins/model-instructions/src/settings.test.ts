@@ -38,7 +38,7 @@ function check(value: unknown, over: Parameters<typeof env>[0] = {}): string | n
 describe("structural checks", () => {
   it("rejects what parseConfig rejects, with its message", () => {
     expect(check("not json")).toContain("not valid JSON");
-    expect(check([{}])).toContain('a rule needs "instructions", "skills", or both');
+    expect(check([{}])).toContain('a rule needs "instructions", "skills", "plugins", or a combination');
   });
 
   it("accepts the default value even when nothing is cached yet", () => {
@@ -225,6 +225,11 @@ describe("a cache that cannot be trusted yet", () => {
   it("needs no cache for a setting without any instruction text", () => {
     const empty = snapshotOf([], [], { providers: { loaded: false }, projects: { loaded: false } });
     expect(check([{ skills: "other" }], { snapshot: empty })).toBeNull();
+  });
+
+  it("needs no cache for a selector-only rule", () => {
+    const empty = snapshotOf([], [], { providers: { loaded: false }, projects: { loaded: false } });
+    expect(check([{ plugins: "example-*" }], { snapshot: empty })).toBeNull();
   });
 
   it("reports unresolved references before the cache state", () => {

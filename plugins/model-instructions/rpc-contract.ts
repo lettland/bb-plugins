@@ -17,6 +17,7 @@ const rawRuleSchema = z.strictObject({
   skipTitles: z.array(z.string()).optional(),
   scope: z.array(z.string()).optional(),
   skills: z.array(z.string()).optional(),
+  plugins: z.array(z.string()).optional(),
   threads: z.enum(["any", "top-level", "child"]),
   instructions: z.string().optional(),
 });
@@ -79,6 +80,27 @@ const stateSchema = z.strictObject({
 });
 export type ConfigState = z.infer<typeof stateSchema>;
 
+const pluginSelectionTargetSchema = z.strictObject({
+  provider: z.strictObject({ id: z.string(), model: z.string() }),
+  thread: z.strictObject({
+    id: z.string(),
+    title: z.string().nullable(),
+    parentThreadId: z.string().nullable(),
+  }),
+  project: z.strictObject({ id: z.string(), name: z.string() }),
+  environment: z.strictObject({ id: z.string(), path: z.string().nullable() }),
+});
+
+const resolvePluginSelectionInputSchema = z.strictObject({
+  version: z.literal(1),
+  target: pluginSelectionTargetSchema,
+});
+
+const resolvePluginSelectionOutputSchema = z.strictObject({
+  version: z.literal(1),
+  selected: z.boolean(),
+});
+
 export const modelInstructionsRpcContract = {
   getState: {
     input: z.null(),
@@ -93,6 +115,10 @@ export const modelInstructionsRpcContract = {
   keepSavedRules: {
     input: z.null(),
     output: stateSchema,
+  },
+  resolvePluginSelection: {
+    input: resolvePluginSelectionInputSchema,
+    output: resolvePluginSelectionOutputSchema,
   },
 } satisfies PluginRpcContract;
 

@@ -149,6 +149,33 @@ const warnings = (harness: { logEntries: Array<{ level: string; message: string 
 
 const rules = (...list: unknown[]) => JSON.stringify(list);
 
+const selectionTarget = (over: {
+  model?: string;
+  parentThreadId?: string | null;
+  project?: { id?: string; name?: string };
+  path?: string | null;
+  provider?: string;
+  title?: string | null;
+} = {}) => ({
+  version: 1,
+  target: {
+    provider: { id: over.provider ?? "claude-code", model: over.model ?? "opus" },
+    thread: { id: "thr_1", title: over.title ?? null, parentThreadId: over.parentThreadId ?? null },
+    project: { id: "proj_1", name: "bb-plugins", ...over.project },
+    environment: { id: "env_1", path: over.path ?? "/tmp/none" },
+  },
+});
+
+function resolvePluginSelection(
+  harness: Awaited<ReturnType<typeof load>>["harness"],
+  input = selectionTarget(),
+  pluginId = "example-plugin",
+) {
+  return harness.callRpc("resolvePluginSelection", input, {
+    experimental_caller: { kind: "plugin", pluginId },
+  });
+}
+
 describe("skills through the plugin", () => {
   it("injects only model-instructions and no instructions with the default setting", async () => {
     const { harness } = await load();
@@ -1041,6 +1068,7 @@ describe("bb model-instructions status", () => {
           matchers: { provider: "claude-code", scope: ["work"], threads: "top-level" },
           instructionsLength: 12,
           skills: [],
+          plugins: [],
           unresolved: [],
         },
         {
@@ -1048,9 +1076,10 @@ describe("bb model-instructions status", () => {
           matchers: { model: "m*", project: ["a", "b"], skipProjects: ["c"], skipTitles: ["T*"] },
           instructionsLength: null,
           skills: ["work-*"],
+          plugins: [],
           unresolved: [],
         },
-        { name: "rules[2]", matchers: {}, instructionsLength: 3, skills: [], unresolved: [] },
+        { name: "rules[2]", matchers: {}, instructionsLength: 3, skills: [], plugins: [], unresolved: [] },
       ],
       skills: [
         { name: "model-instructions", claimedBy: null },
@@ -1209,6 +1238,7 @@ describe("bb model-instructions check", () => {
       limit: 4096,
       dropped: [],
       skills: ["model-instructions", "work-conventions"],
+      pluginClaims: [],
       ignoredSettingScopes: [],
       claudeProfile: { profilesFile: "absent", decision: null, threadId: "thr_cli", pinned: null },
     });
@@ -1230,6 +1260,7 @@ describe("bb model-instructions check", () => {
         "length: 39/4096",
         "dropped: none",
         "skills: model-instructions, work-conventions",
+        "plugin claims: none",
         "Claude profile: none (profiles.json is absent; a thread without a pin gets no CLAUDE_CONFIG_DIR and no pin is written)",
         "Claude profile pinned for thread thr_cli: not pinned yet",
         "",
@@ -1476,7 +1507,12 @@ describe("registration", () => {
 
   it("registers the settings form's RPC", async () => {
     const { harness } = await load();
-    expect(harness.registrations.rpcMethods.sort()).toEqual(["getState", "keepSavedRules", "saveConfig"]);
+    expect(harness.registrations.rpcMethods.sort()).toEqual([
+      "getState",
+      "keepSavedRules",
+      "resolvePluginSelection",
+      "saveConfig",
+    ]);
   });
 });
 
@@ -1655,5 +1691,106 @@ describe("the known limit of the save check: the environment path", () => {
     );
     expect(warnings(harness).filter((line) => line.includes("lost rules"))).toHaveLength(1);
     expect((await configure(harness, { path: outside })).instructions).toBe(x(3000));
+  });
+});
+
+describe("plugin selection RPC", () => {
+  it("uses the authenticated plugin caller and rejects clients, spoofed fields and unsupported versions", async () => {
+    const { harness } = await load({ config: rules({ plugins: "example-*" }) });
+    expect(await resolvePluginSelection(harness)).toEqual({ version: 1, selected: true });
+    expect(await resolvePluginSelection(harness, selectionTarget(), "other-plugin")).toEqual({
+      version: 1,
+      selected: false,
+    });
+    await expect(harness.callRpc("resolvePluginSelection", selectionTarget())).rejects.toMatchObject({
+      code: "forbidden",
+      message: "Only loaded plugins can resolve plugin selection.",
+    });
+    await expect(resolvePluginSelection(harness, { ...selectionTarget(), version: 2 })).rejects.toMatchObject({
+      code: "invalid_input",
+    });
+    await expect(
+      resolvePluginSelection(harness, {
+        ...selectionTarget(),
+        pluginId: "example-plugin",
+      } as never),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+  });
+
+  it("uses matching provider, model, role, title, scope and project checkout candidates", async () => {
+    const root = path.join(base, "work");
+    mkdirSync(path.join(root, "repo"), { recursive: true });
+    const world = DEFAULT_WORLD();
+    world.projects = [{ id: "proj_1", name: "bb-plugins", sources: [{ path: path.join(root, "repo"), hostId: "h" }] }];
+    const { harness } = await load({
+      world,
+      config: JSON.stringify({
+        scopes: [{ name: "work", paths: [root] }],
+        rules: [
+          {
+            provider: "claude-code",
+            model: "opus",
+            threads: "top-level",
+            project: "bb-*",
+            scope: "work",
+            skipTitles: "Skip *",
+            plugins: "example-plugin",
+          },
+        ],
+      }),
+    });
+    expect(await resolvePluginSelection(harness, selectionTarget({ path: null }))).toEqual({
+      version: 1,
+      selected: true,
+    });
+    expect(await resolvePluginSelection(harness, selectionTarget({ parentThreadId: "parent" }))).toEqual({
+      version: 1,
+      selected: false,
+    });
+    expect(await resolvePluginSelection(harness, selectionTarget({ title: "Skip this" }))).toEqual({
+      version: 1,
+      selected: false,
+    });
+    expect(await resolvePluginSelection(harness, selectionTarget({ model: "sonnet" }))).toEqual({
+      version: 1,
+      selected: false,
+    });
+  });
+
+  it("uses changed configuration on the next call and reports configured claim patterns", async () => {
+    const { harness } = await load({ config: rules({ plugins: "other-plugin" }) });
+    expect(await resolvePluginSelection(harness)).toEqual({ version: 1, selected: false });
+    await save(harness, JSON.stringify({ rules: [{ plugins: ["example-*", "other-plugin"] }] }));
+    expect(await resolvePluginSelection(harness)).toEqual({ version: 1, selected: true });
+    const status = JSON.parse((await harness.runCli(["status", "--json"])).stdout);
+    expect(status.rules[0].plugins).toEqual(["example-*", "other-plugin"]);
+    expect((await harness.runCli(["status"])).stdout).toContain("plugins=example-*|other-plugin");
+    const check = JSON.parse(
+      (await harness.runCli(["check", "--provider", "claude-code", "--model", "opus", "--json"])).stdout,
+    );
+    expect(check.pluginClaims).toEqual(["example-*", "other-plugin"]);
+    expect((await harness.runCli(["check", "--provider", "claude-code", "--model", "opus"])).stdout).toContain(
+      "plugin claims: example-*, other-plugin",
+    );
+  });
+
+  it("refreshes an uncached project before matching its checkout scope", async () => {
+    const root = path.join(base, "refreshed-work");
+    mkdirSync(path.join(root, "repo"), { recursive: true });
+    const world = DEFAULT_WORLD();
+    const { harness } = await load({
+      world,
+      config: JSON.stringify({
+        scopes: [{ name: "work", paths: [root] }],
+        rules: [{ scope: "work", plugins: "example-plugin" }],
+      }),
+    });
+    world.projects = [{ id: "proj_later", name: "later", sources: [{ path: path.join(root, "repo"), hostId: "h" }] }];
+    expect(
+      await resolvePluginSelection(
+        harness,
+        selectionTarget({ project: { id: "proj_later", name: "later" }, path: null }),
+      ),
+    ).toEqual({ version: 1, selected: true });
   });
 });

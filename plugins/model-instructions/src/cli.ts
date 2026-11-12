@@ -159,6 +159,7 @@ async function status(deps: CliDeps, json: boolean): Promise<PluginCliResult> {
       matchers: matchersOf(rule),
       instructionsLength: rule.instructions?.length ?? null,
       skills: rule.skills ?? [],
+      plugins: rule.plugins ?? [],
       unresolved: unresolved
         .filter((ref) => ref.index === index)
         .map(({ kind, glob }) => ({ kind, glob })),
@@ -210,7 +211,8 @@ async function status(deps: CliDeps, json: boolean): Promise<PluginCliResult> {
         (rule.instructionsLength === null
           ? "no instructions"
           : `instructions=${rule.instructionsLength} chars`) +
-        (rule.skills.length > 0 ? `  skills=${rule.skills.join("|")}` : ""),
+        (rule.skills.length > 0 ? `  skills=${rule.skills.join("|")}` : "") +
+        (rule.plugins.length > 0 ? `  plugins=${rule.plugins.join("|")}` : ""),
     );
     for (const ref of rule.unresolved) lines.push(`  ! ${ref.kind} "${ref.glob}" matches nothing`);
   }
@@ -430,6 +432,7 @@ async function check(
     limit: INSTRUCTIONS_LIMIT,
     dropped: result.dropped,
     skills: result.skills,
+    pluginClaims: matched.flatMap((index) => rules[index].plugins ?? []),
     ignoredSettingScopes: ignored,
     claudeProfile: {
       profilesFile: profiles.state,
@@ -459,6 +462,9 @@ async function check(
     `length: ${payload.length}/${INSTRUCTIONS_LIMIT}`,
     payload.dropped.length === 0 ? "dropped: none" : `dropped: ${payload.dropped.join(", ")}`,
     `skills: ${payload.skills.join(", ")}`,
+    payload.pluginClaims.length === 0
+      ? "plugin claims: none"
+      : `plugin claims: ${payload.pluginClaims.join(", ")}`,
   ];
   for (const name of ignored) lines.push(ignoredScopeText(name));
   lines.push(...claudeProfileLines(profiles, decision, pinned, ctx.threadId));

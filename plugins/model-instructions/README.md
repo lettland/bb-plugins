@@ -21,7 +21,8 @@ Rules are edited in Settings → Plugins → Model instructions. The plugin stor
 | `name` | no | 1–128 characters, unique among the rules. Names the rule in `status`, `check`, logs and overflow events; a rule without a name is `rules[<index>]`. |
 | `scope` | no | A scope name glob or an array of globs (see Scopes). The rule matches only while a scope with a matching name is active for the thread. Omit to match every directory. |
 | `skills` | no | A bundled skill name glob or an array of globs (see Skills). Matching skills are injected into every thread the rule matches. |
-| `instructions` | no | A string, or an array of lines joined with newlines. A rule needs `instructions`, `skills`, or both. |
+| `plugins` | no | A participating plugin id glob or an array of globs (see Plugin selection). Matching rules select that consumer plugin. |
+| `instructions` | no | A string, or an array of lines joined with newlines. A rule needs `instructions`, `skills`, `plugins`, or a combination. |
 
 To back up or move the config, use `bb model-instructions export` and `bb model-instructions import <file>` (see Storage, export and import).
 
@@ -116,6 +117,37 @@ skills by name, and a thread gets every skill claimed by a rule that matches it:
   status` lists the unclaimed skills.
 - Skills are never dropped for the character limit. Only instruction text is.
 - A skill claimed by several rules is listed once.
+
+## Plugin selection
+
+A rule's `plugins` globs select capabilities from participating BB plugins. These
+claims use the same `*` glob behavior as the other rule fields. A consumer is
+selected when at least one matching rule claims its authenticated plugin id. No
+matching claim means it is unselected.
+
+```json
+{
+  "scopes": [{ "name": "work", "paths": ["~/work"] }],
+  "rules": [{ "scope": "work", "plugins": ["example-*"] }]
+}
+```
+
+- Claims can name a participating consumer that is installed later. The form
+  does not list installed consumers.
+- Plugin claims do not inject, remove, or otherwise change the ownership of
+  bundled skills. Existing `skills` selectors keep their current meaning.
+- Ordinary plugin installation and enablement are unchanged. Only participating
+  consumers call this selection API.
+
+Participating consumers call the typed `resolvePluginSelection` RPC with a
+strict, versioned target. Its input is `{ "version": 1, "target": { ... } }`,
+where `target` contains `provider` (`id`, `model`), `thread` (`id`, `title`,
+`parentThreadId`), `project` (`id`, `name`), and `environment` (`id`, `path`).
+Its result is `{ "version": 1, "selected": boolean }`. The caller id comes
+only from the authenticated loaded-plugin RPC context; callers cannot supply or
+spoof it in the input. Non-plugin callers are refused.
+
+Configuration changes apply at BB's existing safe runtime and session boundaries.
 
 ## Instruction budget
 
@@ -523,14 +555,14 @@ bb model-instructions import <file>
 
 - `status` lists the state of profiles.json, the profile scopes, the ignored
   saved scopes and the pin count (see Claude profiles), the scopes, the rules (name or `rules[<index>]`, matchers,
-  instructions length, skills), the bundled skills with the rules that claim
-  them and the unclaimed ones, the state of the caches, the providers whose
+  instructions length, skills, configured plugin claim patterns), the bundled
+  skills with the rules that claim them and the unclaimed ones, the state of the caches, the providers whose
   models could not be listed (unchecked, with the reason), the thread types that
   are over budget and the recent overflow events. A `scope` or `skills` glob that
   matches nothing is marked under its rule (`! scope "<glob>" matches nothing`;
   `unresolved` in `--json`).
-- `check` shows what one thread would get: the matched rules, the length out of
-  4096, the dropped rules and the skills, then the Claude profile decision for the
+- `check` shows what one thread would get: the matched rules, matching plugin
+  claim patterns, the length out of 4096, the dropped rules and the skills, then the Claude profile decision for the
   project and the calling thread's pin. Run inside a bb thread, it takes
   provider, model, role, title, project and path from that thread; the output
   says which values were defaulted. A flag overrides its default. `--child` and
