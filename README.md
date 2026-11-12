@@ -207,13 +207,22 @@ push publishes the next bumped version, not the one skipped earlier (tag discove
 is git-based, so it never rewinds). Re-publish a skipped version by hand if you
 need it on npm.
 
-The bump is inferred from commit markers, scanning every commit that touched the
-plugin since its last tag: a `[major]` or `[minor]` marker in a commit subject
-opts into that bump (the highest marker across the range wins), and any normal
-commit with no marker cuts a `patch`. `[patch]` is accepted for parity but is
-the default. A manual run accepts an explicit `release_type` (`patch`, `minor`,
-`major`, or `prerelease`) and an optional single `plugin` to restrict the
-release; `prerelease` is reachable only through such a dispatch.
+Commit subjects use `type(scope)!: text` with the types `feat`, `fix`, `perf`,
+`refactor`, `revert`, `docs`, `test`, `chore`, `ci`, `build` and `style`; the
+scope is optional, and git's own `Revert "…"` and `Reapply "…"` subjects are
+accepted. The bump is inferred per plugin from the non-merge commits since its
+last tag that touched `plugins/<id>/`: `feat` cuts a `minor`; a breaking change
+(`!` after the type or scope, or a `BREAKING CHANGE:` footer) cuts a `minor`
+while the plugin is on 0.x and a `major` from 1.x on; anything else, including
+a subject not in the format, cuts a `patch`. The highest bump wins, and every
+change under `plugins/<id>/` releases at least a patch. A manual run accepts a
+`release_type` (`patch`, `minor`, `major`, `prerelease`, or an exact `X.Y.Z`
+that must be above the current version of every selected plugin) and an
+optional single `plugin` to restrict the release; `prerelease` is reachable
+only through such a dispatch. CI's `commit subjects` job flags a subject that
+is not in the format with a red run; pushes go straight to `master`, so it
+cannot refuse the push. After a force-push it checks only the pushed head, and a
+push whose head commit carries `[skip ci]` is not checked.
 
 npm publishing is not set up yet, so install from the marketplace or over git;
 every changed plugin still cuts its stable `<plugin>/vX.Y.Z` tag and GitHub
@@ -222,11 +231,14 @@ exact tag over git, e.g. `bb plugin install
 git:https://github.com/lettland/bb-plugins.git@<id>/vX.Y.Z-beta.N --subdirectory
 plugins/<id>`.
 
-A `[major]` release reaches new marketplace installs once `marketplace.json` is
-regenerated — the bump lands in the release bot's commit, so pull, then run `node
-scripts/marketplace.mjs`. Existing installs keep the range they were installed
-with and stay on the old major; moving them means `bb plugin remove` plus
-reinstalling, which costs settings.
+A major release (1.0.0 is reached only by a manual run with `plugin=<id>` and
+`release_type=major`; never without `plugin`, which would release every plugin
+as a major; from 1.x on, a breaking commit is a major too) reaches new
+marketplace installs once `marketplace.json` is regenerated — the bump lands in
+the release bot's commit, so pull, then run `node scripts/marketplace.mjs`.
+Existing installs keep the range they were installed with and stay on the old
+major; moving them means `bb plugin remove` plus reinstalling, which costs
+settings.
 
 To add a new plugin, create `plugins/<name>/` with a `package.json` (name
 `@lettland/bb-plugin-<name>`, `publishConfig.access: public`) and a `bb`

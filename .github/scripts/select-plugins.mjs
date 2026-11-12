@@ -1,13 +1,16 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readdirSync, readFileSync, existsSync } from "node:fs";
+import { bumpFor, effectiveBump, highestBump, parseSubject } from "./conventional.mjs";
 
-const BUMP_RANK = { patch: 1, minor: 2, major: 3 };
-const VALID_BUMPS = new Set(["patch", "minor", "major", "prerelease"]);
+const NAMED_BUMPS = new Set(["patch", "minor", "major", "prerelease"]);
+const EXACT_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 const onlyPlugin = (process.env.ONLY_PLUGIN ?? "").trim();
 const forcedBump = (process.env.FORCED_BUMP ?? "").trim();
-if (forcedBump && !VALID_BUMPS.has(forcedBump)) {
-  console.error(`Invalid release_type "${forcedBump}" (expected ${[...VALID_BUMPS].join(", ")}).`);
+if (forcedBump && !NAMED_BUMPS.has(forcedBump) && !EXACT_VERSION.test(forcedBump)) {
+  console.error(
+    `Invalid release_type "${forcedBump}" (expected ${[...NAMED_BUMPS].join(", ")}, or an exact version X.Y.Z).`,
+  );
   process.exit(1);
 }
 
@@ -31,24 +34,53 @@ function pluginChangedSince(id, tag) {
   }
 }
 
-function inferBump(id, tag) {
+// True when `target` (X.Y.Z) is strictly above `current` by semver precedence.
+// On a numeric tie the target is above only when current carries a prerelease.
+function isAbove(target, current) {
+  const t = target.split(".").map(Number);
+  const [core, ...pre] = current.split("-");
+  const c = core.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (t[i] !== c[i]) return t[i] > c[i];
+  }
+  return pre.length > 0;
+}
+
+function inferBump(id, tag, currentVersion) {
   if (forcedBump) return forcedBump;
   const range = tag ? `${tag}..HEAD` : "HEAD";
-  const subjects = git("log", range, "--format=%s", "--", `plugins/${id}`)
-    .split("\n")
-    .filter(Boolean);
-  let best = 0;
-  for (const s of subjects) {
-    const m = s.match(/\[(patch|minor|major)\]/i);
-    if (m) best = Math.max(best, BUMP_RANK[m[1].toLowerCase()]);
+  const records = execFileSync(
+    "git",
+    ["log", "--no-merges", "--format=%H%x1f%s%x1f%b%x1e", range, "--", `plugins/${id}`],
+    { encoding: "utf8" },
+  )
+    .split("\x1e")
+    .map((r) => r.replace(/^\n/, ""))
+    .filter((r) => r.trim() !== "");
+
+  const bumps = [];
+  let malformed = 0;
+  for (const record of records) {
+    const [sha, subject = "", body = ""] = record.split("\x1f");
+    bumps.push(bumpFor(subject, body));
+    if (parseSubject(subject) === null) {
+      malformed++;
+      console.log(`malformed subject ${sha}: ${subject}`);
+    }
   }
-  // A normal commit cuts a patch; minor/major must be opted into with a
-  // [minor]/[major] marker. prerelease is reachable only via a manual dispatch.
-  return best ? Object.keys(BUMP_RANK)[best - 1] : "patch";
+
+  if (bumps.length === 0) {
+    console.log(`warning ${id}: changed but no non-merge commits in range; using patch`);
+    return "patch";
+  }
+  const bump = effectiveBump(highestBump(bumps), currentVersion);
+  console.log(`${id}: ${bump} (${bumps.length} commits${malformed ? `, ${malformed} malformed` : ""})`);
+  return bump;
 }
 
 const pluginsDir = "plugins";
 const selected = [];
+const currentVersions = new Map();
 for (const entry of readdirSync(pluginsDir, { withFileTypes: true })) {
   if (!entry.isDirectory()) continue;
   const id = entry.name;
@@ -61,7 +93,18 @@ for (const entry of readdirSync(pluginsDir, { withFileTypes: true })) {
   const forced = onlyPlugin === id || Boolean(forcedBump);
   if (!forced && !pluginChangedSince(id, tag)) continue;
 
-  selected.push({ id, dir: `${pluginsDir}/${id}`, name: pkg.name, bump: inferBump(id, tag) });
+  currentVersions.set(id, pkg.version);
+  selected.push({ id, dir: `${pluginsDir}/${id}`, name: pkg.name, bump: inferBump(id, tag, pkg.version) });
+}
+
+if (EXACT_VERSION.test(forcedBump)) {
+  const blocking = selected.filter((p) => !isAbove(forcedBump, currentVersions.get(p.id)));
+  if (blocking.length > 0) {
+    for (const p of blocking) {
+      console.error(`release_type ${forcedBump} is not above ${p.id} ${currentVersions.get(p.id)}`);
+    }
+    process.exit(1);
+  }
 }
 
 const matrix = JSON.stringify(selected);

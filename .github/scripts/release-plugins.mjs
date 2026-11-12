@@ -57,7 +57,7 @@ for (const { id, dir, bump } of matrix) {
 if (released.length === 0) process.exit(0);
 
 const summary = released.map((r) => `${r.id} v${r.version}`).join(", ");
-run("git", ["commit", "-m", `release: ${summary} [skip ci]`]);
+run("git", ["commit", "-m", `chore(release): ${summary} [skip ci]`]);
 for (const r of released) run("git", ["tag", "-a", r.tag, "-m", `${r.id} v${r.version}`]);
 run("git", ["push", "origin", "HEAD:master"]);
 run("git", ["push", "origin", "--tags"]);

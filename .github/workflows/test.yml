@@ -87,3 +87,33 @@ jobs:
         run: node scripts/marketplace.mjs --check
       - name: Test the generator
         run: node --test scripts/marketplace.test.mjs
+
+  commit-subjects:
+    name: commit subjects
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Check commit subjects
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            RANGE="$BASE..$HEAD_SHA"
+          elif [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BEFORE^{commit}"; then
+            echo "checking only the pushed head (no usable before sha)"
+            RANGE="$AFTER^!"
+          else
+            RANGE="$BEFORE..$AFTER"
+          fi
+          node .github/scripts/check-commit-subjects.mjs "$RANGE"
+      - name: Test the release scripts
+        run: node --test .github/scripts/*.test.mjs
