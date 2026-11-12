@@ -160,7 +160,7 @@
     {
       "id": "shared-runtime",
       "displayName": "Shared Runtime",
-      "description": "Typed, project-confined shared container runtime for BB worktrees, driven by each repository's .bb-runtime.json",
+      "description": "Typed, project-confined shared container runtime for BB worktrees, driven by a project's .bb-runtime.json, in the repository or the host project directory",
       "icon": "Container",
       "author": {
         "name": "Lettland",
