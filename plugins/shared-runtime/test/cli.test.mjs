@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { manifestDigest } from "../src/manifest.mjs";
+import { loadRegistry } from "../src/registry.mjs";
 
 const execFileAsync = promisify(execFile);
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -696,6 +697,8 @@ test("doctor verifies registration, manifest, and container mounts", async (t) =
     result.stdout,
     [
       "ok    registration proj_example on host host_fixture",
+      `ok    manifest source: repo (${path.join(fixture.repo, ".bb-runtime.json")})`,
+      `ok    script root: ${fixture.repo}`,
       `ok    manifest hash ${digest.slice(0, 12)} matches`,
       "ok    policy file permissions verified",
       "warn  isolation launcher is missing or does not match; reinstalled on the next operation",
@@ -721,7 +724,7 @@ test("doctor verifies registration, manifest, and container mounts", async (t) =
   assert.equal(result.code, 1);
   assert.equal(result.stderr, "doctor found errors\n");
   const { findings } = JSON.parse(result.stdout);
-  assert.deepEqual(findings.slice(3), [
+  assert.deepEqual(findings.slice(5), [
     { level: "ok", message: "isolation launcher is installed and verified" },
     { level: "error", message: "container worker (example_dev_worker) is not running or not created" },
     { level: "warn", message: "container web: /bb-worktrees is mounted from /elsewhere/worktrees" },
@@ -746,7 +749,7 @@ test("doctor verifies registration, manifest, and container mounts", async (t) =
   await writeFile(manifestPath, `${original}\n`);
   result = await fixture.run(["doctor", "--json"]);
   assert.equal(result.code, 1);
-  assert.deepEqual(JSON.parse(result.stdout).findings[1], {
+  assert.deepEqual(JSON.parse(result.stdout).findings[3], {
     level: "error",
     message: "manifest changed since installation; run bb-shared-runtime sync",
   });
@@ -756,6 +759,8 @@ test("doctor verifies registration, manifest, and container mounts", async (t) =
   assert.equal(result.code, 1);
   assert.deepEqual(JSON.parse(result.stdout).findings, [
     { level: "ok", message: "registration proj_example on host host_fixture" },
+    { level: "ok", message: `manifest source: repo (${manifestPath})` },
+    { level: "ok", message: `script root: ${fixture.repo}` },
     {
       level: "error",
       message: `manifest: Shared runtime manifest invalid: ${manifestPath} is not valid JSON`,
@@ -862,4 +867,389 @@ test("list and doctor honour --runtime-root and render compose-less policies", a
   ]);
   assert.equal(removed.code, 0, removed.stderr);
   assert.match(removed.stdout, /Removed registration proj_example\./);
+});
+
+// Origin: BB thread thr_69ubadfky5 — a project could not use the runtime without committing
+// .bb-runtime.json and its scripts. These tests run a fixture repository that holds zero
+// runtime files and keep the manifest, a script and an overlay in the host project directory.
+const hostManifest = {
+  version: 1,
+  containers: {
+    app: { service: "app", containerName: "demo_app", mounts: [{ host: ".", container: "/app" }] },
+  },
+  lifecycle: { ensure: ["bash", "ensure.sh"] },
+};
+
+async function createHostDirectoryFixture(t, { projectId = "proj_example", manifest = hostManifest } = {}) {
+  const fixture = await createFixture(t, { manifest: false });
+  await git(fixture.repo, "commit", "--allow-empty", "--quiet", "-m", "initial");
+  const projectDirectory = path.join(fixture.runtimeRoot, "projects", projectId);
+  for (const directory of [fixture.runtimeRoot, path.join(fixture.runtimeRoot, "projects"), projectDirectory]) {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await chmod(directory, 0o700);
+  }
+  const manifestPath = path.join(projectDirectory, ".bb-runtime.json");
+  await writeFile(manifestPath, JSON.stringify(manifest), { mode: 0o600 });
+  await writeFile(path.join(projectDirectory, "ensure.sh"), "#!/bin/bash\n", { mode: 0o700 });
+  await writeFile(path.join(projectDirectory, "overlay.yml"), "services: {}\n", { mode: 0o600 });
+  const excludePath = path.join(fixture.repo, ".git", "info", "exclude");
+  return {
+    ...fixture,
+    manifestPath,
+    projectDirectory,
+    excludePath,
+    registered: async (root = fixture.runtimeRoot) => (await loadRegistry(root)).policies.get(projectId),
+  };
+}
+
+async function repoStatus(repo) {
+  return (await git(repo, "status", "--porcelain", "--untracked-files=all")).stdout;
+}
+
+test("a project with zero committed runtime files installs from its host project directory", async (t) => {
+  const fixture = await createHostDirectoryFixture(t);
+  assert.equal(await repoStatus(fixture.repo), "", "the repository holds no runtime file");
+
+  const installed = await fixture.run(["install", "--no-reload"]);
+  assert.equal(installed.code, 0, installed.stderr);
+  const digest = manifestDigest(await readFile(fixture.manifestPath));
+  assert.match(installed.stdout, new RegExp(`with manifest ${digest.slice(0, 12)}; plugin installed\\.`));
+
+  // The stored path comes from the real install output, and the registry loads it back.
+  const stored = await fixture.readPolicy();
+  assert.equal(stored.manifestPath, fixture.manifestPath);
+  assert.equal("scriptRoot" in stored, false, "the script root is derived, never stored");
+  const policy = await fixture.registered();
+  assert.equal(policy.manifestError, null);
+  assert.equal(policy.manifestStale, false);
+  assert.equal(policy.scriptRoot, fixture.projectDirectory);
+  assert.equal(policy.manifestSha256, digest);
+
+  // The host directory keeps the runtime files out of git status.
+  const excludes = await readFile(fixture.excludePath, "utf8");
+  assert.ok(excludes.includes("\n/.bb-runtime/\n/.bb-runtime-isolation-*/\n"));
+  await mkdir(path.join(fixture.repo, ".bb-runtime"));
+  await writeFile(path.join(fixture.repo, ".bb-runtime", "landlock-run"), "x");
+  await mkdir(path.join(fixture.repo, ".bb-runtime-isolation-1"));
+  await writeFile(path.join(fixture.repo, ".bb-runtime-isolation-1", "f"), "x");
+  assert.equal(await repoStatus(fixture.repo), "");
+
+  // A second install adds nothing and keeps the registration.
+  const before = await readFile(fixture.excludePath, "utf8");
+  assert.equal((await fixture.run(["sync", "--no-reload"])).code, 0);
+  assert.equal(await readFile(fixture.excludePath, "utf8"), before);
+
+  // validate and compose-overlay read the same manifest from anywhere in the repository.
+  const validated = await fixture.run(["validate"]);
+  assert.equal(validated.code, 0, validated.stderr);
+  assert.match(validated.stdout, new RegExp(`^${escapeRegExp(fixture.manifestPath)} is valid`));
+  const overlay = await fixture.run(["compose-overlay"]);
+  assert.equal(overlay.code, 0, overlay.stderr);
+  assert.match(overlay.stdout, /^services:\n {2}app:\n/m);
+});
+
+test("a repository manifest keeps the primary checkout as its script root and writes no exclude lines", async (t) => {
+  const fixture = await createHostDirectoryFixture(t);
+  await rm(fixture.projectDirectory, { recursive: true });
+  await writeFile(path.join(fixture.repo, ".bb-runtime.json"), JSON.stringify(hostManifest));
+  const excludesBefore = await readFile(fixture.excludePath, "utf8");
+  const installed = await fixture.run(["install", "--no-reload"]);
+  assert.equal(installed.code, 0, installed.stderr);
+  assert.equal((await fixture.readPolicy()).manifestPath, undefined);
+  const policy = await fixture.registered();
+  assert.equal(policy.manifestError, null);
+  assert.equal(policy.scriptRoot, fixture.repo);
+  assert.equal(await readFile(fixture.excludePath, "utf8"), excludesBefore);
+
+  // An explicit --manifest naming the repository file is stored as no path at all.
+  assert.equal(
+    (await fixture.run(["install", "--no-reload", "--manifest", path.join(fixture.repo, ".bb-runtime.json")])).code,
+    0,
+  );
+  assert.equal((await fixture.readPolicy()).manifestPath, undefined);
+});
+
+test("install denies two manifests and a missing manifest, and --manifest breaks the tie", async (t) => {
+  const fixture = await createHostDirectoryFixture(t);
+  const repoManifest = path.join(fixture.repo, ".bb-runtime.json");
+  await writeFile(repoManifest, JSON.stringify(hostManifest));
+
+  const both = await fixture.run(["install", "--no-reload"]);
+  assert.equal(both.code, 1);
+  assert.equal(
+    both.stderr,
+    `two manifests: ${fixture.manifestPath} and ${repoManifest}; remove one or pass --manifest\n`,
+  );
+  await assert.rejects(stat(fixture.policyPath()), { code: "ENOENT" }, "nothing was registered");
+  assert.equal((await readFile(fixture.excludePath, "utf8")).includes("/.bb-runtime/"), false, "no exclude lines before the install is accepted");
+
+  const explicitHost = await fixture.run(["install", "--no-reload", "--manifest", fixture.manifestPath]);
+  assert.equal(explicitHost.code, 0, explicitHost.stderr);
+  assert.equal((await fixture.readPolicy()).manifestPath, fixture.manifestPath);
+  assert.equal((await fixture.registered()).scriptRoot, fixture.projectDirectory);
+  const explicitRepo = await fixture.run(["install", "--no-reload", "--manifest", repoManifest]);
+  assert.equal(explicitRepo.code, 0, explicitRepo.stderr);
+  assert.equal((await fixture.readPolicy()).manifestPath, undefined);
+  assert.equal((await fixture.registered()).scriptRoot, fixture.repo);
+
+  await rm(repoManifest);
+  await rm(fixture.manifestPath);
+  const none = await fixture.run(["install", "--no-reload"]);
+  assert.equal(none.code, 1);
+  assert.match(none.stderr, /^No manifest found\. Searched: /);
+  assert.ok(none.stderr.includes(fixture.manifestPath), "the concrete project directory path is listed");
+  assert.ok(none.stderr.includes(repoManifest), "the repository path is listed");
+  assert.match(none.stderr, /`bb project list`/);
+});
+
+test("install refuses an untrusted host directory with the fix, and a failing exclude write registers nothing", async (t) => {
+  const fixture = await createHostDirectoryFixture(t);
+  await chmod(fixture.projectDirectory, 0o755);
+  const loose = await fixture.run(["install", "--no-reload"]);
+  assert.equal(loose.code, 1);
+  assert.match(loose.stderr, /must have mode 0700; fix: chmod 700 /);
+  await assert.rejects(stat(fixture.policyPath()), { code: "ENOENT" });
+  await chmod(fixture.projectDirectory, 0o700);
+
+  const target = path.join(fixture.fixtureRoot, "elsewhere");
+  await writeFile(target, "untouched\n");
+  await rm(fixture.excludePath, { force: true });
+  await symlink(target, fixture.excludePath);
+  const linked = await fixture.run(["install", "--no-reload"]);
+  assert.equal(linked.code, 1);
+  assert.match(linked.stderr, /^Refusing to write .*exclude: it is a symlink\n$/);
+  assert.equal(await readFile(target, "utf8"), "untouched\n");
+  await assert.rejects(stat(fixture.policyPath()), { code: "ENOENT" }, "no half-finished registration");
+  await rm(fixture.excludePath);
+  assert.equal((await fixture.run(["install", "--no-reload"])).code, 0);
+});
+
+test("sync keeps the host-directory path, the custom runtime root and its script root", async (t) => {
+  const fixture = await createHostDirectoryFixture(t);
+  assert.equal((await fixture.run(["install", "--no-reload"])).code, 0);
+
+  // The invocation the runtime tool builds: it passes the runtime root and the stored path.
+  await writeFile(path.join(fixture.repo, ".bb-runtime.json"), JSON.stringify(hostManifest));
+  const synced = await fixture.run([
+    "sync",
+    "--project-id",
+    "proj_example",
+    "--runtime-root",
+    fixture.runtimeRoot,
+    "--manifest",
+    fixture.manifestPath,
+    "--no-reload",
+  ]);
+  assert.equal(synced.code, 0, synced.stderr);
+  assert.equal((await fixture.readPolicy()).manifestPath, fixture.manifestPath, "the stored path wins over a repository file that appeared later");
+  assert.equal((await fixture.registered()).scriptRoot, fixture.projectDirectory);
+
+  // A manual sync without --manifest re-resolves the path and reports the two manifests.
+  const manual = await fixture.run(["sync", "--no-reload"]);
+  assert.equal(manual.code, 1);
+  assert.match(manual.stderr, /^two manifests: /);
+  await rm(path.join(fixture.repo, ".bb-runtime.json"));
+
+  // A non-default runtime root keeps its own host directory.
+  const otherRoot = path.join(fixture.fixtureRoot, "other-runtime");
+  const otherDirectory = path.join(otherRoot, "projects", "proj_example");
+  await mkdir(otherDirectory, { recursive: true, mode: 0o700 });
+  await chmod(otherRoot, 0o700);
+  await chmod(path.join(otherRoot, "projects"), 0o700);
+  await chmod(otherDirectory, 0o700);
+  await writeFile(path.join(otherDirectory, ".bb-runtime.json"), JSON.stringify(hostManifest), { mode: 0o600 });
+  const other = await fixture.run(["install", "--runtime-root", otherRoot, "--no-reload"]);
+  assert.equal(other.code, 0, other.stderr);
+  const otherManifest = path.join(otherDirectory, ".bb-runtime.json");
+  assert.equal((await fixture.readPolicy("proj_example", otherRoot)).manifestPath, otherManifest);
+  const resynced = await fixture.run([
+    "sync",
+    "--project-id",
+    "proj_example",
+    "--runtime-root",
+    otherRoot,
+    "--manifest",
+    otherManifest,
+    "--no-reload",
+  ]);
+  assert.equal(resynced.code, 0, resynced.stderr);
+  const otherPolicy = await fixture.registered(otherRoot);
+  assert.equal(otherPolicy.manifestPath, otherManifest);
+  assert.equal(otherPolicy.scriptRoot, otherDirectory);
+  // Without --runtime-root the same invocation would have looked in the default root.
+  assert.equal((await fixture.readPolicy()).manifestPath, fixture.manifestPath);
+});
+
+test("validate and compose-overlay resolve the manifest in order and degrade on any checkout", async (t) => {
+  const fixture = await createHostDirectoryFixture(t);
+  const repoManifest = path.join(fixture.repo, ".bb-runtime.json");
+  const custom = path.join(fixture.fixtureRoot, "custom.bb-runtime.json");
+  await writeFile(custom, JSON.stringify(hostManifest));
+  const validateFrom = (args = [], options = {}) => fixture.run(["validate", ...args], options);
+
+  // Host directory only.
+  let result = await validateFrom();
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(result.stdout.startsWith(`${fixture.manifestPath} is valid`));
+  // Repository only.
+  await rm(fixture.manifestPath);
+  await writeFile(repoManifest, JSON.stringify(hostManifest));
+  result = await validateFrom();
+  assert.ok(result.stdout.startsWith(`${repoManifest} is valid`));
+  // Both present: deny, for both commands.
+  await writeFile(fixture.manifestPath, JSON.stringify(hostManifest), { mode: 0o600 });
+  for (const command of ["validate", "compose-overlay"]) {
+    result = await fixture.run([command]);
+    assert.equal(result.code, 1, command);
+    assert.match(result.stderr, /^two manifests: .* and .*; remove one or pass --manifest\n$/);
+  }
+  // --manifest breaks the tie and wins over everything.
+  result = await validateFrom(["--manifest", custom]);
+  assert.ok(result.stdout.startsWith(`${custom} is valid`));
+  result = await fixture.run(["compose-overlay", "--manifest", custom]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^services:\n {2}app:/m);
+
+  // The registered path wins over both files.
+  await rm(fixture.manifestPath);
+  assert.equal((await fixture.run(["install", "--no-reload", "--manifest", custom])).code, 0);
+  assert.equal((await fixture.readPolicy()).manifestPath, custom);
+  await writeFile(fixture.manifestPath, JSON.stringify(hostManifest), { mode: 0o600 });
+  result = await validateFrom();
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(result.stdout.startsWith(`${custom} is valid`));
+  result = await fixture.run(["compose-overlay"]);
+  assert.equal(result.code, 0, result.stderr);
+  await rm(fixture.policyPath());
+  await rm(fixture.manifestPath);
+  await rm(repoManifest);
+
+  // None found: deny, listing both searched paths.
+  result = await validateFrom();
+  assert.equal(result.code, 1);
+  assert.ok(result.stderr.includes(fixture.manifestPath) && result.stderr.includes(repoManifest));
+  assert.match(result.stderr, /`bb project list`/);
+
+  // A host manifest that is not private is refused by validate too.
+  await writeFile(fixture.manifestPath, JSON.stringify(hostManifest), { mode: 0o600 });
+  await chmod(fixture.manifestPath, 0o666);
+  result = await validateFrom();
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /group- or world-writable; fix: chmod go-w /);
+  await rm(fixture.manifestPath);
+
+  // Degraded lookups: each skips the registered and host-directory steps with a note and
+  // falls back to the repository file.
+  await writeFile(repoManifest, JSON.stringify(hostManifest));
+  const note = /^note: the registered and host-directory manifests are not searched: /m;
+  const expectDegraded = (output, label) => {
+    assert.equal(output.code, 0, `${label}: ${output.stderr}`);
+    assert.match(output.stderr, note, label);
+    assert.ok(output.stdout.startsWith(`${repoManifest} is valid`), label);
+  };
+  expectDegraded(await validateFrom([], { env: { BB_CLI: path.join(fixture.bin, "absent-bb") } }), "bb CLI unavailable");
+
+  const writeProjects = async (projects) => {
+    const state = await fixture.bbState();
+    state.projects = JSON.parse(JSON.stringify(projects).replaceAll("__REPO__", fixture.repo));
+    await writeFile(path.join(fixture.fixtureRoot, "bb-state.json"), JSON.stringify(state));
+  };
+  const local = { type: "local_path", path: "__REPO__", hostId: "host_fixture" };
+  await writeProjects([{ id: "proj_unrelated", name: "unrelated", sources: [] }]);
+  expectDegraded(await validateFrom(), "no project matches");
+  await writeProjects([
+    { id: "proj_one", name: "one", sources: [local] },
+    { id: "proj_two", name: "two", sources: [local] },
+  ]);
+  expectDegraded(await validateFrom(), "more than one project matches");
+  await writeProjects([{ id: "proj_example", name: "example", sources: [local] }]);
+  const brokenRoot = path.join(fixture.fixtureRoot, "broken-runtime");
+  await mkdir(brokenRoot, { recursive: true });
+  await writeFile(path.join(brokenRoot, "projects"), "not a directory");
+  expectDegraded(await validateFrom(["--runtime-root", brokenRoot]), "registry unusable");
+
+  // Not a git repository: the current directory is the checkout.
+  const plain = path.join(fixture.fixtureRoot, "plain");
+  await mkdir(plain);
+  await writeFile(path.join(plain, ".bb-runtime.json"), JSON.stringify(hostManifest));
+  result = await validateFrom([], { cwd: plain });
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(result.stdout.startsWith(`${path.join(plain, ".bb-runtime.json")} is valid`));
+  result = await fixture.run(["compose-overlay"], { cwd: plain });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, note);
+
+  // A linked worktree: the worktree directory is the checkout.
+  const worktree = path.join(fixture.fixtureRoot, "linked");
+  await git(fixture.repo, "worktree", "add", "--quiet", worktree, "-b", "linked");
+  await writeFile(path.join(worktree, ".bb-runtime.json"), JSON.stringify(hostManifest));
+  result = await validateFrom([], { cwd: worktree });
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(result.stdout.startsWith(`${path.join(await realpath(worktree), ".bb-runtime.json")} is valid`));
+  result = await fixture.run(["compose-overlay"], { cwd: worktree });
+  assert.equal(result.code, 0, result.stderr);
+});
+
+test("doctor reports the manifest source, the script root, the trust result and the exclude lines", async (t) => {
+  const fixture = await createHostDirectoryFixture(t);
+  assert.equal((await fixture.run(["install", "--no-reload"])).code, 0);
+  await fixture.setMounts({ demo_app: [{ Destination: "/bb-worktrees", Source: fixture.worktreeRoot }] });
+  const findingsOf = async () => JSON.parse((await fixture.run(["doctor", "--json"])).stdout).findings;
+
+  let findings = await findingsOf();
+  assert.deepEqual(findings.slice(0, 5), [
+    { level: "ok", message: "registration proj_example on host host_fixture" },
+    { level: "ok", message: `manifest source: host dir (${fixture.manifestPath})` },
+    { level: "ok", message: `script root: ${fixture.projectDirectory}` },
+    {
+      level: "ok",
+      message: "host directory trust check passed (0700 directory, user-owned manifest, no links, not group- or world-writable)",
+    },
+    { level: "ok", message: `git exclude lines are present in ${fixture.excludePath}` },
+  ]);
+
+  await rm(fixture.excludePath);
+  findings = await findingsOf();
+  assert.deepEqual(findings[4], {
+    level: "warn",
+    message: `git exclude lines missing from ${fixture.excludePath}: /.bb-runtime/, /.bb-runtime-isolation-*/; run bb-shared-runtime sync`,
+  });
+  await mkdir(fixture.excludePath);
+  findings = await findingsOf();
+  assert.equal(findings[4].level, "error");
+  assert.match(findings[4].message, /^git exclude file: /);
+  await rm(fixture.excludePath, { recursive: true });
+
+  await chmod(fixture.projectDirectory, 0o755);
+  findings = await findingsOf();
+  assert.deepEqual(findings[3], {
+    level: "error",
+    message: "host directory trust check failed (see the manifest finding below)",
+  });
+  assert.ok(
+    findings.some((finding) => finding.level === "error" && /manifest: .*must have mode 0700; fix: chmod 700/.test(finding.message)),
+  );
+  await chmod(fixture.projectDirectory, 0o700);
+
+  // A custom manifest path is reported as custom and has no host-directory checks.
+  const custom = path.join(fixture.fixtureRoot, "custom.bb-runtime.json");
+  await writeFile(custom, JSON.stringify(hostManifest));
+  assert.equal((await fixture.run(["install", "--no-reload", "--manifest", custom])).code, 0);
+  findings = await findingsOf();
+  assert.deepEqual(findings.slice(1, 4).map((finding) => finding.message), [
+    `manifest source: custom (${custom})`,
+    `script root: ${fixture.repo}`,
+    `manifest hash ${manifestDigest(await readFile(custom)).slice(0, 12)} matches`,
+  ]);
+});
+
+test("uninstall leaves the host directory and the exclude lines in place", async (t) => {
+  const fixture = await createHostDirectoryFixture(t);
+  assert.equal((await fixture.run(["install", "--no-reload"])).code, 0);
+  const excludes = await readFile(fixture.excludePath, "utf8");
+  const removed = await fixture.run(["uninstall", "--no-reload"]);
+  assert.equal(removed.code, 0, removed.stderr);
+  await assert.rejects(stat(fixture.policyPath()), { code: "ENOENT" });
+  assert.equal((await stat(fixture.manifestPath)).isFile(), true);
+  assert.equal(await readFile(fixture.excludePath, "utf8"), excludes);
 });

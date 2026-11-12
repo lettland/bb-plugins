@@ -95,7 +95,7 @@ function validateHostStep(manifest, value, label, { allowTarget }) {
     deny(`${label}.argv host steps must start with a known interpreter`);
   }
   if (argv.length < 2) {
-    deny(`${label}.argv host steps need a primary-checkout script`);
+    deny(`${label}.argv host steps need a script relative to the manifest's script root`);
   }
   const script = validateRepositoryRelativePath(argv[1], `${label}.argv[1]`);
   const environment = assertEnvironment(value.env, `${label}.env`);

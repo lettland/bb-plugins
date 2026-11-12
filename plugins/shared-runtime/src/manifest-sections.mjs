@@ -152,7 +152,7 @@ export function validateLifecycle(value) {
       deny(`lifecycle.${operation} must start with a known interpreter`);
     }
     if (validated.length < 2) {
-      deny(`lifecycle.${operation} needs a primary-checkout script`);
+      deny(`lifecycle.${operation} needs a script relative to the manifest's script root`);
     }
     validateRepositoryRelativePath(validated[1], `lifecycle.${operation}[1]`);
     for (const argument of validated.slice(2)) {

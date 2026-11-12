@@ -2,6 +2,7 @@ import { spawn as spawnChild } from "node:child_process";
 import { readFile as readFileFromDisk } from "node:fs/promises";
 import path from "node:path";
 
+import { resolvePolicyScript } from "./registry.mjs";
 import {
   captureLockWaitMessages,
   defaultRuntimeRoot,
@@ -57,7 +58,7 @@ function lifecycleInvocation(policy, operation) {
   const primaryRoot = path.resolve(policy.primaryRoot);
   return {
     command: interpreter,
-    args: [path.join(primaryRoot, argv[1]), ...argv.slice(2)],
+    args: [resolvePolicyScript(policy, argv[1]), ...argv.slice(2)],
     cwd: primaryRoot,
   };
 }
@@ -105,6 +106,8 @@ export function buildRuntimeInvocation(policy, operation) {
       "sync",
       "--project-id",
       policy.projectId,
+      "--runtime-root",
+      policy.runtimeRoot ?? defaultRuntimeRoot(),
       ...(policy.manifestPath ? ["--manifest", policy.manifestPath] : []),
       "--no-reload",
     ],

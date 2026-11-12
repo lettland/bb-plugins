@@ -110,6 +110,7 @@ async function createFixture(t, overrides = {}) {
     projectId: "proj_fixture",
     trustedHostId: "host_fixture",
     primaryRoot,
+    scriptRoot: primaryRoot,
     worktreeRoot,
     worktreeDirectoryName: "example",
     gitCommonDir: path.join(primaryRoot, ".git"),

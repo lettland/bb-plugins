@@ -1,7 +1,7 @@
 {
   "name": "@lettland/bb-plugin-shared-runtime",
   "version": "0.1.9",
-  "description": "One shared, write-confined container runtime per repository for every BB managed worktree, declared by a committed .bb-runtime.json manifest.",
+  "description": "One shared, write-confined container runtime per repository for every BB managed worktree, declared by a .bb-runtime.json manifest.",
   "license": "BSD-2-Clause",
   "type": "module",
   "bin": {
@@ -31,7 +31,7 @@
   },
   "bb": {
     "name": "Shared Runtime",
-    "description": "Typed, project-confined shared container runtime for BB worktrees, driven by each repository's .bb-runtime.json",
+    "description": "Typed, project-confined shared container runtime for BB worktrees, driven by a project's .bb-runtime.json, in the repository or the host project directory",
     "branding": {
       "icon": "Container"
     },

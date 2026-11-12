@@ -21,6 +21,7 @@ import {
   containerPathFor,
 } from "./isolation-scratch.mjs";
 import { validateManagedWorktreeBranch } from "./git-invocation.mjs";
+import { resolvePolicyScript } from "./registry.mjs";
 
 function placeholderVariables(policy, workspace, role, { cwd = null, target = null } = {}) {
   const manifest = requireManifest(policy);
@@ -108,7 +109,7 @@ function compileHostStep(policy, workspace, step, label, target = null) {
   }
   return {
     command: interpreter,
-    args: [path.join(normalizeAbsolute(policy.primaryRoot), step.script), ...argv],
+    args: [resolvePolicyScript(policy, step.script), ...argv],
     containers: [...step.containers],
     cwd: workspace.hostRoot,
     environment: substituteEnvironment(step.environment, variables, `${label}.env`),

@@ -364,7 +364,7 @@ const invalidManifests = [
   ["an unknown lifecycle operation", minimal({ lifecycle: { restart: ["bash", "x.sh"] } }), /lifecycle\.restart is not a lifecycle operation/],
   ["an empty lifecycle argv", minimal({ lifecycle: { ensure: [] } }), /lifecycle\.ensure must be a non-empty argument array/],
   ["a lifecycle without a script", minimal({ lifecycle: { ensure: ["bash"] } }), /lifecycle\.ensure may not evaluate inline shell text/],
-  ["a script lifecycle without a script", minimal({ lifecycle: { stop: ["node"] } }), /lifecycle\.stop needs a primary-checkout script/],
+  ["a script lifecycle without a script", minimal({ lifecycle: { stop: ["node"] } }), /lifecycle\.stop needs a script relative to the manifest's script root/],
   ["a lifecycle script at the root", minimal({ lifecycle: { stop: ["bash", "."] } }), /lifecycle\.stop\[1\] may not be the repository root/],
   ["a lifecycle placeholder", minimal({ lifecycle: { stop: ["bash", "stop.sh", "${env}"] } }), /lifecycle\.stop arguments may not use placeholders/],
 
@@ -425,7 +425,7 @@ const invalidManifests = [
   ["a target placeholder in a variant", withOperation(app({ target: { variants: { a: app({ argv: ["npm", "${target}"] }) } } })), /target\.variants\.a references unknown placeholder "target"/],
 
   ["a host step without a script", withOperation({ kind: "host", argv: ["bash"] }), /may not evaluate inline shell text/],
-  ["a script host step without a script", withOperation({ kind: "host", argv: ["ruby"] }), /operations\.probe\.argv host steps need a primary-checkout script/],
+  ["a script host step without a script", withOperation({ kind: "host", argv: ["ruby"] }), /operations\.probe\.argv host steps need a script relative to the manifest's script root/],
   ["host containers as a string", withOperation({ kind: "host", argv: ["bash", "x.sh"], containers: "app" }), /operations\.probe\.containers must be an array/],
   ["an undeclared host container", withOperation({ kind: "host", argv: ["bash", "x.sh"], containers: ["db"] }), /operations\.probe\.containers references undeclared container "db"/],
 

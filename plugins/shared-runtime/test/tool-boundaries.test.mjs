@@ -59,6 +59,7 @@ function basePolicy(overrides = {}) {
     projectId: "proj_example",
     trustedHostId: "host_example",
     primaryRoot: "/workspace/example",
+    scriptRoot: "/workspace/example",
     worktreeRoot: "/bb/worktrees",
     worktreeDirectoryName: "example",
     gitCommonDir: "/workspace/example/.git",

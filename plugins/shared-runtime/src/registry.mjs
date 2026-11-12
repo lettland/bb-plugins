@@ -1,9 +1,9 @@
-import { constants, watch } from "node:fs";
+import { constants, lstatSync, watch } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 
-import { readManifest } from "./manifest.mjs";
+import { MANIFEST_FILE_NAME, manifestDigest, readManifest, validateManifest } from "./manifest.mjs";
 
 export const RUNTIME_ROOT_NAME = "shared-runtime";
 const PROJECT_ID_PATTERN = /^proj_[a-zA-Z0-9]+$/;
@@ -26,6 +26,37 @@ export function defaultRuntimeRoot() {
 
 export function projectsDirectory(runtimeRoot = defaultRuntimeRoot()) {
   return path.join(runtimeRoot, "projects");
+}
+
+// The per-project host directory: it holds a manifest, its scripts and its overlay for a
+// project that commits no runtime files. Only proj_*.json regular files are registry
+// entries, so this directory never disturbs the registry scan.
+export function projectDirectoryFor(projectId, runtimeRoot = defaultRuntimeRoot()) {
+  if (!PROJECT_ID_PATTERN.test(projectId)) {
+    deny("project id is invalid");
+  }
+  return path.join(projectsDirectory(runtimeRoot), projectId);
+}
+
+export function hostManifestPathFor(projectId, runtimeRoot = defaultRuntimeRoot()) {
+  return path.join(projectDirectoryFor(projectId, runtimeRoot), MANIFEST_FILE_NAME);
+}
+
+// "repo", "host-dir" or "custom": where a registered policy's manifest comes from.
+export function manifestSourceOf(policy) {
+  if (policy.manifestPath === undefined || policy.manifestPath === null) {
+    return "repo";
+  }
+  if (policy.manifestPath === path.join(policy.primaryRoot, MANIFEST_FILE_NAME)) {
+    return "repo";
+  }
+  if (
+    typeof policy.runtimeRoot === "string" &&
+    policy.manifestPath === hostManifestPathFor(policy.projectId, policy.runtimeRoot)
+  ) {
+    return "host-dir";
+  }
+  return "custom";
 }
 
 export function policyPathFor(projectId, runtimeRoot = defaultRuntimeRoot()) {
@@ -178,13 +209,141 @@ export async function loadPolicy(policyPath) {
   if (path.basename(policyPath) !== expectedName) {
     deny(`policy file name must be ${expectedName}`);
   }
-  return Object.freeze({ ...parsed, runtimeRoot: path.dirname(projectsRoot) });
+  const runtimeRoot = path.dirname(projectsRoot);
+  // scriptRoot is derived here and never read from the policy file: a host-directory
+  // manifest resolves its scripts in that directory, every other manifest in the primary
+  // checkout. The spread comes first so a scriptRoot key in the file cannot win.
+  const scriptRoot =
+    manifestSourceOf({ ...parsed, runtimeRoot }) === "host-dir"
+      ? projectDirectoryFor(parsed.projectId, runtimeRoot)
+      : parsed.primaryRoot;
+  return Object.freeze({ ...parsed, runtimeRoot, scriptRoot });
+}
+
+function trustFailure(message, fix) {
+  throw new Error(`Shared runtime denied: ${message}; fix: ${fix}`);
+}
+
+function assertCurrentUser(stats, target) {
+  if (stats.uid !== process.getuid()) {
+    trustFailure(`${target} is not owned by the current user`, `chown "$(id -un)" ${target}`);
+  }
+}
+
+// Reads a host-directory manifest only if the directory and the file are not writable by
+// anyone but the current user and are not links: a branch-controlled checkout can then
+// never change what a registered project runs. The bytes come from the checked
+// descriptor, never from a second open by path.
+export async function readTrustedHostManifest(directory, manifestPath) {
+  let directoryStat;
+  try {
+    directoryStat = await lstat(directory);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      throw new Error(`Shared runtime manifest missing: ${manifestPath}`);
+    }
+    throw error;
+  }
+  if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
+    trustFailure(`host project directory ${directory} is a symlink or not a directory`, `replace it with a real directory (mkdir -m 700 ${directory})`);
+  }
+  assertCurrentUser(directoryStat, directory);
+  if ((directoryStat.mode & 0o7777) !== 0o700) {
+    trustFailure(`host project directory ${directory} must have mode 0700`, `chmod 700 ${directory}`);
+  }
+  let handle;
+  try {
+    handle = await open(manifestPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      throw new Error(`Shared runtime manifest missing: ${manifestPath}`);
+    }
+    if (error.code === "ELOOP") {
+      trustFailure(`host manifest ${manifestPath} is a symlink`, `replace it with a regular file`);
+    }
+    throw error;
+  }
+  let content;
+  try {
+    const manifestStat = await handle.stat();
+    if (!manifestStat.isFile()) {
+      trustFailure(`host manifest ${manifestPath} is not a regular file`, "replace it with a regular file");
+    }
+    assertCurrentUser(manifestStat, manifestPath);
+    if (manifestStat.nlink !== 1) {
+      trustFailure(`host manifest ${manifestPath} has more than one hard link`, `copy it to a new file and remove the old one`);
+    }
+    if ((manifestStat.mode & 0o022) !== 0) {
+      trustFailure(`host manifest ${manifestPath} is group- or world-writable`, `chmod go-w ${manifestPath}`);
+    }
+    content = await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+  let document;
+  try {
+    document = JSON.parse(content.toString("utf8"));
+  } catch {
+    throw new Error(`Shared runtime manifest invalid: ${manifestPath} is not valid JSON`);
+  }
+  return Object.freeze({
+    digest: manifestDigest(content),
+    manifest: validateManifest(document),
+    path: manifestPath,
+  });
+}
+
+// The script a manifest names, resolved against the policy's script root. It never falls
+// back to the primary checkout: a host-directory manifest's scripts must not quietly run
+// from the branch-controlled checkout. A host-directory script is trusted only when every
+// path component from the script root down is a user-owned, non-writable, non-link entry.
+export function resolvePolicyScript(policy, relativeScript) {
+  if (typeof policy.scriptRoot !== "string" || !path.isAbsolute(policy.scriptRoot)) {
+    deny("script root is not set for this project");
+  }
+  const root = path.resolve(policy.scriptRoot);
+  const script = path.join(root, relativeScript);
+  if (root === path.resolve(policy.primaryRoot)) {
+    return script;
+  }
+  const components = [root];
+  for (const part of path.relative(root, script).split(path.sep)) {
+    components.push(path.join(components.at(-1), part));
+  }
+  components.forEach((component, index) => {
+    const isScript = index === components.length - 1;
+    let stats;
+    try {
+      stats = lstatSync(component);
+    } catch {
+      deny(`host script ${component} is missing`);
+    }
+    if (stats.isSymbolicLink()) {
+      deny(`host script path ${component} is a symlink`);
+    }
+    if (isScript ? !stats.isFile() : !stats.isDirectory()) {
+      deny(`host script path ${component} is not a ${isScript ? "regular file" : "directory"}`);
+    }
+    if (stats.uid !== process.getuid()) {
+      deny(`host script path ${component} is not owned by the current user`);
+    }
+    if ((stats.mode & 0o022) !== 0) {
+      deny(`host script path ${component} is group- or world-writable`);
+    }
+    if (isScript && stats.nlink !== 1) {
+      deny(`host script ${component} has more than one hard link`);
+    }
+  });
+  return script;
 }
 
 export async function attachManifest(policy, { readManifestFile = readManifest } = {}) {
   let loaded;
   try {
-    loaded = await readManifestFile(policy.primaryRoot, policy.manifestPath);
+    loaded =
+      manifestSourceOf(policy) === "host-dir"
+        ? await readTrustedHostManifest(projectDirectoryFor(policy.projectId, policy.runtimeRoot), policy.manifestPath)
+        : await readManifestFile(policy.primaryRoot, policy.manifestPath);
   } catch (error) {
     return Object.freeze({
       ...policy,

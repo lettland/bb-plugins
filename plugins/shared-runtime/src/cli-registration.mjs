@@ -1,16 +1,21 @@
 import path from "node:path";
-import { lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
-import { readManifest } from "./manifest.mjs";
+import { MANIFEST_FILE_NAME, readManifest } from "./manifest.mjs";
 import {
   defaultRuntimeRoot,
+  hostManifestPathFor,
   loadRegistry,
   policyPathFor,
+  projectDirectoryFor,
   projectsDirectory,
+  readTrustedHostManifest,
 } from "./registry.mjs";
 import {
+  pathExists,
   execFile,
   commandPath,
   resolveBbCli,
@@ -90,6 +95,118 @@ export function containerNames(manifest, composeProject) {
   return names;
 }
 
+// The lines that keep the per-project runtime files out of `git status` for a project
+// whose manifest lives in the host directory.
+export const GIT_EXCLUDE_LINES = Object.freeze(["/.bb-runtime/", "/.bb-runtime-isolation-*/"]);
+
+// `git rev-parse --git-path info/exclude` resolves a symlinked exclude file to its target,
+// which would hide the link from O_NOFOLLOW; ask for the directory and join the name.
+async function gitExcludePath(primaryRoot) {
+  const { stdout } = await execFile("git", [
+    "-C",
+    primaryRoot,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-path",
+    "info",
+  ]);
+  return path.join(stdout.trim(), "exclude");
+}
+
+// Appends the missing exclude lines. It never rewrites an existing line, refuses to write
+// through a symlink, and fails loudly when the file cannot be read or written.
+export async function ensureGitExcludes(primaryRoot) {
+  const excludePath = await gitExcludePath(primaryRoot);
+  await mkdir(path.dirname(excludePath), { recursive: true });
+  let handle;
+  try {
+    handle = await open(
+      excludePath,
+      constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW,
+      0o644,
+    );
+  } catch (error) {
+    throw new CliError(
+      error.code === "ELOOP"
+        ? `Refusing to write ${excludePath}: it is a symlink`
+        : `Cannot open ${excludePath} for appending: ${error.message}`,
+    );
+  }
+  try {
+    const content = await handle.readFile("utf8");
+    const present = new Set(content.split(/\r?\n/).map((line) => line.trim()));
+    const missing = GIT_EXCLUDE_LINES.filter((line) => !present.has(line));
+    if (missing.length > 0) {
+      const separator = content !== "" && !content.endsWith("\n") ? "\n" : "";
+      await handle.appendFile(`${separator}${missing.join("\n")}\n`);
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function gitExcludeStatus(primaryRoot) {
+  const excludePath = await gitExcludePath(primaryRoot);
+  let content = "";
+  try {
+    content = await readFile(excludePath, "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  const present = new Set(content.split(/\r?\n/).map((line) => line.trim()));
+  return { excludePath, missing: GIT_EXCLUDE_LINES.filter((line) => !present.has(line)) };
+}
+
+// Which manifest a command uses, in order: --manifest; the registered policy's path
+// (validate and compose-overlay only); the host project directory; the repository file.
+// Two candidates without --manifest, or none, is an error rather than a guess.
+export async function resolveManifestLocation({
+  explicit = null,
+  registeredPath = null,
+  projectId = null,
+  runtimeRoot,
+  primaryRoot,
+}) {
+  if (explicit !== null) {
+    return { path: path.resolve(explicit), source: "explicit" };
+  }
+  if (registeredPath !== null) {
+    return { path: registeredPath, source: "registered" };
+  }
+  const repoPath = path.join(primaryRoot, MANIFEST_FILE_NAME);
+  const hostPath = projectId === null ? null : hostManifestPathFor(projectId, runtimeRoot);
+  const hostExists = hostPath !== null && (await pathExists(hostPath));
+  const repoExists = await pathExists(repoPath);
+  if (hostExists && repoExists) {
+    throw new CliError(
+      `two manifests: ${hostPath} and ${repoPath}; remove one or pass --manifest`,
+    );
+  }
+  if (hostExists) {
+    return { path: hostPath, source: "host-dir" };
+  }
+  if (repoExists) {
+    return { path: repoPath, source: "repo" };
+  }
+  const hostSearched =
+    hostPath ??
+    `${path.join(projectsDirectory(runtimeRoot), "<projectId>")}${path.sep}${MANIFEST_FILE_NAME} (skipped: no single BB project was resolved)`;
+  throw new CliError(
+    `No manifest found. Searched: ${hostSearched}, then ${repoPath}. Create one of them, or pass --manifest. Find the project id with \`bb project list\`; the project directory is ${path.join(projectsDirectory(runtimeRoot), "<projectId>")}${path.sep}.`,
+  );
+}
+
+// Reads the resolved manifest; a manifest inside the host project directory goes through
+// the trust checks, every other one through the plain reader.
+export async function loadResolvedManifest(location, { primaryRoot, projectId, runtimeRoot }) {
+  if (projectId !== null && location.path === hostManifestPathFor(projectId, runtimeRoot)) {
+    return readTrustedHostManifest(projectDirectoryFor(projectId, runtimeRoot), location.path);
+  }
+  return readManifest(primaryRoot, location.path);
+}
+
 export async function commandInstall(options, { reloadByDefault }) {
   const runtimeRoot = options.values["runtime-root"]
     ? path.resolve(options.values["runtime-root"])
@@ -98,13 +215,21 @@ export async function commandInstall(options, { reloadByDefault }) {
     ? path.resolve(options.values["primary-root"])
     : process.cwd();
   const { primaryRoot, gitCommonDir } = await requirePrimaryCheckout(requestedPrimaryRoot);
-  const configuredManifestPath = options.values.manifest
-    ? path.resolve(options.values.manifest)
-    : undefined;
-  const loaded = await readManifest(primaryRoot, configuredManifestPath);
-  const manifest = loaded.manifest;
   const cli = await resolveBbCli();
   const { project, source } = await resolveProject(cli, primaryRoot, options);
+  const location = await resolveManifestLocation({
+    explicit: options.values.manifest ?? null,
+    projectId: project.id,
+    runtimeRoot,
+    primaryRoot,
+  });
+  const loaded = await loadResolvedManifest(location, {
+    primaryRoot,
+    projectId: project.id,
+    runtimeRoot,
+  });
+  const manifest = loaded.manifest;
+  const hostDirectoryManifest = location.path === hostManifestPathFor(project.id, runtimeRoot);
   const dockerPath = await commandPath("docker");
   if (!dockerPath) {
     throw new CliError("docker is not on PATH");
@@ -134,11 +259,15 @@ export async function commandInstall(options, { reloadByDefault }) {
     composeProject,
     containers: containerNames(manifest, composeProject),
     manifestSha256: loaded.digest,
-    manifestPath: configuredManifestPath,
+    manifestPath:
+      location.path === path.join(primaryRoot, MANIFEST_FILE_NAME) ? undefined : location.path,
     bbCli: cli,
     installedAt: new Date().toISOString(),
   };
   await ensureProtectedDirectories(runtimeRoot);
+  if (hostDirectoryManifest) {
+    await ensureGitExcludes(primaryRoot);
+  }
   await writeProtectedJson(policyPathFor(project.id, runtimeRoot), document);
   const pluginOutcome = await installOrReloadPlugin(cli, {
     reload: reloadByDefault && !options.flags.has("no-reload"),

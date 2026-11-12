@@ -8,14 +8,14 @@ Commands (run from the primary checkout of the repository):
   uninstall         Remove this repository's registration (--remove-plugin also removes the plugin when no project remains)
   list              Show every project registered on this host
   doctor            Verify the registration, manifest, containers, and mounts
-  validate          Validate ${MANIFEST_FILE_NAME} and list its operations
+  validate          Validate the resolved ${MANIFEST_FILE_NAME} (--manifest, registered path, host project directory, repository) and list its operations
   env               Print shell exports for BB_WORKTREES_ROOT and BB_PRIMARY_ROOT
   compose-overlay   Print a Docker Compose overlay that mounts the worktree root into the declared containers
 
 Options:
   --project-id <id>         BB project id when the checkout maps to more than one project
   --primary-root <path>     Register a primary checkout without changing directory
-  --manifest <path>         Use a trusted manifest outside the repository root
+  --manifest <path>         Use this manifest instead of the host project directory's or the repository's .bb-runtime.json
   --compose-project <name>  Docker Compose project name (otherwise read from the manifest's compose.envFile)
   --docker-socket <path>    Docker socket path (otherwise DOCKER_HOST or the active docker context)
   --worktree-root <path>    BB worktree root (default: $BB_WORKTREES_ROOT or ~/.bb/worktrees)

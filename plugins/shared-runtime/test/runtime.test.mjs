@@ -67,6 +67,7 @@ import {
   validateManifest,
 } from "../src/manifest.mjs";
 import {
+  defaultRuntimeRoot,
   loadPolicy,
   loadRegistry,
   validatePolicyDocument,
@@ -86,6 +87,7 @@ const policy = Object.freeze({
   projectId: "proj_example",
   trustedHostId: "host_example",
   primaryRoot: "/workspace/example",
+  scriptRoot: "/workspace/example",
   worktreeRoot: "/bb/worktrees",
   worktreeDirectoryName: "example",
   gitCommonDir: "/workspace/example/.git",
@@ -2984,6 +2986,8 @@ test("runtime lifecycle plans target only the configured primary stack", () => {
       "sync",
       "--project-id",
       policy.projectId,
+      "--runtime-root",
+      defaultRuntimeRoot(),
       "--manifest",
       "/trusted/example.bb-runtime.json",
       "--no-reload",
