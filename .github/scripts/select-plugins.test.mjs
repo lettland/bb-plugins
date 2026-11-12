@@ -275,6 +275,16 @@ test("a current prerelease is below its release version", () => {
   assert.deepEqual(bumps(res), { a: "0.3.0" });
 });
 
+test("build metadata on the current version is ignored by the exact-version guard", () => {
+  // Only a patch-decided comparison tells the metadata apart: "0+abc" read as a
+  // number is NaN, which made 0.3.1 look not above 0.3.0+abc.
+  const above = select(makeRepo({ a: "0.3.0+abc" }), { FORCED_BUMP: "0.3.1", ONLY_PLUGIN: "a" });
+  assert.equal(above.status, 0, above.all);
+  assert.deepEqual(bumps(above), { a: "0.3.1" });
+  const equal = select(makeRepo({ a: "0.3.0+abc" }), { FORCED_BUMP: "0.3.0", ONLY_PLUGIN: "a" });
+  assert.equal(equal.status, 1, equal.all);
+});
+
 test("the guard applies only to selected plugins", () => {
   const repo = makeRepo();
   const res = select(repo, { ONLY_PLUGIN: "a", FORCED_BUMP: "0.2.0" });

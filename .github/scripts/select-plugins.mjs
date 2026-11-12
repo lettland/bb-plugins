@@ -38,7 +38,8 @@ function pluginChangedSince(id, tag) {
 // On a numeric tie the target is above only when current carries a prerelease.
 function isAbove(target, current) {
   const t = target.split(".").map(Number);
-  const [core, ...pre] = current.split("-");
+  // Build metadata (`+…`) has no precedence in semver.
+  const [core, ...pre] = current.split("+")[0].split("-");
   const c = core.split(".").map(Number);
   for (let i = 0; i < 3; i++) {
     if (t[i] !== c[i]) return t[i] > c[i];

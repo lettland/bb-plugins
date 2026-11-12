@@ -232,8 +232,9 @@ git:https://github.com/lettland/bb-plugins.git@<id>/vX.Y.Z-beta.N --subdirectory
 plugins/<id>`.
 
 A major release (1.0.0 is reached only by a manual run with `plugin=<id>` and
-`release_type=major`; never without `plugin`, which would release every plugin
-as a major; from 1.x on, a breaking commit is a major too) reaches new
+`release_type=major` or an exact `1.0.0`; never without `plugin`, which would
+release every plugin as a major; from 1.x on, a breaking commit is a major too)
+reaches new
 marketplace installs once `marketplace.json` is regenerated — the bump lands in
 the release bot's commit, so pull, then run `node scripts/marketplace.mjs`.
 Existing installs keep the range they were installed with and stay on the old

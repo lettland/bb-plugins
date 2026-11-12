@@ -95,6 +95,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # The job runs PR-supplied test code; keep the token out of .git/config.
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc

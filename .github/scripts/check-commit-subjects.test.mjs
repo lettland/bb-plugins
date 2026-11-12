@@ -1,4 +1,4 @@
-import { test, before, after } from "node:test";
+import { test, before, beforeEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -33,6 +33,14 @@ before(() => {
   commit("chore: root");
   git("tag", "base");
 });
+// Every test starts from the same single root commit, even when an earlier
+// test failed before it could clean up.
+beforeEach(() => {
+  git("reset", "-q", "--hard", "base");
+  git("checkout", "-q", "master");
+  git("reset", "-q", "--hard", "base");
+  git("update-ref", "-d", "refs/heads/side");
+});
 after(() => rmSync(cwd, { recursive: true, force: true }));
 
 test("a bad subject among good ones fails and is reported with the fixed prefix", () => {
@@ -41,7 +49,6 @@ test("a bad subject among good ones fails and is reported with the fixed prefix"
   const r = check("base..HEAD");
   assert.equal(r.status, 1);
   assert.ok(r.stdout.split("\n").includes(`bad subject ${bad}: a: legacy subject`), r.stdout);
-  git("reset", "--hard", "base");
 });
 
 test("a subject that looks like a workflow command still starts with the prefix", () => {
@@ -50,7 +57,6 @@ test("a subject that looks like a workflow command still starts with the prefix"
   assert.equal(r.status, 1);
   const lines = r.stdout.split("\n").filter((l) => l.includes("::warning::x"));
   assert.deepEqual(lines, [`bad subject ${bad}: ::warning::x`]);
-  git("reset", "--hard", "base");
 });
 
 test("an all-good range passes", () => {
@@ -59,7 +65,6 @@ test("an all-good range passes", () => {
   const r = check("base..HEAD");
   assert.equal(r.status, 0, r.stdout);
   assert.match(r.stdout, /^all 2 commit subjects ok$/m);
-  git("reset", "--hard", "base");
 });
 
 test("merge commits are not checked", () => {
