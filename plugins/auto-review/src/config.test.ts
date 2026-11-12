@@ -6,6 +6,7 @@ import {
   globalDefaultsFrom,
   parseMainlines,
   readProjectConfig,
+  readProjectConfigStatus,
   setAutoApprovePlans,
   setProjectReview,
   writeProjectConfig,
@@ -164,6 +165,85 @@ describe("writeProjectConfig", () => {
       await host.harness.dispose();
     }
   });
+
+  it("keeps an unknown key through writeProjectConfig and setAutoApprovePlans", async () => {
+    const host = createFakePluginHost({ pluginId: "auto-review" });
+    try {
+      const { bb } = host;
+      await bb.storage.kv.set("project:p-1", { futureKey: { a: 1 } });
+      await writeProjectConfig(bb, "p-1", { enabled: false });
+      expect(await bb.storage.kv.get("project:p-1")).toEqual({ enabled: false, futureKey: { a: 1 } });
+      await setAutoApprovePlans(bb, "p-1", true, "rpc");
+      expect(await bb.storage.kv.get("project:p-1")).toEqual({
+        enabled: false,
+        autoApprovePlans: true,
+        futureKey: { a: 1 },
+      });
+    } finally {
+      await host.harness.dispose();
+    }
+  });
+
+  it("setAutoApprovePlans throws on a malformed record and leaves it unchanged", async () => {
+    const host = createFakePluginHost({ pluginId: "auto-review" });
+    try {
+      const { bb } = host;
+      const malformed = { enabled: "yes", futureKey: 1 };
+      await bb.storage.kv.set("project:p-1", malformed);
+      await expect(setAutoApprovePlans(bb, "p-1", true, "rpc")).rejects.toThrow(
+        "stored auto-review config for project p-1 is malformed; not overwriting. Run `bb auto-review enable|disable --project p-1` to replace it (this discards the stored record).",
+      );
+      expect(await bb.storage.kv.get("project:p-1")).toEqual(malformed);
+      expect(host.harness.logEntries.filter((entry) => entry.level === "info")).toEqual([]);
+    } finally {
+      await host.harness.dispose();
+    }
+  });
+
+  it("setAutoApprovePlans does not throw on a valid or null record", async () => {
+    const host = createFakePluginHost({ pluginId: "auto-review" });
+    try {
+      const { bb } = host;
+      await bb.storage.kv.set("project:p-1", { enabled: true });
+      await expect(setAutoApprovePlans(bb, "p-1", true, "rpc")).resolves.toBeUndefined();
+      await bb.storage.kv.set("project:p-2", null);
+      await expect(setAutoApprovePlans(bb, "p-2", true, "rpc")).resolves.toBeUndefined();
+      expect(await bb.storage.kv.get("project:p-2")).toEqual({ autoApprovePlans: true });
+    } finally {
+      await host.harness.dispose();
+    }
+  });
+
+  it("writeProjectConfig replaces a malformed record and logs a warning", async () => {
+    const host = createFakePluginHost({ pluginId: "auto-review" });
+    try {
+      const { bb } = host;
+      await bb.storage.kv.set("project:p-1", { enabled: "yes", autoApprovePlans: true });
+      await writeProjectConfig(bb, "p-1", { enabled: false });
+      expect(await bb.storage.kv.get("project:p-1")).toEqual({ enabled: false });
+      expect(
+        host.harness.logEntries.filter((entry) => entry.level === "warn").map((entry) => entry.message),
+      ).toEqual(["replacing malformed stored auto-review config for project p-1"]);
+    } finally {
+      await host.harness.dispose();
+    }
+  });
+
+  it("writeProjectConfig does not warn on a valid, null or missing record", async () => {
+    const host = createFakePluginHost({ pluginId: "auto-review" });
+    try {
+      const { bb } = host;
+      await bb.storage.kv.set("project:p-1", { autoApprovePlans: true });
+      await writeProjectConfig(bb, "p-1", { enabled: false });
+      await bb.storage.kv.set("project:p-2", null);
+      await writeProjectConfig(bb, "p-2", { enabled: false });
+      await writeProjectConfig(bb, "p-3", { enabled: false });
+      expect(host.harness.logEntries.filter((entry) => entry.level === "warn")).toEqual([]);
+      expect(await bb.storage.kv.get("project:p-1")).toEqual({ autoApprovePlans: true, enabled: false });
+    } finally {
+      await host.harness.dispose();
+    }
+  });
 });
 
 describe("setProjectReview", () => {
@@ -225,7 +305,7 @@ describe("setProjectReview", () => {
       for (const review of ["on", "off", "default"] as const) {
         await bb.storage.kv.set("project:p-1", malformed);
         await expect(setProjectReview(bb, "p-1", review, "rpc")).rejects.toThrow(
-          "stored auto-review config for project p-1 is malformed; not overwriting",
+          "stored auto-review config for project p-1 is malformed; not overwriting. Run `bb auto-review enable|disable --project p-1` to replace it (this discards the stored record).",
         );
         expect(JSON.stringify(await bb.storage.kv.get("project:p-1"))).toBe(JSON.stringify(malformed));
       }
@@ -246,7 +326,19 @@ describe("setProjectReview", () => {
     });
   });
 
-  it("logs the override it saw as the before value and who changed it", async () => {
+  it("keeps an unknown key through on, off and default", async () => {
+    await withBb(async ({ bb }) => {
+      await bb.storage.kv.set("project:p-1", { enabled: false, futureKey: { a: 1 } });
+      await setProjectReview(bb, "p-1", "on", "rpc");
+      expect(await bb.storage.kv.get("project:p-1")).toEqual({ enabled: true, futureKey: { a: 1 } });
+      await setProjectReview(bb, "p-1", "off", "rpc");
+      expect(await bb.storage.kv.get("project:p-1")).toEqual({ enabled: false, futureKey: { a: 1 } });
+      await setProjectReview(bb, "p-1", "default", "rpc");
+      expect(await bb.storage.kv.get("project:p-1")).toEqual({ futureKey: { a: 1 } });
+    });
+  });
+
+  it("logs a change with the override it saw as the before value and who changed it", async () => {
     await withBb(async (host) => {
       const { bb } = host;
       await setProjectReview(bb, "p-1", "off", "rpc");
@@ -263,6 +355,19 @@ describe("setProjectReview", () => {
     });
   });
 
+  it("does not log a set to the value already stored", async () => {
+    await withBb(async (host) => {
+      const { bb } = host;
+      await setProjectReview(bb, "p-1", "default", "rpc");
+      await setProjectReview(bb, "p-1", "off", "rpc");
+      const logged = host.harness.logEntries.length;
+      await setProjectReview(bb, "p-1", "off", "rpc");
+      await bb.storage.kv.set("project:p-2", { enabled: true });
+      await setProjectReview(bb, "p-2", "on", "rpc");
+      expect(host.harness.logEntries).toHaveLength(logged);
+    });
+  });
+
   it("keeps both keys when written concurrently with other writers", async () => {
     await withBb(async ({ bb }) => {
       await Promise.all([
@@ -276,5 +381,44 @@ describe("setProjectReview", () => {
         reviewMode: "self",
       });
     });
+  });
+});
+
+describe("readProjectConfig", () => {
+  it("strips unknown keys and reads a malformed or missing record as {}", async () => {
+    const host = createFakePluginHost({ pluginId: "auto-review" });
+    try {
+      const { bb } = host;
+      await bb.storage.kv.set("project:p-ok", { enabled: true, futureKey: 1 });
+      expect(await readProjectConfig(bb, "p-ok")).toEqual({ enabled: true });
+      await bb.storage.kv.set("project:p-bad", { enabled: "yes" });
+      expect(await readProjectConfig(bb, "p-bad")).toEqual({});
+      expect(await readProjectConfig(bb, "p-none")).toEqual({});
+    } finally {
+      await host.harness.dispose();
+    }
+  });
+});
+
+describe("readProjectConfigStatus", () => {
+  it("is malformed only for a stored record that fails the schema, from one read", async () => {
+    const host = createFakePluginHost({ pluginId: "auto-review" });
+    try {
+      const { bb } = host;
+      expect(await readProjectConfigStatus(bb, "p-none")).toEqual({ config: {}, malformed: false });
+      await bb.storage.kv.set("project:p-null", null);
+      expect(await readProjectConfigStatus(bb, "p-null")).toEqual({ config: {}, malformed: false });
+      await bb.storage.kv.set("project:p-ok", { enabled: true, futureKey: 1 });
+      expect(await readProjectConfigStatus(bb, "p-ok")).toEqual({
+        config: { enabled: true, futureKey: 1 },
+        malformed: false,
+      });
+      await bb.storage.kv.set("project:p-bad", { enabled: "yes" });
+      expect(await readProjectConfigStatus(bb, "p-bad")).toEqual({ config: {}, malformed: true });
+      await bb.storage.kv.set("project:p-str", "not an object");
+      expect(await readProjectConfigStatus(bb, "p-str")).toEqual({ config: {}, malformed: true });
+    } finally {
+      await host.harness.dispose();
+    }
   });
 });

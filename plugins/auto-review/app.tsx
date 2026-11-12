@@ -49,57 +49,71 @@ function ProjectRow(props: {
   const switchId = `${base}-switch`;
   const reviewId = `${base}-review`;
   const detailId = `${base}-detail`;
+  const nameId = `${base}-name`;
+  const reviewLabelId = `${base}-review-label`;
+  const switchLabelId = `${base}-switch-label`;
+  const malformedId = `${base}-malformed`;
   return (
     <li
       style={{
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 12,
         padding: "8px 0",
         borderTop: "1px solid color-mix(in oklch, var(--ink) 11%, var(--canvas))",
       }}
     >
-      <input
-        id={switchId}
-        type="checkbox"
-        role="switch"
-        checked={project.autoApprovePlans}
-        disabled={pending}
-        aria-describedby={detailId}
-        onChange={(event) => onToggle(project, event.target.checked)}
-        style={{ marginTop: 3 }}
-      />
-      <div style={{ minWidth: 0 }}>
-        <label htmlFor={switchId} style={{ color: "var(--ink)", fontWeight: 500 }}>
-          {project.name}
-        </label>
-        <div id={detailId} style={{ fontSize: 12, color: SOFT_INK }}>
-          <span>{project.id}</span>
-          {project.reviewActive ? null : (
-            <div>auto-review is off for this project, so this has no effect</div>
-          )}
-        </div>
-        <div style={{ fontSize: 12, marginTop: 4 }}>
-          <label htmlFor={reviewId} style={{ color: SOFT_INK }}>
-            Auto-review
-          </label>{" "}
-          <select
-            id={reviewId}
-            value={project.reviewOverride}
-            disabled={pending}
-            onChange={(event) => onReview(project, event.target.value as ReviewOverride)}
-          >
-            <option value="default">Default (global: {globalEnabled ? "on" : "off"})</option>
-            <option value="on">On</option>
-            <option value="off">Off</option>
-          </select>
-        </div>
-        {error === undefined ? null : (
-          <div role="alert" style={{ fontSize: 12, color: "var(--destructive-text)" }}>
-            {error}
-          </div>
+      <div id={nameId} style={{ color: "var(--ink)", fontWeight: 500 }}>
+        {project.name}
+      </div>
+      <div id={detailId} style={{ fontSize: 12, color: SOFT_INK }}>
+        <span>{project.id}</span>
+        {project.reviewActive ? null : (
+          <div>auto-review is off for this project, so plan auto-approve has no effect</div>
         )}
       </div>
+      <div style={{ fontSize: 12, marginTop: 4 }}>
+        <label id={reviewLabelId} htmlFor={reviewId} style={{ color: SOFT_INK }}>
+          Auto-review
+        </label>{" "}
+        <select
+          id={reviewId}
+          value={project.reviewOverride}
+          disabled={pending || project.malformed}
+          aria-labelledby={`${nameId} ${reviewLabelId}`}
+          aria-describedby={project.malformed ? `${detailId} ${malformedId}` : detailId}
+          onChange={(event) => onReview(project, event.target.value as ReviewOverride)}
+        >
+          <option value="default">Default (global: {globalEnabled ? "on" : "off"})</option>
+          <option value="on">On</option>
+          <option value="off">Off</option>
+        </select>
+        {project.malformed ? (
+          <div id={malformedId} style={{ color: "var(--destructive-text)" }}>
+            Stored auto-review settings for this project are malformed, so they can't be changed
+            here. Run <code>bb auto-review enable --project {project.id}</code> or{" "}
+            <code>bb auto-review disable --project {project.id}</code> to replace them; that
+            discards the stored record.
+          </div>
+        ) : null}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
+        <input
+          id={switchId}
+          type="checkbox"
+          role="switch"
+          checked={project.autoApprovePlans}
+          disabled={pending || project.malformed}
+          aria-labelledby={`${nameId} ${switchLabelId}`}
+          aria-describedby={project.malformed ? `${detailId} ${malformedId}` : detailId}
+          onChange={(event) => onToggle(project, event.target.checked)}
+        />
+        <label id={switchLabelId} htmlFor={switchId} style={{ fontSize: 12, color: SOFT_INK }}>
+          Plan auto-approve
+        </label>
+      </div>
+      {error === undefined ? null : (
+        <div role="alert" style={{ fontSize: 12, color: "var(--destructive-text)" }}>
+          {error}
+        </div>
+      )}
     </li>
   );
 }
@@ -643,7 +657,7 @@ export default definePluginApp((app) => {
     id: "project-auto-approve",
     title: "Per-project settings",
     description:
-      "Auto-review: Default follows the global Enabled switch; On or Off overrides it for that project. Plan auto-approve: off by default. When on for a project, a plan auto-review has reviewed is approved for you: the agent starts implementing without waiting for your approval.",
+      "Auto-review: Default follows the global Enabled switch; On or Off overrides it for that project. Plan auto-approve: when on, a plan auto-review has reviewed is approved without waiting for you.",
     component: ProjectAutoApprove,
   });
   app.slots.experimental_threadHeaderAction({

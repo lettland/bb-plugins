@@ -33,9 +33,9 @@ describe("auto-review rpc: listProjectSettings", () => {
       await host.bb.storage.kv.set("project:p-c", { enabled: false });
       expect(await host.harness.callRpc("listProjectSettings", null)).toEqual({
         projects: [
-          { id: "p-c", name: "alpha", autoApprovePlans: false, reviewOverride: "off", reviewActive: false },
-          { id: "p-a", name: "Beta", autoApprovePlans: false, reviewOverride: "default", reviewActive: true },
-          { id: "p-b", name: "Beta", autoApprovePlans: true, reviewOverride: "default", reviewActive: true },
+          { id: "p-c", name: "alpha", autoApprovePlans: false, reviewOverride: "off", malformed: false, reviewActive: false },
+          { id: "p-a", name: "Beta", autoApprovePlans: false, reviewOverride: "default", malformed: false, reviewActive: true },
+          { id: "p-b", name: "Beta", autoApprovePlans: true, reviewOverride: "default", malformed: false, reviewActive: true },
         ],
         globalEnabled: true,
       });
@@ -138,6 +138,21 @@ describe("auto-review rpc: review override", () => {
     });
   });
 
+  it("lists malformed true for a malformed record and false for a valid one", async () => {
+    await withHost(async (host) => {
+      await host.bb.storage.kv.set("project:p-a", { enabled: "yes", autoApprovePlans: true });
+      await host.bb.storage.kv.set("project:p-b", { enabled: false });
+      const result = (await host.harness.callRpc("listProjectSettings", null)) as {
+        projects: { id: string; malformed: boolean }[];
+      };
+      expect(result.projects.map((p) => [p.id, p.malformed]).sort()).toEqual([
+        ["p-a", true],
+        ["p-b", false],
+        ["p-c", false],
+      ]);
+    });
+  });
+
   it("shows a CLI `disable` as off and the GUI's change in the CLI's show", async () => {
     await withHost(async (host) => {
       await host.harness.runCli(["disable", "--project", "p-a"], {});
@@ -201,6 +216,16 @@ describe("auto-review rpc: setAutoApprovePlans", () => {
         await expect(host.harness.callRpc("setAutoApprovePlans", input)).rejects.toThrow();
       }
       expect(await host.bb.storage.kv.list("project:")).toEqual([]);
+    });
+  });
+
+  it("rejects a malformed stored record and leaves it unchanged", async () => {
+    await withHost(async (host) => {
+      await host.bb.storage.kv.set("project:p-a", { enabled: "yes", futureKey: 1 });
+      await expect(
+        host.harness.callRpc("setAutoApprovePlans", { projectId: "p-a", autoApprovePlans: true }),
+      ).rejects.toThrow("malformed");
+      expect(await host.bb.storage.kv.get("project:p-a")).toEqual({ enabled: "yes", futureKey: 1 });
     });
   });
 

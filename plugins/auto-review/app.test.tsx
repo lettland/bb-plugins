@@ -55,6 +55,7 @@ function project(overrides: Partial<ProjectSetting> = {}): ProjectSetting {
     name: "Project one",
     autoApprovePlans: false,
     reviewOverride: "default",
+    malformed: false,
     reviewActive: true,
     ...overrides,
   };
@@ -111,7 +112,7 @@ describe("registration", () => {
   it("registers the settings section and the thread header action", () => {
     expect(approveSection.title).toBe("Per-project settings");
     expect(approveSection.description).toBe(
-      "Auto-review: Default follows the global Enabled switch; On or Off overrides it for that project. Plan auto-approve: off by default. When on for a project, a plan auto-review has reviewed is approved for you: the agent starts implementing without waiting for your approval.",
+      "Auto-review: Default follows the global Enabled switch; On or Off overrides it for that project. Plan auto-approve: when on, a plan auto-review has reviewed is approved without waiting for you.",
     );
     expect(badgeSlot.title).toBe("Auto-review");
   });
@@ -136,13 +137,16 @@ describe("Per-project settings section", () => {
     await screen.findByText("Alpha");
     const rows = screen.getAllByRole("listitem");
     expect(rows).toHaveLength(2);
-    expect((screen.getByLabelText("Alpha") as HTMLInputElement).checked).toBe(true);
-    expect((screen.getByLabelText("Beta") as HTMLInputElement).checked).toBe(false);
+    expect((within(rows[0]!).getByLabelText("Plan auto-approve") as HTMLInputElement).checked).toBe(true);
+    expect((within(rows[1]!).getByLabelText("Plan auto-approve") as HTMLInputElement).checked).toBe(false);
+    expect(within(rows[0]!).getByRole("switch", { name: "Alpha Plan auto-approve" })).toBeTruthy();
+    expect(within(rows[0]!).getByRole("combobox", { name: "Alpha Auto-review" })).toBeTruthy();
+    expect(within(rows[1]!).getByRole("switch", { name: "Beta Plan auto-approve" })).toBeTruthy();
     expect(
-      within(rows[0]!).queryByText("auto-review is off for this project, so this has no effect"),
+      within(rows[0]!).queryByText("auto-review is off for this project, so plan auto-approve has no effect"),
     ).toBeNull();
     expect(
-      within(rows[1]!).getByText("auto-review is off for this project, so this has no effect"),
+      within(rows[1]!).getByText("auto-review is off for this project, so plan auto-approve has no effect"),
     ).toBeTruthy();
     expect(within(rows[1]!).getByText("prj_off")).toBeTruthy();
   });
@@ -256,13 +260,16 @@ describe("Per-project settings section", () => {
         globalEnabled: true,
       }),
     });
-    fireEvent.click(await screen.findByLabelText("Alpha"));
+    const rows = await screen.findAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByLabelText("Plan auto-approve"));
     expect(view.rpcCalls).toContainEqual({
       method: "setAutoApprovePlans",
       input: { projectId: "prj_a", autoApprovePlans: true },
     });
-    expect(((await screen.findByLabelText("Alpha")) as HTMLInputElement).checked).toBe(true);
-    expect((screen.getByLabelText("Beta") as HTMLInputElement).checked).toBe(false);
+    await waitFor(() =>
+      expect((within(rows[0]!).getByLabelText("Plan auto-approve") as HTMLInputElement).checked).toBe(true),
+    );
+    expect((within(rows[1]!).getByLabelText("Plan auto-approve") as HTMLInputElement).checked).toBe(false);
   });
 
   it("disables the switch while the write is in flight", async () => {
@@ -272,10 +279,10 @@ describe("Per-project settings section", () => {
       setAutoApprovePlans: () =>
         new Promise((resolve) => { stored = resolve; }),
     });
-    fireEvent.click(await screen.findByLabelText("Project one"));
-    expect((screen.getByLabelText("Project one") as HTMLInputElement).disabled).toBe(true);
+    fireEvent.click(await screen.findByLabelText("Plan auto-approve"));
+    expect((screen.getByLabelText("Plan auto-approve") as HTMLInputElement).disabled).toBe(true);
     await act(async () => { stored({ projectId: "prj_1", autoApprovePlans: true }); });
-    const box = screen.getByLabelText("Project one") as HTMLInputElement;
+    const box = screen.getByLabelText("Plan auto-approve") as HTMLInputElement;
     expect(box.disabled).toBe(false);
     expect(box.checked).toBe(true);
   });
@@ -289,11 +296,11 @@ describe("Per-project settings section", () => {
       },
       setAutoApprovePlans: () => { throw new Error("denied"); },
     });
-    const box = await screen.findByLabelText("Project one");
+    const box = await screen.findByLabelText("Plan auto-approve");
     fireEvent.click(box);
     expect((await screen.findByRole("alert")).textContent).toBe("denied");
     expect(loads).toBe(2);
-    const reverted = screen.getByLabelText("Project one") as HTMLInputElement;
+    const reverted = screen.getByLabelText("Plan auto-approve") as HTMLInputElement;
     expect(reverted.checked).toBe(false);
     expect(reverted.disabled).toBe(false);
     expect(view.rpcCalls.filter((call) => call.method === "setAutoApprovePlans")).toHaveLength(1);
@@ -304,7 +311,7 @@ describe("Per-project settings section", () => {
       listProjectSettings: () => ({ projects: [project()], globalEnabled: true }),
       setAutoApprovePlans: () => { throw "rejected"; },
     });
-    fireEvent.click(await screen.findByLabelText("Project one"));
+    fireEvent.click(await screen.findByLabelText("Plan auto-approve"));
     expect((await screen.findByRole("alert")).textContent).toBe("rejected");
   });
 
@@ -325,11 +332,11 @@ describe("Per-project settings section", () => {
       },
       setAutoApprovePlans: () => { throw new Error("denied"); },
     });
-    fireEvent.click(await screen.findByLabelText("Project one"));
+    fireEvent.click(await screen.findByLabelText("Plan auto-approve"));
     expect(await screen.findByRole("alert")).toBeTruthy();
     window.dispatchEvent(new Event("focus"));
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
-    expect((screen.getByLabelText("Project one") as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByLabelText("Plan auto-approve") as HTMLInputElement).checked).toBe(false);
     expect(loads).toBe(3);
   });
 
@@ -361,7 +368,7 @@ describe("Per-project settings section", () => {
   });
 
   it("stores a changed override and refreshes the select and the no-effect note together", async () => {
-    const note = "auto-review is off for this project, so this has no effect";
+    const note = "auto-review is off for this project, so plan auto-approve has no effect";
     const view = renderSection({
       listProjectSettings: () => ({
         projects: [project({ id: "prj_a", name: "Alpha" }), project({ id: "prj_b", name: "Beta" })],
@@ -404,6 +411,54 @@ describe("Per-project settings section", () => {
     expect(reverted.value).toBe("default");
     expect(reverted.disabled).toBe(false);
     expect(view.rpcCalls.filter((call) => call.method === "setProjectReview")).toHaveLength(1);
+  });
+
+  it("disables the select while the override write is in flight", async () => {
+    let stored!: (value: { projectId: string; reviewOverride: ProjectSetting["reviewOverride"]; reviewActive: boolean }) => void;
+    renderSection({
+      listProjectSettings: () => ({ projects: [project()], globalEnabled: true }),
+      setProjectReview: () => new Promise((resolve) => { stored = resolve; }),
+    });
+    fireEvent.change(await screen.findByLabelText("Auto-review"), { target: { value: "off" } });
+    expect((screen.getByLabelText("Auto-review") as HTMLSelectElement).disabled).toBe(true);
+    await act(async () => { stored({ projectId: "prj_1", reviewOverride: "off", reviewActive: false }); });
+    const select = screen.getByLabelText("Auto-review") as HTMLSelectElement;
+    expect(select.disabled).toBe(false);
+    expect(select.value).toBe("off");
+  });
+
+  it("disables both controls and links the note only for a malformed row", async () => {
+    renderSection({
+      listProjectSettings: () => ({
+        projects: [
+          project({ id: "prj_bad", name: "Alpha", malformed: true }),
+          project({ id: "prj_ok", name: "Beta" }),
+        ],
+        globalEnabled: true,
+      }),
+    });
+    const rows = await screen.findAllByRole("listitem");
+    const bad = within(rows[0]!).getByRole("combobox", { name: /Alpha.*Auto-review/ }) as HTMLSelectElement;
+    const badSwitch = within(rows[0]!).getByRole("switch", { name: /Alpha.*Plan auto-approve/ }) as HTMLInputElement;
+    const good = within(rows[1]!).getByRole("combobox", { name: /Beta.*Auto-review/ }) as HTMLSelectElement;
+    const goodSwitch = within(rows[1]!).getByRole("switch", { name: /Beta.*Plan auto-approve/ }) as HTMLInputElement;
+    expect(bad.disabled).toBe(true);
+    expect(badSwitch.disabled).toBe(true);
+    expect(good.disabled).toBe(false);
+    expect(goodSwitch.disabled).toBe(false);
+    const note = within(rows[0]!).getByText(/are malformed, so they can't be changed here/);
+    expect(note.textContent).toBe(
+      "Stored auto-review settings for this project are malformed, so they can't be changed here. Run bb auto-review enable --project prj_bad or bb auto-review disable --project prj_bad to replace them; that discards the stored record.",
+    );
+    expect(Array.from(note.querySelectorAll("code")).map((code) => code.textContent)).toEqual([
+      "bb auto-review enable --project prj_bad",
+      "bb auto-review disable --project prj_bad",
+    ]);
+    expect(bad.getAttribute("aria-describedby")?.split(" ")).toContain(note.id);
+    expect(badSwitch.getAttribute("aria-describedby")?.split(" ")).toContain(note.id);
+    expect(good.getAttribute("aria-describedby")?.split(" ")).not.toContain(note.id);
+    expect(goodSwitch.getAttribute("aria-describedby")?.split(" ")).not.toContain(note.id);
+    expect(within(rows[1]!).queryByText(/are malformed/)).toBeNull();
   });
 });
 

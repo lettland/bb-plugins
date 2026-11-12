@@ -10,6 +10,8 @@ const projectSettingSchema = z.object({
   autoApprovePlans: z.boolean(),
   /** The project's own on/off override of the global switch; `default` follows the global switch. */
   reviewOverride: reviewOverrideSchema,
+  /** The stored record for the project fails the schema, so the settings page cannot rewrite it. */
+  malformed: z.boolean(),
   /** Whether auto-review currently runs for the project; when false the switch has no effect. */
   reviewActive: z.boolean(),
 });

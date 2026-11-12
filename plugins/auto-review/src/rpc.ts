@@ -2,6 +2,7 @@ import {
   describeReviewOverride,
   effectiveConfig,
   readProjectConfig,
+  readProjectConfigStatus,
   setAutoApprovePlans,
   setProjectReview,
 } from "./config.js";
@@ -26,11 +27,12 @@ export function registerAutoReviewRpc(ctx: ReviewContext): void {
       const projects = await listProjects(ctx);
       const rows = await Promise.all(
         projects.map(async (project) => {
-          const config = await readProjectConfig(bb, project.id);
+          const { config, malformed } = await readProjectConfigStatus(bb, project.id);
           return {
             ...project,
             autoApprovePlans: config.autoApprovePlans ?? false,
             reviewOverride: describeReviewOverride(config),
+            malformed,
             reviewActive: effectiveConfig(ctx.globals, config).enabled,
           };
         }),

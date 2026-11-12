@@ -185,6 +185,43 @@ export async function readProjectConfig(
   return parsed.success ? parsed.data : {};
 }
 
+const passthroughProjectConfigSchema = projectConfigSchema.passthrough();
+
+type StoredProjectConfig =
+  | { kind: "absent" }
+  | { kind: "malformed" }
+  | { kind: "ok"; config: z.infer<typeof passthroughProjectConfigSchema> };
+
+/**
+ * The raw stored record, parsed with its unknown keys kept. Writers read through
+ * this, never `readProjectConfig`, which strips unknown keys and reads a malformed
+ * record as `{}`.
+ */
+async function readStoredProjectConfig(
+  bb: BbPluginApi,
+  projectId: string,
+): Promise<StoredProjectConfig> {
+  const raw = await bb.storage.kv.get<unknown>(projectKey(projectId));
+  if (raw === undefined || raw === null) return { kind: "absent" };
+  const parsed = passthroughProjectConfigSchema.safeParse(raw);
+  return parsed.success ? { kind: "ok", config: parsed.data } : { kind: "malformed" };
+}
+
+/** The config and whether a stored record failed the schema (then `config` is `{}`), from one read. */
+export async function readProjectConfigStatus(
+  bb: BbPluginApi,
+  projectId: string,
+): Promise<{ config: ProjectConfig; malformed: boolean }> {
+  const stored = await readStoredProjectConfig(bb, projectId);
+  return { config: stored.kind === "ok" ? stored.config : {}, malformed: stored.kind === "malformed" };
+}
+
+function malformedConfigError(projectId: string): Error {
+  return new Error(
+    `stored auto-review config for project ${projectId} is malformed; not overwriting. Run \`bb auto-review enable|disable --project ${projectId}\` to replace it (this discards the stored record).`,
+  );
+}
+
 const withProjectLock = createKeyedLock();
 
 /** The read-merge-write itself; callers hold the project's lock. */
@@ -192,20 +229,28 @@ async function mergeProjectConfig(
   bb: BbPluginApi,
   projectId: string,
   patch: ProjectConfig,
+  replaceMalformed: boolean,
 ): Promise<ProjectConfig> {
-  const current = await readProjectConfig(bb, projectId);
-  const next: ProjectConfig = { ...current, ...patch };
+  const stored = await readStoredProjectConfig(bb, projectId);
+  if (stored.kind === "malformed") {
+    if (!replaceMalformed) throw malformedConfigError(projectId);
+    bb.log.warn(`replacing malformed stored auto-review config for project ${projectId}`);
+  }
+  const next: ProjectConfig = { ...(stored.kind === "ok" ? stored.config : {}), ...patch };
   await bb.storage.kv.set(projectKey(projectId), next);
   return next;
 }
 
-/** Serialized per project, so concurrent writers (CLI and settings page) cannot drop each other's keys. */
+/**
+ * Serialized per project, so concurrent writers (CLI and settings page) cannot drop each other's keys.
+ * Only the CLI `enable|disable --project` uses it: an explicit repair, so it replaces a malformed record.
+ */
 export function writeProjectConfig(
   bb: BbPluginApi,
   projectId: string,
   patch: ProjectConfig,
 ): Promise<ProjectConfig> {
-  return withProjectLock(projectId, () => mergeProjectConfig(bb, projectId, patch));
+  return withProjectLock(projectId, () => mergeProjectConfig(bb, projectId, patch, true));
 }
 
 /**
@@ -219,8 +264,9 @@ export function setAutoApprovePlans(
   source: string,
 ): Promise<void> {
   return withProjectLock(projectId, async () => {
-    const before = (await readProjectConfig(bb, projectId)).autoApprovePlans ?? false;
-    await mergeProjectConfig(bb, projectId, { autoApprovePlans: value });
+    const stored = await readStoredProjectConfig(bb, projectId);
+    const before = (stored.kind === "ok" ? stored.config.autoApprovePlans : undefined) ?? false;
+    await mergeProjectConfig(bb, projectId, { autoApprovePlans: value }, false);
     bb.log.info(
       `plan auto-approve for project ${projectId}: ${before} -> ${value} (via ${source})`,
     );
@@ -237,8 +283,8 @@ export function describeReviewOverride(config: ProjectConfig): ProjectReviewOver
 /**
  * The settings page's writer of the per-project `enabled` override: `default`
  * clears it (follow the global switch), `on` and `off` set it. Unlike
- * `readProjectConfig` it rejects a malformed stored record instead of reading it
- * as `{}`, so the write cannot drop the record's other keys.
+ * `readProjectConfig` it keeps unknown keys and rejects a malformed stored record
+ * instead of reading it as `{}`, so the write cannot drop the record's other keys.
  */
 export function setProjectReview(
   bb: BbPluginApi,
@@ -247,21 +293,19 @@ export function setProjectReview(
   source: string,
 ): Promise<ProjectConfig> {
   return withProjectLock(projectId, async () => {
-    const raw = await bb.storage.kv.get<unknown>(projectKey(projectId));
-    const parsed = projectConfigSchema.safeParse(raw ?? {});
-    if (!parsed.success) {
-      throw new Error(
-        `stored auto-review config for project ${projectId} is malformed; not overwriting`,
-      );
-    }
-    const before = describeReviewOverride(parsed.data);
-    const next: ProjectConfig = { ...parsed.data };
+    const stored = await readStoredProjectConfig(bb, projectId);
+    if (stored.kind === "malformed") throw malformedConfigError(projectId);
+    const current = stored.kind === "ok" ? stored.config : {};
+    const before = describeReviewOverride(current);
+    const next: ProjectConfig = { ...current };
     if (review === "default") delete next.enabled;
     else next.enabled = review === "on";
-    if (review !== "default" || (raw !== undefined && raw !== null)) {
+    if (review !== "default" || stored.kind === "ok") {
       await bb.storage.kv.set(projectKey(projectId), next);
     }
-    bb.log.info(`auto-review for project ${projectId}: ${before} -> ${review} (via ${source})`);
+    if (before !== review) {
+      bb.log.info(`auto-review for project ${projectId}: ${before} -> ${review} (via ${source})`);
+    }
     return next;
   });
 }

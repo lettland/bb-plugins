@@ -656,7 +656,8 @@ plugin (Tools → Auto review) also has a Per-project settings section that list
 select (Default follows the global Enabled switch; On or Off overrides it for that project) and a switch for approving reviewed
 plans automatically. They write the same storage as `bb auto-review enable|disable --project` and `bb auto-review auto-approve`.
 Only the settings page can set the Auto-review override back to Default; the CLI writes only on or off. If the stored record
-for a project is malformed, the select refuses to change it and reports an error instead of overwriting the record.
+for a project is malformed, the settings page and `auto-approve` refuse to change it (the row disables both controls and shows a
+note); `enable|disable --project <id>` replaces it and discards the stored record.
 
 ### Plan approval form
 
