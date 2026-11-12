@@ -84,7 +84,7 @@ const manifest = validateManifest(
 
 const policy = Object.freeze({
   projectId: "proj_example",
-  trustedHostId: "host_vairogs",
+  trustedHostId: "host_example",
   primaryRoot: "/workspace/example",
   worktreeRoot: "/bb/worktrees",
   worktreeDirectoryName: "example",
@@ -380,7 +380,7 @@ function isolatedArgs(
 function context(overrides = {}) {
   return {
     projectId: "proj_example",
-    hostId: "host_vairogs",
+    hostId: "host_example",
     environmentId: "env_abc123",
     environmentPath: "/bb/worktrees/env_abc123/example",
     workspaceProvisionType: "managed-worktree",
@@ -502,7 +502,7 @@ test("builds only fixed Docker exec plans", () => {
   ]);
   assert.deepEqual(
     buildContainerPlan(policy, workspace, "api_unit", {
-      target: "example/src/Example/Component/Redis",
+      target: "modules/cache/src/Redis",
     }),
     [
       {
@@ -512,7 +512,7 @@ test("builds only fixed Docker exec plans", () => {
           "example_dev_api",
           "/workspace/example/.bb-runtime/landlock-run",
           "bin/unit",
-          ["example/src/Example/Component/Redis"],
+          ["modules/cache/src/Redis"],
           { TEST_TOKEN: "_env_abc123" },
         ),
         rejectNonEmptyStdout: false,
@@ -560,9 +560,9 @@ test("builds only fixed Docker exec plans", () => {
           EXAMPLE_E2E_WORKER_ISOLATION_LAUNCHER: "/app/.bb-runtime/landlock-run",
           EXAMPLE_E2E_WORKER_WORKDIR:
             "/bb-worktrees/env_abc123/example/src/worker",
-          EXAMPLE_IT_PACKAGES: "./internal/features/orders/timeline",
+          EXAMPLE_IT_PACKAGES: "./internal/store",
           EXAMPLE_IT_PARALLEL: "1",
-          EXAMPLE_IT_RUN: "^TestListEvents",
+          EXAMPLE_IT_RUN: "^TestIntegration",
           EXAMPLE_IT_TIMEOUT: "120s",
           // ${envSlug} turns the environment id's underscores into dashes.
           EXAMPLE_REDIS_TEST_PREFIX: "bb:env-abc123:timeline:v1",
@@ -590,7 +590,7 @@ test("builds only fixed Docker exec plans", () => {
     [
       "scripts/up.sh",
       "scripts/down.sh",
-      "scripts/lib/primary-checkout.sh",
+      "scripts/lib/common.sh",
       "scripts/test-integration.sh",
       "scripts/tests/test-layout.sh",
     ],
@@ -707,13 +707,13 @@ test("pre-commit generators are isolated and fixed", () => {
   assert.equal(plan.length, 2);
   assert.deepEqual(
     plan.map((entry) => entry.generator.stages.length),
-    [1, 7],
+    [1, 2],
   );
   assert.deepEqual(
     buildPrecommitGenerationPlan(policy, workspace, {
-      available: new Set(["scripts/generate-components.php"]),
-    }).length,
-    1,
+      available: new Set(["scripts/generate-manifest.php"]),
+    }).map((entry) => entry.generator.requires),
+    ["scripts/generate-manifest.php"],
   );
   assert.deepEqual(
     plan.map(({ invocation }) => invocation.args),
@@ -723,14 +723,14 @@ test("pre-commit generators are isolated and fixed", () => {
         "example_dev_api",
         "/workspace/example/.bb-runtime/landlock-run",
         "php",
-        ["scripts/generate-components.php", "--modified"],
+        ["scripts/generate-manifest.php", "--modified"],
       ),
       isolatedArgs(
         "/bb-worktrees/env_abc123/example",
         "example_dev_api",
         "/workspace/example/.bb-runtime/landlock-run",
         "php",
-        ["scripts/generate-registry.php"],
+        ["scripts/generate-config.php"],
       ),
     ],
   );
@@ -1162,7 +1162,7 @@ test("worktree dependency prep keeps root tool caches off the shared install", a
     await readlink(path.join(worktreeModules, "@playwright")),
     "/app/node_modules/@playwright",
   );
-  const taskState = path.join(worktreeModules, ".pnpm-task-run-state-v1");
+  const taskState = path.join(worktreeModules, ".task-state");
   await mkdir(taskState, { recursive: true });
   await writeFile(path.join(taskState, "latest.json"), "{}\n");
   assert.equal(
@@ -2097,7 +2097,7 @@ test("agent tools are selected only for the authorized project and machine", () 
   const allowed = buildAgentConfiguration(registry, {
     thread: { id: "thr_allowed" },
     project: { id: "proj_example" },
-    host: { id: "host_vairogs" },
+    host: { id: "host_example" },
     environment: {
       id: "env_abc123",
       path: "/bb/worktrees/env_abc123/example",
@@ -2149,7 +2149,7 @@ test("agent tools are selected only for the authorized project and machine", () 
     {
       thread: { id: "thr_codegraph" },
       project: { id: "proj_example" },
-      host: { id: "host_vairogs" },
+      host: { id: "host_example" },
       environment: {
         id: "env_abc123",
         path: "/bb/worktrees/env_abc123/example",
@@ -2164,7 +2164,7 @@ test("agent tools are selected only for the authorized project and machine", () 
   );
 
   for (const [projectId, hostId] of [
-    ["proj_other", "host_vairogs"],
+    ["proj_other", "host_example"],
     ["proj_example", "host_other"],
   ]) {
     const denied = buildAgentConfiguration(registry, {
@@ -2202,7 +2202,7 @@ test("agent context is rehydrated after a plugin reload", async () => {
         return {
           id: input.environmentId,
           projectId: "proj_example",
-          hostId: "host_vairogs",
+          hostId: "host_example",
           path: "/bb/worktrees/env_abc123/example",
           workspaceProvisionType: "managed-worktree",
           branchName: "bb/example",
@@ -2578,7 +2578,7 @@ test("policy loading verifies the protected policy descriptor", async (t) => {
   await mkdir(projectsRoot, { recursive: true, mode: 0o700 });
   const policyDocument = {
     projectId: "proj_example",
-    trustedHostId: "host_vairogs",
+    trustedHostId: "host_example",
     primaryRoot: path.join(fixtureRoot, "primary"),
     worktreeRoot: path.join(fixtureRoot, "worktrees"),
     worktreeDirectoryName: "example",
