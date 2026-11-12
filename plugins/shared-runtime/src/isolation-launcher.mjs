@@ -1,10 +1,12 @@
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import {
   chmod,
   copyFile,
   lstat,
   mkdir,
+  open,
   readFile,
   readdir,
   rename,
@@ -27,6 +29,26 @@ export function runtimeDirectoryPath(policy) {
   return path.join(normalizeAbsolute(policy.primaryRoot), isolationRuntimeDirectory);
 }
 
+// Reads one file without following a link or blocking on a special file. readdir said it was
+// regular, but a repository or container process can swap it before it is opened; null means it
+// no longer is.
+async function readRegularFile(file) {
+  let handle;
+  try {
+    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    if (error?.code === "ELOOP") {
+      return null;
+    }
+    throw error;
+  }
+  try {
+    return (await handle.stat()).isFile() ? await handle.readFile() : null;
+  } finally {
+    await handle.close();
+  }
+}
+
 async function directoryDigest(directory) {
   const hash = createHash("sha256");
   let entries;
@@ -45,7 +67,9 @@ async function directoryDigest(directory) {
   for (const name of files) {
     hash.update(name);
     hash.update("\0");
-    hash.update(await readFile(path.join(directory, name)));
+    // A swapped-in link or special file contributes a marker no bundled file hashes to, so the
+    // digest differs and the set is reinstalled.
+    hash.update((await readRegularFile(path.join(directory, name))) ?? "\0swapped-after-listing");
     hash.update("\0");
   }
   return { digest: hash.digest("hex"), files };
@@ -85,18 +109,33 @@ async function installedAssetsMatch(target, digest) {
   if (!info.isDirectory() || info.uid !== process.getuid()) {
     return false;
   }
-  try {
-    return (await directoryDigest(target)).digest === digest;
-  } catch (error) {
-    // Another call removed a file while it was being read: the set is not the bundled one.
-    if (error?.code === "ENOENT") {
-      return false;
-    }
-    throw error;
-  }
+  return (await directoryDigest(target)).digest === digest;
 }
 
+// Calls in one process (two worktrees of one project share the plugin process) must not interleave
+// the remove and rename below, so they run one after another per runtime directory. The map holds
+// the tail of each directory's chain and drops it once the chain is idle.
+const assetInstalls = new Map();
+
 export async function ensureRuntimeAssets(policy) {
+  const key = runtimeDirectoryPath(policy);
+  const previous = assetInstalls.get(key) ?? Promise.resolve();
+  const result = previous.then(() => installRuntimeAssets(policy));
+  // A failed call settles the tail as fulfilled, so it never blocks or fails the next call.
+  const tail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  assetInstalls.set(key, tail);
+  tail.then(() => {
+    if (assetInstalls.get(key) === tail) {
+      assetInstalls.delete(key);
+    }
+  });
+  return result;
+}
+
+async function installRuntimeAssets(policy) {
   const runtimeDirectory = runtimeDirectoryPath(policy);
   await assertRuntimeDirectory(runtimeDirectory);
   const target = path.join(runtimeDirectory, runtimeAssetsDirectoryName);
@@ -120,16 +159,11 @@ export async function ensureRuntimeAssets(policy) {
       await copyFile(path.join(assetsSourceDirectory, name), path.join(temporary, name));
       await chmod(path.join(temporary, name), 0o644);
     }
-    // A concurrent call may have published the bundled set while we copied; removing it would
-    // break a third call that is reading it.
-    if (await installedAssetsMatch(target, digest)) {
-      return target;
-    }
     await rm(target, { recursive: true, force: true });
     try {
       await rename(temporary, target);
     } catch (error) {
-      // A concurrent call published a directory between our rm and rename; renaming a directory
+      // Another process published a directory between our rm and rename; renaming a directory
       // onto a non-empty one fails. Accept it only if it matches the bundled assets.
       if (error?.code !== "ENOTEMPTY" && error?.code !== "EEXIST") {
         throw error;

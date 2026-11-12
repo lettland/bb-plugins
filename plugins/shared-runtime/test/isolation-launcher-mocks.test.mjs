@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import * as fsPromises from "node:fs/promises";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
 import path from "node:path";
 import test, { mock } from "node:test";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 // The asset directory and the bundled launcher paths are fixed constants, so the
 // fs seams below inject the failure states (a vanished assets directory, a
@@ -224,7 +226,7 @@ function raceWith(publish) {
   };
 }
 
-test("a concurrent call that published matching assets between our rm and rename is accepted", async (t) => {
+test("another process that published matching assets between our rm and rename is accepted", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const target = path.join(root, ".bb-runtime", "assets");
@@ -242,7 +244,7 @@ test("a concurrent call that published matching assets between our rm and rename
   );
 });
 
-test("a concurrent call that published assets that do not match is denied", async (t) => {
+test("another process that published assets that do not match is denied", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const target = path.join(root, ".bb-runtime", "assets");
@@ -282,51 +284,82 @@ test("installed assets that someone else owns, or that cannot be inspected, are 
   await assert.rejects(ensureRuntimeAssets(policyFor(root)), { code: "EACCES" });
 });
 
-test("installed assets that lose a file while being read are reinstalled", async (t) => {
+// Swap one installed asset after readdir listed it as a regular file and before it is opened.
+async function swapAfterListing(target, name, swap) {
+  let swapped = false;
+  fsHooks.readdir = async (directory, ...rest) => {
+    const entries = await fsPromises.readdir(directory, ...rest);
+    if (directory === target && !swapped) {
+      swapped = true;
+      await swap(path.join(target, name));
+    }
+    return entries;
+  };
+  return () => swapped;
+}
+
+test("a symlink swapped in after the listing is not read through, and the set is reinstalled", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const target = path.join(root, ".bb-runtime", "assets");
   await ensureRuntimeAssets(policyFor(root));
   const [name] = await bundledAssetNames();
-  const before = await fsPromises.lstat(path.join(target, name));
-  let thrown = false;
-  readOverride(path.join(target, name), () => {
-    thrown = true;
-    throw missing();
+  const bundled = await fsPromises.readFile(path.join(pluginRoot, "assets", name));
+  // The link target holds the correct content, so a digest that followed the link would match.
+  const outside = path.join(root, "outside-file");
+  await fsPromises.writeFile(outside, bundled);
+  const swapped = await swapAfterListing(target, name, async (file) => {
+    await fsPromises.rm(file);
+    await fsPromises.symlink(outside, file);
   });
   assert.equal(await ensureRuntimeAssets(policyFor(root)), target);
-  assert.equal(thrown, true);
-  delete fsHooks.readFile;
-  assert.notEqual((await fsPromises.lstat(path.join(target, name))).ino, before.ino);
-
-  readOverride(path.join(target, name), () => {
-    throw denied();
-  });
-  await assert.rejects(ensureRuntimeAssets(policyFor(root)), { code: "EACCES" });
+  assert.equal(swapped(), true);
+  const installed = await fsPromises.lstat(path.join(target, name));
+  assert.equal(installed.isSymbolicLink(), false, "the link was replaced by a regular file");
+  assert.equal(installed.isFile(), true);
+  assert.deepEqual(await fsPromises.readFile(outside), bundled, "the link target is untouched");
 });
 
-test("a call that finds the bundled set published while it copies keeps that set", async (t) => {
+test("a special file swapped in after the listing neither blocks nor matches", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const target = path.join(root, ".bb-runtime", "assets");
-  const names = await bundledAssetNames();
-  let published;
-  fsHooks.copyFile = async (from, to) => {
-    if (published === undefined) {
-      await fsPromises.mkdir(target, { recursive: true });
-      for (const name of names) {
-        await fsPromises.copyFile(path.join(pluginRoot, "assets", name), path.join(target, name));
-      }
-      published = await fsPromises.lstat(path.join(target, names[0]));
-    }
-    return fsPromises.copyFile(from, to);
-  };
+  await ensureRuntimeAssets(policyFor(root));
+  const [name] = await bundledAssetNames();
+  const swapped = await swapAfterListing(target, name, async (file) => {
+    await fsPromises.rm(file);
+    await promisify(execFile)("mkfifo", [file]);
+  });
   assert.equal(await ensureRuntimeAssets(policyFor(root)), target);
-  assert.equal((await fsPromises.lstat(path.join(target, names[0]))).ino, published.ino, "the published set is not removed");
+  assert.equal(swapped(), true);
+  assert.equal((await fsPromises.lstat(path.join(target, name))).isFile(), true, "the FIFO was replaced");
+});
+
+test("a failed call does not block or fail the next call on the same runtime directory", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const target = path.join(root, ".bb-runtime", "assets");
+  let renames = 0;
+  fsHooks.rename = async (from, to) => {
+    renames += 1;
+    if (renames === 1) {
+      throw denied();
+    }
+    return fsPromises.rename(from, to);
+  };
+  const first = ensureRuntimeAssets(policyFor(root));
+  const second = ensureRuntimeAssets(policyFor(root));
+  const third = ensureRuntimeAssets(policyFor(root));
+  await assert.rejects(first, { code: "EACCES" });
+  assert.equal(await second, target);
+  assert.equal(await third, target);
+  assert.equal(renames, 2, "one failed rename, one install; the third call finds the set in place");
   assert.deepEqual(
     (await fsPromises.readdir(path.join(root, ".bb-runtime"))).filter((name) => name.includes(".tmp")),
     [],
   );
+  // The chain is idle again: a later call starts fresh.
+  assert.equal(await ensureRuntimeAssets(policyFor(root)), target);
 });
 
 test("a rename failure other than a lost publish race surfaces", async (t) => {
