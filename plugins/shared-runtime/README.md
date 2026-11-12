@@ -25,14 +25,36 @@ compiled from the manifest; targets are validated against a declared pattern or 
 - **Worktrees are mounted into the stack** at `worktrees.containerRoot` (default `/bb-worktrees`).
   Containers that run Git also mount the worktree root and the primary checkout at their
   identical host paths so linked-worktree metadata stays valid.
-- **Write confinement.** Quality operations run under `native/landlock-run.go`, built once per
-  project into `<primary>/.bb-runtime/landlock-run` by the manifest's `isolation.builder`
-  container. Writes are limited to the selected worktree and per-worktree scratch paths.
+- **Write confinement.** Quality operations run under `landlock-run`, a static launcher that
+  limits writes to the selected worktree and per-worktree scratch paths with Landlock and
+  seccomp. The plugin ships it prebuilt and reproducible: `native/prebuilt/linux-amd64/landlock-run`
+  and `native/prebuilt/linux-arm64/landlock-run`, built from `native/landlock-run.go` by one
+  pinned Go toolchain. No project container needs Go or any other toolchain. Before each
+  operation the plugin asks the Docker daemon for its architecture, picks the matching binary,
+  and installs it to `<primary>/.bb-runtime/landlock-run`. That binary is the host-architecture
+  one, so it also runs natively in a container whose image is another architecture. The install
+  is verified on every use: it must be a regular file with mode `0555` and the SHA-256 recorded
+  in `native/prebuilt/SHA256SUMS`, or the plugin reinstalls it.
 - **Trust anchors.** The manifest describes *what* a project can do. The host registry under
   `~/.bb/shared-runtime/projects/<projectId>.json` records *which* BB project, on *which* host,
   at *which* primary checkout is allowed to do it, and pins the manifest's SHA-256. A manifest
   edited after installation is refused until `bb-shared-runtime sync` re-pins it from the primary
   checkout, so a branch cannot grant itself new operations.
+- **Launcher trust.** `native/prebuilt/SHA256SUMS` is the one record of build provenance: the
+  pinned `toolchain` image (tag plus multi-platform index digest), the digest of
+  `native/landlock-run.go`, and the digest of each binary. The check at run time catches
+  corruption of the bundled or installed binary. It does not catch tampering by someone who
+  can edit both a binary and `SHA256SUMS`. That is the job of the build-and-verify gate:
+  `npm test`, which CI and the release run, first rebuilds both binaries with the pinned
+  toolchain in Docker and fails if they differ from `SHA256SUMS` or from the committed
+  files, so a swapped binary cannot be published.
+
+## Requirements
+
+- A Docker engine whose `docker version -f '{{.Server.Arch}}'` reports `amd64` or `arm64`.
+  Any other architecture is denied.
+- Git in the container you use for `isolation_self_test` (see `isolation.probe` below). No other
+  operation needs Git, and no container needs a language toolchain for the launcher.
 
 ## Installing in a repository
 
@@ -71,7 +93,6 @@ registered project; `bb-shared-runtime uninstall` removes one.
     "stop": ["bash", "scripts/down.sh"]
   },
   "worktrees": { "containerRoot": "/bb-worktrees" },
-  "isolation": { "builder": "worker", "probe": "api" },
   "search": { "defaultPath": "src" },
   "containers": {
     "api": {
@@ -103,13 +124,13 @@ registered project; `bb-shared-runtime uninstall` removes one.
         {
           "container": "api",
           "cwd": ".",
-          "argv": ["php", "scripts/generate-components.php", "--modified"],
-          "requires": "scripts/generate-components.php",
-          "stages": [".github/deploy/components-modified.json"],
+          "argv": ["php", "scripts/generate-manifest.php", "--modified"],
+          "requires": "scripts/generate-manifest.php",
+          "stages": ["build/manifest.json"],
           "tolerateMissingExecutable": true
         }
       ],
-      "hardlinks": [{ "source": "docs/public/README.md", "target": "docs/private/README.md" }]
+      "hardlinks": [{ "source": "docs/source.md", "target": "docs/copy.md" }]
     }
   }
 }
@@ -122,9 +143,18 @@ Field notes:
   host paths to container paths; `"${primaryRoot}"` means the primary checkout is mounted at its
   own absolute host path. `root` is the default working directory for operations, relative to
   the repository.
-- `isolation.builder` names the container with a Go toolchain that builds the launcher.
-  `isolation.probe` (default: builder) names the container used for the built-in
-  `isolation_self_test` operation; it needs Git.
+- `isolation` is optional. Its `probe` names the container used for the built-in
+  `isolation_self_test` operation, which needs Git in that container; without Git the self-test
+  denies with `isolation_self_test needs git in container "<name>"`. Without `isolation.probe`
+  the probe is resolved in this order: `isolation.builder`; the first container that an
+  operation uses (operations in declaration order, then a `steps` list's container steps in
+  order, then a variant target's variants in declaration order); the container of the first
+  `git.prepareCommit` generator. The first declared container is never used, because it could
+  be a database. If nothing resolves (for example, a manifest with only host steps), the
+  self-test denies with `isolation_self_test needs a probe container; set isolation.probe to a
+  container with git`. `isolation.builder` is deprecated: it no longer builds anything, and its
+  only remaining effect is to serve as the probe fallback. A name in either field must be a
+  declared container.
 - `scratch` declares extra per-worktree scratch directories under `/var/tmp`, exported under the
   listed environment variable names and available as `${scratch.<name>}`.
 - `dependencies` prepare a fresh worktree before every operation: `link` symlinks a path to a
@@ -173,8 +203,8 @@ plugin refuses entries with other permissions, symlinks, or hard links.
 
 ```json
 {
-  "projectId": "proj_97vy956k9w",
-  "trustedHostId": "host_e7kdfsvum6",
+  "projectId": "proj_example",
+  "trustedHostId": "host_example",
   "primaryRoot": "/Users/me/workspace/example",
   "worktreeRoot": "/Users/me/.bb/worktrees",
   "worktreeDirectoryName": "example",
@@ -191,10 +221,30 @@ plugin refuses entries with other permissions, symlinks, or hard links.
 ## Development
 
 ```sh
-node --test test/
+npm test            # builds and verifies the prebuilt launcher, then runs the suite (needs Docker)
+npm run test:coverage
 ```
 
 The suite covers workspace mapping, plan compilation from the example fixture manifest,
 target validation, isolation probes, dependency preparation, the reader-writer project locks
 (including the shell reload helper), agent configuration, registry loading, thread reads, and
 the CLI's registry-free commands.
+
+### Rebuilding the launcher
+
+After editing `native/landlock-run.go`, or to change the Go toolchain on the `toolchain` line of
+`native/prebuilt/SHA256SUMS`, run:
+
+```sh
+sh build/launcher.sh build
+```
+
+It runs the pinned `golang` image in Docker (no network, source mounted read-only) with
+`CGO_ENABLED=0`, `GOTOOLCHAIN=local`, `-trimpath`, `-buildvcs=false`, and a stripped, buildid-free
+link, for both architectures. It then rewrites the `source` and binary lines of
+`native/prebuilt/SHA256SUMS`. Commit the binaries and `SHA256SUMS` together with the source.
+`sh build/launcher.sh verify` rebuilds into a temporary directory and compares the result with
+`SHA256SUMS` and with the committed binaries; `npm test` runs it first. When you change the
+toolchain, update the version named in `THIRD_PARTY_NOTICES.md` and its Go license text from
+the new image. Both files are maintainer tools and notices, not shipped code:
+`build/` is not in the npm tarball, and `THIRD_PARTY_NOTICES.md` is.

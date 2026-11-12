@@ -20,7 +20,6 @@ process.env.HOME = fixtureHome;
 test.after(async () => {
   process.env.HOME = originalHome;
   process.env.PATH = originalPath;
-  delete process.env.FAKE_APP_ROOT;
   await rm(fixtureRoot, { recursive: true, force: true });
   await rm(fixtureHome, { recursive: true, force: true });
 });
@@ -50,11 +49,9 @@ const manifestDocument = {
 };
 
 const fakeDockerSource = `#!${process.execPath}
-const fs = require("node:fs");
 const args = process.argv.slice(2);
-if (args.includes("build")) {
-  const output = args[args.indexOf("-o") + 1].replace("/app/", process.env.FAKE_APP_ROOT + "/");
-  fs.writeFileSync(output, "#!/bin/sh\\n", { mode: 0o755 });
+if (args[0] === "version") {
+  process.stdout.write("arm64\\n");
 }
 process.exit(0);
 `;
@@ -92,7 +89,6 @@ await chmod(projectsRoot, 0o700);
 await writeFile(path.join(bin, "docker"), fakeDockerSource, { mode: 0o755 });
 await writeFile(path.join(bin, "rg"), fakeRgSource, { mode: 0o755 });
 process.env.PATH = `${bin}${path.delimiter}${process.env.PATH}`;
-process.env.FAKE_APP_ROOT = primaryRoot;
 
 await writeFile(path.join(primaryRoot, ".bb-runtime.json"), JSON.stringify(manifestDocument));
 await git(primaryRoot, "init", "--quiet");
@@ -339,10 +335,9 @@ test("git tool runs typed status in the authorized worktree", async () => {
   assert.match(result, /## bb\/example/);
 });
 
-test("the launcher builds through the default host executor when none is injected", async () => {
+test("the launcher installs through the default host executor when none is injected", async () => {
   const launcherPath = path.join(primaryRoot, ".bb-runtime", "landlock-run");
   await rm(launcherPath);
-  await rm(path.join(primaryRoot, ".bb-runtime", "landlock-run.sha256"));
   const policyForLauncher = {
     projectId: "proj_example",
     trustedHostId: "host_server",

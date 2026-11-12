@@ -275,16 +275,16 @@ export function validateIsolation(isolation, containers) {
   if (!isPlainObject(isolation)) {
     deny("isolation must be an object");
   }
-  const builder = assertString(isolation.builder, "isolation.builder");
-  if (!Object.hasOwn(containers, builder)) {
-    deny(`isolation.builder ${JSON.stringify(builder)} is not a declared container`);
-  }
-  let probe = builder;
-  if (isolation.probe !== undefined) {
-    probe = assertString(isolation.probe, "isolation.probe");
-    if (!Object.hasOwn(containers, probe)) {
-      deny(`isolation.probe ${JSON.stringify(probe)} is not a declared container`);
+  // Both fields are optional. `builder` is deprecated: its only effect is to serve as the probe fallback.
+  const names = {};
+  for (const field of ["builder", "probe"]) {
+    names[field] = null;
+    if (isolation[field] !== undefined) {
+      names[field] = assertString(isolation[field], `isolation.${field}`);
+      if (!Object.hasOwn(containers, names[field])) {
+        deny(`isolation.${field} ${JSON.stringify(names[field])} is not a declared container`);
+      }
     }
   }
-  return Object.freeze({ builder, probe });
+  return Object.freeze(names);
 }

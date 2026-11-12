@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
   chmod,
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -697,7 +698,7 @@ test("doctor verifies registration, manifest, and container mounts", async (t) =
       "ok    registration proj_example on host host_fixture",
       `ok    manifest hash ${digest.slice(0, 12)} matches`,
       "ok    policy file permissions verified",
-      "warn  isolation launcher not built yet (built on first quality operation)",
+      "warn  isolation launcher is missing or does not match; reinstalled on the next operation",
       `ok    container worker: /bb-worktrees is mounted from ${worktreeAlias}`,
       `ok    container web: /bb-worktrees is mounted from ${fixture.worktreeRoot}`,
       `ok    container api: /bb-worktrees is mounted from ${fixture.worktreeRoot}`,
@@ -706,7 +707,9 @@ test("doctor verifies registration, manifest, and container mounts", async (t) =
   );
 
   await mkdir(path.join(fixture.repo, ".bb-runtime"));
-  await writeFile(path.join(fixture.repo, ".bb-runtime", "landlock-run"), "");
+  const installedLauncher = path.join(fixture.repo, ".bb-runtime", "landlock-run");
+  await copyFile(path.join(pluginRoot, "native", "prebuilt", "linux-arm64", "landlock-run"), installedLauncher);
+  await chmod(installedLauncher, 0o555);
   await fixture.setMounts({
     example_dev_web: [
       { Destination: "/bb-worktrees", Source: "/elsewhere/worktrees" },
@@ -719,7 +722,7 @@ test("doctor verifies registration, manifest, and container mounts", async (t) =
   assert.equal(result.stderr, "doctor found errors\n");
   const { findings } = JSON.parse(result.stdout);
   assert.deepEqual(findings.slice(3), [
-    { level: "ok", message: "isolation launcher is built" },
+    { level: "ok", message: "isolation launcher is installed and verified" },
     { level: "error", message: "container worker (example_dev_worker) is not running or not created" },
     { level: "warn", message: "container web: /bb-worktrees is mounted from /elsewhere/worktrees" },
     {
@@ -772,10 +775,10 @@ test("doctor reports unresolved mount sources and a vanished worktree root", asy
   const result = await fixture.run(["doctor", "--json"]);
   assert.equal(result.code, 1);
   const { findings } = JSON.parse(result.stdout);
-  const launcherFinding = findings.find((finding) => /isolation launcher not built yet \(built on first quality operation\)/.test(finding.message));
+  const launcherFinding = findings.find((finding) => /isolation launcher is missing or does not match/.test(finding.message));
   assert.ok(launcherFinding, "expected an isolation launcher warn finding");
   assert.equal(launcherFinding.level, "warn");
-  assert.equal(launcherFinding.message, "isolation launcher not built yet (built on first quality operation)");
+  assert.equal(launcherFinding.message, "isolation launcher is missing or does not match; reinstalled on the next operation");
   const goMount = findings.find((finding) => /container worker: \/bb-worktrees is mounted from \/gone\/worktrees/.test(finding.message));
   assert.ok(goMount, "expected a container worker mount warn finding");
   assert.equal(goMount.level, "warn");

@@ -19,7 +19,7 @@ import {
 } from "./lock-claims.mjs";
 import { withProjectLock } from "./project-lock.mjs";
 import { invocationExitIsAccepted, runInvocation } from "./invocation-runner.mjs";
-import { ensureIsolationLauncher, ensureRuntimeAssets, launcherBuildInvocation } from "./isolation-launcher.mjs";
+import { ensureIsolationLauncher, ensureRuntimeAssets } from "./isolation-launcher.mjs";
 import {
   ensureContainerSymlink,
   prepareWorktreeDependencies,
@@ -56,7 +56,6 @@ export {
   executeSearch,
   formatResults,
   hostPathInContainer,
-  launcherBuildInvocation,
   pluginRoot,
   prependLockWaitMessages,
   prepareWorktreeDependencies,

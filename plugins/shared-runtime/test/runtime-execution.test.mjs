@@ -22,6 +22,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { installedLauncherVerified } from "../src/isolation-launcher.mjs";
 import { manifestDigest, validateManifest } from "../src/manifest.mjs";
 import {
   ensureContainerSymlink,
@@ -32,7 +33,6 @@ import {
   executeSearch,
   formatResults,
   ISOLATION_SELF_TEST_OPERATION,
-  launcherBuildInvocation,
   prepareWorktreeDependencies,
   resolveWorkspace,
   runInvocation,
@@ -42,9 +42,15 @@ import {
 
 const execFileAsync = promisify(execFile);
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const launcherSourceDigest = createHash("sha256")
-  .update(await readFile(path.join(pluginRoot, "native", "landlock-run.go")))
-  .digest("hex");
+const sha256Of = (content) => createHash("sha256").update(content).digest("hex");
+const prebuiltSums = await readFile(path.join(pluginRoot, "native", "prebuilt", "SHA256SUMS"), "utf8");
+const bundledDigests = new Map(
+  prebuiltSums
+    .split("\n")
+    .map((line) => /^([0-9a-f]{64})  linux-(\w+)\/landlock-run$/.exec(line))
+    .filter(Boolean)
+    .map(([, digest, architecture]) => [architecture, digest]),
+);
 const DOCKER = "/fixture/bin/docker";
 
 function manifestDocument(overrides = {}) {
@@ -144,6 +150,9 @@ async function createFixture(t, overrides = {}) {
 }
 
 function describeInvocation(invocation) {
+  if (invocation.command === DOCKER && invocation.args[0] === "version") {
+    return "docker version";
+  }
   if (invocation.command === DOCKER) {
     const workdirIndex = invocation.args.indexOf("--workdir");
     const container = invocation.args[workdirIndex + 2];
@@ -154,9 +163,6 @@ function describeInvocation(invocation) {
         return `${container} [self-test]`;
       }
       return `${container} [isolated] ${rest.slice(rest.indexOf("--") + 1).join(" ")}`;
-    }
-    if (executable === "go" && rest[0] === "build") {
-      return `${container} go build`;
     }
     return `${container} ${executable} ${rest[0]}`;
   }
@@ -181,15 +187,12 @@ function recordingRun(fixture, handlers = {}) {
   const run = async (invocation, options) => {
     const label = describeInvocation(invocation);
     calls.push({ label, invocation, options });
-    if (label.endsWith(" go build")) {
-      const output = invocation.args[invocation.args.indexOf("-o") + 1];
-      await writeFile(fixture.toHost(output), "#!/bin/sh\n");
-    }
     const handler = handlers[label];
     if (handler) {
       return handler(invocation);
     }
-    return ok();
+    // The fake Docker daemon runs on arm64 unless a test says otherwise.
+    return label === "docker version" ? ok("arm64\n") : ok();
   };
   return { calls, run, labels: () => calls.map(({ label }) => label) };
 }
@@ -229,7 +232,14 @@ test("runtime assets are copied once and refreshed when their marker disappears"
   await assert.rejects(ensureRuntimeAssets(fixture.policy), { code: "EISDIR" });
 });
 
-test("the isolation launcher is built in the builder container and cached by source digest", async (t) => {
+test("the SHA256SUMS source line is the digest of native/landlock-run.go", async () => {
+  const source = /^source ([0-9a-f]{64})$/m.exec(prebuiltSums)?.[1];
+  assert.equal(source, sha256Of(await readFile(path.join(pluginRoot, "native", "landlock-run.go"))));
+  assert.match(prebuiltSums, /^toolchain golang:[0-9.]+@sha256:[0-9a-f]{64}$/m);
+  assert.deepEqual([...bundledDigests.keys()].sort(), ["amd64", "arm64"]);
+});
+
+test("the prebuilt launcher is installed for the daemon architecture and reused only after verification", async (t) => {
   const fixture = await createFixture(t);
   const recorder = recordingRun(fixture);
   const controller = new AbortController();
@@ -238,73 +248,135 @@ test("the isolation launcher is built in the builder container and cached by sou
     signal: controller.signal,
   });
   assert.equal(launcher, path.join(fixture.runtimeDirectory, "landlock-run"));
-  assert.equal(recorder.calls.length, 1);
+  assert.equal(recorder.calls.length, 1, "only the architecture query runs; nothing is compiled");
   const [{ invocation, options }] = recorder.calls;
   assert.equal(options.signal, controller.signal);
-  assert.deepEqual(invocation.args, [
-    "exec",
-    "--workdir",
-    "/app",
-    "fixture_app",
-    "go",
-    "build",
-    "-trimpath",
-    "-o",
-    `/app/.bb-runtime/.landlock-run.${process.pid}.tmp`,
-    "/app/.bb-runtime/landlock-run.go",
-  ]);
+  assert.deepEqual(invocation, {
+    command: DOCKER,
+    args: ["version", "-f", "{{.Server.Arch}}"],
+  });
+  const installed = await lstat(launcher);
+  assert.equal(installed.isFile(), true);
+  assert.equal(installed.mode & 0o777, 0o555);
+  assert.equal(sha256Of(await readFile(launcher)), bundledDigests.get("arm64"));
+  assert.deepEqual(
+    (await readdir(fixture.runtimeDirectory)).filter((name) => name.includes("landlock-run")),
+    ["landlock-run"],
+    "no marker, source copy, or temporary file is written",
+  );
+
+  await ensureIsolationLauncher(fixture.policy, { run: recorder.run });
+  assert.equal((await lstat(launcher)).ino, installed.ino, "a verified launcher is reused, not rewritten");
+  assert.equal(recorder.calls.length, 2, "the daemon is asked on every call");
+
+  await chmod(launcher, 0o755);
+  await writeFile(launcher, "swapped by an unconfined container process");
+  await ensureIsolationLauncher(fixture.policy, { run: recorder.run });
+  assert.equal(sha256Of(await readFile(launcher)), bundledDigests.get("arm64"), "a swapped binary is reinstalled");
   assert.equal((await stat(launcher)).mode & 0o777, 0o555);
-  assert.equal(
-    await readFile(path.join(fixture.runtimeDirectory, "landlock-run.sha256"), "utf8"),
-    `${launcherSourceDigest}\n`,
-  );
-  assert.equal(
-    await readFile(path.join(fixture.runtimeDirectory, "landlock-run.go"), "utf8"),
-    await readFile(path.join(pluginRoot, "native", "landlock-run.go"), "utf8"),
-  );
 
+  await chmod(launcher, 0o755);
   await ensureIsolationLauncher(fixture.policy, { run: recorder.run });
-  assert.equal(recorder.calls.length, 1, "a current launcher is not rebuilt");
+  assert.equal((await stat(launcher)).mode & 0o777, 0o555, "a changed mode is repaired");
 
-  await writeFile(path.join(fixture.runtimeDirectory, "landlock-run.sha256"), "stale\n");
+  await rm(launcher);
+  await symlink(path.join(pluginRoot, "native", "prebuilt", "linux-arm64", "landlock-run"), launcher);
   await ensureIsolationLauncher(fixture.policy, { run: recorder.run });
-  assert.equal(recorder.calls.length, 2, "a stale digest triggers a rebuild");
+  assert.equal((await lstat(launcher)).isFile(), true, "a symlink is replaced by a regular file");
+  assert.equal((await lstat(launcher)).isSymbolicLink(), false);
 
-  await rm(path.join(fixture.runtimeDirectory, "landlock-run.sha256"));
-  await rm(launcher, { force: true });
-  await assert.rejects(
-    ensureIsolationLauncher(fixture.policy, {
-      run: async () => {
-        throw new Error("go toolchain unavailable");
-      },
-    }),
-    /go toolchain unavailable/,
-  );
-  await assert.rejects(stat(launcher), { code: "ENOENT" });
   assert.deepEqual(
     (await readdir(fixture.runtimeDirectory)).filter((name) => name.includes(".tmp")),
     [],
   );
-
-  await rm(path.join(fixture.runtimeDirectory, "landlock-run.sha256"), { force: true });
-  await mkdir(path.join(fixture.runtimeDirectory, "landlock-run.sha256"));
-  await assert.rejects(
-    ensureIsolationLauncher(fixture.policy, { run: recorder.run }),
-    { code: "EISDIR" },
-  );
 });
 
-test("launcher builds require a declared isolation builder", async (t) => {
+test("a stale source copy and marker from a source build are removed", async (t) => {
   const fixture = await createFixture(t);
-  const withoutIsolation = { ...fixture.policy, manifest: { ...fixture.policy.manifest, isolation: null } };
-  assert.throws(
-    () => launcherBuildInvocation(withoutIsolation, "/a", "/b"),
-    /Shared runtime denied: isolation builder is not declared/,
+  await mkdir(fixture.runtimeDirectory, { recursive: true });
+  await writeFile(path.join(fixture.runtimeDirectory, "landlock-run.go"), "package main\n");
+  await writeFile(path.join(fixture.runtimeDirectory, "landlock-run.sha256"), "stale\n");
+  const launcher = await ensureIsolationLauncher(fixture.policy, { run: recordingRun(fixture).run });
+  assert.deepEqual(
+    (await readdir(fixture.runtimeDirectory)).filter((name) => name.includes("landlock-run")),
+    ["landlock-run"],
   );
-  assert.throws(
-    () => launcherBuildInvocation({ ...fixture.policy, manifest: null, manifestError: "broken" }, "/a", "/b"),
-    /project manifest \.bb-runtime\.json is unavailable: broken/,
+  assert.equal(sha256Of(await readFile(launcher)), bundledDigests.get("arm64"));
+});
+
+test("the launcher matches the daemon architecture, not the container image architecture", async (t) => {
+  // Regression, BB thread thr_69ubadfky5: an amd64-image container on an arm64 daemon gets the
+  // arm64 launcher. A native static binary runs natively in every container, and the seccomp
+  // syscall numbers match the kernel; an amd64 binary under emulation would not match them.
+  const arm64 = await createFixture(t);
+  await ensureIsolationLauncher(arm64.policy, { run: recordingRun(arm64).run });
+  assert.equal(
+    sha256Of(await readFile(path.join(arm64.runtimeDirectory, "landlock-run"))),
+    bundledDigests.get("arm64"),
   );
+  const amd64 = await createFixture(t);
+  await ensureIsolationLauncher(amd64.policy, {
+    run: recordingRun(amd64, { "docker version": () => ok("amd64\n") }).run,
+  });
+  assert.equal(
+    sha256Of(await readFile(path.join(amd64.runtimeDirectory, "landlock-run"))),
+    bundledDigests.get("amd64"),
+  );
+  assert.notEqual(bundledDigests.get("amd64"), bundledDigests.get("arm64"));
+});
+
+test("an unsupported or unreadable daemon architecture denies the install", async (t) => {
+  const fixture = await createFixture(t);
+  for (const reported of ["riscv64", "", "x86_64"]) {
+    await assert.rejects(
+      ensureIsolationLauncher(fixture.policy, {
+        run: recordingRun(fixture, { "docker version": () => ok(`${reported}\n`) }).run,
+      }),
+      (error) =>
+        error.message ===
+        `Shared runtime denied: unsupported Docker host architecture ${JSON.stringify(reported)}`,
+    );
+  }
+  await assert.rejects(
+    ensureIsolationLauncher(fixture.policy, {
+      run: recordingRun(fixture, {
+        "docker version": () => {
+          throw failure(1, "Cannot connect to the Docker daemon");
+        },
+      }).run,
+    }),
+    /Shared runtime denied: cannot read the Docker host architecture: command failed with exit 1\nCannot connect to the Docker daemon/,
+  );
+  await assert.rejects(lstat(path.join(fixture.runtimeDirectory, "landlock-run")), { code: "ENOENT" });
+});
+
+test("a Python-only stack installs the launcher without an isolation builder", async (t) => {
+  // Regression, BB thread thr_69ubadfky5: a Python-only stack could not run any operation because
+  // the plugin compiled its launcher with Go inside the project. The install needs no container.
+  const fixture = await createFixture(t, {
+    isolation: undefined,
+    containers: { python: { service: "python", mounts: [{ host: ".", container: "/app" }] } },
+    operations: { tests: { container: "python", argv: ["pytest", "-q"] } },
+    git: undefined,
+    dependencies: [],
+  });
+  assert.equal(fixture.policy.manifest.isolation, null);
+  const recorder = recordingRun(fixture);
+  await ensureIsolationLauncher(fixture.policy, { run: recorder.run });
+  assert.deepEqual(recorder.labels(), ["docker version"]);
+  assert.equal(sha256Of(await readFile(path.join(fixture.runtimeDirectory, "landlock-run"))), bundledDigests.get("arm64"));
+});
+
+test("the doctor check compares the installed launcher with SHA256SUMS", async (t) => {
+  const fixture = await createFixture(t);
+  assert.equal(await installedLauncherVerified(fixture.primaryRoot), false, "not installed yet");
+  const launcher = await ensureIsolationLauncher(fixture.policy, { run: recordingRun(fixture).run });
+  assert.equal(await installedLauncherVerified(fixture.primaryRoot), true);
+  await chmod(launcher, 0o755);
+  assert.equal(await installedLauncherVerified(fixture.primaryRoot), false, "wrong mode");
+  await writeFile(launcher, "swapped");
+  await chmod(launcher, 0o555);
+  assert.equal(await installedLauncherVerified(fixture.primaryRoot), false, "wrong digest");
 });
 
 test("container operations run their plan inside reset scratch with shared dependencies", async (t) => {
@@ -317,7 +389,7 @@ test("container operations run their plan inside reset scratch with shared depen
     run: recorder.run,
   });
   assert.deepEqual(recorder.labels(), [
-    "fixture_app go build",
+    "docker version",
     "fixture_app rm -rf",
     "fixture_app mkdir -p",
     "fixture_app [isolated] gofmt -l .",
@@ -356,7 +428,7 @@ test("host-step operations reset scratch only for their declared containers", as
     run: recorder.run,
   });
   assert.deepEqual(recorder.labels(), [
-    "fixture_app go build",
+    "docker version",
     "fixture_probe rm -rf",
     "fixture_probe mkdir -p",
     `/bin/bash ${path.join(fixture.primaryRoot, "scripts", "it.sh")}`,
@@ -432,16 +504,17 @@ test("the isolation self-test proves writes stay inside the selected worktree", 
   );
   assert.equal(formatResults(results), "self-test passed");
   assert.deepEqual(recorder.labels(), [
-    "fixture_app go build",
+    "docker version",
     "fixture_probe rm -rf",
     "fixture_probe mkdir -p",
+    "fixture_probe git --version",
     "fixture_probe mkdir -p",
     "fixture_probe touch /tmp/bb-runtime-env_sibling/unchanged.txt",
     "fixture_probe [self-test]",
     "fixture_probe rm -rf",
     "fixture_probe rm -rf",
   ]);
-  const probe = recorder.calls[5].invocation.args;
+  const probe = recorder.calls[6].invocation.args;
   const deny = probe.filter((_, index, all) => all[index - 1] === "--deny-write");
   assert.ok(deny[0].startsWith(path.join(fixture.runtimeDirectory, "isolation-primary-")));
   assert.match(deny[1], /^\/bb-worktrees\/\.bb-runtime-isolation-sibling-[^/]+\/unchanged\.txt$/);
@@ -472,6 +545,42 @@ test("the isolation self-test proves writes stay inside the selected worktree", 
   assert.deepEqual(leftovers, [], "probe directories are always removed");
 });
 
+test("the isolation self-test needs git in the probe container", async (t) => {
+  const fixture = await createFixture(t);
+  const withGit = recordingRun(fixture, { "fixture_probe [self-test]": async (invocation) => {
+    const allowed = invocation.args[invocation.args.indexOf("--allow-write") + 1];
+    await appendFile(fixture.toHost(allowed), "allowed\n");
+    return ok("self-test passed\n");
+  } });
+  await executeContainerOperation(fixture.policy, fixture.workspace, ISOLATION_SELF_TEST_OPERATION, {
+    lockAdapter: new Map(),
+    run: withGit.run,
+  });
+  assert.ok(withGit.labels().includes("fixture_probe git --version"), "with git present the self-test runs");
+
+  const withoutGit = recordingRun(fixture, {
+    "fixture_probe git --version": () => {
+      throw failure(127, "exec: git: executable file not found");
+    },
+  });
+  await assert.rejects(
+    executeContainerOperation(fixture.policy, fixture.workspace, ISOLATION_SELF_TEST_OPERATION, {
+      lockAdapter: new Map(),
+      run: withoutGit.run,
+    }),
+    {
+      message:
+        'Shared runtime denied: isolation_self_test needs git in container "probe"; set isolation.probe to a container with git',
+    },
+  );
+  assert.equal(withoutGit.labels().includes("fixture_probe [self-test]"), false);
+  assert.deepEqual(
+    (await readdir(fixture.runtimeDirectory)).filter((name) => name.startsWith("isolation-")),
+    [],
+    "the denial happens before any probe directory exists",
+  );
+});
+
 test("commits regenerate outputs, hard-link mirrors, and stage them before committing", async (t) => {
   const fixture = await createFixture(t);
   await writeFile(path.join(fixture.hostRoot, "gen.php"), "<?php\n");
@@ -491,7 +600,7 @@ test("commits regenerate outputs, hard-link mirrors, and stage them before commi
   });
   assert.equal(result.code, 0);
   assert.deepEqual(recorder.labels(), [
-    "fixture_app go build",
+    "docker version",
     "fixture_app rm -rf",
     "fixture_app mkdir -p",
     "fixture_app [isolated] php gen.php",
@@ -515,6 +624,7 @@ test("commits regenerate outputs, hard-link mirrors, and stage them before commi
   assert.deepEqual(
     second.labels(),
     [
+      "docker version",
       "fixture_app rm -rf",
       "fixture_app mkdir -p",
       "fixture_app [isolated] make strict",

@@ -9,8 +9,9 @@ import {
   readManifest,
 } from "./manifest.mjs";
 import { defaultRuntimeRoot, loadPolicy, loadRegistry, policyPathFor } from "./registry.mjs";
-import { execFile, pathExists, requirePrimaryCheckout } from "./cli-host.mjs";
+import { execFile, requirePrimaryCheckout } from "./cli-host.mjs";
 import { CliError } from "./cli-arguments.mjs";
+import { installedLauncherVerified } from "./isolation-launcher.mjs";
 
 export async function commandList(options) {
   const runtimeRoot = options.values["runtime-root"]
@@ -189,12 +190,12 @@ async function checkPolicy(policy, primaryRoot, runtimeRoot, note) {
   if (loadedPolicy) {
     note("ok", "policy file permissions verified");
   }
-  const launcher = path.join(primaryRoot, ".bb-runtime", "landlock-run");
+  const launcherVerified = await installedLauncherVerified(primaryRoot);
   note(
-    (await pathExists(launcher)) ? "ok" : "warn",
-    (await pathExists(launcher))
-      ? "isolation launcher is built"
-      : "isolation launcher not built yet (built on first quality operation)",
+    launcherVerified ? "ok" : "warn",
+    launcherVerified
+      ? "isolation launcher is installed and verified"
+      : "isolation launcher is missing or does not match; reinstalled on the next operation",
   );
   for (const [role, name] of Object.entries(policy.containers)) {
     await checkContainerMounts(policy, role, name, primaryRoot, note);

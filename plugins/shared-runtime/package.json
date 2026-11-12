@@ -14,11 +14,12 @@
     "assets",
     "native",
     "scripts",
-    "README.md"
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
-    "test": "node --experimental-test-module-mocks --test \"test/**/*.test.mjs\"",
-    "test:coverage": "mkdir -p coverage && node --test --experimental-test-module-mocks --experimental-test-coverage --test-coverage-include=\"src/**\" --test-coverage-include=\"bin/**\" --test-coverage-include=\"server.ts\" --test-coverage-include=\"assets/**\" --test-coverage-lines=99.71 --test-coverage-branches=99.03 --test-coverage-functions=98.88 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info --test-concurrency=1 \"test/**/*.test.mjs\"",
+    "test": "sh build/launcher.sh verify && node --experimental-test-module-mocks --test \"test/**/*.test.mjs\"",
+    "test:coverage": "sh build/launcher.sh verify && mkdir -p coverage && node --test --experimental-test-module-mocks --experimental-test-coverage --test-coverage-include=\"src/**\" --test-coverage-include=\"bin/**\" --test-coverage-include=\"server.ts\" --test-coverage-include=\"assets/**\" --test-coverage-lines=99.71 --test-coverage-branches=99.03 --test-coverage-functions=98.88 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info --test-concurrency=1 \"test/**/*.test.mjs\"",
     "build": "bb plugin build"
   },
   "engines": {

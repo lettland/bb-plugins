@@ -6,7 +6,7 @@ import { MANIFEST_FILE_NAME } from "./manifest.mjs";
 
 export const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-export const isolationSourcePath = path.join(pluginRoot, "native/landlock-run.go");
+export const isolationPrebuiltDirectory = path.join(pluginRoot, "native/prebuilt");
 
 export const assetsSourceDirectory = path.join(pluginRoot, "assets");
 

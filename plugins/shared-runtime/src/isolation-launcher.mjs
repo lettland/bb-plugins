@@ -3,52 +3,29 @@ import { createHash } from "node:crypto";
 import {
   chmod,
   copyFile,
+  lstat,
   mkdir,
   readFile,
   readdir,
   rename,
   rm,
-  stat,
   writeFile,
 } from "node:fs/promises";
 
 import {
-  isolationSourcePath,
+  isolationPrebuiltDirectory,
   assetsSourceDirectory,
   isolationRuntimeDirectory,
   isolationLauncherName,
   runtimeAssetsDirectoryName,
   deny,
   normalizeAbsolute,
-  requireManifest,
   pathExists,
 } from "./runtime-common.mjs";
-import { dockerExec, hostPathInContainer } from "./workspace.mjs";
 import { runInvocation } from "./invocation-runner.mjs";
 
 export function runtimeDirectoryPath(policy) {
   return path.join(normalizeAbsolute(policy.primaryRoot), isolationRuntimeDirectory);
-}
-
-export function launcherBuildInvocation(policy, sourcePath, outputPath) {
-  const manifest = requireManifest(policy);
-  if (manifest.isolation === null) {
-    deny("isolation builder is not declared");
-  }
-  const builder = manifest.isolation.builder;
-  return dockerExec(
-    policy,
-    builder,
-    hostPathInContainer(policy, policy.primaryRoot, builder),
-    "go",
-    [
-      "build",
-      "-trimpath",
-      "-o",
-      hostPathInContainer(policy, outputPath, builder),
-      hostPathInContainer(policy, sourcePath, builder),
-    ],
-  );
 }
 
 async function directoryDigest(directory) {
@@ -107,53 +84,131 @@ export async function ensureRuntimeAssets(policy) {
   }
 }
 
+const PREBUILT_ARCHITECTURES = Object.freeze(["amd64", "arm64"]);
+const INSTALLED_LAUNCHER_MODE = 0o555;
+const SUMS_LINE_PATTERN = /^([0-9a-f]{64})  linux-(amd64|arm64)\/landlock-run$/;
+
+function sha256Of(content) {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+// Maps each supported architecture to the digest that native/prebuilt/SHA256SUMS records for it.
+async function readPrebuiltDigests() {
+  let sums;
+  try {
+    sums = await readFile(path.join(isolationPrebuiltDirectory, "SHA256SUMS"), "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      deny("native/prebuilt/SHA256SUMS is missing");
+    }
+    throw error;
+  }
+  const digests = new Map();
+  for (const line of sums.split("\n")) {
+    const match = SUMS_LINE_PATTERN.exec(line);
+    if (match !== null) {
+      digests.set(match[2], match[1]);
+    }
+  }
+  return digests;
+}
+
+async function dockerHostArchitecture(policy, run, signal) {
+  let result;
+  try {
+    result = await run(
+      { command: policy.dockerPath, args: ["version", "-f", "{{.Server.Arch}}"] },
+      { signal },
+    );
+  } catch (error) {
+    deny(`cannot read the Docker host architecture: ${error.message}`);
+  }
+  const architecture = result.stdout.trim();
+  if (!PREBUILT_ARCHITECTURES.includes(architecture)) {
+    deny(`unsupported Docker host architecture ${JSON.stringify(architecture)}`);
+  }
+  return architecture;
+}
+
+async function readBundledLauncher(architecture, digests) {
+  const expected = digests.get(architecture);
+  if (expected === undefined) {
+    deny(`native/prebuilt/SHA256SUMS has no entry for linux-${architecture}`);
+  }
+  let binary;
+  try {
+    binary = await readFile(path.join(isolationPrebuiltDirectory, `linux-${architecture}`, isolationLauncherName));
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      deny(`the bundled launcher for linux-${architecture} is missing`);
+    }
+    throw error;
+  }
+  if (sha256Of(binary) !== expected) {
+    deny(`the bundled launcher for linux-${architecture} does not match native/prebuilt/SHA256SUMS`);
+  }
+  return { binary, expected };
+}
+
+// True only for a regular file with the installed mode whose SHA-256 is one of `accepted`.
+async function launcherMatches(launcher, accepted) {
+  let info;
+  try {
+    info = await lstat(launcher);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+  if (!info.isFile() || (info.mode & 0o777) !== INSTALLED_LAUNCHER_MODE) {
+    return false;
+  }
+  try {
+    return accepted.includes(sha256Of(await readFile(launcher)));
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+// Doctor check: the installed launcher is the bundled one for some supported architecture.
+export async function installedLauncherVerified(primaryRoot) {
+  const digests = await readPrebuiltDigests();
+  return launcherMatches(
+    path.join(normalizeAbsolute(primaryRoot), isolationRuntimeDirectory, isolationLauncherName),
+    [...digests.values()],
+  );
+}
+
 export async function ensureIsolationLauncher(policy, options = {}) {
-  const source = await readFile(isolationSourcePath);
-  const digest = createHash("sha256").update(source).digest("hex");
+  const run = options.run ?? runInvocation;
   const runtimeDirectory = runtimeDirectoryPath(policy);
   const launcher = path.join(runtimeDirectory, isolationLauncherName);
-  const marker = path.join(runtimeDirectory, `${isolationLauncherName}.sha256`);
   await ensureRuntimeAssets(policy);
-  try {
-    const [recordedDigest, launcherStat] = await Promise.all([
-      readFile(marker, "utf8"),
-      stat(launcher),
-    ]);
-    if (
-      recordedDigest.trim() === digest &&
-      launcherStat.isFile() &&
-      (launcherStat.mode & 0o111) !== 0
-    ) {
-      return launcher;
-    }
-  } catch (error) {
-    if (error?.code !== "ENOENT") {
-      throw error;
-    }
+  const architecture = await dockerHostArchitecture(policy, run, options.signal);
+  const { binary, expected } = await readBundledLauncher(architecture, await readPrebuiltDigests());
+  // A source build left these behind; the prebuilt install writes neither.
+  await rm(path.join(runtimeDirectory, `${isolationLauncherName}.go`), { force: true });
+  await rm(path.join(runtimeDirectory, `${isolationLauncherName}.sha256`), { force: true });
+  if (await launcherMatches(launcher, [expected])) {
+    return launcher;
   }
 
   await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-  const sourceCopy = path.join(runtimeDirectory, `${isolationLauncherName}.go`);
   const temporaryLauncher = path.join(
     runtimeDirectory,
     `.${isolationLauncherName}.${process.pid}.tmp`,
   );
-  const temporaryMarker = `${marker}.${process.pid}.tmp`;
   await rm(temporaryLauncher, { force: true });
-  await rm(temporaryMarker, { force: true });
   try {
-    await writeFile(sourceCopy, source, { mode: 0o644 });
-    const run = options.run ?? runInvocation;
-    await run(launcherBuildInvocation(policy, sourceCopy, temporaryLauncher), {
-      signal: options.signal,
-    });
-    await chmod(temporaryLauncher, 0o555);
+    await writeFile(temporaryLauncher, binary, { mode: 0o700 });
+    await chmod(temporaryLauncher, INSTALLED_LAUNCHER_MODE);
     await rename(temporaryLauncher, launcher);
-    await writeFile(temporaryMarker, `${digest}\n`, { mode: 0o600 });
-    await rename(temporaryMarker, marker);
     return launcher;
   } finally {
     await rm(temporaryLauncher, { force: true });
-    await rm(temporaryMarker, { force: true });
   }
 }

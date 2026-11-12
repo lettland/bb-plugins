@@ -34,16 +34,6 @@ export {
   validateRepositoryRelativePath,
 };
 
-function requiresIsolation(manifest) {
-  return (
-    Object.values(manifest.operations).some((operation) =>
-      operation.kind !== "sequence"
-        ? operation.step.kind === "container" || operation.target?.variants
-        : true,
-    ) || manifest.git.generators.length > 0
-  );
-}
-
 export function validateManifest(document) {
   if (!isPlainObject(document)) {
     deny("document must be a JSON object");
@@ -73,10 +63,6 @@ export function validateManifest(document) {
 
   manifest.operations = Object.freeze(validateOperations(manifest, document.operations));
   manifest.git = validateGit(manifest, document.git);
-
-  if (requiresIsolation(manifest) && manifest.isolation === null) {
-    deny("isolation.builder is required when container operations are declared");
-  }
   return Object.freeze(manifest);
 }
 

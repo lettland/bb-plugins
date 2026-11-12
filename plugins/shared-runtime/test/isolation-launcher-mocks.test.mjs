@@ -6,10 +6,11 @@ import path from "node:path";
 import test, { mock } from "node:test";
 import { fileURLToPath } from "node:url";
 
-// The asset directory and launcher marker paths are fixed constants, so the
-// fs seams below inject the failure states (a vanished assets directory, an
-// unreadable launcher marker) that cannot be produced against the real
-// checkout. Every seam is restored after each test.
+// The asset directory and the bundled launcher paths are fixed constants, so the
+// fs seams below inject the failure states (a vanished assets directory, a
+// missing or unreadable SHA256SUMS, a corrupt bundled binary, an unreadable
+// installed launcher) that cannot be produced against the real checkout. Every
+// seam is restored after each test.
 const fsHooks = {};
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -21,12 +22,13 @@ function hookedFs(name, ...args) {
 mock.module("node:fs/promises", {
   namedExports: {
     ...fsPromises,
+    lstat: (...args) => hookedFs("lstat", ...args),
     readFile: (...args) => hookedFs("readFile", ...args),
     readdir: (...args) => hookedFs("readdir", ...args),
   },
 });
 
-const { ensureIsolationLauncher, ensureRuntimeAssets } = await import(
+const { ensureIsolationLauncher, ensureRuntimeAssets, installedLauncherVerified } = await import(
   "../src/isolation-launcher.mjs"
 );
 
@@ -36,8 +38,23 @@ test.afterEach(() => {
   }
 });
 
+const sumsPath = path.join(pluginRoot, "native", "prebuilt", "SHA256SUMS");
+const bundledPath = (architecture) =>
+  path.join(pluginRoot, "native", "prebuilt", `linux-${architecture}`, "landlock-run");
+const missing = () => Object.assign(new Error("absent"), { code: "ENOENT" });
+const denied = () => Object.assign(new Error("denied"), { code: "EACCES" });
+
 function policyFor(primaryRoot) {
-  return { primaryRoot };
+  return { primaryRoot, dockerPath: "/fixture/bin/docker" };
+}
+
+// A fake Docker daemon that reports the given architecture.
+const daemon = (architecture) => async () => ({ stdout: `${architecture}\n` });
+
+// Replace what readFile returns for one path; every other path reads the real file.
+function readOverride(target, implementation) {
+  fsHooks.readFile = async (filePath, ...rest) =>
+    filePath === target ? implementation() : fsPromises.readFile(filePath, ...rest);
 }
 
 test("an unreadable assets directory publishes an empty asset set", async (t) => {
@@ -60,23 +77,113 @@ test("an unreadable assets directory publishes an empty asset set", async (t) =>
   assert.deepEqual(await fsPromises.readdir(target), []);
 });
 
-test("an unreadable launcher marker surfaces the error after the assets refresh", async (t) => {
+test("an unreadable installed launcher surfaces the error instead of reinstalling", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  fsHooks.readFile = async (filePath, ...rest) => {
-    if (filePath === path.join(root, ".bb-runtime", "landlock-run.sha256")) {
-      throw Object.assign(new Error("denied"), { code: "EACCES" });
+  const installed = path.join(root, ".bb-runtime", "landlock-run");
+  await ensureIsolationLauncher(policyFor(root), { run: daemon("arm64") });
+  readOverride(installed, () => {
+    throw denied();
+  });
+  await assert.rejects(ensureIsolationLauncher(policyFor(root), { run: daemon("arm64") }), {
+    code: "EACCES",
+  });
+});
+
+test("an installed launcher that vanishes between lstat and read is reinstalled", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const installed = path.join(root, ".bb-runtime", "landlock-run");
+  await ensureIsolationLauncher(policyFor(root), { run: daemon("arm64") });
+  readOverride(installed, () => {
+    throw missing();
+  });
+  assert.equal(await ensureIsolationLauncher(policyFor(root), { run: daemon("arm64") }), installed);
+  delete fsHooks.readFile;
+  assert.equal(await installedLauncherVerified(root), true, "the reinstalled launcher verifies");
+});
+
+test("an installed launcher that cannot be inspected surfaces errors other than ENOENT", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const installed = path.join(root, ".bb-runtime", "landlock-run");
+  fsHooks.lstat = async (filePath, ...rest) => {
+    if (filePath === installed) {
+      throw denied();
     }
-    return fsPromises.readFile(filePath, ...rest);
+    return fsPromises.lstat(filePath, ...rest);
   };
-  await assert.rejects(
-    ensureIsolationLauncher(policyFor(root), {
-      run: async () => {
-        throw new Error("the launcher build must not run");
-      },
-    }),
-    { code: "EACCES" },
+  await assert.rejects(ensureIsolationLauncher(policyFor(root), { run: daemon("arm64") }), {
+    code: "EACCES",
+  });
+});
+
+test("a missing SHA256SUMS denies, and an unreadable one surfaces its error", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  readOverride(sumsPath, () => {
+    throw missing();
+  });
+  await assert.rejects(ensureIsolationLauncher(policyFor(root), { run: daemon("arm64") }), {
+    message: "Shared runtime denied: native/prebuilt/SHA256SUMS is missing",
+  });
+  await assert.rejects(installedLauncherVerified(root), {
+    message: "Shared runtime denied: native/prebuilt/SHA256SUMS is missing",
+  });
+  readOverride(sumsPath, () => {
+    throw denied();
+  });
+  await assert.rejects(ensureIsolationLauncher(policyFor(root), { run: daemon("arm64") }), {
+    code: "EACCES",
+  });
+  await assert.rejects(fsPromises.lstat(path.join(root, ".bb-runtime", "landlock-run")), {
+    code: "ENOENT",
+  });
+});
+
+test("a SHA256SUMS without the daemon architecture's line denies", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const realSums = await fsPromises.readFile(sumsPath, "utf8");
+  readOverride(sumsPath, () =>
+    realSums
+      .split("\n")
+      .filter((line) => !line.endsWith("linux-arm64/landlock-run"))
+      .join("\n"),
   );
+  await assert.rejects(ensureIsolationLauncher(policyFor(root), { run: daemon("arm64") }), {
+    message: "Shared runtime denied: native/prebuilt/SHA256SUMS has no entry for linux-arm64",
+  });
+  assert.equal(
+    await ensureIsolationLauncher(policyFor(root), { run: daemon("amd64") }),
+    path.join(root, ".bb-runtime", "landlock-run"),
+    "the other architecture's line is still honoured",
+  );
+});
+
+test("a missing, unreadable, or corrupt bundled binary denies the install", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  readOverride(bundledPath("arm64"), () => {
+    throw missing();
+  });
+  await assert.rejects(ensureIsolationLauncher(policyFor(root), { run: daemon("arm64") }), {
+    message: "Shared runtime denied: the bundled launcher for linux-arm64 is missing",
+  });
+  readOverride(bundledPath("arm64"), () => {
+    throw denied();
+  });
+  await assert.rejects(ensureIsolationLauncher(policyFor(root), { run: daemon("arm64") }), {
+    code: "EACCES",
+  });
+  readOverride(bundledPath("arm64"), () => Buffer.from("one byte changed"));
+  await assert.rejects(ensureIsolationLauncher(policyFor(root), { run: daemon("arm64") }), {
+    message:
+      "Shared runtime denied: the bundled launcher for linux-arm64 does not match native/prebuilt/SHA256SUMS",
+  });
+  await assert.rejects(fsPromises.lstat(path.join(root, ".bb-runtime", "landlock-run")), {
+    code: "ENOENT",
+  });
 });
 
 test("the assets digest ignores dot files and directories", async (t) => {

@@ -157,8 +157,119 @@ test("container roles without an installed name are denied at plan time", () => 
   });
   assert.throws(
     () => isolationProbeRole(basePolicy({ manifest: smallManifest })),
-    /isolation builder is not declared/,
+    /isolation_self_test needs a probe container; set isolation\.probe to a container with git/,
   );
+});
+
+const PROBE_CONTAINERS = {
+  db: { service: "db", mounts: [{ host: ".", container: "/db" }] },
+  one: { service: "one", mounts: [{ host: ".", container: "/one" }] },
+  two: { service: "two", mounts: [{ host: ".", container: "/two" }] },
+  three: { service: "three", mounts: [{ host: ".", container: "/three" }] },
+};
+
+function probeFor(overrides) {
+  return isolationProbeRole(
+    basePolicy({
+      manifest: validateManifest({ version: 1, containers: PROBE_CONTAINERS, ...overrides }),
+    }),
+  );
+}
+
+const containerStep = (container, extra = {}) => ({ container, argv: ["tool"], ...extra });
+const hostStep = { kind: "host", argv: ["bash", "x.sh"] };
+
+test("the probe container resolves in order: probe, builder, first operation step, first generator", () => {
+  assert.equal(
+    probeFor({ isolation: { builder: "one", probe: "two" }, operations: { a: containerStep("three") } }),
+    "two",
+    "isolation.probe wins over builder and operations",
+  );
+  assert.equal(
+    probeFor({ isolation: { builder: "one" }, operations: { a: containerStep("three") } }),
+    "one",
+    "the deprecated builder is the probe fallback",
+  );
+  assert.equal(
+    probeFor({ isolation: { probe: "two" } }),
+    "two",
+    "a probe alone needs no builder and no operations",
+  );
+  assert.equal(
+    probeFor({ operations: { a: containerStep("two"), b: containerStep("three") } }),
+    "two",
+    "a single step uses its container, in declaration order; the first declared container (db) is never used",
+  );
+  assert.equal(
+    probeFor({ operations: { a: { kind: "host", argv: ["bash", "x.sh"] }, b: containerStep("three") } }),
+    "three",
+    "a host step names no container and is skipped",
+  );
+  assert.equal(
+    probeFor({
+      operations: {
+        run_all: { steps: [hostStep, containerStep("three"), containerStep("two")] },
+      },
+    }),
+    "three",
+    "a sequence uses its container steps in order",
+  );
+  assert.equal(
+    probeFor({ operations: { run_all: { steps: ["format"] }, format: containerStep("two") } }),
+    "two",
+    "a sequence reference resolves to the referenced operation's step",
+  );
+  assert.equal(
+    probeFor({
+      operations: {
+        by_target: containerStep("db", {
+          target: { variants: { first: containerStep("three"), second: containerStep("two") } },
+        }),
+      },
+    }),
+    "three",
+    "variant targets use the variants in declaration order, not the base step",
+  );
+  assert.equal(
+    probeFor({
+      operations: { host_only: hostStep },
+      git: { prepareCommit: { generators: [containerStep("two"), containerStep("three")] } },
+    }),
+    "two",
+    "the first generator container is the last resort",
+  );
+  assert.equal(
+    probeFor({
+      operations: { a: containerStep("three") },
+      git: { prepareCommit: { generators: [containerStep("two")] } },
+    }),
+    "three",
+    "operations are consulted before generators",
+  );
+});
+
+test("an unresolved probe denies, and declaring isolation.probe resolves it", () => {
+  const denied = /isolation_self_test needs a probe container; set isolation\.probe to a container with git/;
+  assert.throws(() => probeFor({ operations: { host_only: hostStep } }), denied, "only host steps");
+  assert.throws(() => probeFor({}), denied, "no operations");
+  assert.throws(() => probeFor({ isolation: {}, operations: {} }), denied, "an empty isolation section");
+  assert.equal(probeFor({ isolation: { probe: "two" }, operations: { host_only: hostStep } }), "two");
+});
+
+test("a Python-only stack resolves its probe without an isolation section", () => {
+  // Regression, BB thread thr_69ubadfky5: a Python-only stack could not run any
+  // operation because the plugin compiled its launcher with Go inside the project.
+  const policy = basePolicy({
+    manifest: validateManifest({
+      version: 1,
+      containers: {
+        postgres: { service: "postgres", mounts: [{ host: ".", container: "/db" }] },
+        python: { service: "python", mounts: [{ host: ".", container: "/app" }] },
+      },
+      operations: { tests: { container: "python", argv: ["pytest", "-q"] } },
+    }),
+  });
+  assert.equal(isolationProbeRole(policy), "python");
 });
 
 test("primary-only paths resolve through mounts and refuse unmounted escapes", () => {

@@ -1,7 +1,7 @@
 import path from "node:path";
 import { link, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 
-import { assertManifestCurrent, pathExists } from "./runtime-common.mjs";
+import { assertManifestCurrent, deny, pathExists } from "./runtime-common.mjs";
 import { dockerExec, hostPathInContainer } from "./workspace.mjs";
 import { builtinScratchPaths, allScratchPaths } from "./isolation-scratch.mjs";
 import {
@@ -135,6 +135,11 @@ export async function prepareCommitOutputs(policy, workspace, run, signal) {
 
 export async function executeIsolationSelfTest(policy, workspace, run, signal) {
   const role = isolationProbeRole(policy);
+  try {
+    await run(dockerExec(policy, role, "/", "git", ["--version"]), { signal });
+  } catch {
+    deny(`isolation_self_test needs git in container ${JSON.stringify(role)}; set isolation.probe to a container with git`);
+  }
   const runtimeDirectory = runtimeDirectoryPath(policy);
   await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
   const primaryDirectory = await mkdtemp(path.join(runtimeDirectory, "isolation-primary-"));

@@ -184,12 +184,30 @@ export function buildContainerPlan(policy, workspace, operation, input = {}) {
   return [compileStep(policy, workspace, definition.step, `operations.${operation}`, target)];
 }
 
+// The containers an operation runs steps in, in execution order. Host steps name no container here.
+function operationContainers(manifest, operation) {
+  if (operation.kind === "sequence") {
+    return operation.steps.map((step) => step.reference === undefined ? step : manifest.operations[step.reference].step);
+  }
+  return operation.target?.variants ? Object.values(operation.target.variants) : [operation.step];
+}
+
 export function isolationProbeRole(policy) {
   const manifest = requireManifest(policy);
-  if (manifest.isolation === null) {
-    deny("isolation builder is not declared");
+  const declared = manifest.isolation?.probe ?? manifest.isolation?.builder ?? null;
+  if (declared !== null) {
+    return declared;
   }
-  return manifest.isolation.probe ?? manifest.isolation.builder;
+  // The first declared container is never used: it could be a database.
+  const steps = [
+    ...Object.values(manifest.operations).flatMap((operation) => operationContainers(manifest, operation)),
+    ...manifest.git.generators.map((generator) => generator.step),
+  ];
+  const first = steps.find((step) => step.kind === "container");
+  if (first === undefined) {
+    deny("isolation_self_test needs a probe container; set isolation.probe to a container with git");
+  }
+  return first.container;
 }
 
 export function buildIsolationSelfTestInvocation(

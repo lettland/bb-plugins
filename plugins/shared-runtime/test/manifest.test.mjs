@@ -94,9 +94,10 @@ test("manifest validation refuses shell evaluation and unknown placeholders", ()
     () => validateManifest(minimal({ version: 2 })),
     /version must be 1/,
   );
-  assert.throws(
-    () => validateManifest(minimal({ isolation: undefined })),
-    /isolation.builder is required/,
+  assert.equal(
+    validateManifest(minimal({ isolation: undefined })).isolation,
+    null,
+    "the minimal manifest declares container operations and no isolation section",
   );
   assert.throws(
     () =>
@@ -442,8 +443,9 @@ const invalidManifests = [
   ["hardlinks as an object", withGit({ prepareCommit: { hardlinks: {} } }), /git\.prepareCommit\.hardlinks must be an array/],
   ["a scalar hardlink", withGit({ prepareCommit: { hardlinks: ["a"] } }), /git\.prepareCommit\.hardlinks\[0\] must be an object/],
   ["an absolute hardlink target", withGit({ prepareCommit: { hardlinks: [{ source: "a", target: "/b" }] } }), /hardlinks\[0\]\.target must be a repository-relative POSIX path/],
-  ["a generator without isolation", minimal({ isolation: undefined, operations: {}, git: { prepareCommit: { generators: [app()] } } }), /isolation\.builder is required when container operations are declared/],
-  ["a step list without isolation", minimal({ isolation: undefined, operations: { all: { steps: [{ kind: "host", argv: ["bash", "x.sh"] }] } } }), /isolation\.builder is required/],
+  ["an empty isolation builder", minimal({ isolation: { builder: "" } }), /isolation\.builder must be a non-empty string/],
+  ["an undeclared isolation probe without a builder", minimal({ isolation: { probe: "php" } }), /isolation\.probe "php" is not a declared container/],
+  ["an undeclared isolation builder beside a valid probe", minimal({ isolation: { builder: "go", probe: "app" } }), /isolation\.builder "go" is not a declared container/],
 ];
 
 test("manifest validation rejects each malformed section with a precise message", () => {
@@ -459,6 +461,37 @@ test("manifest validation rejects each malformed section with a precise message"
       label,
     );
   }
+});
+
+test("isolation is optional and its builder and probe are each optional", () => {
+  assert.equal(
+    validateManifest(minimal({ isolation: undefined, operations: {}, git: { prepareCommit: { generators: [app()] } } })).isolation,
+    null,
+    "a generator without isolation",
+  );
+  assert.equal(
+    validateManifest(minimal({ isolation: undefined, operations: { all: { steps: [{ kind: "host", argv: ["bash", "x.sh"] }] } } })).isolation,
+    null,
+    "a step list without isolation",
+  );
+  assert.deepEqual(validateManifest(minimal({ isolation: { probe: "app" } })).isolation, { builder: null, probe: "app" });
+  assert.deepEqual(validateManifest(minimal({ isolation: { builder: "app" } })).isolation, { builder: "app", probe: null });
+  assert.deepEqual(validateManifest(minimal({ isolation: {} })).isolation, { builder: null, probe: null });
+});
+
+test("a Python-only stack validates without any isolation section", () => {
+  // Regression, BB thread thr_69ubadfky5: a Python-only stack could not run any
+  // operation because the plugin compiled its launcher with Go inside the project.
+  const manifest = validateManifest({
+    version: 1,
+    containers: { python: { service: "python", mounts: [{ host: ".", container: "/app" }] } },
+    operations: {
+      tests: { container: "python", argv: ["pytest", "-q"] },
+      lint: { container: "python", argv: ["ruff", "check", "."] },
+    },
+  });
+  assert.equal(manifest.isolation, null);
+  assert.deepEqual(Object.keys(manifest.operations), ["tests", "lint"]);
 });
 
 test("repository-relative paths normalise safely", () => {
