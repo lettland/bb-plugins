@@ -33,10 +33,11 @@ describe("auto-review rpc: listProjectSettings", () => {
       await host.bb.storage.kv.set("project:p-c", { enabled: false });
       expect(await host.harness.callRpc("listProjectSettings", null)).toEqual({
         projects: [
-          { id: "p-c", name: "alpha", autoApprovePlans: false, reviewActive: false },
-          { id: "p-a", name: "Beta", autoApprovePlans: false, reviewActive: true },
-          { id: "p-b", name: "Beta", autoApprovePlans: true, reviewActive: true },
+          { id: "p-c", name: "alpha", autoApprovePlans: false, reviewOverride: "off", reviewActive: false },
+          { id: "p-a", name: "Beta", autoApprovePlans: false, reviewOverride: "default", reviewActive: true },
+          { id: "p-b", name: "Beta", autoApprovePlans: true, reviewOverride: "default", reviewActive: true },
         ],
+        globalEnabled: true,
       });
     });
   });
@@ -53,6 +54,104 @@ describe("auto-review rpc: listProjectSettings", () => {
         ["p-a", true],
         ["p-b", false],
       ]);
+    });
+  });
+});
+
+describe("auto-review rpc: review override", () => {
+  type Listed = {
+    projects: { id: string; reviewOverride: string; reviewActive: boolean }[];
+    globalEnabled: boolean;
+  };
+
+  it("lists default, on and off with the global switch", async () => {
+    await withHost(async (host) => {
+      await host.harness.setSettings({ enabled: false });
+      await host.bb.storage.kv.set("project:p-a", { enabled: true });
+      await host.bb.storage.kv.set("project:p-c", { enabled: false });
+      const result = (await host.harness.callRpc("listProjectSettings", null)) as Listed;
+      expect(result.globalEnabled).toBe(false);
+      expect(result.projects.map((p) => [p.id, p.reviewOverride, p.reviewActive])).toEqual([
+        ["p-c", "off", false],
+        ["p-a", "on", true],
+        ["p-b", "default", false],
+      ]);
+    });
+  });
+
+  it("sets the override and returns the stored override with the effective value", async () => {
+    await withHost(async (host) => {
+      await host.bb.storage.kv.set("project:p-a", { autoApprovePlans: true });
+      expect(
+        await host.harness.callRpc("setProjectReview", { projectId: "p-a", review: "off" }),
+      ).toEqual({ projectId: "p-a", reviewOverride: "off", reviewActive: false });
+      expect(await host.bb.storage.kv.get("project:p-a")).toEqual({
+        autoApprovePlans: true,
+        enabled: false,
+      });
+      expect(
+        await host.harness.callRpc("setProjectReview", { projectId: "p-a", review: "default" }),
+      ).toEqual({ projectId: "p-a", reviewOverride: "default", reviewActive: true });
+      expect(await host.bb.storage.kv.get("project:p-a")).toEqual({ autoApprovePlans: true });
+
+      await host.harness.setSettings({ enabled: false });
+      expect(
+        await host.harness.callRpc("setProjectReview", { projectId: "p-a", review: "on" }),
+      ).toEqual({ projectId: "p-a", reviewOverride: "on", reviewActive: true });
+      expect(
+        await host.harness.callRpc("setProjectReview", { projectId: "p-a", review: "default" }),
+      ).toEqual({ projectId: "p-a", reviewOverride: "default", reviewActive: false });
+    });
+  });
+
+  it("rejects an unknown project without writing", async () => {
+    await withHost(async (host) => {
+      await expect(
+        host.harness.callRpc("setProjectReview", { projectId: "nope", review: "off" }),
+      ).rejects.toThrow("BB project was not found");
+      expect(await host.bb.storage.kv.list("project:")).toEqual([]);
+    });
+  });
+
+  it("rejects invalid input without writing", async () => {
+    await withHost(async (host) => {
+      for (const input of [
+        { projectId: "", review: "on" },
+        { projectId: "p-a", review: "maybe" },
+        { projectId: "p-a" },
+        null,
+      ]) {
+        await expect(host.harness.callRpc("setProjectReview", input)).rejects.toThrow();
+      }
+      expect(await host.bb.storage.kv.list("project:")).toEqual([]);
+    });
+  });
+
+  it("refuses a malformed stored record and leaves it unchanged", async () => {
+    await withHost(async (host) => {
+      const malformed = { enabled: "yes", autoApprovePlans: true };
+      await host.bb.storage.kv.set("project:p-a", malformed);
+      await expect(
+        host.harness.callRpc("setProjectReview", { projectId: "p-a", review: "off" }),
+      ).rejects.toThrow("malformed");
+      expect(await host.bb.storage.kv.get("project:p-a")).toEqual(malformed);
+    });
+  });
+
+  it("shows a CLI `disable` as off and the GUI's change in the CLI's show", async () => {
+    await withHost(async (host) => {
+      await host.harness.runCli(["disable", "--project", "p-a"], {});
+      const listed = (await host.harness.callRpc("listProjectSettings", null)) as Listed;
+      expect(listed.projects.find((p) => p.id === "p-a")).toMatchObject({
+        reviewOverride: "off",
+        reviewActive: false,
+      });
+      await host.harness.callRpc("setProjectReview", { projectId: "p-a", review: "on" });
+      const shown = await host.harness.runCli(["show", "--project", "p-a", "--json"], {});
+      expect(JSON.parse(shown.stdout ?? "")).toMatchObject({
+        projectOverride: { enabled: true },
+        effective: { enabled: true },
+      });
     });
   });
 });

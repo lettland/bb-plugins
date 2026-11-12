@@ -7,6 +7,7 @@ import {
   parseMainlines,
   readProjectConfig,
   setAutoApprovePlans,
+  setProjectReview,
   writeProjectConfig,
   type GlobalDefaults,
 } from "./config.js";
@@ -162,5 +163,118 @@ describe("writeProjectConfig", () => {
     } finally {
       await host.harness.dispose();
     }
+  });
+});
+
+describe("setProjectReview", () => {
+  async function withBb(body: (host: ReturnType<typeof createFakePluginHost>) => Promise<void>) {
+    const host = createFakePluginHost({ pluginId: "auto-review" });
+    try {
+      await body(host);
+    } finally {
+      await host.harness.dispose();
+    }
+  }
+
+  it("round-trips on, off and default", async () => {
+    await withBb(async ({ bb }) => {
+      expect(await setProjectReview(bb, "p-1", "on", "rpc")).toEqual({ enabled: true });
+      expect(await readProjectConfig(bb, "p-1")).toEqual({ enabled: true });
+      expect(await setProjectReview(bb, "p-1", "off", "rpc")).toEqual({ enabled: false });
+      expect(await readProjectConfig(bb, "p-1")).toEqual({ enabled: false });
+      expect(await setProjectReview(bb, "p-1", "default", "rpc")).toEqual({});
+      expect(await bb.storage.kv.get("project:p-1")).toEqual({});
+    });
+  });
+
+  it("default removes enabled and keeps every other key", async () => {
+    await withBb(async ({ bb }) => {
+      const stored = {
+        enabled: false,
+        autoApprovePlans: true,
+        reviewMode: "self",
+        mergeEligibleMainlines: ["main", "release"],
+      };
+      await bb.storage.kv.set("project:p-1", stored);
+      await setProjectReview(bb, "p-1", "default", "rpc");
+      expect(await bb.storage.kv.get("project:p-1")).toEqual({
+        autoApprovePlans: true,
+        reviewMode: "self",
+        mergeEligibleMainlines: ["main", "release"],
+      });
+      await setProjectReview(bb, "p-1", "on", "rpc");
+      expect(await bb.storage.kv.get("project:p-1")).toEqual({
+        enabled: true,
+        autoApprovePlans: true,
+        reviewMode: "self",
+        mergeEligibleMainlines: ["main", "release"],
+      });
+    });
+  });
+
+  it("writes nothing for default when no record exists", async () => {
+    await withBb(async ({ bb }) => {
+      expect(await setProjectReview(bb, "p-1", "default", "rpc")).toEqual({});
+      expect(await bb.storage.kv.list("project:")).toEqual([]);
+    });
+  });
+
+  it("throws on a malformed stored record and leaves it unchanged", async () => {
+    await withBb(async ({ bb }) => {
+      const malformed = { enabled: "yes", autoApprovePlans: true, reviewMode: "self", extra: 1 };
+      for (const review of ["on", "off", "default"] as const) {
+        await bb.storage.kv.set("project:p-1", malformed);
+        await expect(setProjectReview(bb, "p-1", review, "rpc")).rejects.toThrow(
+          "stored auto-review config for project p-1 is malformed; not overwriting",
+        );
+        expect(JSON.stringify(await bb.storage.kv.get("project:p-1"))).toBe(JSON.stringify(malformed));
+      }
+      await bb.storage.kv.set("project:p-2", "not an object");
+      await expect(setProjectReview(bb, "p-2", "off", "rpc")).rejects.toThrow("malformed");
+      expect(await bb.storage.kv.get("project:p-2")).toBe("not an object");
+    });
+  });
+
+  it("does not throw on a valid record", async () => {
+    await withBb(async ({ bb }) => {
+      await bb.storage.kv.set("project:p-1", { reviewMode: "devkit", autoApprovePlans: false });
+      await expect(setProjectReview(bb, "p-1", "off", "rpc")).resolves.toEqual({
+        reviewMode: "devkit",
+        autoApprovePlans: false,
+        enabled: false,
+      });
+    });
+  });
+
+  it("logs the override it saw as the before value and who changed it", async () => {
+    await withBb(async (host) => {
+      const { bb } = host;
+      await setProjectReview(bb, "p-1", "off", "rpc");
+      await setProjectReview(bb, "p-1", "default", "rpc");
+      await setProjectReview(bb, "p-1", "on", "cli");
+      const info = host.harness.logEntries
+        .filter((entry) => entry.level === "info")
+        .map((entry) => entry.message);
+      expect(info).toEqual([
+        "auto-review for project p-1: default -> off (via rpc)",
+        "auto-review for project p-1: off -> default (via rpc)",
+        "auto-review for project p-1: default -> on (via cli)",
+      ]);
+    });
+  });
+
+  it("keeps both keys when written concurrently with other writers", async () => {
+    await withBb(async ({ bb }) => {
+      await Promise.all([
+        setProjectReview(bb, "p-1", "off", "rpc"),
+        setAutoApprovePlans(bb, "p-1", true, "rpc"),
+        writeProjectConfig(bb, "p-1", { reviewMode: "self" }),
+      ]);
+      expect(await readProjectConfig(bb, "p-1")).toEqual({
+        enabled: false,
+        autoApprovePlans: true,
+        reviewMode: "self",
+      });
+    });
   });
 });

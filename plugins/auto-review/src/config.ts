@@ -227,6 +227,45 @@ export function setAutoApprovePlans(
   });
 }
 
+export type ProjectReviewOverride = "default" | "on" | "off";
+
+export function describeReviewOverride(config: ProjectConfig): ProjectReviewOverride {
+  if (config.enabled === undefined) return "default";
+  return config.enabled ? "on" : "off";
+}
+
+/**
+ * The settings page's writer of the per-project `enabled` override: `default`
+ * clears it (follow the global switch), `on` and `off` set it. Unlike
+ * `readProjectConfig` it rejects a malformed stored record instead of reading it
+ * as `{}`, so the write cannot drop the record's other keys.
+ */
+export function setProjectReview(
+  bb: BbPluginApi,
+  projectId: string,
+  review: ProjectReviewOverride,
+  source: string,
+): Promise<ProjectConfig> {
+  return withProjectLock(projectId, async () => {
+    const raw = await bb.storage.kv.get<unknown>(projectKey(projectId));
+    const parsed = projectConfigSchema.safeParse(raw ?? {});
+    if (!parsed.success) {
+      throw new Error(
+        `stored auto-review config for project ${projectId} is malformed; not overwriting`,
+      );
+    }
+    const before = describeReviewOverride(parsed.data);
+    const next: ProjectConfig = { ...parsed.data };
+    if (review === "default") delete next.enabled;
+    else next.enabled = review === "on";
+    if (review !== "default" || (raw !== undefined && raw !== null)) {
+      await bb.storage.kv.set(projectKey(projectId), next);
+    }
+    bb.log.info(`auto-review for project ${projectId}: ${before} -> ${review} (via ${source})`);
+    return next;
+  });
+}
+
 export async function readLastFire(
   bb: BbPluginApi,
   projectId: string,

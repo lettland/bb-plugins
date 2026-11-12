@@ -54,6 +54,7 @@ function project(overrides: Partial<ProjectSetting> = {}): ProjectSetting {
     id: "prj_1",
     name: "Project one",
     autoApprovePlans: false,
+    reviewOverride: "default",
     reviewActive: true,
     ...overrides,
   };
@@ -75,10 +76,15 @@ type Handlers = Partial<PluginRpcTestHandlers<AutoReviewRpcContract>>;
 
 function baseHandlers(): PluginRpcTestHandlers<AutoReviewRpcContract> {
   return {
-    listProjectSettings: () => ({ projects: [] }),
+    listProjectSettings: () => ({ projects: [], globalEnabled: true }),
     setAutoApprovePlans: (input) => ({
       projectId: input.projectId,
       autoApprovePlans: input.autoApprovePlans,
+    }),
+    setProjectReview: (input) => ({
+      projectId: input.projectId,
+      reviewOverride: input.review,
+      reviewActive: input.review !== "off",
     }),
     threadReview: () => review(),
   };
@@ -103,15 +109,15 @@ function renderBadge(handlers: Handlers = {}, props: Partial<PluginThreadHeaderA
 
 describe("registration", () => {
   it("registers the settings section and the thread header action", () => {
-    expect(approveSection.title).toBe("Plan auto-approve");
+    expect(approveSection.title).toBe("Per-project settings");
     expect(approveSection.description).toBe(
-      "Off by default. When on for a project, a plan auto-review has reviewed is approved for you: the agent starts implementing without waiting for your approval.",
+      "Auto-review: Default follows the global Enabled switch; On or Off overrides it for that project. Plan auto-approve: off by default. When on for a project, a plan auto-review has reviewed is approved for you: the agent starts implementing without waiting for your approval.",
     );
     expect(badgeSlot.title).toBe("Auto-review");
   });
 });
 
-describe("Plan auto-approve section", () => {
+describe("Per-project settings section", () => {
   it("shows a loading note while the first load is in flight", () => {
     renderSection({ listProjectSettings: () => new Promise(() => {}) });
     expect(screen.getByText("Loading projects…")).toBeTruthy();
@@ -124,6 +130,7 @@ describe("Plan auto-approve section", () => {
           project({ id: "prj_on", name: "Alpha", autoApprovePlans: true }),
           project({ id: "prj_off", name: "Beta", reviewActive: false }),
         ],
+        globalEnabled: true,
       }),
     });
     await screen.findByText("Alpha");
@@ -146,7 +153,7 @@ describe("Plan auto-approve section", () => {
       listProjectSettings: () => {
         calls++;
         if (calls === 1) throw new Error("boom");
-        return { projects: [project()] };
+        return { projects: [project()], globalEnabled: true };
       },
     });
     expect((await screen.findByRole("alert")).textContent).toContain(
@@ -171,7 +178,7 @@ describe("Plan auto-approve section", () => {
       listProjectSettings: () => {
         calls++;
         if (calls === 2) throw new Error("server unavailable");
-        return { projects: [project()] };
+        return { projects: [project()], globalEnabled: true };
       },
     });
     expect(await screen.findByText("Project one")).toBeTruthy();
@@ -192,7 +199,7 @@ describe("Plan auto-approve section", () => {
       listProjectSettings: () => {
         calls++;
         if (calls > 1) throw new Error("server unavailable");
-        return { projects: [] };
+        return { projects: [], globalEnabled: true };
       },
     });
     expect(await screen.findByText("No projects.")).toBeTruthy();
@@ -204,7 +211,7 @@ describe("Plan auto-approve section", () => {
   });
 
   it("ignores a list response a newer load superseded", async () => {
-    const pending: Array<{ resolve: (value: { projects: ProjectSetting[] }) => void }> = [];
+    const pending: Array<{ resolve: (value: { projects: ProjectSetting[]; globalEnabled: boolean }) => void }> = [];
     const view = renderSection({
       listProjectSettings: () => new Promise((resolve) => { pending.push({ resolve }); }),
     });
@@ -213,11 +220,11 @@ describe("Plan auto-approve section", () => {
     await act(async () => {});
     expect(view.rpcCalls.filter((call) => call.method === "listProjectSettings")).toHaveLength(2);
     await act(async () => {
-      pending[1]!.resolve({ projects: [project({ id: "prj_new", name: "New" })] });
+      pending[1]!.resolve({ projects: [project({ id: "prj_new", name: "New" })], globalEnabled: true });
     });
     expect(await screen.findByText("New")).toBeTruthy();
     await act(async () => {
-      pending[0]!.resolve({ projects: [project({ id: "prj_old", name: "Old" })] });
+      pending[0]!.resolve({ projects: [project({ id: "prj_old", name: "Old" })], globalEnabled: true });
     });
     expect(screen.getByText("New")).toBeTruthy();
     expect(screen.queryByText("Old")).toBeNull();
@@ -225,7 +232,7 @@ describe("Plan auto-approve section", () => {
 
   it("ignores a list failure a newer load superseded", async () => {
     const pending: Array<{
-      resolve: (value: { projects: ProjectSetting[] }) => void;
+      resolve: (value: { projects: ProjectSetting[]; globalEnabled: boolean }) => void;
       reject: (error: unknown) => void;
     }> = [];
     renderSection({
@@ -234,7 +241,7 @@ describe("Plan auto-approve section", () => {
     window.dispatchEvent(new Event("focus"));
     await act(async () => {});
     await act(async () => {
-      pending[1]!.resolve({ projects: [project({ name: "New" })] });
+      pending[1]!.resolve({ projects: [project({ name: "New" })], globalEnabled: true });
     });
     expect(await screen.findByText("New")).toBeTruthy();
     await act(async () => { pending[0]!.reject(new Error("late boom")); });
@@ -246,6 +253,7 @@ describe("Plan auto-approve section", () => {
     const view = renderSection({
       listProjectSettings: () => ({
         projects: [project({ id: "prj_a", name: "Alpha" }), project({ id: "prj_b", name: "Beta" })],
+        globalEnabled: true,
       }),
     });
     fireEvent.click(await screen.findByLabelText("Alpha"));
@@ -260,7 +268,7 @@ describe("Plan auto-approve section", () => {
   it("disables the switch while the write is in flight", async () => {
     let stored!: (value: { projectId: string; autoApprovePlans: boolean }) => void;
     renderSection({
-      listProjectSettings: () => ({ projects: [project()] }),
+      listProjectSettings: () => ({ projects: [project()], globalEnabled: true }),
       setAutoApprovePlans: () =>
         new Promise((resolve) => { stored = resolve; }),
     });
@@ -277,7 +285,7 @@ describe("Plan auto-approve section", () => {
     const view = renderSection({
       listProjectSettings: () => {
         loads++;
-        return { projects: [project()] };
+        return { projects: [project()], globalEnabled: true };
       },
       setAutoApprovePlans: () => { throw new Error("denied"); },
     });
@@ -293,7 +301,7 @@ describe("Plan auto-approve section", () => {
 
   it("words a rejection that is not an Error as-is", async () => {
     renderSection({
-      listProjectSettings: () => ({ projects: [project()] }),
+      listProjectSettings: () => ({ projects: [project()], globalEnabled: true }),
       setAutoApprovePlans: () => { throw "rejected"; },
     });
     fireEvent.click(await screen.findByLabelText("Project one"));
@@ -313,7 +321,7 @@ describe("Plan auto-approve section", () => {
     renderSection({
       listProjectSettings: () => {
         loads++;
-        return { projects: [project()] };
+        return { projects: [project()], globalEnabled: true };
       },
       setAutoApprovePlans: () => { throw new Error("denied"); },
     });
@@ -323,6 +331,79 @@ describe("Plan auto-approve section", () => {
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
     expect((screen.getByLabelText("Project one") as HTMLInputElement).checked).toBe(false);
     expect(loads).toBe(3);
+  });
+
+  it("shows each row's override and the global label in the Auto-review select", async () => {
+    renderSection({
+      listProjectSettings: () => ({
+        projects: [
+          project({ id: "prj_d", name: "Alpha" }),
+          project({ id: "prj_on", name: "Beta", reviewOverride: "on" }),
+          project({ id: "prj_off", name: "Gamma", reviewOverride: "off", reviewActive: false }),
+        ],
+        globalEnabled: false,
+      }),
+    });
+    await screen.findByText("Alpha");
+    const rows = screen.getAllByRole("listitem");
+    const selects = rows.map((row) => within(row).getByLabelText("Auto-review") as HTMLSelectElement);
+    expect(selects.map((select) => select.value)).toEqual(["default", "on", "off"]);
+    expect(within(rows[0]!).getByRole("option", { name: "Default (global: off)" })).toBeTruthy();
+    expect(within(rows[0]!).getByRole("option", { name: "On" })).toBeTruthy();
+    expect(within(rows[0]!).getByRole("option", { name: "Off" })).toBeTruthy();
+  });
+
+  it("labels Default with the global switch when it is on", async () => {
+    renderSection({
+      listProjectSettings: () => ({ projects: [project()], globalEnabled: true }),
+    });
+    expect(await screen.findByRole("option", { name: "Default (global: on)" })).toBeTruthy();
+  });
+
+  it("stores a changed override and refreshes the select and the no-effect note together", async () => {
+    const note = "auto-review is off for this project, so this has no effect";
+    const view = renderSection({
+      listProjectSettings: () => ({
+        projects: [project({ id: "prj_a", name: "Alpha" }), project({ id: "prj_b", name: "Beta" })],
+        globalEnabled: true,
+      }),
+    });
+    const rows = await screen.findAllByRole("listitem");
+    const select = within(rows[0]!).getByLabelText("Auto-review") as HTMLSelectElement;
+    expect(within(rows[0]!).queryByText(note)).toBeNull();
+    fireEvent.change(select, { target: { value: "off" } });
+    expect(view.rpcCalls).toContainEqual({
+      method: "setProjectReview",
+      input: { projectId: "prj_a", review: "off" },
+    });
+    await waitFor(() => expect(within(rows[0]!).getByText(note)).toBeTruthy());
+    expect((within(rows[0]!).getByLabelText("Auto-review") as HTMLSelectElement).value).toBe("off");
+    expect((within(rows[0]!).getByLabelText("Auto-review") as HTMLSelectElement).disabled).toBe(false);
+    expect((within(rows[1]!).getByLabelText("Auto-review") as HTMLSelectElement).value).toBe("default");
+    expect(within(rows[1]!).queryByText(note)).toBeNull();
+
+    fireEvent.change(within(rows[0]!).getByLabelText("Auto-review"), { target: { value: "on" } });
+    await waitFor(() => expect(within(rows[0]!).queryByText(note)).toBeNull());
+    expect((within(rows[0]!).getByLabelText("Auto-review") as HTMLSelectElement).value).toBe("on");
+  });
+
+  it("re-reads and flags the row when the override write fails", async () => {
+    let loads = 0;
+    const view = renderSection({
+      listProjectSettings: () => {
+        loads++;
+        return { projects: [project()], globalEnabled: true };
+      },
+      setProjectReview: () => { throw new Error("malformed"); },
+    });
+    const select = await screen.findByLabelText("Auto-review");
+    fireEvent.change(select, { target: { value: "off" } });
+    expect((await screen.findByRole("alert")).textContent).toBe("malformed");
+    expect(loads).toBe(2);
+    const reverted = screen.getByLabelText("Auto-review") as HTMLSelectElement;
+    expect(reverted.value).toBe("default");
+    expect(reverted.disabled).toBe(false);
+    expect(view.rpcCalls.filter((call) => call.method === "setProjectReview")).toHaveLength(1);
   });
 });
 

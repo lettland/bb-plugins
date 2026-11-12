@@ -1,4 +1,10 @@
-import { effectiveConfig, readProjectConfig, setAutoApprovePlans } from "./config.js";
+import {
+  describeReviewOverride,
+  effectiveConfig,
+  readProjectConfig,
+  setAutoApprovePlans,
+  setProjectReview,
+} from "./config.js";
 import type { ReviewContext } from "./context.js";
 import { readFindings } from "./findings-store.js";
 import { summarizeReview } from "./findings.js";
@@ -24,11 +30,12 @@ export function registerAutoReviewRpc(ctx: ReviewContext): void {
           return {
             ...project,
             autoApprovePlans: config.autoApprovePlans ?? false,
+            reviewOverride: describeReviewOverride(config),
             reviewActive: effectiveConfig(ctx.globals, config).enabled,
           };
         }),
       );
-      return { projects: rows };
+      return { projects: rows, globalEnabled: ctx.globals.enabled };
     },
     async threadReview(input) {
       const [store, state] = await Promise.all([
@@ -50,6 +57,18 @@ export function registerAutoReviewRpc(ctx: ReviewContext): void {
           // v8 ignore start -- @preserve the setter above (rpc.ts:45) always stores a boolean and the read-back (rpc.ts:46) never misses the key, so the fallback cannot run.
           false,
         // v8 ignore stop
+      };
+    },
+    async setProjectReview(input) {
+      const projects = await listProjects(ctx);
+      if (!projects.some((project) => project.id === input.projectId)) {
+        throw new Error("BB project was not found");
+      }
+      const stored = await setProjectReview(bb, input.projectId, input.review, "rpc");
+      return {
+        projectId: input.projectId,
+        reviewOverride: describeReviewOverride(stored),
+        reviewActive: effectiveConfig(ctx.globals, stored).enabled,
       };
     },
   });

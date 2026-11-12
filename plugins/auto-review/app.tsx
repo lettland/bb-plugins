@@ -17,6 +17,8 @@ import {
 } from "./src/plan-approval-form.js";
 import type { AutoReviewRpcContract, ProjectSetting, ThreadReview } from "./src/rpc-contract.js";
 
+type ReviewOverride = ProjectSetting["reviewOverride"];
+
 const SOFT_INK = "color-mix(in oklch, var(--ink) 68%, var(--canvas))";
 const PLAN_BOX_BORDER = "color-mix(in oklch, var(--ink) 16%, var(--canvas))";
 const BUTTON_BASE =
@@ -38,11 +40,14 @@ function ProjectRow(props: {
   project: ProjectSetting;
   pending: boolean;
   error: string | undefined;
+  globalEnabled: boolean;
   onToggle: (project: ProjectSetting, next: boolean) => void;
+  onReview: (project: ProjectSetting, next: ReviewOverride) => void;
 }) {
-  const { project, pending, error, onToggle } = props;
+  const { project, pending, error, globalEnabled, onToggle, onReview } = props;
   const base = useId();
   const switchId = `${base}-switch`;
+  const reviewId = `${base}-review`;
   const detailId = `${base}-detail`;
   return (
     <li
@@ -74,6 +79,21 @@ function ProjectRow(props: {
             <div>auto-review is off for this project, so this has no effect</div>
           )}
         </div>
+        <div style={{ fontSize: 12, marginTop: 4 }}>
+          <label htmlFor={reviewId} style={{ color: SOFT_INK }}>
+            Auto-review
+          </label>{" "}
+          <select
+            id={reviewId}
+            value={project.reviewOverride}
+            disabled={pending}
+            onChange={(event) => onReview(project, event.target.value as ReviewOverride)}
+          >
+            <option value="default">Default (global: {globalEnabled ? "on" : "off"})</option>
+            <option value="on">On</option>
+            <option value="off">Off</option>
+          </select>
+        </div>
         {error === undefined ? null : (
           <div role="alert" style={{ fontSize: 12, color: "var(--destructive-text)" }}>
             {error}
@@ -98,6 +118,7 @@ function LoadError(props: { error: string; onRetry: () => void }) {
 function ProjectAutoApprove() {
   const rpc = useRpc<AutoReviewRpcContract>();
   const [projects, setProjects] = useState<ProjectSetting[] | null>(null);
+  const [globalEnabled, setGlobalEnabled] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<Record<string, true>>({});
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
@@ -109,6 +130,7 @@ function ProjectAutoApprove() {
       const result = await rpc.call("listProjectSettings", null);
       if (revision !== revisionRef.current) return;
       setProjects(result.projects);
+      setGlobalEnabled(result.globalEnabled);
       setRowErrors({});
       setError(null);
     } catch (nextError) {
@@ -125,24 +147,22 @@ function ProjectAutoApprove() {
     return () => window.removeEventListener("focus", onFocus);
   }, [load]);
 
-  const toggle = async (project: ProjectSetting, next: boolean) => {
+  const write = async <T extends { projectId: string }>(
+    project: ProjectSetting,
+    call: () => Promise<T>,
+    apply: (row: ProjectSetting, stored: T) => ProjectSetting,
+  ) => {
     setPending((current) => ({ ...current, [project.id]: true }));
     setRowErrors((current) => without(current, project.id));
     try {
-      const stored = await rpc.call("setAutoApprovePlans", {
-        projectId: project.id,
-        autoApprovePlans: next,
-      });
+      const stored = await call();
       // Supersede any list fetch started before this write landed.
       revisionRef.current++;
       setProjects(
         (current) =>
-          current?.map((row) =>
-            row.id === stored.projectId
-              ? { ...row, autoApprovePlans: stored.autoApprovePlans }
-              : row,
-          /* v8 ignore start -- @preserve projects only changes from null to a loaded list (line 97), and toggles render only from that list, so current is never null here. */
-          ) ?? null,
+          current?.map((row) => (row.id === stored.projectId ? apply(row, stored) : row))
+          /* v8 ignore start -- @preserve projects only changes from null to a loaded list (see load), and the controls render only from that list, so current is never null here. */
+          ?? null,
           /* v8 ignore stop */
       );
     } catch (nextError) {
@@ -154,6 +174,24 @@ function ProjectAutoApprove() {
       setPending((current) => without(current, project.id));
     }
   };
+
+  const toggle = (project: ProjectSetting, next: boolean) =>
+    write(
+      project,
+      () => rpc.call("setAutoApprovePlans", { projectId: project.id, autoApprovePlans: next }),
+      (row, stored) => ({ ...row, autoApprovePlans: stored.autoApprovePlans }),
+    );
+
+  const setReview = (project: ProjectSetting, review: ReviewOverride) =>
+    write(
+      project,
+      () => rpc.call("setProjectReview", { projectId: project.id, review }),
+      (row, stored) => ({
+        ...row,
+        reviewOverride: stored.reviewOverride,
+        reviewActive: stored.reviewActive,
+      }),
+    );
 
   if (projects === null) {
     if (error === null) return <p style={{ color: SOFT_INK }}>Loading projects…</p>;
@@ -172,7 +210,9 @@ function ProjectAutoApprove() {
             project={project}
             pending={pending[project.id] === true}
             error={rowErrors[project.id]}
+            globalEnabled={globalEnabled}
             onToggle={(row, next) => void toggle(row, next)}
+            onReview={(row, next) => void setReview(row, next)}
           />
         ))}
       </ul>
@@ -601,9 +641,9 @@ function PlanApproval(props: PluginPendingInteractionProps) {
 export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "project-auto-approve",
-    title: "Plan auto-approve",
+    title: "Per-project settings",
     description:
-      "Off by default. When on for a project, a plan auto-review has reviewed is approved for you: the agent starts implementing without waiting for your approval.",
+      "Auto-review: Default follows the global Enabled switch; On or Off overrides it for that project. Plan auto-approve: off by default. When on for a project, a plan auto-review has reviewed is approved for you: the agent starts implementing without waiting for your approval.",
     component: ProjectAutoApprove,
   });
   app.slots.experimental_threadHeaderAction({

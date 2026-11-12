@@ -20,7 +20,7 @@ not count) asking the user what to change, auto-review answers that one question
 (marked `[bb auto-review]`) so the queued review still reaches it instead of the user
 being asked to explain a rejection they never made.
 
-A project can opt in (Tools → Auto review → Plan auto-approve, or
+A project can opt in (Tools → Auto review → Per-project settings, or
 `bb auto-review auto-approve on --project <id>`, which refuses to run inside a bb thread as
 a guard against accidental agent use, not a security boundary; off by default) to have a
 plan approved automatically once it has completed the review cycle; anything the gate
@@ -652,8 +652,11 @@ past the tier's budget (light: 3, standard: 7), carrying the count and tier into
 record — including when the hold expires instead of releasing.
 
 Per-project overrides are stored in the plugin's own storage. bb's settings page for this
-plugin (Tools → Auto review) also has a Plan auto-approve section that lists every project with its own switch for approving reviewed
-plans automatically; it writes the same storage as `bb auto-review auto-approve`.
+plugin (Tools → Auto review) also has a Per-project settings section that lists every project with two controls: an Auto-review
+select (Default follows the global Enabled switch; On or Off overrides it for that project) and a switch for approving reviewed
+plans automatically. They write the same storage as `bb auto-review enable|disable --project` and `bb auto-review auto-approve`.
+Only the settings page can set the Auto-review override back to Default; the CLI writes only on or off. If the stored record
+for a project is malformed, the select refuses to change it and reports an error instead of overwriting the record.
 
 ### Plan approval form
 
@@ -809,7 +812,7 @@ All commands accept `--json`.
 |---|---|
 | `bb auto-review status` | Effective state (including `planGate`, whether this thread's plan review is served here by the native ExitPlanMode gate), last-fire outcome (naming the commits a `stale-park` or `already-pushed` stand-down skipped, as `lastFire.skippedCommits`), a `last parked` line for a turn parked behind another review (`lastParkedAt` in `--json`), a `plan hold` line with the age of an armed plan review against its window while one holds the thread (`planHoldArmedAt` and `planHoldWindowMs` in `--json`; no line when no gate holds), and the last review's reported outcome with open/re-raised finding counts (`reviewResult`, plus `omittedFromPrompt`: open findings the next review's prompt cannot list) for the current thread |
 | `bb auto-review show` | Global defaults, project override and resolved settings for the current project |
-| `bb auto-review enable [--global \| --project <id>]` | Turn it on; bare `enable` is global |
+| `bb auto-review enable [--global \| --project <id>]` | Turn it on; bare `enable` is global; `--project` sets the project's override to on (the settings page can also clear it back to Default) |
 | `bb auto-review disable [--global \| --project <id>]` | Turn it off, same scoping |
 | `bb auto-review auto-approve <on\|off> --project <id>` | Approve reviewed plans automatically for one project (off by default); `--project` is required and must exist, and `on` is refused from inside a bb thread (an accident guard, not a security boundary) |
 | `bb auto-review findings [thread-id] [--clear]` | List what a thread's reviews reported (finding chains, flagging high/blocker ones dismissed more than once, and incidents). `--clear` drops the chains only; it is refused inside a bb thread and needs an explicit thread id |
