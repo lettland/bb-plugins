@@ -1382,7 +1382,7 @@ test("the card stays working while the top-level thread or another sub-thread st
   known.set("leaf-deep", kid("leaf-deep", "mid-deep"));
   // listRunning names the same thread twice and a thread the host no longer lists: both are harmless.
   running(context, "live-self", "kid-other-b", "kid-other-b", "leaf-deep", "vanished");
-  context.ctx.list = worldOf([thr("live-self"), known.get("kid-other-b"), known.get("leaf-deep")]).handler;
+  context.ctx.list = worldOf([thr("live-self", { status: "active" }), known.get("kid-other-b"), known.get("leaf-deep")]).handler;
   await emit("thread.idle", { thread: known.get("kid-self") });
   await emit("thread.idle", { thread: known.get("kid-other-a") });
   await emit("thread.failed", { thread: known.get("mid-deep"), error: "boom" });
@@ -1391,6 +1391,18 @@ test("the card stays working while the top-level thread or another sub-thread st
   for (const id of ["live-self", "live-other", "live-deep"]) {
     expect(cardOf(id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
   }
+});
+
+test("a thread listRunning names but the host now lists as idle is not live, so the root card settles", async () => {
+  const context = await startQuiet();
+  const { cardOf, emit, known, mirror } = context;
+  await mirror(thr("root-stop", { status: "active" }));
+  known.set("kid-stop", kid("kid-stop", "root-stop"));
+  running(context, "kid-stop");
+  context.ctx.list = worldOf([thr("kid-stop", { parentThreadId: "root-stop", status: "idle" })]).handler;
+  await emit("thread.idle", { thread: known.get("kid-stop") });
+  expect(cardOf("root-stop")).toMatchObject({ stage_id: "stage-progress", run_state: "idle" });
+  expect(cardOf("root-stop").settled_at).toBeGreaterThan(0);
 });
 
 test("a child end under a card that is not working, failed, stopped, done, manual or missing makes no lookup", async () => {

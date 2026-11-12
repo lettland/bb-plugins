@@ -50,7 +50,6 @@ export interface Task {
   request: NewThreadRequest | null;
   scheduledAt: number | null;
   threadId: string | null;
-  origin?: "manual" | "mirror";
   sidebarVisible?: boolean | null;
   runState: RunState;
   attentionReason: string | null;

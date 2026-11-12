@@ -100,11 +100,18 @@ function useDraftRootIds(): ReadonlySet<string> {
 }
 
 /**
- * A mirror card whose session has an unsent draft and is not running shows as an
- * open To Do card, whatever its stored state: if bb shows the draft, so does Triage.
+ * A card whose session has an unsent draft, is not running, and that the board
+ * would otherwise hide (settled or failed) shows as an open To Do card: if bb
+ * shows the draft, so does Triage. A visible card (open, not failed) stays in its
+ * stored column, whether or not it has a draft.
  */
 function isDraftedCard(task: Task, draftRoots: ReadonlySet<string>): boolean {
-  return task.origin === "mirror" && task.threadId !== null && draftRoots.has(task.threadId) && !isTaskRunning(task);
+  return (
+    task.threadId !== null &&
+    draftRoots.has(task.threadId) &&
+    !isTaskRunning(task) &&
+    (task.settledAt !== null || task.runState === "failed")
+  );
 }
 
 function matchesFilter(task: Task, filter: TaskFilter, drafted: boolean): boolean {
@@ -196,7 +203,10 @@ function TriageBoard() {
   /**
    * A drafted card shows in To Do while its stored stage says otherwise, so a move
    * to another column always writes, even to the stored stage, and also reopens a
-   * settled card; a move to To Do changes nothing the user can see.
+   * settled card; a move to To Do changes nothing the user can see. Once open, the
+   * card renders in its stored (new) column. A failed card that is not settled stays
+   * drafted after the move and keeps showing in To Do, because the board shows
+   * failed cards only through the draft overlay.
    */
   const move = async (task: Task, stageId: string, drafted = false, intakeId = "") => {
     if (drafted ? stageId === intakeId : task.stageId === stageId) return;

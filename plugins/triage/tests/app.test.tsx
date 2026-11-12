@@ -613,12 +613,12 @@ describe("board drag highlight", () => {
 });
 
 // Drafts: useSidebarThreadDraftIds() reports the thread ids that hold an unsent draft (SDK
-// bundled-types PluginSdkApp.useSidebarThreadDraftIds, @get-bb/plugin-sdk 0.6.140). The board
-// reads ids only and shows a drafted mirror card as an open To Do card.
+// bundled-types PluginSdkApp.useSidebarThreadDraftIds, @get-bb/plugin-sdk 0.6.90). The board
+// reads ids only and shows a drafted card the board would otherwise hide as an open To Do card.
 describe("sidebar drafts", () => {
   const snapshotOf = (tasks: unknown[]) => () => ({ ...cloneSnapshot(), tasks });
   const mirrorCard = (overrides: Record<string, unknown> & { number: number; title: string }) =>
-    task({ origin: "mirror", stageId: "stage-progress", runState: "idle", ...overrides });
+    task({ stageId: "stage-progress", runState: "idle", ...overrides });
   const drafted = (ids: string[], extra: Record<string, unknown> = {}) => ({ sidebarDraftThreadIds: ids, ...extra });
   const rpcMethods = (view: ReturnType<typeof renderBoard>, method: string) =>
     view.inspection.rpcCalls.filter((call: any) => call.method === method);
@@ -696,9 +696,9 @@ describe("sidebar drafts", () => {
     expect(screen.getByRole("button", { name: "All2" })).toBeTruthy();
   });
 
-  test("a manual card and a running card with drafts stay in their own columns", async () => {
+  test("a visible manual card and a running card with drafts stay in their own columns", async () => {
     const tasks = [
-      task({ number: 10, title: "Manual draft", origin: "manual", stageId: "stage-attention", runState: "idle", threadId: "thr-d1" }),
+      task({ number: 10, title: "Manual draft", stageId: "stage-attention", runState: "idle", threadId: "thr-d1" }),
       mirrorCard({ number: 11, title: "Running draft", threadId: "thr-d2", runState: "working" }),
     ];
     renderBoard({ snapshot: snapshotOf(tasks) }, undefined, drafted(["thr-d1", "thr-d2"]));
@@ -707,6 +707,41 @@ describe("sidebar drafts", () => {
     expect(within(columnOf("In Progress")).getByText("Running draft")).toBeTruthy();
     expect(within(columnOf("To Do")).queryByText("Manual draft")).toBe(null);
     expect(within(columnOf("To Do")).queryByText("Running draft")).toBe(null);
+  });
+
+  test("a visible card with a draft stays in its stored column, even in the done stage, and a hidden manual card shows in To Do", async () => {
+    const tasks = [
+      mirrorCard({ number: 10, title: "Done open draft", threadId: "thr-d1", stageId: "stage-completed", runState: "completed" }),
+      task({ number: 11, title: "Manual hidden draft", stageId: "stage-attention", runState: "idle", threadId: "thr-d2", settledAt: 500 }),
+      task({ number: 12, title: "Manual visible draft", stageId: "stage-attention", runState: "idle", threadId: "thr-d3" }),
+    ];
+    renderBoard({ snapshot: snapshotOf(tasks) }, undefined, drafted(["thr-d1", "thr-d2", "thr-d3"]));
+    await screen.findByText("Done open draft");
+    expect(within(columnOf("Completed")).getByText("Done open draft")).toBeTruthy();
+    expect(within(columnOf("To Do")).queryByText("Done open draft")).toBe(null);
+    expect(within(columnOf("To Do")).getByText("Manual hidden draft")).toBeTruthy();
+    expect(within(columnOf("Human Review")).getByText("Manual visible draft")).toBeTruthy();
+    expect(within(columnOf("To Do")).queryByText("Manual visible draft")).toBe(null);
+  });
+
+  test("four drafted threads in mixed hidden states all show in To Do beside an open working card", async () => {
+    const tasks = [
+      mirrorCard({ number: 10, title: "Settled active", threadId: "thr-d1", settledAt: 500 }),
+      mirrorCard({ number: 11, title: "Settled intake", threadId: "thr-d2", stageId: "stage-todo", settledAt: 600 }),
+      mirrorCard({ number: 12, title: "Failed card", threadId: "thr-d3", runState: "failed", attentionReason: "boom" }),
+      mirrorCard({ number: 13, title: "Settled done", threadId: "thr-d4", stageId: "stage-completed", runState: "completed", settledAt: 700 }),
+      mirrorCard({ number: 14, title: "Working card", threadId: "thr-w1", runState: "working" }),
+    ];
+    renderBoard({ snapshot: snapshotOf(tasks) }, undefined, drafted(["thr-d1", "thr-d2", "thr-d3", "thr-d4"]));
+    await screen.findByText("Working card");
+    const todo = within(columnOf("To Do"));
+    for (const title of ["Settled active", "Settled intake", "Failed card", "Settled done"]) {
+      expect(todo.getByText(title)).toBeTruthy();
+    }
+    expect(within(columnOf("In Progress")).getByText("Working card")).toBeTruthy();
+    expect(within(columnOf("In Progress")).queryByText("Settled active")).toBe(null);
+    expect(within(columnOf("Completed")).queryByText("Settled done")).toBe(null);
+    expect(screen.getByRole("button", { name: "All5" })).toBeTruthy();
   });
 
   test("a draft on a sub-thread shows its top-level thread's card, and a parent cycle ends the walk", async () => {
@@ -730,7 +765,7 @@ describe("sidebar drafts", () => {
   test("dragging a drafted card out of To Do moves it, even to its stored stage, and reopens a settled one", async () => {
     const tasks = [
       mirrorCard({ number: 10, title: "Settled draft", threadId: "thr-d1", settledAt: 500, readAt: 5 }),
-      mirrorCard({ number: 11, title: "Open draft", threadId: "thr-d2", readAt: 5 }),
+      mirrorCard({ number: 11, title: "Failed draft card", threadId: "thr-d2", runState: "failed", readAt: 5 }),
     ];
     const view = renderBoard({ snapshot: snapshotOf(tasks), moveTask: () => ({ ok: true }), setTaskSettled: () => ({ ok: true }) }, undefined, drafted(["thr-d1", "thr-d2"]));
     await screen.findByText("Settled draft");
@@ -742,13 +777,13 @@ describe("sidebar drafts", () => {
     expect(rpcMethods(view, "moveTask")).toStrictEqual([
       { method: "moveTask", input: { number: 10, stageId: "stage-progress" } },
     ]);
-    // An unsettled drafted card moves without a reopen.
-    fireEvent.dragStart(cardElement("Open draft"), { dataTransfer: dragTransfer() });
+    // An unsettled drafted card (failed, so the draft is what shows it) moves without a reopen.
+    fireEvent.dragStart(cardElement("Failed draft card"), { dataTransfer: dragTransfer() });
     fireEvent.drop(columnOf("Human Review"), { dataTransfer: dragTransfer() });
     await waitFor(() => expect(rpcMethods(view, "moveTask")).toHaveLength(2));
     expect(rpcMethods(view, "setTaskSettled")).toHaveLength(1);
     // Dropping back on To Do changes nothing.
-    fireEvent.dragStart(cardElement("Open draft"), { dataTransfer: dragTransfer() });
+    fireEvent.dragStart(cardElement("Failed draft card"), { dataTransfer: dragTransfer() });
     fireEvent.drop(columnOf("To Do"), { dataTransfer: dragTransfer() });
     await flushBoard();
     expect(rpcMethods(view, "moveTask")).toHaveLength(2);
@@ -757,6 +792,25 @@ describe("sidebar drafts", () => {
     fireEvent.pointerMove(screen.getByRole("menuitem", { name: "Move to" }), { pointerType: "mouse" });
     fireEvent.click(await screen.findByRole("menuitemradio", { name: "Completed" }));
     await waitFor(() => expect(rpcMethods(view, "moveTask")).toHaveLength(3));
+  });
+
+  test("a settled drafted card dragged out of To Do renders in its new column once reopened", async () => {
+    let reopened = false;
+    const card = (open: boolean) => mirrorCard({
+      number: 10, title: "Snap draft", threadId: "thr-d1", readAt: 5,
+      ...(open ? { stageId: "stage-attention", settledAt: null } : { settledAt: 500 }),
+    });
+    renderBoard({
+      snapshot: () => snapshotOf([card(reopened)])(),
+      moveTask: () => ({ ok: true }),
+      setTaskSettled: () => { reopened = true; return { ok: true }; },
+    }, undefined, drafted(["thr-d1"]));
+    await screen.findByText("Snap draft");
+    expect(within(columnOf("To Do")).getByText("Snap draft")).toBeTruthy();
+    fireEvent.dragStart(cardElement("Snap draft"), { dataTransfer: dragTransfer() });
+    fireEvent.drop(columnOf("Human Review"), { dataTransfer: dragTransfer() });
+    await waitFor(() => expect(within(columnOf("Human Review")).getByText("Snap draft")).toBeTruthy());
+    expect(within(columnOf("To Do")).queryByText("Snap draft")).toBe(null);
   });
 
   test("a card without a draft keeps the plain move rule", async () => {

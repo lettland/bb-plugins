@@ -51,8 +51,6 @@ const taskSchema = z.object({
   request: newThreadRequestSchema.nullable(),
   scheduledAt: z.number().int().nullable(),
   threadId: z.string().nullable(),
-  /** Mirror cards are a view of a session; the board needs to tell them from manual ones. */
-  origin: z.enum(["manual", "mirror"]),
   sidebarVisible: z.boolean().nullable().default(null),
   runState: z.enum([
     "queued",
@@ -448,7 +446,6 @@ function toTask(row: TaskRow) {
     request: storedRequest.success ? storedRequest.data : null,
     scheduledAt: row.scheduled_at,
     threadId: row.thread_id,
-    origin: row.origin,
     runState: row.run_state,
     attentionReason: row.attention_reason,
     readAt: row.read_at,
@@ -1093,9 +1090,10 @@ export default async function plugin(bb: BbPluginApi) {
       const getThread = async (threadId: string) => listed.get(threadId) ?? lookup(threadId);
       const roots = new Map<string, RootThread>();
       for (const threadId of threadIds) {
-        // A thread that stopped or was deleted since listRunning answered is not listed: it is no longer live.
+        // A thread that was deleted since listRunning answered is not listed, and one that stopped is no longer
+        // `active` or `starting`: neither is live.
         const thread = listed.get(threadId);
-        if (!thread) continue;
+        if (!thread || (thread.status !== "active" && thread.status !== "starting")) continue;
         const root = await topLevelOf(thread, getThread);
         roots.set(root.id, root);
       }
