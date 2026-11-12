@@ -6,6 +6,22 @@ import type { ReactElement } from "react";
 import { toast } from "sonner";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
+// The draft hook is real unless a test switches it: `missing` is a host that lacks it, `throws` one where it breaks.
+const draftHook = vi.hoisted(() => ({ mode: "real" as "real" | "missing" | "throws" }));
+vi.mock("@get-bb/plugin-sdk/app", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, any>>();
+  const mocked: Record<string, unknown> = { ...actual };
+  Object.defineProperty(mocked, "useSidebarThreadDraftIds", {
+    enumerable: true,
+    get: () => draftHook.mode === "missing"
+      ? undefined
+      : draftHook.mode === "throws"
+        ? () => { throw new Error("draft hook broke"); }
+        : actual.useSidebarThreadDraftIds,
+  });
+  return mocked;
+});
+
 installTestPluginRuntime();
 
 const app = await loadPluginApp(() => import("../app"));
@@ -74,10 +90,15 @@ const cloneSnapshot = () => JSON.parse(JSON.stringify(SNAPSHOT));
 
 type Handler = (input: unknown) => unknown;
 
-function renderBoard(handlers: Record<string, Handler> = {}, context?: { projectId: string | null }) {
+function renderBoard(
+  handlers: Record<string, Handler> = {},
+  context?: { projectId: string | null },
+  host: { sidebarDraftThreadIds?: string[]; sidebarThreads?: Record<string, unknown> } = {},
+) {
   return renderSlot(boardSlot, {} as never, {
     rpc: { snapshot: cloneSnapshot, ...handlers } as never,
     context: context ?? { projectId: "p-route" },
+    ...(host as object),
   });
 }
 
@@ -590,3 +611,184 @@ describe("board drag highlight", () => {
     expect(todo.getAttribute("data-dropping")).toBe(null);
   });
 });
+
+// Drafts: useSidebarThreadDraftIds() reports the thread ids that hold an unsent draft (SDK
+// bundled-types PluginSdkApp.useSidebarThreadDraftIds, @get-bb/plugin-sdk 0.6.140). The board
+// reads ids only and shows a drafted mirror card as an open To Do card.
+describe("sidebar drafts", () => {
+  const snapshotOf = (tasks: unknown[]) => () => ({ ...cloneSnapshot(), tasks });
+  const mirrorCard = (overrides: Record<string, unknown> & { number: number; title: string }) =>
+    task({ origin: "mirror", stageId: "stage-progress", runState: "idle", ...overrides });
+  const drafted = (ids: string[], extra: Record<string, unknown> = {}) => ({ sidebarDraftThreadIds: ids, ...extra });
+  const rpcMethods = (view: ReturnType<typeof renderBoard>, method: string) =>
+    view.inspection.rpcCalls.filter((call: any) => call.method === method);
+
+  test("a settled mirror card with a draft shows in To Do and counts as open; without the draft it stays settled", async () => {
+    const tasks = [
+      mirrorCard({ number: 10, title: "Draft card", threadId: "thr-d1", settledAt: 500, readAt: 5 }),
+      mirrorCard({ number: 11, title: "Plain settled", threadId: "thr-d2", settledAt: 600, readAt: 5 }),
+    ];
+    renderBoard({ snapshot: snapshotOf(tasks) }, undefined, drafted(["thr-d1"]));
+    await screen.findByText("Draft card");
+    expect(within(columnOf("To Do")).getByText("Draft card")).toBeTruthy();
+    expect(within(columnOf("In Progress")).queryByText("Draft card")).toBe(null);
+    expect(screen.queryByText("Plain settled")).toBe(null);
+    expect(screen.getByRole("button", { name: "All1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Settled1" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Settled1" }));
+    expect(screen.getByText("Plain settled")).toBeTruthy();
+    expect(screen.queryByText("Draft card")).toBe(null);
+    cleanup();
+    renderBoard({ snapshot: snapshotOf(tasks) });
+    await screen.findByText("In Progress");
+    expect(screen.queryByText("Draft card")).toBe(null);
+    expect(screen.getByRole("button", { name: "All0" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Settled2" })).toBeTruthy();
+  });
+
+  test("a drafted unread card counts as unread and one with no read state does not", async () => {
+    const tasks = [
+      mirrorCard({ number: 10, title: "Unread draft", threadId: "thr-d1", settledAt: 500 }),
+      mirrorCard({ number: 12, title: "Queued draft", threadId: "thr-d3", runState: "queued", readAt: null }),
+    ];
+    renderBoard({ snapshot: snapshotOf(tasks) }, undefined, drafted(["thr-d1", "thr-d3"]));
+    await screen.findByText("Unread draft");
+    fireEvent.click(screen.getByRole("button", { name: "Unread1" }));
+    expect(screen.getByText("Unread draft")).toBeTruthy();
+    expect(screen.queryByText("Queued draft")).toBe(null);
+    fireEvent.click(screen.getByRole("button", { name: /^Running\d*$/ }));
+    expect(screen.queryByText("Unread draft")).toBe(null);
+  });
+
+  test("a drafted settled card offers Reopen, and its Move-to menu marks the stored stage", async () => {
+    const tasks = [mirrorCard({ number: 10, title: "Draft card", threadId: "thr-d1", settledAt: 500, readAt: 5 })];
+    renderBoard({ snapshot: snapshotOf(tasks) }, undefined, drafted(["thr-d1"]));
+    await screen.findByText("Draft card");
+    expect(screen.getByRole("button", { name: "Reopen Triage #10" })).toBeTruthy();
+    await openCardMenu(10);
+    fireEvent.pointerMove(screen.getByRole("menuitem", { name: "Move to" }), { pointerType: "mouse" });
+    const stored = await screen.findByRole("menuitemradio", { name: "In Progress" });
+    expect(stored.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("menuitemradio", { name: "To Do" }).getAttribute("aria-checked")).toBe("false");
+  });
+
+  test("a draft with no card, and one on a deleted thread's absent card, renders nothing and counts nothing", async () => {
+    const tasks = [mirrorCard({ number: 10, title: "Other card", threadId: "thr-d1", settledAt: 500 })];
+    renderBoard({ snapshot: snapshotOf(tasks) }, undefined, drafted(["thr-ghost", "thr-tombstoned"]));
+    await screen.findByText("In Progress");
+    expect(screen.queryByText("Other card")).toBe(null);
+    expect(screen.getByRole("button", { name: "All0" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Settled1" })).toBeTruthy();
+  });
+
+  test("a failed mirror card and a done-stage mirror card with drafts both show in To Do", async () => {
+    const tasks = [
+      mirrorCard({ number: 10, title: "Failed draft", threadId: "thr-d1", runState: "failed", settledAt: 500, attentionReason: "boom" }),
+      mirrorCard({ number: 11, title: "Done draft", threadId: "thr-d2", stageId: "stage-completed", runState: "completed", settledAt: 600 }),
+      mirrorCard({ number: 12, title: "Failed plain", threadId: "thr-d3", runState: "failed", settledAt: 700 }),
+    ];
+    renderBoard({ snapshot: snapshotOf(tasks) }, undefined, drafted(["thr-d1", "thr-d2"]));
+    await screen.findByText("Failed draft");
+    const todo = within(columnOf("To Do"));
+    expect(todo.getByText("Failed draft")).toBeTruthy();
+    expect(todo.getByText("Done draft")).toBeTruthy();
+    expect(screen.queryByText("Failed plain")).toBe(null);
+    expect(screen.getByRole("button", { name: "All2" })).toBeTruthy();
+  });
+
+  test("a manual card and a running card with drafts stay in their own columns", async () => {
+    const tasks = [
+      task({ number: 10, title: "Manual draft", origin: "manual", stageId: "stage-attention", runState: "idle", threadId: "thr-d1" }),
+      mirrorCard({ number: 11, title: "Running draft", threadId: "thr-d2", runState: "working" }),
+    ];
+    renderBoard({ snapshot: snapshotOf(tasks) }, undefined, drafted(["thr-d1", "thr-d2"]));
+    await screen.findByText("Manual draft");
+    expect(within(columnOf("Human Review")).getByText("Manual draft")).toBeTruthy();
+    expect(within(columnOf("In Progress")).getByText("Running draft")).toBeTruthy();
+    expect(within(columnOf("To Do")).queryByText("Manual draft")).toBe(null);
+    expect(within(columnOf("To Do")).queryByText("Running draft")).toBe(null);
+  });
+
+  test("a draft on a sub-thread shows its top-level thread's card, and a parent cycle ends the walk", async () => {
+    const sidebarThreads = { threads: [
+      { id: "thr-sub", parentThreadId: "thr-mid" },
+      { id: "thr-mid", parentThreadId: "thr-top" },
+      { id: "thr-top", parentThreadId: null },
+      { id: "cyc-a", parentThreadId: "cyc-b" },
+      { id: "cyc-b", parentThreadId: "cyc-a" },
+    ] };
+    const tasks = [
+      mirrorCard({ number: 10, title: "Parent card", threadId: "thr-top", settledAt: 500 }),
+      mirrorCard({ number: 11, title: "Cycle card", threadId: "cyc-c", settledAt: 600 }),
+    ];
+    renderBoard({ snapshot: snapshotOf(tasks) }, undefined, drafted(["thr-sub", "cyc-a"], { sidebarThreads }));
+    await screen.findByText("Parent card");
+    expect(within(columnOf("To Do")).getByText("Parent card")).toBeTruthy();
+    expect(screen.queryByText("Cycle card")).toBe(null);
+  });
+
+  test("dragging a drafted card out of To Do moves it, even to its stored stage, and reopens a settled one", async () => {
+    const tasks = [
+      mirrorCard({ number: 10, title: "Settled draft", threadId: "thr-d1", settledAt: 500, readAt: 5 }),
+      mirrorCard({ number: 11, title: "Open draft", threadId: "thr-d2", readAt: 5 }),
+    ];
+    const view = renderBoard({ snapshot: snapshotOf(tasks), moveTask: () => ({ ok: true }), setTaskSettled: () => ({ ok: true }) }, undefined, drafted(["thr-d1", "thr-d2"]));
+    await screen.findByText("Settled draft");
+    fireEvent.dragStart(cardElement("Settled draft"), { dataTransfer: dragTransfer() });
+    fireEvent.drop(columnOf("In Progress"), { dataTransfer: dragTransfer() });
+    await waitFor(() => expect(rpcMethods(view, "setTaskSettled")).toStrictEqual([
+      { method: "setTaskSettled", input: { number: 10, settled: false } },
+    ]));
+    expect(rpcMethods(view, "moveTask")).toStrictEqual([
+      { method: "moveTask", input: { number: 10, stageId: "stage-progress" } },
+    ]);
+    // An unsettled drafted card moves without a reopen.
+    fireEvent.dragStart(cardElement("Open draft"), { dataTransfer: dragTransfer() });
+    fireEvent.drop(columnOf("Human Review"), { dataTransfer: dragTransfer() });
+    await waitFor(() => expect(rpcMethods(view, "moveTask")).toHaveLength(2));
+    expect(rpcMethods(view, "setTaskSettled")).toHaveLength(1);
+    // Dropping back on To Do changes nothing.
+    fireEvent.dragStart(cardElement("Open draft"), { dataTransfer: dragTransfer() });
+    fireEvent.drop(columnOf("To Do"), { dataTransfer: dragTransfer() });
+    await flushBoard();
+    expect(rpcMethods(view, "moveTask")).toHaveLength(2);
+    // The card menu follows the same rule.
+    await openCardMenu(11);
+    fireEvent.pointerMove(screen.getByRole("menuitem", { name: "Move to" }), { pointerType: "mouse" });
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "Completed" }));
+    await waitFor(() => expect(rpcMethods(view, "moveTask")).toHaveLength(3));
+  });
+
+  test("a card without a draft keeps the plain move rule", async () => {
+    const tasks = [mirrorCard({ number: 10, title: "Plain card", threadId: "thr-d1", stageId: "stage-todo" })];
+    const view = renderBoard({ snapshot: snapshotOf(tasks), moveTask: () => ({ ok: true }) }, undefined, drafted(["thr-other"]));
+    await screen.findByText("Plain card");
+    fireEvent.dragStart(cardElement("Plain card"), { dataTransfer: dragTransfer() });
+    fireEvent.drop(columnOf("To Do"), { dataTransfer: dragTransfer() });
+    await flushBoard();
+    expect(rpcMethods(view, "moveTask")).toHaveLength(0);
+  });
+
+  test("a host without the draft hook, and one where it throws, still renders the board twice and warns once", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const tasks = [mirrorCard({ number: 10, title: "Hook card", threadId: "thr-d1", settledAt: 500 })];
+    for (const mode of ["missing", "throws"] as const) {
+      draftHook.mode = mode;
+      try {
+        renderBoard({ snapshot: snapshotOf(tasks) }, undefined, drafted(["thr-d1"]));
+        await screen.findByText("In Progress");
+        expect(screen.queryByText("Hook card")).toBe(null);
+        // A second render: a lens change re-renders the board with the same hook order.
+        fireEvent.click(screen.getByRole("button", { name: /^Settled\d*$/ }));
+        expect(screen.getByText("Hook card")).toBeTruthy();
+      } finally {
+        draftHook.mode = "real";
+        cleanup();
+      }
+    }
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain("could not read sidebar drafts");
+  });
+});
+
+const flushBoard = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });

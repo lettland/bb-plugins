@@ -25,6 +25,7 @@ License text: [`LICENSE`](LICENSE) in this directory (kept verbatim from upstrea
 - Derived triage files (modified): `components/ui/badge.tsx`, `components/ui/button.tsx`, `components/ui/drawer.tsx`, `components/ui/dropdown-menu.tsx`, `components/ui/icon.tsx`, `components/ui/motion.ts`, `components/ui/popover.tsx`, `lib/portal-scope.ts`, `components/ui/select.tsx`, `components/ui/skeleton.tsx`, `components/ui/textarea.tsx`.
 - Derived triage files (verbatim): `components/ui/alert-dialog.tsx`, `components/ui/calendar.tsx`, `components/ui/card.tsx`, `components/ui/coarse-pointer-sizing.ts`, `components/ui/dialog.tsx`, `components/ui/input.tsx`, `components/ui/menu-item-hover.tsx`, `components/ui/overlay-trigger.ts`, `components/ui/responsive-overlay.tsx`, `components/ui/hooks/use-compact-viewport.tsx`, `components/ui/hooks/use-media-query.ts`, `components/ui/hooks/use-pointer-coarse.ts`, `hooks/useBrowserDimmingModal.ts`, `lib/utils.ts`.
 - Also derived from the same upstream: `types/bb-plugin-sdk.d.ts` and `types/bb-plugin-sdk-app.d.ts`, generated `@get-bb/plugin-sdk` type declarations (portable declarations for the Plugin SDK from get-bb/bb).
+- Bundled runtime code: the `@get-bb/plugin-sdk` runtime code that `bb plugin build` bundles into `dist/` comes from `packages/plugin-sdk` in the same upstream repo, under the same MIT license below.
 - Copyright: the upstream `LICENSE` at tag `desktop-v0.36.0` reads `Copyright (c) 2026 Michael Yong`.
 
 License text (verbatim):

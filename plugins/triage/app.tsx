@@ -1,9 +1,11 @@
 import { useCallback, useMemo, useState } from "react";
 import {
   definePluginApp,
+  experimental_useSidebarThreads,
   useBbContext,
   useBbNavigate,
   useRealtime,
+  useSidebarThreadDraftIds,
 } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 
@@ -62,17 +64,61 @@ function showNotification(payload: RealtimePayload["notification"]): void {
   }
 }
 
-function matchesFilter(task: Task, filter: TaskFilter): boolean {
-  if (task.runState === "failed") return false;
+const NO_DRAFTS: ReadonlySet<string> = new Set();
+let warnedAboutDrafts = false;
+
+/**
+ * Ids of the top-level threads that have an unsent draft on this client. A draft
+ * on a sub-thread counts for its top-level thread, found through the sidebar's
+ * parentThreadId. Only ids are read: draft text is never read, stored or sent.
+ * A host without these hooks, or one where they throw, shows no drafts; both
+ * hooks run on every render in this order so the hook order stays stable.
+ */
+function useDraftRootIds(): ReadonlySet<string> {
+  try {
+    const draftIds = useSidebarThreadDraftIds();
+    const sidebar = experimental_useSidebarThreads();
+    const parents = new Map(sidebar.threads.map((thread) => [thread.id, thread.parentThreadId]));
+    const roots = new Set<string>();
+    for (const draftId of draftIds) {
+      const seen = new Set([draftId]);
+      let current = draftId;
+      for (let parent = parents.get(current); parent && !seen.has(parent); parent = parents.get(current)) {
+        seen.add(parent);
+        current = parent;
+      }
+      roots.add(current);
+    }
+    return roots;
+  } catch (error) {
+    if (!warnedAboutDrafts) {
+      warnedAboutDrafts = true;
+      console.warn("Triage could not read sidebar drafts; the board shows none.", error);
+    }
+    return NO_DRAFTS;
+  }
+}
+
+/**
+ * A mirror card whose session has an unsent draft and is not running shows as an
+ * open To Do card, whatever its stored state: if bb shows the draft, so does Triage.
+ */
+function isDraftedCard(task: Task, draftRoots: ReadonlySet<string>): boolean {
+  return task.origin === "mirror" && task.threadId !== null && draftRoots.has(task.threadId) && !isTaskRunning(task);
+}
+
+function matchesFilter(task: Task, filter: TaskFilter, drafted: boolean): boolean {
+  if (task.runState === "failed" && !drafted) return false;
+  const open = drafted || task.settledAt === null;
   switch (filter) {
     case "live":
-      return task.settledAt === null && isTaskRunning(task);
+      return open && isTaskRunning(task);
     case "unread":
-      return task.settledAt === null && supportsTaskRead(task) && task.readAt === null;
+      return open && supportsTaskRead(task) && task.readAt === null;
     case "settled":
-      return task.settledAt !== null;
+      return !open;
     default:
-      return task.settledAt === null;
+      return open;
   }
 }
 
@@ -86,6 +132,7 @@ function TriageBoard() {
   const [draggedNumber, setDraggedNumber] = useState<number | null>(null);
   const [dropStageId, setDropStageId] = useState<string | null>(null);
   const [editingNumber, setEditingNumber] = useState<number | null>(null);
+  const draftRoots = useDraftRootIds();
 
   useRealtime("triage", (payload) => {
     showNotification((payload as RealtimePayload).notification);
@@ -124,20 +171,16 @@ function TriageBoard() {
 
   const counts = useMemo(
     () => {
-      const boardTasks = scopedTasks.filter((task) => task.runState !== "failed");
-      return {
-        all: boardTasks.filter((task) => task.settledAt === null).length,
-        live: boardTasks.filter((task) => task.settledAt === null && isTaskRunning(task)).length,
-        unread: boardTasks.filter((task) => task.settledAt === null && supportsTaskRead(task) && task.readAt === null).length,
-        settled: boardTasks.filter((task) => task.settledAt !== null).length,
-      };
+      const countOf = (filter: TaskFilter) =>
+        scopedTasks.filter((task) => matchesFilter(task, filter, isDraftedCard(task, draftRoots))).length;
+      return { all: countOf("all"), live: countOf("live"), unread: countOf("unread"), settled: countOf("settled") };
     },
-    [scopedTasks],
+    [draftRoots, scopedTasks],
   );
 
   const visibleTasks = useMemo(
-    () => scopedTasks.filter((task) => matchesFilter(task, taskFilter)),
-    [scopedTasks, taskFilter],
+    () => scopedTasks.filter((task) => matchesFilter(task, taskFilter, isDraftedCard(task, draftRoots))),
+    [draftRoots, scopedTasks, taskFilter],
   );
 
   const taskAction = async (operation: () => Promise<unknown>, message: string) => {
@@ -150,11 +193,17 @@ function TriageBoard() {
     }
   };
 
-  const move = async (task: Task, stageId: string) => {
-    if (task.stageId === stageId) return;
+  /**
+   * A drafted card shows in To Do while its stored stage says otherwise, so a move
+   * to another column always writes, even to the stored stage, and also reopens a
+   * settled card; a move to To Do changes nothing the user can see.
+   */
+  const move = async (task: Task, stageId: string, drafted = false, intakeId = "") => {
+    if (drafted ? stageId === intakeId : task.stageId === stageId) return;
     patchTaskStage(task.number, stageId);
     try {
       await rpc.call("moveTask", { number: task.number, stageId });
+      if (drafted && task.settledAt !== null) await rpc.call("setTaskSettled", { number: task.number, settled: false });
       await refresh();
     } catch (moveError) {
       toast.error(moveError instanceof Error ? moveError.message : String(moveError));
@@ -190,6 +239,9 @@ function TriageBoard() {
 
   const editingTask = snapshot.tasks.find((task) => task.number === editingNumber) ?? null;
   const defaultProjectId = projectFilter !== "all" ? projectFilter : routeProjectId;
+  // The server always keeps an intake stage.
+  const intakeId = snapshot.stages.find((stage) => stage.systemRole === "intake")!.id;
+  const draftedTask = (task: Task) => isDraftedCard(task, draftRoots);
 
   return (
     <div className="triage-shell">
@@ -216,7 +268,7 @@ function TriageBoard() {
       <div className="triage-board-viewport">
         <div className="triage-board">
           {snapshot.stages.map((stage) => {
-            const cards = visibleTasks.filter((task) => task.stageId === stage.id);
+            const cards = visibleTasks.filter((task) => (draftedTask(task) ? intakeId : task.stageId) === stage.id);
             const dragging = draggedNumber !== null;
             return (
               <section
@@ -240,7 +292,7 @@ function TriageBoard() {
                   const task = scopedTasks.find((item) => item.number === draggedNumber);
                   setDraggedNumber(null);
                   setDropStageId(null);
-                  if (task) void move(task, stage.id);
+                  if (task) void move(task, stage.id, draftedTask(task), intakeId);
                 }}
               >
                 <header className="triage-column-header">
@@ -260,7 +312,7 @@ function TriageBoard() {
                         () => rpc.call("setThreadSidebar", { number: task.number, visible: !task.sidebarVisible }),
                         task.sidebarVisible ? "Session hidden from sidebar" : "Session shown in sidebar",
                       )}
-                      onMove={(stageId) => void move(task, stageId)}
+                      onMove={(stageId) => void move(task, stageId, draftedTask(task), intakeId)}
                       onRun={() =>
                         void taskAction(
                           () => rpc.call("runTask", { number: task.number }),

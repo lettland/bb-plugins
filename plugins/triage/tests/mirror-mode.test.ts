@@ -7,6 +7,10 @@ import plugin from "../server.ts";
 // (threadIds capped at 200 per call, unknown and deleted ids dropped) plus the
 // ThreadListArgs fields (archived is a selector, includeHidden gates hidden
 // sessions; there is no sort parameter).
+//
+// Provenance for the liveness quirk: threads.listRunning returns only the threads in
+// `starting` or `active` (SDK bundled-types ThreadsArea.listRunning, the ThreadRunningResponse
+// array of { id, hostId }), so a running descendant is found without paging a thread tree.
 
 type ListArgs = { threadIds?: readonly string[]; archived?: boolean; includeHidden?: boolean; limit?: number; offset?: number };
 type ListHandler = (args: ListArgs) => unknown;
@@ -33,7 +37,11 @@ const pagedList = (all: unknown[], pageSize: number): ListHandler => (args) => {
 
 async function setup(options: { settings?: Record<string, boolean>; list?: ListHandler } = {}) {
   const known = new Map<string, any>();
-  const ctx = { list: options.list ?? ((): unknown => []) };
+  const ctx = {
+    list: options.list ?? ((): unknown => []),
+    // threads.listRunning: only threads in starting or active (SDK bundled-types ThreadsArea.listRunning).
+    running: ((): unknown => []) as () => unknown,
+  };
   const { bb, harness } = createFakePluginHost({
     pluginId: "triage",
     settings: options.settings,
@@ -41,6 +49,7 @@ async function setup(options: { settings?: Record<string, boolean>; list?: ListH
       threads: {
         get: async (args: { threadId: string }) => known.get(args.threadId),
         list: async (args: ListArgs = {}) => ctx.list(args) as any,
+        listRunning: async () => ctx.running() as any,
         spawn: async () => makeThreadResponse({ id: "spawned-1", originPluginId: "triage" }),
         update: async () => makeThreadResponse(),
         stop: async () => ({}),
@@ -926,10 +935,11 @@ test("events for a thread with no creation in flight are handled synchronously",
   const { cardOf, emit, mirror } = await start();
   await mirror(thr("sync-1", { status: "active" }));
   await flush();
-  void emit("thread.idle", { thread: thr("sync-1"), lastAssistantText: "Done" });
-  // No await between the emit and the check: the handler did not defer.
+  // A top-level idle asks which threads still run, so it settles after that lookup.
+  await emit("thread.idle", { thread: thr("sync-1"), lastAssistantText: "Done" });
   expect(cardOf("sync-1")).toMatchObject({ run_state: "idle" });
   expect(cardOf("sync-1").settled_at).toBeGreaterThan(0);
+  // No await between the emit and the check: the handler did not defer.
   void emit("thread.failed", { thread: thr("sync-1"), error: "late" });
   expect(cardOf("sync-1")).toMatchObject({ run_state: "failed", attention_reason: "late" });
 });
@@ -1219,4 +1229,463 @@ test("reconcile leaves the card of a pending or stopping thread alone", async ()
   context.ctx.list = handler;
   await runPass(context, 4);
   expect([cardOf("ps-pending"), cardOf("ps-stopping")]).toStrictEqual(before);
+});
+
+// ---- Sub-threads keep their top-level card live ------------------------------------------------
+// A sub-thread never gets a card of its own (isMirrorable). While one runs, its top-level
+// thread's mirror card is working; when nothing below that thread runs any more, it settles.
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const deferred = <T>() => {
+  let resolve: (value: T) => void = () => {};
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+};
+// The plugin's own start-up backfill must be over before a test swaps the fake host's answers.
+const startQuiet = async (options?: Parameters<typeof setup>[0]) => {
+  const context = await start(options);
+  await flush();
+  return context;
+};
+const running = (context: Setup, ...ids: string[]) => {
+  context.ctx.running = () => ids.map((id) => ({ id, hostId: null }));
+};
+const kid = (id: string, parentThreadId: string, overrides: Record<string, unknown> = {}) =>
+  thr(id, { parentThreadId, status: "active", ...overrides });
+const runningCalls = (context: Setup) => context.harness.inspection.sdk.callsTo("threads.listRunning").length;
+const warned = (context: Setup, text: string) =>
+  context.harness.logEntries.some((entry: any) => entry.level === "warn" && entry.message.includes(text));
+// Run one backfill pass and wait for its `lookups` listRunning calls (backfill, then reconcile).
+async function rerun(context: Setup, lookups: number) {
+  const before = runningCalls(context);
+  await sleep(3);
+  await context.harness.behavior.setSettings({ autoCardThreads: false });
+  await context.harness.behavior.setSettings({ autoCardThreads: true });
+  await until(() => runningCalls(context) >= before + lookups);
+  await flush();
+  await flush();
+}
+
+test("a sub-thread going active reopens its settled top-level card as working, with no card, history or notice of its own", async () => {
+  const context = await startQuiet();
+  const { db, cards, cardOf, eventsOf, notifications, emit, known, mirror } = context;
+  const root = await mirror(thr("root-1", { status: "active" }));
+  known.set("kid-1", kid("kid-1", "root-1"));
+  running(context);
+  await emit("thread.idle", { thread: thr("root-1") });
+  expect(cardOf("root-1")).toMatchObject({ run_state: "idle" });
+  expect(cardOf("root-1").settled_at).toBeGreaterThan(0);
+  db.prepare("UPDATE triage_tasks SET stage_id = 'stage-todo', attention_reason = 'needs you' WHERE id = ?").run(root.id);
+  const history = eventsOf(root.id);
+  await emit("thread.active", { thread: known.get("kid-1") });
+  expect(cardOf("root-1")).toMatchObject({ stage_id: "stage-progress", run_state: "working", attention_reason: null, settled_at: null });
+  expect(eventsOf(root.id)).toStrictEqual(history);
+  expect(notifications()).toStrictEqual([]);
+  expect(cards().map((card) => card.thread_id)).toStrictEqual(["root-1"]);
+});
+
+test("a sub-thread going active under a top-level thread with no card creates that card, then marks it working", async () => {
+  const context = await startQuiet();
+  const { cards, cardOf, eventsOf, emit, known } = context;
+  known.set("root-2", thr("root-2", { status: "idle" }));
+  known.set("kid-2", kid("kid-2", "root-2"));
+  await emit("thread.active", { thread: known.get("kid-2") });
+  expect(cardOf("root-2")).toMatchObject({ origin: "mirror", stage_id: "stage-progress", run_state: "working", settled_at: null });
+  expect(eventsOf(cardOf("root-2").id)).toStrictEqual([{ actor: "bb", event: "mirrored" }]);
+  expect(cards().length).toBe(1);
+});
+
+test("a grandchild going active reopens the top-level card, and a parent cycle ends the walk without a card", async () => {
+  const context = await startQuiet();
+  const { cards, cardOf, emit, known, mirror, harness } = context;
+  await mirror(thr("root-3", { status: "pending" }));
+  known.set("mid-3", thr("mid-3", { parentThreadId: "root-3" }));
+  known.set("leaf-3", kid("leaf-3", "mid-3"));
+  await emit("thread.active", { thread: known.get("leaf-3") });
+  expect(cardOf("root-3")).toMatchObject({ stage_id: "stage-progress", run_state: "working" });
+  const lookups = harness.inspection.sdk.callsTo("threads.get").length;
+  // c -> a -> b -> a: the walk stops at b, which still has a parent, so nothing is carded.
+  known.set("cyc-a", thr("cyc-a", { parentThreadId: "cyc-b" }));
+  known.set("cyc-b", thr("cyc-b", { parentThreadId: "cyc-a" }));
+  const result = await emit("thread.active", { thread: kid("cyc-c", "cyc-a") });
+  expect(result.errors).toStrictEqual([]);
+  expect(harness.inspection.sdk.callsTo("threads.get").length - lookups).toBe(2);
+  expect(cards().map((card) => card.thread_id)).toStrictEqual(["root-3"]);
+});
+
+test("a done or stopped top-level card is not reopened by a running sub-thread", async () => {
+  const context = await startQuiet();
+  const { db, cardOf, emit, known, mirror, rpc } = context;
+  const done = await mirror(thr("root-done", { status: "pending" }));
+  await rpc("moveTask", { number: done.number, stageId: "stage-completed" });
+  const stopped = await mirror(thr("root-stopped", { status: "active" }));
+  db.prepare("UPDATE triage_tasks SET run_state = 'stopped' WHERE id = ?").run(stopped.id);
+  const before = { done: { ...cardOf("root-done") }, stopped: { ...cardOf("root-stopped") } };
+  known.set("kid-done", kid("kid-done", "root-done"));
+  known.set("kid-stopped", kid("kid-stopped", "root-stopped"));
+  await emit("thread.active", { thread: known.get("kid-done") });
+  await emit("thread.active", { thread: known.get("kid-stopped") });
+  expect(cardOf("root-done")).toStrictEqual(before.done);
+  expect(cardOf("root-stopped")).toStrictEqual(before.stopped);
+});
+
+test("a tombstoned, hidden or archived top-level thread gets no card from a running sub-thread", async () => {
+  const context = await startQuiet();
+  const { db, cards, emit, known } = context;
+  db.prepare("INSERT INTO triage_mirror_tombstones (thread_id, created_at) VALUES ('root-tomb', 1)").run();
+  known.set("root-tomb", thr("root-tomb"));
+  known.set("root-hidden", thr("root-hidden", { visibility: "hidden" }));
+  known.set("root-archived", thr("root-archived", { archivedAt: 5 }));
+  for (const parent of ["root-tomb", "root-hidden", "root-archived"]) {
+    await emit("thread.active", { thread: kid(`kid-of-${parent}`, parent) });
+  }
+  expect(cards()).toStrictEqual([]);
+});
+
+test("an existing card of a hidden top-level thread, and a manual card, do not reopen when a sub-thread goes active", async () => {
+  const context = await startQuiet();
+  const { cardOf, emit, known, mirror, importManual } = context;
+  await mirror(thr("root-hid", { status: "pending" }));
+  known.set("root-hid", thr("root-hid", { visibility: "hidden" }));
+  const manual = await importManual(thr("root-man", { status: "pending" }));
+  const before = { hidden: { ...cardOf("root-hid") }, manual: { ...cardOf("root-man") } };
+  await emit("thread.active", { thread: kid("kid-hid", "root-hid") });
+  await emit("thread.active", { thread: kid("kid-man", "root-man") });
+  expect(cardOf("root-hid")).toStrictEqual(before.hidden);
+  expect(cardOf("root-man")).toStrictEqual(before.manual);
+  expect(manual.number).toBe(cardOf("root-man").number);
+  expect(cardOf("root-man").origin).toBe("manual");
+});
+
+test("a sub-thread going idle, failed, archived or deleted settles the top-level card when nothing else runs, adding no attention", async () => {
+  const context = await startQuiet();
+  const { cardOf, emit, known, mirror } = context;
+  running(context);
+  for (const event of ["thread.idle", "thread.failed", "thread.archived", "thread.deleted"]) {
+    const rootId = `root-${event}`;
+    await mirror(thr(rootId, { status: "active" }));
+    known.set(`kid-${event}`, kid(`kid-${event}`, rootId));
+    await emit(event, { thread: known.get(`kid-${event}`), error: "boom" });
+    expect(cardOf(rootId)).toMatchObject({ stage_id: "stage-progress", run_state: "idle", attention_reason: null });
+    expect(cardOf(rootId).settled_at).toBeGreaterThan(0);
+  }
+});
+
+test("the card stays working while the top-level thread or another sub-thread still runs, including a root's own idle", async () => {
+  const context = await startQuiet();
+  const { cardOf, emit, known, mirror } = context;
+  for (const id of ["live-self", "live-other", "live-deep"]) await mirror(thr(id, { status: "active" }));
+  known.set("kid-self", kid("kid-self", "live-self"));
+  known.set("kid-other-a", kid("kid-other-a", "live-other"));
+  known.set("kid-other-b", kid("kid-other-b", "live-other"));
+  known.set("mid-deep", kid("mid-deep", "live-deep"));
+  known.set("leaf-deep", kid("leaf-deep", "mid-deep"));
+  // listRunning names the same thread twice and a thread the host no longer lists: both are harmless.
+  running(context, "live-self", "kid-other-b", "kid-other-b", "leaf-deep", "vanished");
+  context.ctx.list = worldOf([thr("live-self"), known.get("kid-other-b"), known.get("leaf-deep")]).handler;
+  await emit("thread.idle", { thread: known.get("kid-self") });
+  await emit("thread.idle", { thread: known.get("kid-other-a") });
+  await emit("thread.failed", { thread: known.get("mid-deep"), error: "boom" });
+  // A top-level thread's own idle: a running sub-thread keeps it working.
+  await emit("thread.idle", { thread: thr("live-other") });
+  for (const id of ["live-self", "live-other", "live-deep"]) {
+    expect(cardOf(id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+  }
+});
+
+test("a child end under a card that is not working, failed, stopped, done, manual or missing makes no lookup", async () => {
+  const context = await startQuiet();
+  const { db, emit, known, mirror, importManual, cardOf } = context;
+  const failed = await mirror(thr("nw-failed", { status: "error" }));
+  const stopped = await mirror(thr("nw-stopped", { status: "active" }));
+  db.prepare("UPDATE triage_tasks SET run_state = 'stopped' WHERE id = ?").run(stopped.id);
+  await mirror(thr("nw-idle", { status: "pending" }));
+  const doneWorking = await mirror(thr("nw-done", { status: "active" }));
+  db.prepare("UPDATE triage_tasks SET stage_id = 'stage-completed' WHERE id = ?").run(doneWorking.id);
+  await importManual(thr("nw-manual", { status: "pending" }));
+  known.set("nw-nocard", thr("nw-nocard"));
+  const before = ["nw-failed", "nw-stopped", "nw-idle", "nw-done", "nw-manual"].map((id) => ({ ...cardOf(id) }));
+  const asked = runningCalls(context);
+  for (const id of ["nw-failed", "nw-stopped", "nw-idle", "nw-done", "nw-manual", "nw-nocard"]) {
+    known.set(`kid-${id}`, kid(`kid-${id}`, id));
+    await emit("thread.idle", { thread: known.get(`kid-${id}`) });
+  }
+  expect(failed.run_state).toBe("failed");
+  expect(["nw-failed", "nw-stopped", "nw-idle", "nw-done", "nw-manual"].map((id) => cardOf(id))).toStrictEqual(before);
+  expect(runningCalls(context)).toBe(asked);
+});
+
+test("a root's own idle on a failed or stopped card keeps today's path and asks nothing", async () => {
+  const context = await startQuiet();
+  const { db, cardOf, emit, mirror } = context;
+  await mirror(thr("own-failed", { status: "error" }));
+  const stopped = await mirror(thr("own-stopped", { status: "active" }));
+  db.prepare("UPDATE triage_tasks SET run_state = 'stopped' WHERE id = ?").run(stopped.id);
+  const asked = runningCalls(context);
+  await emit("thread.idle", { thread: thr("own-failed") });
+  await emit("thread.idle", { thread: thr("own-stopped") });
+  expect(cardOf("own-stopped").run_state).toBe("stopped");
+  expect(cardOf("own-failed").settled_at).toBeGreaterThan(0);
+  expect(runningCalls(context)).toBe(asked);
+});
+
+test("a root's idle lookup that resolves after a sub-thread went active leaves the card working", async () => {
+  const context = await startQuiet();
+  const { ctx, cardOf, emit, known, mirror } = context;
+  await mirror(thr("r1-root", { status: "active" }));
+  known.set("r1-kid", kid("r1-kid", "r1-root"));
+  const gate = deferred<unknown[]>();
+  ctx.running = () => gate.promise;
+  await sleep(3);
+  const idle = emit("thread.idle", { thread: thr("r1-root") });
+  await sleep(3);
+  // The reopen touches the card after the idle handler read it.
+  await emit("thread.active", { thread: known.get("r1-kid") });
+  gate.resolve([]);
+  await idle;
+  expect(cardOf("r1-root")).toMatchObject({ run_state: "working", stage_id: "stage-progress", settled_at: null });
+});
+
+test("a sub-thread's active walk that resolves after its idle settled the card leaves the card settled", async () => {
+  const context = await startQuiet();
+  const { cardOf, emit, known, mirror, harness } = context;
+  await mirror(thr("r2-root", { status: "active" }));
+  known.set("r2-kid", kid("r2-kid", "r2-root"));
+  running(context);
+  const gate = deferred<unknown>();
+  let walks = 0;
+  harness.inspection.sdk.stub("threads.get", async (args: { threadId: string }) =>
+    args.threadId === "r2-root" && ++walks === 1 ? gate.promise : known.get(args.threadId));
+  const active = emit("thread.active", { thread: known.get("r2-kid") });
+  await sleep(3);
+  await emit("thread.idle", { thread: known.get("r2-kid") });
+  expect(cardOf("r2-root").run_state).toBe("idle");
+  gate.resolve(known.get("r2-root"));
+  await active;
+  expect(cardOf("r2-root")).toMatchObject({ run_state: "idle", stage_id: "stage-progress" });
+  expect(cardOf("r2-root").settled_at).toBeGreaterThan(0);
+});
+
+test("a sub-thread's active that is overtaken while its top-level card is being created leaves the new card unopened", async () => {
+  const context = await startQuiet();
+  const { cardOf, emit, known } = context;
+  known.set("r4-root", thr("r4-root", { status: "idle" }));
+  known.set("r4-kid", kid("r4-kid", "r4-root"));
+  const release = gateProjects(context);
+  const active = emit("thread.active", { thread: known.get("r4-kid") });
+  await sleep(5);
+  const idle = emit("thread.idle", { thread: known.get("r4-kid") });
+  await sleep(5);
+  release();
+  await active;
+  await idle;
+  expect(cardOf("r4-root")).toMatchObject({ stage_id: "stage-todo", run_state: "idle" });
+});
+
+test("sub-thread events wait for their top-level card's creation in flight", async () => {
+  const context = await startQuiet();
+  const { cardOf, emit, known } = context;
+  const release = gateProjects(context);
+  known.set("w-root", thr("w-root", { status: "idle" }));
+  known.set("w-kid", kid("w-kid", "w-root"));
+  void emit("thread.created", { thread: known.get("w-root") });
+  await sleep(5);
+  const active = emit("thread.active", { thread: known.get("w-kid") });
+  await sleep(5);
+  expect(cardOf("w-root")).toBeUndefined();
+  release();
+  await active;
+  expect(cardOf("w-root")).toMatchObject({ stage_id: "stage-progress", run_state: "working" });
+  // The same wait on a child's end: a creation in flight delays it, then the card settles.
+  const gate = gateProjects(context);
+  known.set("e-root", thr("e-root", { status: "active" }));
+  known.set("e-kid", kid("e-kid", "e-root"));
+  void emit("thread.created", { thread: known.get("e-root") });
+  await sleep(5);
+  const ended = emit("thread.idle", { thread: known.get("e-kid") });
+  await sleep(5);
+  gate();
+  await ended;
+  expect(cardOf("e-root")).toMatchObject({ run_state: "idle" });
+});
+
+test("a failed card creation for a running sub-thread's top-level thread is logged, not thrown", async () => {
+  const context = await startQuiet();
+  const { db, cards, emit, known } = context;
+  db.prepare("DELETE FROM triage_stages WHERE system_role = 'intake'").run();
+  known.set("f-root", thr("f-root", { status: "idle" }));
+  const result = await emit("thread.active", { thread: kid("f-kid", "f-root") });
+  expect(result.errors).toStrictEqual([]);
+  expect(cards()).toStrictEqual([]);
+  expect(warned(context, "could not card session f-root")).toBe(true);
+});
+
+test("a top-level lookup that fails or finds nothing changes no card and warns", async () => {
+  const context = await startQuiet();
+  const { cardOf, emit, known, mirror, harness } = context;
+  await mirror(thr("l-root", { status: "active" }));
+  const before = { ...cardOf("l-root") };
+  running(context);
+  // The parent is unknown to the host: threads.get answers nothing.
+  await emit("thread.active", { thread: kid("l-kid", "ghost-parent") });
+  await emit("thread.idle", { thread: kid("l-kid", "ghost-parent") });
+  expect(warned(context, "could not find the top-level session of l-kid")).toBe(true);
+  expect(warned(context, "session ghost-parent was not found")).toBe(true);
+  harness.inspection.sdk.stub("threads.get", async () => { throw new Error("host down"); });
+  known.set("l-kid2", kid("l-kid2", "l-root"));
+  await emit("thread.active", { thread: known.get("l-kid2") });
+  await emit("thread.archived", { thread: known.get("l-kid2") });
+  expect(warned(context, "host down")).toBe(true);
+  expect(cardOf("l-root")).toStrictEqual(before);
+});
+
+test("a failed running-threads lookup leaves a child end unchanged and settles a root's own idle as before", async () => {
+  const context = await startQuiet();
+  const { cardOf, emit, known, mirror } = context;
+  await mirror(thr("q-root", { status: "active" }));
+  await mirror(thr("q-own", { status: "active" }));
+  known.set("q-kid", kid("q-kid", "q-root"));
+  context.ctx.running = () => { throw new Error("listRunning down"); };
+  const before = { ...cardOf("q-root") };
+  await emit("thread.idle", { thread: known.get("q-kid") });
+  expect(cardOf("q-root")).toStrictEqual(before);
+  expect(warned(context, "could not look up running sessions: listRunning down")).toBe(true);
+  await emit("thread.idle", { thread: thr("q-own") });
+  expect(cardOf("q-own")).toMatchObject({ run_state: "idle" });
+  expect(cardOf("q-own").settled_at).toBeGreaterThan(0);
+  // A lookup that fails inside the by-id list or the parent walk fails the same way.
+  context.ctx.running = () => [{ id: "q-kid", hostId: null }];
+  context.ctx.list = () => { throw new Error("list down"); };
+  await emit("thread.failed", { thread: known.get("q-kid"), error: "x" });
+  expect(cardOf("q-root")).toStrictEqual(before);
+  expect(warned(context, "list down")).toBe(true);
+});
+
+test("running threads resolve in chunks of 200 with both halves and hidden threads included", async () => {
+  const context = await startQuiet();
+  const { cardOf, emit, known, mirror } = context;
+  await mirror(thr("chunk-root", { status: "active" }));
+  known.set("chunk-kid", kid("chunk-kid", "chunk-root"));
+  running(context, ...Array.from({ length: 201 }, (_, index) => `run-${index}`));
+  await emit("thread.idle", { thread: known.get("chunk-kid") });
+  // threads.list takes at most 200 ids per call and archived is a selector (SDK ThreadListArgs).
+  const lookups = idLookups(context);
+  expect(lookups.map((args) => args.threadIds!.length).sort((left, right) => left - right)).toStrictEqual([1, 1, 200, 200]);
+  expect(lookups.filter((args) => args.archived === true).length).toBe(2);
+  for (const args of lookups) expect(args).toMatchObject({ includeHidden: true, limit: 200 });
+  expect(cardOf("chunk-root").run_state).toBe("idle");
+});
+
+test("the backfill gives a root with a running sub-thread the active stage and working, for an existing and a new card", async () => {
+  const context = await startQuiet();
+  const { cardOf, cards, eventsOf, known, mirror } = context;
+  await mirror(thr("bf-existing", { status: "idle" }));
+  known.set("bf-new", thr("bf-new", { status: "idle" }));
+  known.set("bf-kid-a", kid("bf-kid-a", "bf-existing"));
+  known.set("bf-kid-b", kid("bf-kid-b", "bf-new"));
+  context.ctx.list = worldOf([thr("bf-existing"), known.get("bf-kid-a"), known.get("bf-kid-b")]).handler;
+  running(context, "bf-kid-a", "bf-kid-b");
+  await rerun(context, 2);
+  for (const id of ["bf-existing", "bf-new"]) {
+    expect(cardOf(id)).toMatchObject({ origin: "mirror", stage_id: "stage-progress", run_state: "working", settled_at: null });
+  }
+  expect(eventsOf(cardOf("bf-new").id)).toStrictEqual([{ actor: "bb", event: "backfilled" }]);
+  expect(cards().map((card) => card.thread_id).sort()).toStrictEqual(["bf-existing", "bf-new"]);
+});
+
+test("the backfill skips a tombstoned or archived live root, and warns when a live root cannot be carded", async () => {
+  const context = await startQuiet();
+  const { db, cards, known } = context;
+  db.prepare("INSERT INTO triage_mirror_tombstones (thread_id, created_at) VALUES ('bt-tomb', 1)").run();
+  known.set("bt-tomb", thr("bt-tomb"));
+  known.set("bt-archived", thr("bt-archived", { archivedAt: 5 }));
+  known.set("bt-broken", thr("bt-broken"));
+  const threads = [kid("bt-kid-1", "bt-tomb"), kid("bt-kid-2", "bt-archived"), kid("bt-kid-3", "bt-broken")];
+  for (const thread of threads) known.set(thread.id, thread);
+  context.ctx.list = worldOf(threads).handler;
+  running(context, "bt-kid-1", "bt-kid-2", "bt-kid-3", "bt-archived");
+  db.prepare("DELETE FROM triage_stages WHERE system_role = 'intake'").run();
+  await rerun(context, 1);
+  expect(cards()).toStrictEqual([]);
+  expect(warned(context, "could not card session bt-broken")).toBe(true);
+});
+
+test("a failed running-threads lookup in the backfill and in reconcile writes nothing", async () => {
+  const context = await startQuiet();
+  const { cardOf, cards, known, mirror } = context;
+  await mirror(thr("bl-root", { status: "active" }));
+  known.set("bl-root", thr("bl-root", { status: "idle" }));
+  known.set("bl-kid", kid("bl-kid", "bl-root"));
+  context.ctx.list = worldOf([thr("bl-root"), known.get("bl-kid")]).handler;
+  context.ctx.running = () => { throw new Error("listRunning down"); };
+  const before = cards().map((card) => ({ ...card }));
+  await rerun(context, 2);
+  expect(cards()).toStrictEqual(before);
+  expect(cardOf("bl-root")).toMatchObject({ run_state: "working", settled_at: null });
+});
+
+test("a pass that is switched off while it looks up running threads cards no live root", async () => {
+  const context = await startQuiet();
+  const { cards, known, harness } = context;
+  known.set("bo-root", thr("bo-root"));
+  known.set("bo-kid", kid("bo-kid", "bo-root"));
+  context.ctx.list = worldOf([known.get("bo-kid")]).handler;
+  const gate = deferred<unknown[]>();
+  let asked = false;
+  context.ctx.running = () => { asked = true; return gate.promise; };
+  await harness.behavior.setSettings({ autoCardThreads: false });
+  await sleep(3);
+  await harness.behavior.setSettings({ autoCardThreads: true });
+  await until(() => asked);
+  await harness.behavior.setSettings({ autoCardThreads: false });
+  gate.resolve([{ id: "bo-kid", hostId: null }]);
+  await flush();
+  await flush();
+  expect(cards()).toStrictEqual([]);
+});
+
+test("reconcile settles a working active-stage card whose thread is idle with nothing running below it, and only that", async () => {
+  const context = await startQuiet();
+  const { db, cardOf, known, mirror, rpc } = context;
+  const ids = ["rs-settle", "rs-live", "rs-idlecard", "rs-active", "rs-attention"];
+  for (const id of ids) await mirror(thr(id, { status: "active" }));
+  db.prepare("UPDATE triage_tasks SET run_state = 'idle' WHERE thread_id = 'rs-idlecard'").run();
+  await rpc("moveTask", { number: cardOf("rs-attention").number, stageId: "stage-attention" });
+  const threads = ids.map((id) => thr(id, { status: id === "rs-active" ? "active" : "idle" }));
+  known.set("rs-kid", kid("rs-kid", "rs-live"));
+  context.ctx.list = worldOf([...threads, known.get("rs-kid")]).handler;
+  running(context, "rs-kid", "rs-active");
+  const before = Object.fromEntries(ids.map((id) => [id, { ...cardOf(id) }]));
+  await rerun(context, 2);
+  expect(cardOf("rs-settle")).toMatchObject({ run_state: "idle", stage_id: "stage-progress" });
+  expect(cardOf("rs-settle").settled_at).toBeGreaterThan(0);
+  // The running root rs-active is reopened by the backfill like any live root, which only touches updated_at.
+  for (const id of ids.filter((id) => id !== "rs-settle" && id !== "rs-live")) {
+    expect({ ...cardOf(id), updated_at: 0 }).toStrictEqual({ ...before[id], updated_at: 0 });
+  }
+  // The live root was reopened by the backfill: still working, still unsettled.
+  expect(cardOf("rs-live")).toMatchObject({ run_state: "working", stage_id: "stage-progress", settled_at: null });
+});
+
+test("reconcile leaves a card reopened after its candidates were read working", async () => {
+  const context = await startQuiet();
+  const { ctx, cardOf, emit, known, mirror } = context;
+  await mirror(thr("rr-root", { status: "active" }));
+  known.set("rr-root", thr("rr-root", { status: "idle" }));
+  known.set("rr-kid", kid("rr-kid", "rr-root"));
+  ctx.list = worldOf([thr("rr-root", { status: "idle" })]).handler;
+  const gate = deferred<unknown[]>();
+  let calls = 0;
+  // The backfill's own lookup answers at once; reconcile's waits.
+  ctx.running = () => (++calls === 2 ? gate.promise : []);
+  await sleep(3);
+  await context.harness.behavior.setSettings({ autoCardThreads: false });
+  await context.harness.behavior.setSettings({ autoCardThreads: true });
+  await until(() => calls === 2);
+  await sleep(3);
+  await emit("thread.active", { thread: known.get("rr-kid") });
+  gate.resolve([]);
+  await flush();
+  await flush();
+  expect(cardOf("rr-root")).toMatchObject({ run_state: "working", stage_id: "stage-progress", settled_at: null });
 });

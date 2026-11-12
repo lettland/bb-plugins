@@ -51,6 +51,8 @@ const taskSchema = z.object({
   request: newThreadRequestSchema.nullable(),
   scheduledAt: z.number().int().nullable(),
   threadId: z.string().nullable(),
+  /** Mirror cards are a view of a session; the board needs to tell them from manual ones. */
+  origin: z.enum(["manual", "mirror"]),
   sidebarVisible: z.boolean().nullable().default(null),
   runState: z.enum([
     "queued",
@@ -247,6 +249,8 @@ type CardThread = Pick<
   | "id" | "projectId" | "environmentId" | "providerId" | "status" | "title" | "titleFallback" | "archivedAt" | "deletedAt"
   | "parentThreadId" | "visibility"
 >;
+/** A thread as the root walk and shouldMirror read it. */
+type RootThread = CardThread & { originPluginId: string | null };
 
 /** Per-pass lookup caches: each value is the pending promise, so concurrent cards share one call. */
 interface LookupCaches {
@@ -444,6 +448,7 @@ function toTask(row: TaskRow) {
     request: storedRequest.success ? storedRequest.data : null,
     scheduledAt: row.scheduled_at,
     threadId: row.thread_id,
+    origin: row.origin,
     runState: row.run_state,
     attentionReason: row.attention_reason,
     readAt: row.read_at,
@@ -1035,6 +1040,159 @@ export default async function plugin(bb: BbPluginApi) {
 
   /** Sessions the knob still wants mirrored; checked before every page and every card. */
   const mirroringWanted = () => autoCardThreads && !disposed;
+
+  /**
+   * The top-level thread above `thread`, found by walking parentThreadId. The
+   * visited set ends a walk through a parent cycle at the last thread reached;
+   * that thread still has a parent, so it is never mirrorable.
+   */
+  const topLevelOf = async (thread: RootThread, getThread: (threadId: string) => Promise<RootThread>) => {
+    const seen = new Set([thread.id]);
+    let current = thread;
+    while (current.parentThreadId !== null) {
+      if (seen.has(current.parentThreadId)) break;
+      seen.add(current.parentThreadId);
+      current = await getThread(current.parentThreadId);
+    }
+    return current;
+  };
+  /** A threads.get that memoizes per walk; an absent answer is a failed lookup. */
+  const parentLookup = () => {
+    const pending = new Map<string, Promise<RootThread>>();
+    return (threadId: string) =>
+      memoize(pending, threadId, async () => {
+        const found = await bb.sdk.threads.get({ threadId });
+        if (!found) throw new Error(`session ${threadId} was not found`);
+        return found;
+      });
+  };
+
+  /**
+   * Top-level threads that are running or have a running descendant, by id.
+   * `undefined` when any lookup fails: callers then leave cards unchanged.
+   * threads.listRunning returns only threads in `starting` or `active`
+   * (SDK bundled-types ThreadsArea.listRunning), so it needs no paging; its ids
+   * are resolved with the same batched threads.list calls as snapshot
+   * (archived is a selector, so each chunk needs the archived companion call).
+   */
+  const liveRoots = async () => {
+    try {
+      const running = await bb.sdk.threads.listRunning();
+      const threadIds = [...new Set(running.map((entry) => entry.id))];
+      const batches: Promise<ThreadListItem[]>[] = [];
+      for (let from = 0; from < threadIds.length; from += THREAD_LIST_BATCH) {
+        const chunk = threadIds.slice(from, from + THREAD_LIST_BATCH);
+        batches.push(bb.sdk.threads.list({ threadIds: chunk, includeHidden: true, limit: THREAD_LIST_BATCH }));
+        batches.push(bb.sdk.threads.list({ threadIds: chunk, archived: true, includeHidden: true, limit: THREAD_LIST_BATCH }));
+      }
+      const listed = new Map<string, RootThread>();
+      for (const batch of await Promise.all(batches)) {
+        for (const thread of batch) listed.set(thread.id, thread);
+      }
+      const lookup = parentLookup();
+      const getThread = async (threadId: string) => listed.get(threadId) ?? lookup(threadId);
+      const roots = new Map<string, RootThread>();
+      for (const threadId of threadIds) {
+        // A thread that stopped or was deleted since listRunning answered is not listed: it is no longer live.
+        const thread = listed.get(threadId);
+        if (!thread) continue;
+        const root = await topLevelOf(thread, getThread);
+        roots.set(root.id, root);
+      }
+      return roots;
+    } catch (error) {
+      bb.log.warn(`Triage could not look up running sessions: ${errorMessage(error)}`);
+      return undefined;
+    }
+  };
+
+  /**
+   * The mirror card for a live descendant's top-level thread goes back to
+   * working in the active stage. Like the mirror reopen in thread.active it
+   * writes no history row. `card` is the row as it was read; the UPDATE
+   * writes only if no event touched the card since.
+   */
+  const reopenMirrorCard = (root: RootThread, card: TaskRow) => {
+    if (!isMirrorable(root) || card.origin !== "mirror" || card.run_state === "stopped") return;
+    if (getStageRow(card.stage_id).system_role === "done") return;
+    db.prepare(
+      "UPDATE triage_tasks SET stage_id = ?, run_state = 'working', attention_reason = NULL, settled_at = NULL, updated_at = ? WHERE id = ? AND updated_at = ?",
+    ).run(getSystemStage("active").id, Date.now(), card.id, card.updated_at);
+    publishSoon();
+  };
+
+  /**
+   * Settle a working mirror card unless its thread or a descendant still runs.
+   * `card` is read before the lookup's await and the UPDATE is guarded by its
+   * updated_at, so an event that touched the card meanwhile (a child going
+   * active reopens it) wins. A failed lookup settles only for `settleOnFailure`.
+   */
+  const settleUnlessLive = async (card: TaskRow, rootId: string, settleOnFailure: boolean) => {
+    const live = await liveRoots();
+    if (live ? live.has(rootId) : !settleOnFailure) return;
+    const now = Date.now();
+    db.prepare(
+      "UPDATE triage_tasks SET run_state = CASE WHEN run_state = 'working' THEN 'idle' ELSE run_state END, settled_at = COALESCE(settled_at, ?), updated_at = ? WHERE id = ? AND updated_at = ?",
+    ).run(now, now, card.id, card.updated_at);
+    publishSoon();
+  };
+
+  // The latest lifecycle event seen per sub-thread. A child's thread.active resolves its
+  // root with awaits, so it checks that no later event for that child arrived meanwhile.
+  const childEventSeq = new Map<string, number>();
+  let childEventCount = 0;
+  const stampChildEvent = (threadId: string) => {
+    childEventSeq.set(threadId, ++childEventCount);
+    return childEventCount;
+  };
+
+  /** A sub-thread went active: its top-level thread's mirror card goes live. */
+  const childActive = async (child: RootThread) => {
+    const stamp = stampChildEvent(child.id);
+    let root: RootThread;
+    try {
+      root = await topLevelOf(child, parentLookup());
+    } catch (error) {
+      bb.log.warn(`Triage could not find the top-level session of ${child.id}: ${errorMessage(error)}`);
+      return;
+    }
+    const creating = pendingMirror.get(root.id);
+    if (creating) await creating;
+    if (childEventSeq.get(child.id) !== stamp) return;
+    if (!getTaskByThread(root.id) && shouldMirror(root)) {
+      const creation = ensureCardForThread(root, "mirror");
+      // Later events wait on a copy that never rejects.
+      trackMirror(root.id, creation.then(() => {}, () => {}));
+      try {
+        await creation;
+      } catch (error) {
+        bb.log.warn(`Triage could not card session ${root.id}: ${errorMessage(error)}`);
+        return;
+      }
+      if (childEventSeq.get(child.id) !== stamp) return;
+    }
+    const card = getTaskByThread(root.id);
+    if (card) reopenMirrorCard(root, card);
+  };
+
+  /** A sub-thread stopped running: its top-level thread's card settles unless something below it still runs. */
+  const childEnded = async (child: RootThread) => {
+    stampChildEvent(child.id);
+    let root: RootThread;
+    try {
+      root = await topLevelOf(child, parentLookup());
+    } catch (error) {
+      bb.log.warn(`Triage could not find the top-level session of ${child.id}: ${errorMessage(error)}`);
+      return;
+    }
+    const creating = pendingMirror.get(root.id);
+    if (creating) await creating;
+    const card = getTaskByThread(root.id);
+    // No working mirror card: stop before any lookup, so hidden workers under unmirrored roots stay cheap.
+    if (card?.origin !== "mirror" || card.run_state !== "working") return;
+    if (getStageRow(card.stage_id).system_role === "done") return;
+    await settleUnlessLive(card, root.id, false);
+  };
   /**
    * Repair open mirror cards whose thread events never arrived (a creation that
    * raced its events, a thread deleted while the plugin was unloaded, a child
@@ -1046,9 +1204,9 @@ export default async function plugin(bb: BbPluginApi) {
   const reconcileMirrorCards = async (passStart: number) => {
     const candidates = db
       .prepare(
-        "SELECT id, thread_id, stage_id, updated_at FROM triage_tasks WHERE origin = 'mirror' AND settled_at IS NULL AND thread_id IS NOT NULL AND created_at < ?",
+        "SELECT id, thread_id, stage_id, run_state, updated_at FROM triage_tasks WHERE origin = 'mirror' AND settled_at IS NULL AND thread_id IS NOT NULL AND created_at < ?",
       )
-      .all(passStart) as { id: string; thread_id: string; stage_id: string; updated_at: number }[];
+      .all(passStart) as { id: string; thread_id: string; stage_id: string; run_state: string; updated_at: number }[];
     if (candidates.length === 0) return;
     // Same lookup quirks as snapshot: ids go out in chunks, includeHidden is on
     // every call, archived:true selects only the archived half, and a deleted
@@ -1081,6 +1239,9 @@ export default async function plugin(bb: BbPluginApi) {
         bb.log.warn(`Triage could not confirm session ${missing[index]}; settling its card: ${errorMessage(answer.reason)}`);
       }
     });
+    // Fresh, never the backfill's set: a working card in the active stage settles only when
+    // its thread is idle and nothing below it runs. A failed lookup skips that repair.
+    const live = await liveRoots();
     // The writes below run without an await, so this check covers every one of them.
     if (!mirroringWanted()) return;
     const intake = db.prepare("SELECT id FROM triage_stages WHERE system_role = 'intake'").get() as { id: string } | undefined;
@@ -1114,6 +1275,11 @@ export default async function plugin(bb: BbPluginApi) {
             values: [getSystemStage("active").id],
           };
         }
+      } else if (
+        live && card.run_state === "working" && thread.status === "idle" && !live.has(card.thread_id) &&
+        card.stage_id === getSystemStage("active").id
+      ) {
+        update = settle;
       }
       if (!update) continue;
       // `set` is always one of the literal fragments above; values stay bound parameters.
@@ -1178,6 +1344,18 @@ export default async function plugin(bb: BbPluginApi) {
           await ensureCardForThread(listed, "mirror", caches, { event: "backfilled", settleIfDormant: true });
         } catch (error) {
           bb.log.warn(`Triage could not card session ${listed.id}: ${errorMessage(error)}`);
+        }
+      }
+      // Roots with a running descendant get their card back to working; one lookup serves the whole pass.
+      const live = completed && mirroringWanted() ? await liveRoots() : undefined;
+      for (const root of live?.values() ?? []) {
+        if (!mirroringWanted()) break;
+        if (!shouldMirror(root)) continue;
+        try {
+          const card = await ensureCardForThread(root, "mirror", caches, { event: "backfilled", settleIfDormant: true });
+          if (card) reopenMirrorCard(root, card);
+        } catch (error) {
+          bb.log.warn(`Triage could not card session ${root.id}: ${errorMessage(error)}`);
         }
       }
       if (completed && mirroringWanted()) await reconcileMirrorCards(passStart);
@@ -1610,6 +1788,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.events.on("thread.active", async ({ thread }) => {
+    if (thread.parentThreadId !== null) await childActive(thread);
     const creating = pendingMirror.get(thread.id);
     if (creating) await creating;
     const task = getTaskByThread(thread.id);
@@ -1643,6 +1822,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.events.on("thread.idle", async ({ thread }) => {
+    if (thread.parentThreadId !== null) await childEnded(thread);
     const creating = pendingMirror.get(thread.id);
     if (creating) await creating;
     const task = getTaskByThread(thread.id);
@@ -1654,6 +1834,11 @@ export default async function plugin(bb: BbPluginApi) {
       return;
     }
     if (mirrored) {
+      // A running descendant keeps a top-level card working. A failed lookup settles it as before.
+      if (thread.parentThreadId === null && task.run_state === "working") {
+        await settleUnlessLive(task, thread.id, true);
+        return;
+      }
       // A view stays quiet: no read marker change, no notification, no history row.
       // It still settles, so an idle session leaves In Progress; thread.active reopens it.
       const now = Date.now();
@@ -1681,6 +1866,8 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.events.on("thread.failed", async ({ thread, error }) => {
+    // A failed sub-thread settles its top-level card like an idle one; the failure belongs to the child.
+    if (thread.parentThreadId !== null) await childEnded(thread);
     const creating = pendingMirror.get(thread.id);
     if (creating) await creating;
     const task = getTaskByThread(thread.id);
@@ -1706,6 +1893,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.events.on("thread.archived", async ({ thread }) => {
+    if (thread.parentThreadId !== null) await childEnded(thread);
     const creating = pendingMirror.get(thread.id);
     if (creating) await creating;
     const task = getTaskByThread(thread.id);
@@ -1741,6 +1929,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.events.on("thread.deleted", async ({ thread }) => {
     pendingVisibility.delete(thread.id);
+    if (thread.parentThreadId !== null) await childEnded(thread);
     const creating = pendingMirror.get(thread.id);
     if (creating) await creating;
     const task = getTaskByThread(thread.id);
