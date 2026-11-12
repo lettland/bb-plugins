@@ -689,7 +689,7 @@ you answer, and the answer is the `PresentPlan` result itself:
 
 - **Approve:** the result says the plan was approved in the form, and the agent implements it. The missing-plan Blocker of the code review counts this approval, but only when the answer was given in the app.
 - **Request changes:** the agent revises the plan file from your feedback and calls `PresentPlan` again, which runs a new review and then a new form. The feedback reaches the agent as quoted data, never as an instruction.
-- **Cancel** (or a stop, or the 60-minute limit): the plan stays unapproved. The agent ends its turn and says so; ask it to present the plan again and it calls `PresentPlan` with the same path. For an unchanged plan file that is a short re-review followed by a new form.
+- **Cancel** (or a stop, or the 60-minute limit): the plan stays unapproved. The agent ends its turn and says so; ask it to present the plan again and it calls `PresentPlan` with the same path. For an unchanged plan file, within two hours of the cancel, the form opens again without a review; a changed plan is reviewed as its delta first.
 - **Answer not readable:** an answer that fails the form's strict shape (for example feedback past the form's length cap) is discarded, not read as a change request. The plan stays unapproved, and the agent is told your answer was not read; ask it to present the plan again.
 
 With the form on, a chat reply is not approval: the agent's instructions say to call
