@@ -103,9 +103,10 @@ async function assertRuntimeDirectory(runtimeDirectory) {
 }
 
 // True only for a real directory (not a symlink) owned by the current user whose regular files
-// hash to `digest`. Only the bundled file names are verified: extra entries under other names are
-// ignored because manifests reach assets by name. directoryDigest skips non-regular entries, so a
-// symlinked file inside makes the digests differ.
+// hash to `digest`. Every non-dot regular file counts, so an extra or altered file makes the
+// digests differ. Symlinks, subdirectories and dot-files are skipped by directoryDigest: a symlink
+// that replaces a bundled name makes the digests differ, while one under another name is ignored,
+// which is harmless because manifests reach assets by bundled name.
 async function installedAssetsMatch(target, digest) {
   let info;
   try {
