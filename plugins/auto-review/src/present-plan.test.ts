@@ -1943,7 +1943,9 @@ describe("a cancelled approval form reopens for the unchanged plan without a rev
       await withReopenHost(files, {}, async (f) => {
         cancelOnce(f, "request-aborted");
         await f.call();
-        const before = (await markerOf(f)).value;
+        // Backdate the old marker: both calls can land in the same millisecond, so a fresh clock alone cannot show the rewrite.
+        const old = await markerOf(f);
+        await f.host.bb.storage.kv.set(old.key as string, { ...old.value, openedAt: 1 });
         // The first release of a later call armed the plan again; its marker read failed, so the old one stayed.
         f.metadata.presentPlanArmedAt = Date.now();
         f.metadata.presentPlanArmedPath = files.plan;
@@ -1959,7 +1961,7 @@ describe("a cancelled approval form reopens for the unchanged plan without a rev
         // The release wrote a new marker over the old one.
         const after = (await markerOf(f)).value;
         expect(await markerKeys(f)).toHaveLength(1);
-        expect(after?.openedAt).not.toBe(before?.openedAt);
+        expect(after?.openedAt).not.toBe(1);
       });
     });
   });
