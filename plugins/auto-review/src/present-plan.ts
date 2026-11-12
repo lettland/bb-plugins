@@ -12,7 +12,6 @@ import { PRESENT_PLAN_CHAT_KEYS } from "./chat-approval-state.js";
 import {
   clearPlanBaseline,
   deleteReleasedPlan,
-  deleteReleasedPlans,
   planScope,
   readReleasedPlan,
   settlePlanBaseline,
@@ -288,8 +287,9 @@ async function releasePlan(
  * the form opens again as it was, `reviewed` included, with no review and no
  * arm: the plan was already reviewed. Every other case returns null with the
  * marker deleted, and the call arms as before, so a changed plan still gets its
- * delta review. A plan file that does not resolve has no marker to find by path,
- * so all of the thread's markers go. The path comparison is on the resolved path
+ * delta review. A plan file that does not resolve has no marker to find by path;
+ * the call arms as before and every marker is kept (each one still expires with
+ * its window). The path comparison is on the resolved path
  * the file was read from, never the name the agent gave. With another form open
  * the call is refused and the marker kept, like a release.
  */
@@ -303,7 +303,6 @@ async function reopenReleasedPlan(
   const { bb } = review;
   const planRead = await readPlanFileForForm(bb, ctx.threadId, planFilePath);
   if (planRead.kind !== "read") {
-    await deleteReleasedPlans(bb, ctx.threadId);
     return null;
   }
   const marker = await readReleasedPlan(bb, ctx.threadId, planRead.path);
@@ -311,7 +310,9 @@ async function reopenReleasedPlan(
     return null;
   }
   const sha256 = planSha256Of(planRead.bytes);
-  if (marker.path !== planRead.path || marker.sha256 !== sha256 || now - marker.at > REVIEW_CONTINUATION_CAP_MS) {
+  const age = now - marker.at;
+  // A negative age is a clock that moved back: not fresh, as `planFormMarkerFresh` reads it.
+  if (marker.path !== planRead.path || marker.sha256 !== sha256 || age < 0 || age > REVIEW_CONTINUATION_CAP_MS) {
     await deleteReleasedPlan(bb, ctx.threadId, planRead.path);
     return null;
   }
@@ -354,7 +355,8 @@ async function presentPlan(
     const now = Date.now();
     // The mode the thread's instructions were written with; the live setting only before one is stored.
     const formMode = state.presentPlanFormMode ?? config.planApprovalForm;
-    if (formMode) {
+    // An armed plan always releases: its release writes a new marker over the old one.
+    if (formMode && !presentPlanArmed(state, planFilePath, now)) {
       const reopened = await reopenReleasedPlan(review, ctx, state, planFilePath, now);
       if (reopened !== null) {
         return reopened;

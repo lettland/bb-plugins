@@ -1872,7 +1872,7 @@ describe("a cancelled approval form reopens for the unchanged plan without a rev
     });
   });
 
-  it("arms again, and deletes the marker, for a plan file that is gone after the cancel", async () => {
+  it("arms again, and keeps the marker, for a plan file that is gone after the cancel", async () => {
     await withPlanFiles(async (files) => {
       await withReopenHost(files, {}, async (f) => {
         cancelOnce(f, "request-aborted");
@@ -1881,12 +1881,12 @@ describe("a cancelled approval form reopens for the unchanged plan without a rev
         expect(typeof (await f.call())).toBe("string");
         expect(f.requestInput).toHaveBeenCalledTimes(1);
         expect(f.metadata.presentPlanArmedPath).toBe(files.plan);
-        expect(await markerKeys(f)).toEqual([]);
+        expect(await markerKeys(f)).toHaveLength(1);
       });
     });
   });
 
-  it("arms again, and deletes the markers, for a plan path outside the allowed roots", async () => {
+  it("arms again, and keeps the marker, for a plan path outside the allowed roots", async () => {
     await withPlanFiles(async (files) => {
       await withReopenHost(files, {}, async (f) => {
         cancelOnce(f, "request-aborted");
@@ -1897,7 +1897,69 @@ describe("a cancelled approval form reopens for the unchanged plan without a rev
         expect(typeof (await f.host.harness.callAgentTool("PresentPlan", { planFilePath: outside }, CTX))).toBe("string");
         expect(f.requestInput).toHaveBeenCalledTimes(1);
         expect(f.metadata.presentPlanArmedPath).toBe(outside);
+        expect(await markerKeys(f)).toHaveLength(1);
+      });
+    });
+  });
+
+  it("keeps another plan's marker when a call names a path that does not exist, and still reopens that plan", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        expect(f.requestInput).toHaveBeenCalledTimes(1);
+        const missing = join(files.workspace, "docs", "missing.md");
+        const armed = await f.host.harness.callAgentTool("PresentPlan", { planFilePath: missing }, CTX);
+        expect(typeof armed).toBe("string");
+        expect(armed).not.toBe(presentPlanApprovalCancelledMessage("request-aborted"));
+        expect(f.requestInput).toHaveBeenCalledTimes(1);
+        expect(f.metadata.presentPlanArmedPath).toBe(missing);
+        expect(await markerKeys(f)).toHaveLength(1);
+        cancelOnce(f, "request-aborted");
+        expect(await f.call()).toBe(presentPlanApprovalCancelledMessage("request-aborted"));
+        expect(f.requestInput).toHaveBeenCalledTimes(2);
+        expect(await lastFire(f)).toMatchObject({ outcome: "stood-down", reason: "plan-reopened" });
+      });
+    });
+  });
+
+  it("does not reopen a marker whose clock is ahead of now: it arms again and deletes the marker", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        const { key, value } = await markerOf(f);
+        await f.host.bb.storage.kv.set(key!, { ...value, at: Date.now() + 60_000 });
+        expect(typeof (await f.call())).toBe("string");
+        expect(f.requestInput).toHaveBeenCalledTimes(1);
+        expect(f.metadata.presentPlanArmedPath).toBe(files.plan);
         expect(await markerKeys(f)).toEqual([]);
+      });
+    });
+  });
+
+  it("releases an armed plan instead of reopening, even when a fresh marker for the same plan exists", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        const before = (await markerOf(f)).value;
+        // The first release of a later call armed the plan again; its marker read failed, so the old one stayed.
+        f.metadata.presentPlanArmedAt = Date.now();
+        f.metadata.presentPlanArmedPath = files.plan;
+        f.metadata.presentPlanArmedSeq = 77;
+        f.metadata.presentPlanRedone = true;
+        cancelOnce(f, "request-aborted");
+        expect(await f.call()).toBe(presentPlanApprovalCancelledMessage("request-aborted"));
+        expect(f.requestInput).toHaveBeenCalledTimes(2);
+        for (const key of PRESENT_PLAN_KEYS) {
+          expect(f.metadata[key]).toBeUndefined();
+        }
+        expect(await lastFire(f)).not.toMatchObject({ reason: "plan-reopened" });
+        // The release wrote a new marker over the old one.
+        const after = (await markerOf(f)).value;
+        expect(await markerKeys(f)).toHaveLength(1);
+        expect(after?.openedAt).not.toBe(before?.openedAt);
       });
     });
   });
