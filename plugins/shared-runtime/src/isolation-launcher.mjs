@@ -1,5 +1,5 @@
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   copyFile,
@@ -52,8 +52,27 @@ async function directoryDigest(directory) {
   return { digest: hash.digest("hex"), files };
 }
 
+// The runtime directory sits inside the repository checkout, so a repository that commits it
+// as a symlink would redirect every write and removal below. It must be absent or a real
+// directory owned by the current user.
+async function assertRuntimeDirectory(runtimeDirectory) {
+  let info;
+  try {
+    info = await lstat(runtimeDirectory);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+  if (!info.isDirectory() || info.uid !== process.getuid()) {
+    deny(`${runtimeDirectory} must be a directory owned by you, not a symlink; remove it and run the operation again`);
+  }
+}
+
 export async function ensureRuntimeAssets(policy) {
   const runtimeDirectory = runtimeDirectoryPath(policy);
+  await assertRuntimeDirectory(runtimeDirectory);
   const target = path.join(runtimeDirectory, runtimeAssetsDirectoryName);
   const marker = path.join(runtimeDirectory, `${runtimeAssetsDirectoryName}.sha256`);
   const { digest, files } = await directoryDigest(assetsSourceDirectory);
@@ -67,8 +86,12 @@ export async function ensureRuntimeAssets(policy) {
     }
   }
   await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-  const temporary = path.join(runtimeDirectory, `.${runtimeAssetsDirectoryName}.${process.pid}.tmp`);
-  await rm(temporary, { recursive: true, force: true });
+  // Unique per call: two operations in one process (a shared project lock, two worktrees)
+  // must not share, remove or overwrite each other's temporary directory.
+  const temporary = path.join(
+    runtimeDirectory,
+    `.${runtimeAssetsDirectoryName}.${process.pid}.${randomUUID()}.tmp`,
+  );
   try {
     await mkdir(temporary, { recursive: true, mode: 0o755 });
     for (const name of files) {
@@ -76,7 +99,15 @@ export async function ensureRuntimeAssets(policy) {
       await chmod(path.join(temporary, name), 0o644);
     }
     await rm(target, { recursive: true, force: true });
-    await rename(temporary, target);
+    try {
+      await rename(temporary, target);
+    } catch (error) {
+      // A concurrent call published the same asset set between our rm and rename; renaming a
+      // directory onto a non-empty one fails, and what is there is complete and identical.
+      if (error?.code !== "ENOTEMPTY" && error?.code !== "EEXIST") {
+        throw error;
+      }
+    }
     await writeFile(marker, `${digest}\n`, { mode: 0o600 });
     return target;
   } finally {
@@ -187,6 +218,7 @@ export async function ensureIsolationLauncher(policy, options = {}) {
   const run = options.run ?? runInvocation;
   const runtimeDirectory = runtimeDirectoryPath(policy);
   const launcher = path.join(runtimeDirectory, isolationLauncherName);
+  await assertRuntimeDirectory(runtimeDirectory);
   await ensureRuntimeAssets(policy);
   const architecture = await dockerHostArchitecture(policy, run, options.signal);
   const { binary, expected } = await readBundledLauncher(architecture, await readPrebuiltDigests());
@@ -200,9 +232,8 @@ export async function ensureIsolationLauncher(policy, options = {}) {
   await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
   const temporaryLauncher = path.join(
     runtimeDirectory,
-    `.${isolationLauncherName}.${process.pid}.tmp`,
+    `.${isolationLauncherName}.${process.pid}.${randomUUID()}.tmp`,
   );
-  await rm(temporaryLauncher, { force: true });
   try {
     await writeFile(temporaryLauncher, binary, { mode: 0o700 });
     await chmod(temporaryLauncher, INSTALLED_LAUNCHER_MODE);

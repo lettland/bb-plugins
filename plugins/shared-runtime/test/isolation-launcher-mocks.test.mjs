@@ -25,6 +25,7 @@ mock.module("node:fs/promises", {
     lstat: (...args) => hookedFs("lstat", ...args),
     readFile: (...args) => hookedFs("readFile", ...args),
     readdir: (...args) => hookedFs("readdir", ...args),
+    rename: (...args) => hookedFs("rename", ...args),
   },
 });
 
@@ -215,4 +216,54 @@ test("an unreadable assets directory surfaces errors other than ENOENT", async (
     return fsPromises.readdir(directory);
   };
   await assert.rejects(ensureRuntimeAssets(policyFor(root)), { code: "EACCES" });
+});
+
+test("a concurrent call that published the same assets between our rm and rename is accepted", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const target = path.join(root, ".bb-runtime", "assets");
+  fsHooks.rename = async (from, to) => {
+    // The other call wins the race: its complete directory is already in place.
+    await fsPromises.mkdir(to, { recursive: true });
+    await fsPromises.writeFile(path.join(to, "other-call"), "complete");
+    return fsPromises.rename(from, to);
+  };
+  assert.equal(await ensureRuntimeAssets(policyFor(root)), target);
+  assert.deepEqual(await fsPromises.readdir(target), ["other-call"]);
+  assert.deepEqual(
+    (await fsPromises.readdir(path.join(root, ".bb-runtime"))).filter((name) => name.includes(".tmp")),
+    [],
+    "our own temporary directory is removed",
+  );
+});
+
+test("a rename failure other than a lost publish race surfaces", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  fsHooks.rename = async () => {
+    throw denied();
+  };
+  await assert.rejects(ensureRuntimeAssets(policyFor(root)), { code: "EACCES" });
+});
+
+test("a runtime directory that cannot be inspected, or that someone else owns, is refused", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "launcher-mocks-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtimeDirectory = path.join(root, ".bb-runtime");
+  await fsPromises.mkdir(runtimeDirectory);
+  fsHooks.lstat = async (filePath, ...rest) => {
+    if (filePath === runtimeDirectory) {
+      throw denied();
+    }
+    return fsPromises.lstat(filePath, ...rest);
+  };
+  await assert.rejects(ensureRuntimeAssets(policyFor(root)), { code: "EACCES" });
+  fsHooks.lstat = async (filePath, ...rest) => {
+    const info = await fsPromises.lstat(filePath, ...rest);
+    return filePath === runtimeDirectory ? Object.create(info, { uid: { value: process.getuid() + 1 } }) : info;
+  };
+  const expected = `Shared runtime denied: ${runtimeDirectory} must be a directory owned by you, not a symlink; remove it and run the operation again`;
+  await assert.rejects(ensureRuntimeAssets(policyFor(root)), { message: expected });
+  await assert.rejects(ensureIsolationLauncher(policyFor(root), { run: daemon("arm64") }), { message: expected });
+  assert.deepEqual(await fsPromises.readdir(runtimeDirectory), []);
 });

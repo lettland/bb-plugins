@@ -132,7 +132,9 @@ pass `--runtime-root`.)
    docker compose -f compose.yml -f "$here/overlay.yml" up -d
    ```
 
-   Create `overlay.yml` with `bb-shared-runtime compose-overlay > overlay.yml`.
+   Create the overlay from the primary checkout with
+   `bb-shared-runtime compose-overlay > ~/.bb/shared-runtime/projects/<projectId>/overlay.yml`.
+   Never redirect it into the repository.
 4. Run `bb-shared-runtime install` from the primary checkout.
 
 **Which manifest is used.** `install` and `sync` use, in order: `--manifest`; the host project
@@ -143,7 +145,9 @@ If the host project directory and the repository both hold a manifest and you pa
 --manifest`. If none exists, it stops and lists every path it searched. `validate` and
 `compose-overlay` still work on any checkout, including a linked worktree or a directory that
 is not a BB project yet; when no single BB project can be resolved they skip the stored path and
-the host directory, say so on stderr, and use the repository file.
+the host directory, say so on stderr, and use the repository file. A project that keeps its
+manifest only in the host directory has no repository file, so run `validate` from the primary
+checkout, or pass `--manifest ~/.bb/shared-runtime/projects/<projectId>/.bb-runtime.json`.
 
 `install` and `sync` store the resolved manifest path in the registration whenever it is not
 `<primary>/.bb-runtime.json`, so the runtime's own `sync` and every later load read the same

@@ -126,7 +126,13 @@ func TestMetadataFilterKillsX32OnAmd64Only(t *testing.T) {
 		expectVerdict(t, amd64, nr|x32SyscallBit, auditArchX8664, verdictKill, "amd64 x32")
 	}
 	expectVerdict(t, amd64, x32SyscallBit, auditArchX8664, verdictKill, "amd64 x32 lowest")
-	expectVerdict(t, amd64, 0xFFFFFFFF, auditArchX8664, verdictKill, "amd64 highest")
+	// Regression: the x32 check also caught syscall(-1), which tools use to probe and which must
+	// keep returning ENOSYS from the kernel. libseccomp allows it for the same reason.
+	expectVerdict(t, amd64, 0xFFFFFFFF, auditArchX8664, verdictAllow, "amd64 syscall(-1)")
+	expectVerdict(t, amd64, 0xFFFFFFFE, auditArchX8664, verdictKill, "amd64 just below syscall(-1)")
+	expectVerdict(t, amd64, x32SyscallBit|90, auditArchX8664, verdictKill, "amd64 x32 chmod")
+	// A foreign ABI is killed even for the number that is allowed natively.
+	expectVerdict(t, amd64, 0xFFFFFFFF, auditArchI386, verdictKill, "i386 syscall(-1)")
 	expectVerdict(t, amd64, x32SyscallBit-1, auditArchX8664, verdictAllow, "amd64 just below the x32 bit")
 
 	// The check is amd64-only: arm64 has no x32 ABI, so a high number is an ordinary unknown
@@ -136,6 +142,7 @@ func TestMetadataFilterKillsX32OnAmd64Only(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectVerdict(t, arm64, 63|x32SyscallBit, auditArchAarch64, verdictAllow, "arm64 high number")
+	expectVerdict(t, arm64, 0xFFFFFFFF, auditArchAarch64, verdictAllow, "arm64 syscall(-1)")
 }
 
 func mustSyscalls(t *testing.T, goarch string) []uint32 {

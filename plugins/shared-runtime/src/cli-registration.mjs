@@ -1,6 +1,6 @@
 import path from "node:path";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -159,6 +159,31 @@ export async function gitExcludeStatus(primaryRoot) {
   return { excludePath, missing: GIT_EXCLUDE_LINES.filter((line) => !present.has(line)) };
 }
 
+// True when both paths exist and resolve to the same file.
+async function namesSameFile(first, second) {
+  try {
+    return (await realpath(first)) === (await realpath(second));
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+// A runtime root whose projects entry is a plain file cannot hold a host directory: the host
+// manifest is absent there, not an error.
+async function hostManifestPresent(hostPath) {
+  try {
+    return await pathExists(hostPath);
+  } catch (error) {
+    if (error?.code === "ENOTDIR") {
+      return false;
+    }
+    throw error;
+  }
+}
+
 // Which manifest a command uses, in order: --manifest; the registered policy's path
 // (validate and compose-overlay only); the host project directory; the repository file.
 // Two candidates without --manifest, or none, is an error rather than a guess.
@@ -170,14 +195,24 @@ export async function resolveManifestLocation({
   primaryRoot,
 }) {
   if (explicit !== null) {
-    return { path: path.resolve(explicit), source: "explicit" };
+    const explicitPath = path.resolve(explicit);
+    if (projectId !== null) {
+      // The host manifest named through a symlink or another spelling of the runtime root is
+      // still the host manifest: use its canonical path so it gets the trust checks and its
+      // scripts resolve in the host directory.
+      const hostPath = hostManifestPathFor(projectId, runtimeRoot);
+      if (await namesSameFile(explicitPath, hostPath)) {
+        return { path: hostPath, source: "host-dir" };
+      }
+    }
+    return { path: explicitPath, source: "explicit" };
   }
   if (registeredPath !== null) {
     return { path: registeredPath, source: "registered" };
   }
   const repoPath = path.join(primaryRoot, MANIFEST_FILE_NAME);
   const hostPath = projectId === null ? null : hostManifestPathFor(projectId, runtimeRoot);
-  const hostExists = hostPath !== null && (await pathExists(hostPath));
+  const hostExists = hostPath !== null && (await hostManifestPresent(hostPath));
   const repoExists = await pathExists(repoPath);
   if (hostExists && repoExists) {
     throw new CliError(

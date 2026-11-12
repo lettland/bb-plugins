@@ -65,13 +65,19 @@ async function inspectedManifest(options) {
   try {
     const cli = await resolveBbCli();
     projectId = (await resolveProject(cli, primaryRoot, options)).project.id;
-    const registry = await loadRegistry(runtimeRoot);
-    registeredPath = registry.policies.get(projectId)?.manifestPath ?? null;
   } catch (error) {
-    projectId = null;
     process.stderr.write(
       `note: the registered and host-directory manifests are not searched: ${error.message}\n`,
     );
+  }
+  if (projectId !== null) {
+    // A resolved project id stays usable for the host directory when only the registry fails.
+    try {
+      const registry = await loadRegistry(runtimeRoot);
+      registeredPath = registry.policies.get(projectId)?.manifestPath ?? null;
+    } catch (error) {
+      process.stderr.write(`note: the registered manifest path is not searched: ${error.message}\n`);
+    }
   }
   const location = await resolveManifestLocation({
     explicit: options.values.manifest ?? null,
@@ -220,11 +226,15 @@ async function checkManifestSource(policy, primaryRoot, note) {
   if (source !== "host-dir") {
     return;
   }
+  // Only the trust checks name a fix; a missing file, invalid JSON or a schema error is not one.
+  const trustFailed = Boolean(policy.manifestError) && policy.manifestError.includes("; fix:");
   note(
     policy.manifestError ? "error" : "ok",
-    policy.manifestError
+    trustFailed
       ? "host directory trust check failed (see the manifest finding below)"
-      : "host directory trust check passed (0700 directory, user-owned manifest, no links, not group- or world-writable)",
+      : policy.manifestError
+        ? "host manifest could not be loaded (see the manifest finding below)"
+        : "host directory trust check passed (0700 directory, user-owned manifest, no links, not group- or world-writable)",
   );
   try {
     const { excludePath, missing } = await gitExcludeStatus(primaryRoot);
@@ -262,7 +272,7 @@ async function checkPolicy(policy, primaryRoot, runtimeRoot, note) {
   note(
     launcherVerified ? "ok" : "warn",
     launcherVerified
-      ? "isolation launcher is installed and verified"
+      ? "isolation launcher matches a bundled launcher (the next operation installs the one for the Docker host's architecture)"
       : "isolation launcher is missing or does not match; reinstalled on the next operation",
   );
   for (const [role, name] of Object.entries(policy.containers)) {

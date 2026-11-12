@@ -52,6 +52,9 @@ const (
 	auditArchX8664   = 0xC000003E
 	auditArchAarch64 = 0xC00000B7
 	x32SyscallBit    = 0x40000000
+
+	// syscall(-1): the kernel answers ENOSYS, and tools use it to probe for seccomp.
+	invalidSyscallNumber = 0xFFFFFFFF
 )
 
 type rulesetAttr struct {
@@ -146,6 +149,7 @@ func metadataMutationSyscalls(goarch string) ([]uint32, error) {
 //	ld [4]                         seccomp_data.arch
 //	jeq native arch, else KILL
 //	ld [0]                         seccomp_data.nr
+//	jeq 0xffffffff -> ALLOW        amd64 only
 //	jge x32 bit -> KILL            amd64 only
 //	jeq <nr> -> ERRNO|EPERM        one per native metadata syscall
 //	ret ALLOW
@@ -154,7 +158,9 @@ func metadataMutationSyscalls(goarch string) ([]uint32, error) {
 //
 // Jump offsets are computed from this layout. A call from a foreign ABI (i386, x32, AArch32)
 // carries numbers from another table, so it cannot be matched against the native list; it is
-// killed instead.
+// killed instead. On amd64 nr 0xffffffff (syscall(-1)) is the one number at or above the x32
+// bit that is allowed: tools use it to probe, and it must keep returning ENOSYS from the
+// kernel. libseccomp special-cases it the same way.
 func metadataFilter(goarch string) ([]socketFilter, error) {
 	syscalls, err := metadataMutationSyscalls(goarch)
 	if err != nil {
@@ -167,7 +173,7 @@ func metadataFilter(goarch string) ([]socketFilter, error) {
 	x32Check := goarch == "amd64"
 	prefix := 3
 	if x32Check {
-		prefix++
+		prefix += 2
 	}
 	allow := prefix + len(syscalls)
 	errno := allow + 1
@@ -180,7 +186,10 @@ func metadataFilter(goarch string) ([]socketFilter, error) {
 		{Code: bpfLoadWordAbsolute, K: 0},
 	}
 	if x32Check {
-		filters = append(filters, socketFilter{Code: bpfJumpGreaterEqualConstant, JT: jump(3, kill), K: x32SyscallBit})
+		filters = append(filters,
+			socketFilter{Code: bpfJumpEqualConstant, JT: jump(3, allow), K: invalidSyscallNumber},
+			socketFilter{Code: bpfJumpGreaterEqualConstant, JT: jump(4, kill), K: x32SyscallBit},
+		)
 	}
 	for _, number := range syscalls {
 		filters = append(filters, socketFilter{Code: bpfJumpEqualConstant, JT: jump(len(filters), errno), K: number})

@@ -292,6 +292,61 @@ test("the prebuilt launcher is installed for the daemon architecture and reused 
   );
 });
 
+test("two concurrent launcher installs in one process both succeed with the expected launcher", async (t) => {
+  // Regression: temporary paths were named by process id only, so two operations in one
+  // process (a shared project lock, two worktrees) removed or overwrote each other's temporary
+  // asset directory and launcher file.
+  const fixture = await createFixture(t);
+  const launchers = await Promise.all(
+    Array.from({ length: 4 }, () => ensureIsolationLauncher(fixture.policy, { run: recordingRun(fixture).run })),
+  );
+  assert.deepEqual(new Set(launchers), new Set([path.join(fixture.runtimeDirectory, "landlock-run")]));
+  assert.equal(sha256Of(await readFile(launchers[0])), bundledDigests.get("arm64"));
+  assert.equal((await stat(launchers[0])).mode & 0o777, 0o555);
+  assert.deepEqual(
+    (await readdir(fixture.runtimeDirectory)).filter((name) => name.includes(".tmp")),
+    [],
+    "no call leaves or removes a temporary file that is not its own",
+  );
+  assert.deepEqual(
+    (await readdir(path.join(fixture.runtimeDirectory, "assets"))).sort(),
+    (await readdir(path.join(pluginRoot, "assets"))).filter((name) => !name.startsWith(".")).sort(),
+  );
+});
+
+test("a symlinked runtime directory is refused before anything is written or removed", async (t) => {
+  // Regression: a repository that commits .bb-runtime as a symlink redirected the install's
+  // writes and removals to the link target.
+  const fixture = await createFixture(t);
+  const elsewhere = path.join(fixture.fixtureRoot, "elsewhere");
+  await mkdir(elsewhere);
+  await writeFile(path.join(elsewhere, "landlock-run.go"), "must survive");
+  await symlink(elsewhere, fixture.runtimeDirectory);
+  const expected = `Shared runtime denied: ${fixture.runtimeDirectory} must be a directory owned by you, not a symlink; remove it and run the operation again`;
+  await assert.rejects(ensureRuntimeAssets(fixture.policy), { message: expected });
+  await assert.rejects(
+    ensureIsolationLauncher(fixture.policy, { run: recordingRun(fixture).run }),
+    { message: expected },
+  );
+  assert.deepEqual(await readdir(elsewhere), ["landlock-run.go"]);
+  assert.equal(await readFile(path.join(elsewhere, "landlock-run.go"), "utf8"), "must survive");
+  assert.equal((await lstat(fixture.runtimeDirectory)).isSymbolicLink(), true);
+
+  // A dangling link and a plain file are refused the same way.
+  await rm(fixture.runtimeDirectory);
+  await symlink(path.join(fixture.fixtureRoot, "nowhere"), fixture.runtimeDirectory);
+  await assert.rejects(ensureRuntimeAssets(fixture.policy), { message: expected });
+  await rm(fixture.runtimeDirectory);
+  await writeFile(fixture.runtimeDirectory, "not a directory");
+  await assert.rejects(ensureRuntimeAssets(fixture.policy), { message: expected });
+
+  // Absent, or a real directory you own, passes.
+  await rm(fixture.runtimeDirectory);
+  await ensureIsolationLauncher(fixture.policy, { run: recordingRun(fixture).run });
+  assert.equal(sha256Of(await readFile(path.join(fixture.runtimeDirectory, "landlock-run"))), bundledDigests.get("arm64"));
+  await ensureIsolationLauncher(fixture.policy, { run: recordingRun(fixture).run });
+});
+
 test("a stale source copy and marker from a source build are removed", async (t) => {
   const fixture = await createFixture(t);
   await mkdir(fixture.runtimeDirectory, { recursive: true });

@@ -459,6 +459,83 @@ test("manifest resolution takes --manifest, the registered path, the host direct
   assert.deepEqual(await resolveManifestLocation({ ...options, projectId: null }), { path: repoManifest, source: "repo" });
 });
 
+test("--manifest naming the host manifest through another path resolves to the canonical host path", async (t) => {
+  const fixture = await createFixture(t);
+  const options = { projectId: PROJECT_ID, runtimeRoot: fixture.runtimeRoot, primaryRoot: fixture.primaryRoot };
+  const aliasRoot = path.join(fixture.root, "runtime-alias");
+  await symlink(fixture.runtimeRoot, aliasRoot);
+  const viaAlias = path.join(aliasRoot, "projects", PROJECT_ID, ".bb-runtime.json");
+  const viaDots = path.join(fixture.hostDirectory, "scripts", "..", ".bb-runtime.json");
+  const fileLink = path.join(fixture.root, "manifest-link.json");
+  await symlink(fixture.manifestPath, fileLink);
+  const hostDir = { path: fixture.manifestPath, source: "host-dir" };
+  for (const explicit of [fixture.manifestPath, viaAlias, viaDots, fileLink]) {
+    assert.deepEqual(await resolveManifestLocation({ ...options, explicit }), hostDir, explicit);
+  }
+
+  // The result is then read with the trust checks.
+  const context = { primaryRoot: fixture.primaryRoot, projectId: PROJECT_ID, runtimeRoot: fixture.runtimeRoot };
+  await chmod(fixture.hostDirectory, 0o755);
+  const location = await resolveManifestLocation({ ...options, explicit: viaAlias });
+  await assert.rejects(loadResolvedManifest(location, context), /must have mode 0700; fix: chmod 700/);
+  await chmod(fixture.hostDirectory, 0o700);
+
+  // Anything else stays an explicit custom path: an unrelated file, a missing host manifest,
+  // another project's directory, and no project id at all.
+  const custom = path.join(fixture.root, "custom.json");
+  await writeFile(custom, fixture.content);
+  assert.deepEqual(await resolveManifestLocation({ ...options, explicit: custom }), { path: custom, source: "explicit" });
+  assert.deepEqual(await resolveManifestLocation({ ...options, projectId: null, explicit: viaAlias }), {
+    path: viaAlias,
+    source: "explicit",
+  });
+  assert.deepEqual(await resolveManifestLocation({ ...options, projectId: "proj_other", explicit: viaAlias }), {
+    path: viaAlias,
+    source: "explicit",
+  });
+  await rm(fixture.manifestPath);
+  assert.deepEqual(await resolveManifestLocation({ ...options, explicit: viaAlias }), {
+    path: viaAlias,
+    source: "explicit",
+  });
+  assert.deepEqual(await resolveManifestLocation({ ...options, explicit: path.join(fixture.manifestPath, "x") }), {
+    path: path.join(fixture.manifestPath, "x"),
+    source: "explicit",
+  });
+  // A path through a plain file is ENOTDIR, which is also "not the host manifest".
+  await writeFile(fixture.manifestPath, fixture.content, { mode: 0o600 });
+  assert.deepEqual(await resolveManifestLocation({ ...options, explicit: path.join(fixture.manifestPath, "x") }), {
+    path: path.join(fixture.manifestPath, "x"),
+    source: "explicit",
+  });
+  // Any other failure to resolve is loud, not a silent custom classification.
+  const loop = path.join(fixture.root, "loop.json");
+  await symlink(loop, loop);
+  await assert.rejects(resolveManifestLocation({ ...options, explicit: loop }), { code: "ELOOP" });
+});
+
+test("a runtime root that cannot hold a host directory falls back to the repository, other errors surface", async (t) => {
+  const fixture = await createFixture(t);
+  const repoManifest = path.join(fixture.primaryRoot, ".bb-runtime.json");
+  await writeFile(repoManifest, fixture.content);
+  await rm(fixture.manifestPath);
+  const broken = path.join(fixture.root, "broken-runtime");
+  await mkdir(broken);
+  await writeFile(path.join(broken, "projects"), "not a directory");
+  const options = { projectId: PROJECT_ID, primaryRoot: fixture.primaryRoot };
+  assert.deepEqual(await resolveManifestLocation({ ...options, runtimeRoot: broken }), {
+    path: repoManifest,
+    source: "repo",
+  });
+  const projects = projectsDirectory(fixture.runtimeRoot);
+  await chmod(projects, 0o000);
+  try {
+    await assert.rejects(resolveManifestLocation({ ...options, runtimeRoot: fixture.runtimeRoot }), { code: "EACCES" });
+  } finally {
+    await chmod(projects, 0o700);
+  }
+});
+
 test("a resolved host manifest goes through the trust checks and any other manifest does not", async (t) => {
   const fixture = await createFixture(t);
   const context = { primaryRoot: fixture.primaryRoot, projectId: PROJECT_ID, runtimeRoot: fixture.runtimeRoot };

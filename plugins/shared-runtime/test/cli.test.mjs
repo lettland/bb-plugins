@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { manifestDigest } from "../src/manifest.mjs";
-import { loadRegistry } from "../src/registry.mjs";
+import { loadRegistry, manifestSourceOf } from "../src/registry.mjs";
 
 const execFileAsync = promisify(execFile);
 const pluginRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -725,7 +725,11 @@ test("doctor verifies registration, manifest, and container mounts", async (t) =
   assert.equal(result.stderr, "doctor found errors\n");
   const { findings } = JSON.parse(result.stdout);
   assert.deepEqual(findings.slice(5), [
-    { level: "ok", message: "isolation launcher is installed and verified" },
+    {
+      level: "ok",
+      message:
+        "isolation launcher matches a bundled launcher (the next operation installs the one for the Docker host's architecture)",
+    },
     { level: "error", message: "container worker (example_dev_worker) is not running or not created" },
     { level: "warn", message: "container web: /bb-worktrees is mounted from /elsewhere/worktrees" },
     {
@@ -1142,9 +1146,10 @@ test("validate and compose-overlay resolve the manifest in order and degrade on 
   // falls back to the repository file.
   await writeFile(repoManifest, JSON.stringify(hostManifest));
   const note = /^note: the registered and host-directory manifests are not searched: /m;
-  const expectDegraded = (output, label) => {
+  const registryNote = /^note: the registered manifest path is not searched: /m;
+  const expectDegraded = (output, label, expected = note) => {
     assert.equal(output.code, 0, `${label}: ${output.stderr}`);
-    assert.match(output.stderr, note, label);
+    assert.match(output.stderr, expected, label);
     assert.ok(output.stdout.startsWith(`${repoManifest} is valid`), label);
   };
   expectDegraded(await validateFrom([], { env: { BB_CLI: path.join(fixture.bin, "absent-bb") } }), "bb CLI unavailable");
@@ -1166,7 +1171,9 @@ test("validate and compose-overlay resolve the manifest in order and degrade on 
   const brokenRoot = path.join(fixture.fixtureRoot, "broken-runtime");
   await mkdir(brokenRoot, { recursive: true });
   await writeFile(path.join(brokenRoot, "projects"), "not a directory");
-  expectDegraded(await validateFrom(["--runtime-root", brokenRoot]), "registry unusable");
+  // The project id resolved, so only the registered-path step is skipped; the host directory
+  // cannot exist under a runtime root whose projects entry is a file.
+  expectDegraded(await validateFrom(["--runtime-root", brokenRoot]), "registry unusable", registryNote);
 
   // Not a git repository: the current directory is the checkout.
   const plain = path.join(fixture.fixtureRoot, "plain");
@@ -1231,6 +1238,22 @@ test("doctor reports the manifest source, the script root, the trust result and 
   );
   await chmod(fixture.projectDirectory, 0o700);
 
+  // A manifest that cannot be loaded for any other reason is not a trust failure: a missing
+  // file and invalid JSON must not blame the trust check.
+  const notLoaded = {
+    level: "error",
+    message: "host manifest could not be loaded (see the manifest finding below)",
+  };
+  await writeFile(fixture.manifestPath, "{ not json");
+  findings = await findingsOf();
+  assert.deepEqual(findings[3], notLoaded);
+  assert.ok(findings.some((finding) => finding.level === "error" && finding.message.startsWith("manifest: ")));
+  await rm(fixture.manifestPath);
+  findings = await findingsOf();
+  assert.deepEqual(findings[3], notLoaded);
+  await writeFile(fixture.manifestPath, JSON.stringify(hostManifest), { mode: 0o600 });
+  assert.equal((await findingsOf())[3].level, "ok");
+
   // A custom manifest path is reported as custom and has no host-directory checks.
   const custom = path.join(fixture.fixtureRoot, "custom.bb-runtime.json");
   await writeFile(custom, JSON.stringify(hostManifest));
@@ -1252,4 +1275,64 @@ test("uninstall leaves the host directory and the exclude lines in place", async
   await assert.rejects(stat(fixture.policyPath()), { code: "ENOENT" });
   assert.equal((await stat(fixture.manifestPath)).isFile(), true);
   assert.equal(await readFile(fixture.excludePath, "utf8"), excludes);
+});
+
+test("validate and compose-overlay keep a resolved project id when only the registry cannot be read", async (t) => {
+  // Regression: one try block covered both lookups, so a registry failure discarded the project
+  // id that had already resolved and the host-directory manifest was never searched.
+  const fixture = await createHostDirectoryFixture(t);
+  const projects = path.join(fixture.runtimeRoot, "projects");
+  // Searchable but not readable: the registry listing fails, the host directory is reachable.
+  await chmod(projects, 0o300);
+  try {
+    for (const command of ["validate", "compose-overlay"]) {
+      const result = await fixture.run([command]);
+      assert.equal(result.code, 0, `${command}: ${result.stderr}`);
+      assert.match(result.stderr, /^note: the registered manifest path is not searched: /m, command);
+      assert.doesNotMatch(result.stderr, /registered and host-directory manifests are not searched/, command);
+      if (command === "validate") {
+        assert.ok(result.stdout.startsWith(`${fixture.manifestPath} is valid`), result.stdout);
+      } else {
+        assert.match(result.stdout, /^services:\n {2}app:/m);
+      }
+    }
+  } finally {
+    await chmod(projects, 0o700);
+  }
+});
+
+test("--manifest naming the host manifest through an alias is the host-dir manifest", async (t) => {
+  // Regression: the host manifest reached through a symlink or another spelling of the runtime
+  // root was compared as a string, read without the trust checks, stored as custom, and its
+  // scripts resolved in the primary checkout.
+  const fixture = await createHostDirectoryFixture(t);
+  const alias = path.join(fixture.fixtureRoot, "runtime-alias");
+  await symlink(fixture.runtimeRoot, alias);
+  const viaAlias = path.join(alias, "projects", "proj_example", ".bb-runtime.json");
+  const unrelated = path.join(fixture.fixtureRoot, "custom.bb-runtime.json");
+  await writeFile(unrelated, JSON.stringify(hostManifest));
+
+  const installed = await fixture.run(["install", "--no-reload", "--manifest", viaAlias]);
+  assert.equal(installed.code, 0, installed.stderr);
+  assert.equal((await fixture.readPolicy()).manifestPath, fixture.manifestPath, "the canonical host path is stored");
+  const policy = await fixture.registered();
+  assert.equal(manifestSourceOf(policy), "host-dir");
+  assert.equal(policy.scriptRoot, fixture.projectDirectory);
+  assert.ok((await readFile(fixture.excludePath, "utf8")).includes("/.bb-runtime/"), "host-dir exclude lines are written");
+
+  // The trust checks run on the alias path too.
+  await chmod(fixture.projectDirectory, 0o755);
+  const loose = await fixture.run(["install", "--no-reload", "--manifest", viaAlias]);
+  assert.equal(loose.code, 1);
+  assert.match(loose.stderr, /must have mode 0700; fix: chmod 700 /);
+  const looseValidate = await fixture.run(["validate", "--manifest", viaAlias]);
+  assert.equal(looseValidate.code, 1);
+  assert.match(looseValidate.stderr, /must have mode 0700; fix: chmod 700 /);
+  await chmod(fixture.projectDirectory, 0o700);
+
+  // An unrelated path stays custom.
+  assert.equal((await fixture.run(["install", "--no-reload", "--manifest", unrelated])).code, 0);
+  assert.equal((await fixture.readPolicy()).manifestPath, unrelated);
+  assert.equal(manifestSourceOf(await fixture.registered()), "custom");
+  assert.equal((await fixture.registered()).scriptRoot, fixture.repo);
 });
