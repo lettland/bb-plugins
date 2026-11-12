@@ -76,6 +76,10 @@ build_into() {
 [ -f "$sums" ] || fail "native/prebuilt/SHA256SUMS is missing; it must at least hold the toolchain line"
 toolchain=$(sums_field toolchain)
 [ -n "$toolchain" ] || fail "native/prebuilt/SHA256SUMS has no toolchain line (toolchain golang:<version>@sha256:<index digest>)"
+# Only the official Docker Hub golang image, pinned by digest: a toolchain line that names another
+# registry or repository could build matching binaries with a compiler nobody reviewed.
+printf '%s\n' "$toolchain" | grep -Eq '^golang:[0-9]+\.[0-9]+(\.[0-9]+)?@sha256:[0-9a-f]{64}$' \
+  || fail "SHA256SUMS toolchain must be golang:<version>@sha256:<64 hex> from the official image, got: $toolchain"
 
 case $mode in
   build)
