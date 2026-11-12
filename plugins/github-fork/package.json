@@ -1,6 +1,6 @@
 {
   "name": "@lettland/bb-plugin-github-fork",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Browse GitHub issues and pull requests in BB, then send them to agents.",
   "license": "MIT",
   "homepage": "https://github.com/lettland/bb-plugins/tree/master/plugins/github-fork#readme",
