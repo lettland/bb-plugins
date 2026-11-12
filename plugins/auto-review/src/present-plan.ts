@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 import type {
+  BbPluginApi,
   PluginAgentConfiguration,
   PluginAgentConfigurationContext,
   PluginAgentToolContext,
@@ -8,7 +9,16 @@ import type {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { PRESENT_PLAN_CHAT_KEYS } from "./chat-approval-state.js";
-import { clearPlanBaseline, planScope, settlePlanBaseline, stagePlanPending } from "./baseline-store.js";
+import {
+  clearPlanBaseline,
+  deleteReleasedPlan,
+  deleteReleasedPlans,
+  planScope,
+  readReleasedPlan,
+  settlePlanBaseline,
+  stagePlanPending,
+  writeReleasedPlan,
+} from "./baseline-store.js";
 import { effectiveConfig, readProjectConfig } from "./config.js";
 import { buildPlanApprovalPayload, planSha256Of } from "./plan-approval-payload.js";
 import { readPlanFileForForm } from "./plan-file.js";
@@ -54,6 +64,7 @@ import {
   presentPlanArmed,
   PRESENT_PLAN_KEYS,
   readState,
+  REVIEW_CONTINUATION_CAP_MS,
   withThreadLock,
   writeState,
   type ThreadState,
@@ -92,6 +103,33 @@ function captureArmedSeq(review: ReviewContext, threadId: string): Promise<numbe
     threadId,
     `the plan review in ${threadId}; the plan will not be auto-approved`,
   );
+}
+
+/**
+ * The refusal for a release or a reopen that would open a form while another is
+ * open, or null when none is. A fresh marker counts as open without asking the
+ * host: its form may still be registering. An older marker with no pending form
+ * behind it (a restart skipped the `finally` that clears it) is stale: null is
+ * returned and the caller's write replaces it.
+ */
+async function refuseWhileFormOpen(
+  bb: BbPluginApi,
+  threadId: string,
+  state: ThreadState,
+  now: number,
+): Promise<PluginAgentToolResult | null> {
+  if (!planFormOpen(state, now)) {
+    return null;
+  }
+  const found = planFormMarkerFresh(state, now) ? "pending" : await planFormPending(bb, threadId);
+  if (found === "pending") {
+    return planFormOpenResult();
+  }
+  if (found === "failed") {
+    return planFormCheckFailedResult();
+  }
+  bb.log.info(`auto-review: the plan approval form's open marker in ${threadId} has no pending form behind it, so it is stale and replaced`);
+  return null;
 }
 
 /**
@@ -167,18 +205,11 @@ async function releasePlan(
   const openedAt = nextFormOpenedAt(state, now);
   // A release that would open a form while another is open is refused before
   // anything is cleared, so the plan stays armed for the same call to release later.
-  // A fresh marker counts as open without asking the host: its form may still
-  // be registering. An older marker with no pending form behind it (a restart
-  // skipped the `finally` that clears it) is stale: the write below replaces it.
-  if (opensForm && planFormOpen(state, now)) {
-    const found = planFormMarkerFresh(state, now) ? "pending" : await planFormPending(bb, ctx.threadId);
-    if (found === "pending") {
-      return planFormOpenResult();
+  if (opensForm) {
+    const refused = await refuseWhileFormOpen(bb, ctx.threadId, state, now);
+    if (refused !== null) {
+      return refused;
     }
-    if (found === "failed") {
-      return planFormCheckFailedResult();
-    }
-    bb.log.info(`auto-review: the plan approval form's open marker in ${ctx.threadId} has no pending form behind it, so it is stale and replaced`);
   }
   // The form shows the plan as it stands now, after the review's fixes: read once, from the resolved
   // path, never from the baseline staged at arm time. A path outside the allowed roots, and a plan
@@ -193,6 +224,16 @@ async function releasePlan(
   }
   // One patch: a failed write cannot leave the plan disarmed without its marker.
   await writeState(bb, ctx.threadId, opensForm ? { presentPlanFormOpenAt: openedAt } : {}, [...PRESENT_PLAN_KEYS]);
+  if (planRead?.kind === "read") {
+    // What the form shows, so a cancelled form can reopen for this same plan without a review.
+    await writeReleasedPlan(bb, ctx.threadId, {
+      path: planRead.path,
+      sha256: planSha256Of(planRead.bytes),
+      reviewed: check !== "missing",
+      openedAt,
+      at: now,
+    });
+  }
   await settlePlanBaseline(bb, ctx.threadId, planFilePath, reviewWorked);
   if (autoApproved) {
     await clearPlanBaseline(bb, ctx.threadId, planFilePath);
@@ -240,6 +281,56 @@ async function releasePlan(
   };
 }
 
+/**
+ * A call for a plan whose form closed without an answer (see
+ * `settleReleasedPlan`). When the plan file still holds the bytes the form
+ * showed and the marker is within `REVIEW_CONTINUATION_CAP_MS` of the cancel,
+ * the form opens again as it was, `reviewed` included, with no review and no
+ * arm: the plan was already reviewed. Every other case returns null with the
+ * marker deleted, and the call arms as before, so a changed plan still gets its
+ * delta review. A plan file that does not resolve has no marker to find by path,
+ * so all of the thread's markers go. The path comparison is on the resolved path
+ * the file was read from, never the name the agent gave. With another form open
+ * the call is refused and the marker kept, like a release.
+ */
+async function reopenReleasedPlan(
+  review: ReviewContext,
+  ctx: PluginAgentToolContext,
+  state: ThreadState,
+  planFilePath: string,
+  now: number,
+): Promise<PluginAgentToolResult | NeedsForm | null> {
+  const { bb } = review;
+  const planRead = await readPlanFileForForm(bb, ctx.threadId, planFilePath);
+  if (planRead.kind !== "read") {
+    await deleteReleasedPlans(bb, ctx.threadId);
+    return null;
+  }
+  const marker = await readReleasedPlan(bb, ctx.threadId, planRead.path);
+  if (marker === undefined) {
+    return null;
+  }
+  const sha256 = planSha256Of(planRead.bytes);
+  if (marker.path !== planRead.path || marker.sha256 !== sha256 || now - marker.at > REVIEW_CONTINUATION_CAP_MS) {
+    await deleteReleasedPlan(bb, ctx.threadId, planRead.path);
+    return null;
+  }
+  const refused = await refuseWhileFormOpen(bb, ctx.threadId, state, now);
+  if (refused !== null) {
+    return refused;
+  }
+  const openedAt = nextFormOpenedAt(state, now);
+  await writeState(bb, ctx.threadId, { presentPlanFormOpenAt: openedAt });
+  await writeReleasedPlan(bb, ctx.threadId, { ...marker, openedAt });
+  await recordFire(review, ctx.projectId, ctx.threadId, "stood-down", "plan-reopened");
+  bb.log.info(`auto-review: reopening the plan approval form for the unchanged plan ${basename(planFilePath)} in thread ${ctx.threadId} without a review`);
+  return {
+    form: buildPlanApprovalPayload({ planFilePath, reviewed: marker.reviewed, bytes: planRead.bytes }),
+    bound: { path: planRead.path, sha256 },
+    openedAt,
+  };
+}
+
 /** `PresentPlan`'s `execute`: the first call for a plan arms its review, the second releases it. */
 async function presentPlan(
   review: ReviewContext,
@@ -261,9 +352,16 @@ async function presentPlan(
       };
     }
     const now = Date.now();
+    // The mode the thread's instructions were written with; the live setting only before one is stored.
+    const formMode = state.presentPlanFormMode ?? config.planApprovalForm;
+    if (formMode) {
+      const reopened = await reopenReleasedPlan(review, ctx, state, planFilePath, now);
+      if (reopened !== null) {
+        return reopened;
+      }
+    }
     if (presentPlanArmed(state, planFilePath, now)) {
-      // The mode the thread's instructions were written with; the live setting only before one is stored.
-      return releasePlan(review, ctx, state, config, planFilePath, state.presentPlanFormMode ?? config.planApprovalForm);
+      return releasePlan(review, ctx, state, config, planFilePath, formMode);
     }
     const armedSeq = await captureArmedSeq(review, ctx.threadId);
     // The tier comes from the file as armed; release reads the stored key,

@@ -11,7 +11,13 @@ import { reviewSize } from "./change-size.js";
 import { writeProjectConfig } from "./config.js";
 import { createReviewContext } from "./context.js";
 import { registerPlanTools } from "./present-plan.js";
-import { FORM_OPEN_FRESH_MS, nextFormOpenedAt, planFormMarkerFresh } from "./present-plan-form.js";
+import {
+  FORM_OPEN_FRESH_MS,
+  nextFormOpenedAt,
+  planFormCheckFailedResult,
+  planFormMarkerFresh,
+  planFormOpenResult,
+} from "./present-plan-form.js";
 import { PLAN_APPROVAL_TIMEOUT_MS, PLAN_CHANGED_TITLE } from "./plan-approval-form.js";
 import { PLAN_APPROVAL_PAYLOAD_BUDGET_BYTES, planSha256Of } from "./plan-approval-payload.js";
 import {
@@ -32,7 +38,7 @@ import {
   PRESENT_PLAN_INVALID_PATH_MESSAGE,
 } from "./prompt.js";
 import { PRESENT_PLAN_CHAT_KEYS } from "./chat-approval-state.js";
-import { LATCH_KEYS, PLAN_GATE_KEYS, PRESENT_PLAN_KEYS } from "./state.js";
+import { LATCH_KEYS, PLAN_GATE_KEYS, PRESENT_PLAN_KEYS, REVIEW_CONTINUATION_CAP_MS } from "./state.js";
 
 const THREAD_ID = "thr_1";
 const CTX = { threadId: THREAD_ID, projectId: "project-1" };
@@ -1662,5 +1668,415 @@ describe("a plan approval form that detached from its turn", () => {
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM).toContain(
       "bb delivers it in a message saying your earlier PresentPlan tool call has finished, with the result below it. Such a message counts as the PresentPlan result.",
     );
+  });
+});
+
+/**
+ * Regression: thr_7mpxbb2m3s (Codex, `PresentPlan` path, form mode on). The plan
+ * was reviewed, revised and released to the form; the user typed "approve" in
+ * chat, which cancelled the form (`request-aborted`) on a bb build without
+ * `experimental_detachOnAbort`. The agent then called `PresentPlan` again, as
+ * the form instructions say, and the unchanged plan was armed for a new review.
+ * A cancelled form's unchanged plan must reopen the form with no review.
+ */
+describe("a cancelled approval form reopens for the unchanged plan without a review", () => {
+  const RELEASED_PREFIX = `released:plan:${THREAD_ID}:`;
+  const PLAN_TEXT = "# Plan\n\n1. first step\n";
+  type FormHost = Parameters<Parameters<typeof withFormHost>[1]>[0];
+  interface Files {
+    base: string;
+    workspace: string;
+    dataDir: string;
+    plan: string;
+  }
+  async function withPlanFiles(body: (f: Files) => Promise<void>): Promise<void> {
+    const base = await realpath(await mkdtemp(join(tmpdir(), "present-plan-reopen-")));
+    const workspace = join(base, "ws");
+    const dataDir = join(base, "data");
+    await mkdir(join(workspace, "docs"), { recursive: true });
+    await mkdir(join(dataDir, "plans", THREAD_ID), { recursive: true });
+    const plan = join(workspace, "docs", "p.md");
+    await writeFile(plan, PLAN_TEXT);
+    try {
+      await body({ base, workspace, dataDir, plan });
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  }
+  const withReopenHost = (
+    files: Files,
+    options: { reviewMode?: "self" | "devkit"; form?: boolean },
+    body: (f: FormHost) => Promise<void>,
+  ) =>
+    withFormHost(
+      { form: options.form ?? true, ...(options.reviewMode === undefined ? {} : { reviewMode: options.reviewMode }), planPath: files.plan, workspace: files.workspace, dataDir: files.dataDir },
+      body,
+    );
+  const markerKeys = (f: FormHost) => f.host.bb.storage.kv.list(RELEASED_PREFIX);
+  const markerOf = async (f: FormHost) => {
+    const [key] = await markerKeys(f);
+    return { key, value: key === undefined ? undefined : await f.host.bb.storage.kv.get<Json>(key) };
+  };
+  const baselineKeys = (f: FormHost) => f.host.bb.storage.kv.list("baseline:plan:");
+  const lastFire = (f: FormHost) => f.host.bb.storage.kv.get<Json>(`lastfire:${CTX.projectId}:${THREAD_ID}`);
+  const payloadAt = (f: FormHost, index: number) => (f.requestInput.mock.calls[index] as [{ payload: Json }])[0].payload;
+  const cancelOnce = (f: FormHost, reason: "user" | "timeout" | "request-aborted") =>
+    f.requestInput.mockResolvedValueOnce({ outcome: "cancelled", reason });
+
+  it.each(["request-aborted", "user", "timeout"] as const)(
+    "opens the form again for the unchanged plan after a %s cancel: no review prompt, no arm, no baseline write",
+    async (reason) => {
+      await withPlanFiles(async (files) => {
+        await withReopenHost(files, {}, async (f) => {
+          cancelOnce(f, reason);
+          expect(await f.call()).toBe(presentPlanApprovalCancelledMessage(reason));
+          expect(f.requestInput).toHaveBeenCalledTimes(1);
+          const baselinesBefore = await baselineKeys(f);
+          cancelOnce(f, reason);
+          // The reopened form is a form, not a review prompt: the call ends with the cancel text again.
+          expect(await f.call()).toBe(presentPlanApprovalCancelledMessage(reason));
+          expect(f.requestInput).toHaveBeenCalledTimes(2);
+          expect(payloadAt(f, 1)).toEqual(payloadAt(f, 0));
+          expect(f.metadata.presentPlanArmedAt).toBeUndefined();
+          expect(f.metadata.presentPlanArmedPath).toBeUndefined();
+          expect(await baselineKeys(f)).toEqual(baselinesBefore);
+          expect(await lastFire(f)).toMatchObject({ outcome: "stood-down", reason: "plan-reopened" });
+          expect(f.metadata.presentPlanFormOpenAt).toBeUndefined();
+        });
+      });
+    },
+  );
+
+  it("keeps the marker through cancel, reopen, cancel, reopen, and moves its clock to each cancel", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        const kv = f.host.bb.storage.kv;
+        for (let round = 0; round < 3; round += 1) {
+          const before = Date.now();
+          f.requestInput.mockImplementationOnce(async () => {
+            const { key, value } = await markerOf(f);
+            // The release (or the earlier reopen) left an old clock; only the cancel can move it.
+            if (key !== undefined) {
+              await kv.set(key, { ...value, at: 1 });
+            }
+            return { outcome: "cancelled", reason: "user" };
+          });
+          expect(await f.call()).toBe(presentPlanApprovalCancelledMessage("user"));
+          const { value } = await markerOf(f);
+          expect(value?.at).toBeGreaterThanOrEqual(before);
+          expect(value).toMatchObject({ path: files.plan, sha256: planSha256Of(Buffer.from(PLAN_TEXT)), reviewed: true });
+        }
+        expect(f.requestInput).toHaveBeenCalledTimes(3);
+      });
+    });
+  });
+
+  it("reopens a form that was released incomplete as not reviewed, never as reviewed", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, { reviewMode: "devkit" }, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        expect(payloadAt(f, 0)).toMatchObject({ reviewed: false });
+        expect((await markerOf(f)).value).toMatchObject({ reviewed: false });
+        cancelOnce(f, "request-aborted");
+        expect(await f.call()).toBe(presentPlanApprovalCancelledMessage("request-aborted"));
+        expect(payloadAt(f, 1)).toMatchObject({ reviewed: false });
+      });
+    });
+  });
+
+  it("credits an approval in the reopened form, end to end, and the marker is gone", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        // `settle` describes the answer with the first form's options; the reopened form binds the same path and hash.
+        expect(await f.settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+        expect(f.requestInput).toHaveBeenCalledTimes(2);
+        expect(await markerKeys(f)).toEqual([]);
+        expect(f.metadata.presentPlanFormOpenAt).toBeUndefined();
+        expect(await reviewSize(f.host.bb, THREAD_ID, ["a.ts"], null, 77)).toEqual({ trivial: false, blocker: false });
+      });
+    });
+  });
+
+  it("does not count an approval in the reopened form when the plan changed after it opened", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        const result = await f.settle({ approved: true }, undefined, undefined, () => writeFile(files.plan, "# Plan\n\nchanged\n"));
+        expect(result).toBe(PRESENT_PLAN_FORM_PLAN_CHANGED_MESSAGE);
+      });
+    });
+  });
+
+  it("reviews the plan again, as armed, when the file was edited after the cancel; the marker is deleted", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        expect(await markerKeys(f)).toHaveLength(1);
+        await writeFile(files.plan, `${PLAN_TEXT}2. second step\n`);
+        const result = await f.call();
+        expect(typeof result).toBe("string");
+        expect(result).not.toBe(presentPlanApprovalCancelledMessage("request-aborted"));
+        expect(f.requestInput).toHaveBeenCalledTimes(1);
+        expect(f.metadata.presentPlanArmedPath).toBe(files.plan);
+        expect(await markerKeys(f)).toEqual([]);
+        expect(await lastFire(f)).toMatchObject({ outcome: "fired", reason: "plan-review" });
+      });
+    });
+  });
+
+  it("arms again once the marker is older than the continuation window, and deletes it", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        const { key, value } = await markerOf(f);
+        await f.host.bb.storage.kv.set(key!, { ...value, at: Date.now() - REVIEW_CONTINUATION_CAP_MS - 1_000 });
+        expect(typeof (await f.call())).toBe("string");
+        expect(f.requestInput).toHaveBeenCalledTimes(1);
+        expect(f.metadata.presentPlanArmedPath).toBe(files.plan);
+        expect(await markerKeys(f)).toEqual([]);
+      });
+    });
+  });
+
+  it("still reopens a marker just inside the continuation window", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        const { key, value } = await markerOf(f);
+        await f.host.bb.storage.kv.set(key!, { ...value, at: Date.now() - REVIEW_CONTINUATION_CAP_MS + 60_000 });
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        expect(f.requestInput).toHaveBeenCalledTimes(2);
+      });
+    });
+  });
+
+  it("arms again, and deletes the marker, when the stored path is not the resolved path", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        const { key, value } = await markerOf(f);
+        await f.host.bb.storage.kv.set(key!, { ...value, path: join(files.workspace, "docs", "other.md") });
+        expect(typeof (await f.call())).toBe("string");
+        expect(f.requestInput).toHaveBeenCalledTimes(1);
+        expect(await markerKeys(f)).toEqual([]);
+      });
+    });
+  });
+
+  it("arms again, and deletes the marker, for a plan file that is gone after the cancel", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        await rm(files.plan);
+        expect(typeof (await f.call())).toBe("string");
+        expect(f.requestInput).toHaveBeenCalledTimes(1);
+        expect(f.metadata.presentPlanArmedPath).toBe(files.plan);
+        expect(await markerKeys(f)).toEqual([]);
+      });
+    });
+  });
+
+  it("arms again, and deletes the markers, for a plan path outside the allowed roots", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        await mkdir(join(files.base, "other"));
+        const outside = join(files.base, "other", "secret.md");
+        await writeFile(outside, PLAN_TEXT);
+        expect(typeof (await f.host.harness.callAgentTool("PresentPlan", { planFilePath: outside }, CTX))).toBe("string");
+        expect(f.requestInput).toHaveBeenCalledTimes(1);
+        expect(f.metadata.presentPlanArmedPath).toBe(outside);
+        expect(await markerKeys(f)).toEqual([]);
+      });
+    });
+  });
+
+  it("leaves another plan's marker alone: a different path is armed on its own", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        const other = join(files.workspace, "docs", "other.md");
+        await writeFile(other, "# Other\n");
+        expect(typeof (await f.host.harness.callAgentTool("PresentPlan", { planFilePath: other }, CTX))).toBe("string");
+        expect(f.requestInput).toHaveBeenCalledTimes(1);
+        expect(f.metadata.presentPlanArmedPath).toBe(other);
+        expect(await markerKeys(f)).toHaveLength(1);
+      });
+    });
+  });
+
+  it("refuses the reopen while another form is open, keeping the marker", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        f.metadata.presentPlanFormOpenAt = Date.now();
+        expect(await f.call()).toEqual(planFormOpenResult());
+        expect(f.requestInput).toHaveBeenCalledTimes(1);
+        expect(await markerKeys(f)).toHaveLength(1);
+        expect(f.metadata.presentPlanArmedPath).toBeUndefined();
+      });
+    });
+  });
+
+  it("refuses the reopen when the pending-form check fails, keeping the marker", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        f.metadata.presentPlanFormOpenAt = Date.now() - FORM_OPEN_FRESH_MS - 5_000;
+        f.faults.listError = new Error("list down");
+        expect(await f.call()).toEqual(planFormCheckFailedResult());
+        expect(f.requestInput).toHaveBeenCalledTimes(1);
+        expect(await markerKeys(f)).toHaveLength(1);
+      });
+    });
+  });
+
+  it("replaces a stale open marker that has no pending form behind it, and reopens", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        f.metadata.presentPlanFormOpenAt = Date.now() - FORM_OPEN_FRESH_MS - 5_000;
+        f.faults.listed = [];
+        cancelOnce(f, "request-aborted");
+        await f.call();
+        expect(f.requestInput).toHaveBeenCalledTimes(2);
+      });
+    });
+  });
+
+  it("with the form setting off, a stored marker never reopens a form", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, { form: false }, async (f) => {
+        await f.host.bb.storage.kv.set(`${RELEASED_PREFIX}x`, { path: files.plan, sha256: planSha256Of(Buffer.from(PLAN_TEXT)), reviewed: true, openedAt: 1, at: Date.now() });
+        expect(await f.call()).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+        expect(f.requestInput).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe("the marker after the form ends", () => {
+    const outcomes: [string, (f: FormHost, files: Files) => Promise<unknown>][] = [
+      ["approved", (f) => f.settle({ approved: true })],
+      ["changes requested", (f) => f.settle({ approved: false, feedback: "f" })],
+      ["plan changed", (f, files) => f.settle({ approved: true }, undefined, undefined, () => writeFile(files.plan, "changed\n"))],
+      ["unreadable", (f) => f.settle({ approved: true, extra: 1 })],
+      ["unavailable (not held)", (f) => f.settle({ approved: true }, { kind: "thread" })],
+      ["no cursor (sinceSeq undefined)", async (f) => {
+        f.faults.timelineDown = true;
+        return f.call();
+      }],
+      ["a requestInput throw", async (f) => {
+        f.requestInput.mockRejectedValueOnce(new Error("boom"));
+        return f.call();
+      }],
+    ];
+
+    it.each(outcomes)("is deleted after %s", async (_name, run) => {
+      await withPlanFiles(async (files) => {
+        await withReopenHost(files, {}, async (f) => {
+          await run(f, files);
+          expect(await markerKeys(f)).toEqual([]);
+        });
+      });
+    });
+
+    it("is kept after a cancel", async () => {
+      await withPlanFiles(async (files) => {
+        await withReopenHost(files, {}, async (f) => {
+          cancelOnce(f, "user");
+          await f.call();
+          expect(await markerKeys(f)).toHaveLength(1);
+        });
+      });
+    });
+
+    it.each([
+      ["a cancel", async () => ({ outcome: "cancelled", reason: "user" }) as const],
+      ["a throw", async (): Promise<never> => { throw new Error("boom"); }],
+    ])("is left alone by a late result of an older form (%s), whose open time no longer matches", async (_name, end) => {
+      await withPlanFiles(async (files) => {
+        await withReopenHost(files, {}, async (f) => {
+          let newerMarker: Json | undefined;
+          f.requestInput.mockImplementationOnce(async () => {
+            const { key, value } = await markerOf(f);
+            // A newer form's release replaced the marker while this form was still pending.
+            newerMarker = { ...value, openedAt: Date.now() + 123_456, at: 5 };
+            await f.host.bb.storage.kv.set(key!, newerMarker);
+            return end();
+          });
+          await f.call();
+          expect((await markerOf(f)).value).toEqual(newerMarker);
+        });
+      });
+    });
+  });
+
+  describe("no marker is written", () => {
+    it("in chat mode", async () => {
+      await withPlanFiles(async (files) => {
+        await withReopenHost(files, { form: false }, async (f) => {
+          expect(await f.call()).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
+          expect(await markerKeys(f)).toEqual([]);
+        });
+      });
+    });
+
+    it("on an auto-approval, even with the form on", async () => {
+      await withPlanFiles(async (files) => {
+        await withReopenHost(files, {}, async (f) => {
+          await writeProjectConfig(f.host.bb, CTX.projectId, { autoApprovePlans: true });
+          f.rows.push({ seq: 78, type: "item/completed", scope: { kind: "turn", turnId: "turn-1" }, data: { item: { type: "toolCall", tool: "Read" } } });
+          expect(await f.call()).toBe(PRESENT_PLAN_APPROVED_MESSAGE);
+          expect(await markerKeys(f)).toEqual([]);
+        });
+      });
+    });
+
+    it("for a plan on a remote host, which has no bytes to bind", async () => {
+      await withPlanFiles(async (files) => {
+        await withFormHost({ form: true, workspace: join(files.base, "remote-workspace"), dataDir: files.dataDir }, async (f) => {
+          f.requestInput.mockResolvedValueOnce({ outcome: "cancelled", reason: "user" });
+          await f.call();
+          expect(await f.host.bb.storage.kv.list(RELEASED_PREFIX)).toEqual([]);
+        });
+      });
+    });
+
+    it("for a refused release (the plan file is missing)", async () => {
+      await withPlanFiles(async (files) => {
+        await rm(files.plan);
+        await withReopenHost(files, {}, async (f) => {
+          await f.call();
+          expect(f.requestInput).not.toHaveBeenCalled();
+          expect(await markerKeys(f)).toEqual([]);
+        });
+      });
+    });
+  });
+
+  it("is written only to the plugin's KV: no thread metadata key carries the marker", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "user");
+        await f.call();
+        expect(JSON.stringify(f.metadata)).not.toContain(planSha256Of(Buffer.from(PLAN_TEXT)));
+        expect(await markerKeys(f)).toHaveLength(1);
+      });
+    });
   });
 });

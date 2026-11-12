@@ -100,8 +100,9 @@ export function presentPlanChangesRequestedMessage(feedback?: string): string {
 
 /**
  * `PresentPlan`'s reply when the form closed without an answer (any cancel
- * reason, named): the plan is not approved. A later call for an unchanged plan
- * is a cheap re-review followed by a new form.
+ * reason, named): the plan is not approved. A later call for the unchanged plan,
+ * within the window (`REVIEW_CONTINUATION_CAP_MS` after the cancel), reopens the
+ * form without a review; a changed plan is reviewed as its delta.
  */
 export function presentPlanApprovalCancelledMessage(reason: PluginInteractionCancelReason): string {
   return `${AUTO_REVIEW_MARKER} The plan approval form closed without an answer (${reason}), so the plan is not approved. Do not implement it. End your turn and tell the user the plan still waits for approval. When they ask, call PresentPlan again with the same planFilePath.`;

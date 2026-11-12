@@ -487,6 +487,18 @@ describe("auto-review cli: reset", () => {
     });
   });
 
+  it("deletes the thread's released-plan markers, and only that thread's", async () => {
+    await withHost({}, async (host) => {
+      Object.assign(host.metadataFor(THREAD_ID), { phase: "idle" });
+      const { kv } = host;
+      await kv.set(`released:plan:${THREAD_ID}:a`, { path: "/p.md", sha256: "x", reviewed: true, openedAt: 1, at: 2 });
+      await kv.set(`released:plan:${OTHER_ID}:a`, { path: "/p.md", sha256: "x", reviewed: true, openedAt: 1, at: 2 });
+      const result = await host.run(["reset", THREAD_ID]);
+      expect(result.exitCode).toBe(0);
+      expect(await kv.list("released:plan:")).toEqual([`released:plan:${OTHER_ID}:a`]);
+    });
+  });
+
   it("clears the one-shot planReleased record as well", async () => {
     await withHost({}, async (host) => {
       Object.assign(host.metadataFor(THREAD_ID), {

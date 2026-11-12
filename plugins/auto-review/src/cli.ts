@@ -6,6 +6,7 @@ import {
   type GlobalDefaults,
   type LastFire,
 } from "./config.js";
+import { deleteReleasedPlans } from "./baseline-store.js";
 import { setAutoApprove } from "./cli-auto-approve.js";
 import { reviewStatusView, showFindings } from "./cli-findings.js";
 import { lastParkedAtOf, lastParkedLine, providerParkReleaseText, skippedText } from "./cli-park.js";
@@ -252,6 +253,8 @@ export function registerAutoReviewCli(
               ...PRESENT_PLAN_KEYS,
             ]);
             await removeDeferral(bb, threadId);
+            // A cancelled approval form's plan would reopen its form without a review; reset ends that too.
+            await deleteReleasedPlans(bb, threadId);
             return { prior: before };
           });
           if ("refused" in outcome) {

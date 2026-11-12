@@ -33,6 +33,7 @@ export const FIRE_REASONS = [
   "plan-approved",
   "plan-already-approved",
   "plan-review-redo",
+  "plan-reopened",
   "plan-review-incomplete",
   "plan-review-unverified",
   "already-reviewed",

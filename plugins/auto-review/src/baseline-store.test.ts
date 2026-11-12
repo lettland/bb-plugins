@@ -6,16 +6,21 @@ import {
   CODE_DELTA_BUDGET,
   clearPlanBaseline,
   deleteBaselines,
+  deleteReleasedPlan,
+  deleteReleasedPlans,
   MAX_BASELINE_FILE_BYTES,
   MAX_CODE_BASELINE_FILES,
   PLAN_DELTA_BUDGET,
   planScope,
   prepareCodeBaseline,
+  readReleasedPlan,
   recordCodeReport,
   settleCodeBaseline,
   settlePlanBaseline,
+  settleReleasedPlan,
   stagePlanPending,
   unifiedDelta,
+  writeReleasedPlan,
 } from "./baseline-store.js";
 import type { AvailableWorkspace } from "./detect-workspace.js";
 
@@ -543,5 +548,128 @@ describe("baseline records that cannot be stored or read", () => {
     await settlePlanBaseline(failing.bb, THREAD, PLAN, true);
     expect(failing.warnings[0]).toContain(`could not read the findings of ${THREAD}`);
     expect(failing.warnings[0]).toContain("kaboom");
+  });
+});
+
+describe("released-plan markers", () => {
+  const RESOLVED = "/w/docs/plans/p.md";
+  const record = { path: RESOLVED, sha256: "abc", reviewed: true, openedAt: 10, at: NOW };
+  const keyOf = (path: string) => `released:plan:${THREAD}:${createHash("sha256").update(path).digest("hex")}`;
+
+  function storeFake(failures: { get?: unknown; set?: unknown; delete?: unknown; list?: unknown } = {}) {
+    const kv = new Map<string, unknown>();
+    const warnings: string[] = [];
+    const bb = {
+      storage: {
+        kv: {
+          get: async (key: string) => {
+            if (failures.get !== undefined) throw failures.get;
+            return kv.get(key) ?? null;
+          },
+          set: async (key: string, value: unknown) => {
+            if (failures.set !== undefined) throw failures.set;
+            kv.set(key, structuredClone(value));
+          },
+          delete: async (key: string) => {
+            if (failures.delete !== undefined) throw failures.delete;
+            kv.delete(key);
+          },
+          list: async (prefix: string) => {
+            if (failures.list !== undefined) throw failures.list;
+            return [...kv.keys()].filter((key) => key.startsWith(prefix));
+          },
+        },
+      },
+      log: { warn: (message: string) => warnings.push(message), info: () => undefined },
+    } as unknown as BbPluginApi;
+    return { bb, kv, warnings };
+  }
+
+  it("round-trips by thread and resolved path", async () => {
+    const f = storeFake();
+    await writeReleasedPlan(f.bb, THREAD, record);
+    expect(f.kv.has(keyOf(RESOLVED))).toBe(true);
+    expect(await readReleasedPlan(f.bb, THREAD, RESOLVED)).toEqual(record);
+    expect(await readReleasedPlan(f.bb, "thread-2", RESOLVED)).toBeUndefined();
+    expect(await readReleasedPlan(f.bb, THREAD, "/other.md")).toBeUndefined();
+  });
+
+  it("a cancel keeps the marker and moves its clock; any other end deletes it", async () => {
+    const f = storeFake();
+    await writeReleasedPlan(f.bb, THREAD, record);
+    await settleReleasedPlan(f.bb, THREAD, RESOLVED, 10, NOW + 5);
+    expect(await readReleasedPlan(f.bb, THREAD, RESOLVED)).toEqual({ ...record, at: NOW + 5 });
+    await settleReleasedPlan(f.bb, THREAD, RESOLVED, 10, null);
+    expect(f.kv.size).toBe(0);
+  });
+
+  it.each([NOW + 5, null])("leaves a marker whose openedAt is another form's alone (cancelledAt %s)", async (cancelledAt) => {
+    const f = storeFake();
+    await writeReleasedPlan(f.bb, THREAD, { ...record, openedAt: 99 });
+    await settleReleasedPlan(f.bb, THREAD, RESOLVED, 10, cancelledAt);
+    expect(await readReleasedPlan(f.bb, THREAD, RESOLVED)).toEqual({ ...record, openedAt: 99 });
+  });
+
+  it("settling a plan with no marker writes nothing", async () => {
+    const f = storeFake();
+    await settleReleasedPlan(f.bb, THREAD, RESOLVED, 10, NOW);
+    expect(f.kv.size).toBe(0);
+  });
+
+  it("deleteReleasedPlans drops only that thread's markers, and deleteBaselines drops them too", async () => {
+    const f = storeFake();
+    await writeReleasedPlan(f.bb, THREAD, record);
+    await writeReleasedPlan(f.bb, THREAD, { ...record, path: "/w/b.md" });
+    await writeReleasedPlan(f.bb, "thread-2", record);
+    await deleteReleasedPlan(f.bb, THREAD, "/w/b.md");
+    expect([...f.kv.keys()].filter((key) => key.startsWith(`released:plan:${THREAD}:`))).toHaveLength(1);
+    await deleteReleasedPlans(f.bb, THREAD);
+    expect([...f.kv.keys()]).toEqual([expect.stringContaining("released:plan:thread-2:")]);
+    await writeReleasedPlan(f.bb, THREAD, record);
+    await deleteBaselines(f.bb, THREAD);
+    expect([...f.kv.keys()]).toEqual([expect.stringContaining("released:plan:thread-2:")]);
+  });
+
+  it("discards an unparseable marker and logs it, so the plan is reviewed again", async () => {
+    const f = storeFake();
+    f.kv.set(keyOf(RESOLVED), { path: RESOLVED });
+    expect(await readReleasedPlan(f.bb, THREAD, RESOLVED)).toBeUndefined();
+    expect(f.warnings[0]).toContain("discarding an unparseable released-plan marker");
+  });
+
+  it.each([
+    ["Error", new Error("kv down"), "kv down"],
+    ["non-Error", "kaboom", "kaboom"],
+  ])("logs a store failure (%s) and gives the re-arm behaviour", async (_name, thrown, message) => {
+    const failingGet = storeFake({ get: thrown });
+    expect(await readReleasedPlan(failingGet.bb, THREAD, RESOLVED)).toBeUndefined();
+    expect(failingGet.warnings[0]).toContain("could not read the released-plan marker");
+    expect(failingGet.warnings[0]).toContain(message);
+
+    const failingSet = storeFake({ set: thrown });
+    await writeReleasedPlan(failingSet.bb, THREAD, record);
+    expect(failingSet.warnings[0]).toContain("could not save the released-plan marker");
+    expect(failingSet.warnings[0]).toContain(message);
+
+    const failingDelete = storeFake({ delete: thrown });
+    await deleteReleasedPlan(failingDelete.bb, THREAD, RESOLVED);
+    expect(failingDelete.warnings[0]).toContain("could not delete the released-plan marker");
+    expect(failingDelete.warnings[0]).toContain(message);
+
+    const failingList = storeFake({ list: thrown });
+    await deleteReleasedPlans(failingList.bb, THREAD);
+    expect(failingList.warnings[0]).toContain(`could not list the released-plan markers of ${THREAD}`);
+    expect(failingList.warnings[0]).toContain(message);
+  });
+
+  it("deleteReleasedPlans logs a key whose delete failed and still tries the rest", async () => {
+    const f = storeFake();
+    await writeReleasedPlan(f.bb, THREAD, record);
+    await writeReleasedPlan(f.bb, THREAD, { ...record, path: "/w/b.md" });
+    const failing = storeFake({ delete: "kaboom" });
+    for (const [key, value] of f.kv) failing.kv.set(key, value);
+    await deleteReleasedPlans(failing.bb, THREAD);
+    expect(failing.warnings).toHaveLength(2);
+    expect(failing.warnings[0]).toContain("could not delete the released-plan marker");
   });
 });

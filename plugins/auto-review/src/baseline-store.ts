@@ -225,6 +225,113 @@ export async function clearPlanBaseline(
   }
 }
 
+// released plans.
+
+/**
+ * A plan released to the approval form: what the form showed, kept so a form
+ * that closed without an answer can reopen for the same plan without a review.
+ * Kept in the plugin's KV, never in thread metadata: the agent can write
+ * metadata, and a forged marker would open a form labelled reviewed with no
+ * review. `path` is the resolved path and `sha256` the hash of the bytes the
+ * form showed; `openedAt` is the open-form marker time of the form it belongs to;
+ * `at` is the release time, moved to the cancel time when the form is cancelled.
+ */
+const releasedPlanSchema = z.object({
+  path: z.string(),
+  sha256: z.string(),
+  reviewed: z.boolean(),
+  openedAt: z.number(),
+  at: z.number(),
+});
+export type ReleasedPlan = z.infer<typeof releasedPlanSchema>;
+
+const releasedKeyPrefix = (threadId: string): string => `released:plan:${threadId}:`;
+
+function releasedKey(threadId: string, resolvedPath: string): string {
+  return `${releasedKeyPrefix(threadId)}${createHash("sha256").update(resolvedPath).digest("hex")}`;
+}
+
+/** The marker for the plan at this resolved path, or undefined when there is none or it cannot be read (logged: the plan is then armed again). */
+export async function readReleasedPlan(
+  bb: BbPluginApi,
+  threadId: string,
+  resolvedPath: string,
+): Promise<ReleasedPlan | undefined> {
+  const key = releasedKey(threadId, resolvedPath);
+  try {
+    const raw = await bb.storage.kv.get<unknown>(key);
+    if (raw === null || raw === undefined) {
+      return undefined;
+    }
+    const parsed = releasedPlanSchema.safeParse(raw);
+    if (parsed.success) {
+      return parsed.data;
+    }
+    bb.log.warn(`auto-review: discarding an unparseable released-plan marker (${key}); the plan is reviewed again`);
+  } catch (error) {
+    bb.log.warn(`auto-review: could not read the released-plan marker (${key}); the plan is reviewed again: ${problem(error)}`);
+  }
+  return undefined;
+}
+
+export async function writeReleasedPlan(bb: BbPluginApi, threadId: string, record: ReleasedPlan): Promise<void> {
+  const key = releasedKey(threadId, record.path);
+  try {
+    await bb.storage.kv.set(key, record);
+  } catch (error) {
+    bb.log.warn(`auto-review: could not save the released-plan marker (${key}); a cancelled form's plan is reviewed again: ${problem(error)}`);
+  }
+}
+
+export async function deleteReleasedPlan(bb: BbPluginApi, threadId: string, resolvedPath: string): Promise<void> {
+  const key = releasedKey(threadId, resolvedPath);
+  try {
+    await bb.storage.kv.delete(key);
+  } catch (error) {
+    bb.log.warn(`auto-review: could not delete the released-plan marker (${key}): ${problem(error)}`);
+  }
+}
+
+/**
+ * The form's end, for the marker the release wrote. Only a marker that still
+ * holds this form's `openedAt` changes (a newer form's marker stays): a cancel
+ * keeps it with `at` moved to the cancel time `cancelledAt`, so the freshness
+ * window counts from the cancel; any other end deletes it. Callers hold the
+ * thread's lock.
+ */
+export async function settleReleasedPlan(
+  bb: BbPluginApi,
+  threadId: string,
+  resolvedPath: string,
+  openedAt: number,
+  cancelledAt: number | null,
+): Promise<void> {
+  const record = await readReleasedPlan(bb, threadId, resolvedPath);
+  if (record?.openedAt !== openedAt) {
+    return;
+  }
+  if (cancelledAt === null) {
+    await deleteReleasedPlan(bb, threadId, resolvedPath);
+  } else {
+    await writeReleasedPlan(bb, threadId, { ...record, at: cancelledAt });
+  }
+}
+
+/** Drops every released-plan marker of a thread: a reset, a deleted thread, or a plan path that no longer resolves. */
+export async function deleteReleasedPlans(bb: BbPluginApi, threadId: string): Promise<void> {
+  try {
+    for (const key of await bb.storage.kv.list(releasedKeyPrefix(threadId))) {
+      try {
+        await bb.storage.kv.delete(key);
+      } catch (error) {
+        bb.log.warn(`auto-review: could not delete the released-plan marker (${key}): ${problem(error)}`);
+      }
+    }
+  } catch (error) {
+    bb.log.warn(`auto-review: could not list the released-plan markers of ${threadId}: ${problem(error)}`);
+  }
+}
+
 /** Drops everything a deleted thread's reviews kept. */
 export async function deleteBaselines(bb: BbPluginApi, threadId: string): Promise<void> {
   try {
@@ -235,6 +342,7 @@ export async function deleteBaselines(bb: BbPluginApi, threadId: string): Promis
     bb.log.warn(`auto-review: could not list the plan baselines of ${threadId}: ${problem(error)}`);
   }
   await deleteRecord(bb, codeKey(threadId));
+  await deleteReleasedPlans(bb, threadId);
 }
 
 // code baselines.

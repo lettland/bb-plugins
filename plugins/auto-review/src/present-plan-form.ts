@@ -1,5 +1,6 @@
 import { basename } from "node:path";
 import type { BbPluginApi, PluginAgentToolContext, PluginAgentToolResult } from "@get-bb/plugin-sdk";
+import { settleReleasedPlan } from "./baseline-store.js";
 import { tryCaptureSinceSeq } from "./detect.js";
 import { planFormResolutionSince } from "./detect-plan-form.js";
 import {
@@ -223,6 +224,29 @@ async function clearFormOpen(bb: BbPluginApi, threadId: string, openedAt: number
 }
 
 /**
+ * The form's end for the released-plan marker its release wrote (see
+ * `settleReleasedPlan`): kept, with its clock moved to now, when the form was
+ * cancelled; deleted on any other end, so a broken form cannot loop through
+ * reopens. Only a marker that still holds this form's `openedAt` changes. Under
+ * the thread lock, like `clearFormOpen`. A store failure is logged by the helper
+ * and never changes the tool result: the plan is then reviewed again.
+ */
+async function settleReleasedMarker(
+  bb: BbPluginApi,
+  threadId: string,
+  { bound, openedAt }: NeedsForm,
+  cancelled: boolean,
+): Promise<void> {
+  if (bound === null) {
+    return;
+  }
+  // `settleReleasedPlan` is best-effort and logs its own failures, so nothing here can throw.
+  await withThreadLock(threadId, () =>
+    settleReleasedPlan(bb, threadId, bound.path, openedAt, cancelled ? Date.now() : null),
+  );
+}
+
+/**
  * Opens the plan approval form, outside the thread lock so a pending form never
  * holds it, and turns its outcome into the tool result. The call stays blocked
  * inside the turn that asked, or, when the provider aborts it at the end of the
@@ -231,24 +255,36 @@ async function clearFormOpen(bb: BbPluginApi, threadId: string, openedAt: number
  * confirm an answer (`presentPlanFormUnavailableMessage`), never to wait for a
  * chat approval, which the form instructions do not accept. Whatever the
  * outcome, the open-form marker the release wrote is cleared on the way out.
+ * The released-plan marker survives only a cancel, so the same unchanged plan
+ * can reopen the form without a review.
  */
 export async function askPlanApproval(
   review: ReviewContext,
   ctx: PluginAgentToolContext,
   needs: NeedsForm,
 ): Promise<PluginAgentToolResult> {
+  let cancelled = false;
   try {
-    return await runPlanApproval(review, ctx, needs);
+    const run = await runPlanApproval(review, ctx, needs);
+    cancelled = run.cancelled;
+    return run.result;
   } finally {
+    await settleReleasedMarker(review.bb, ctx.threadId, needs, cancelled);
     await clearFormOpen(review.bb, ctx.threadId, needs.openedAt);
   }
+}
+
+/** The tool result, and whether the form closed without an answer. */
+interface PlanApprovalRun {
+  result: PluginAgentToolResult;
+  cancelled: boolean;
 }
 
 async function runPlanApproval(
   review: ReviewContext,
   ctx: PluginAgentToolContext,
   { form, bound }: NeedsForm,
-): Promise<PluginAgentToolResult> {
+): Promise<PlanApprovalRun> {
   const { bb } = review;
   const unavailable = presentPlanFormUnavailableMessage(form.reviewed);
   const where = `${basename(form.planFilePath)} in thread ${ctx.threadId}`;
@@ -258,7 +294,7 @@ async function runPlanApproval(
     `the plan approval form in ${ctx.threadId}; no form is opened`,
   );
   if (sinceSeq === undefined) {
-    return unavailable;
+    return { result: unavailable, cancelled: false };
   }
   const holdOptions: HoldOptions = {
     signal: ctx.signal,
@@ -290,26 +326,29 @@ async function runPlanApproval(
         error instanceof Error ? error.message : String(error)
       }`,
     );
-    return unavailable;
+    return { result: unavailable, cancelled: false };
   }
   if (result.outcome === "cancelled") {
     bb.log.info(`auto-review: the plan approval form for ${where} was cancelled (${result.reason})`);
-    return presentPlanApprovalCancelledMessage(result.reason);
+    return { result: presentPlanApprovalCancelledMessage(result.reason), cancelled: true };
   }
   const decision = parsePlanApprovalValue(result.value);
   const outcome = await formOutcome(bb, ctx.threadId, sinceSeq, decision.approved, where);
   if (outcome === "plan-changed") {
-    return PRESENT_PLAN_FORM_PLAN_CHANGED_MESSAGE;
+    return { result: PRESENT_PLAN_FORM_PLAN_CHANGED_MESSAGE, cancelled: false };
   }
   if (outcome === "unavailable") {
-    return unavailable;
+    return { result: unavailable, cancelled: false };
   }
   if ("unreadable" in decision) {
     bb.log.info(`auto-review: the plan approval form for ${where} returned an answer that could not be read, so nothing is approved`);
-    return PRESENT_PLAN_FORM_UNREADABLE_MESSAGE;
+    return { result: PRESENT_PLAN_FORM_UNREADABLE_MESSAGE, cancelled: false };
   }
   bb.log.info(
     `auto-review: the plan approval form for ${where} ${decision.approved ? "approved the plan" : "asked for changes"}`,
   );
-  return decision.approved ? PRESENT_PLAN_FORM_APPROVED_MESSAGE : presentPlanChangesRequestedMessage(decision.feedback);
+  return {
+    result: decision.approved ? PRESENT_PLAN_FORM_APPROVED_MESSAGE : presentPlanChangesRequestedMessage(decision.feedback),
+    cancelled: false,
+  };
 }
