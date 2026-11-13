@@ -159,8 +159,7 @@ auto-review's own turns are exempt either way. Child threads and
 threads a plugin spawned (side chats, automations) never get either instruction or the
 tool: neither gate reviews their plans, and nobody may be there to approve one. The
 instruction (and, where it applies, the tool) follows the global switch only, so a project
-or thread with auto-review off still gets it — `PresentPlan` then tells the agent review is
-off here rather than silently reviewing nothing, while a disabled native gate just lets the
+or thread with auto-review off still gets it. `PresentPlan` opens the configured approval form immediately and marks the plan as unreviewed. With the form off, it tells the agent to wait for explicit approval in chat. A disabled native gate just lets the
 plan through unreviewed. A running session keeps the instructions and tools it started
 with, so the change applies from the next session start.
 

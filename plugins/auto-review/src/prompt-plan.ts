@@ -310,11 +310,7 @@ export const PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN = [
   `Skip this for work under a plan already approved in this thread (by the user, or automatically by auto-review), for ${AUTO_REVIEW_MARKER} turns, and when the user tells you to proceed without a plan. ${TRIVIAL_CHANGE} Before any edit or implementation spawn, call \`change_size\`; if it says non_trivial or nothing, present a plan first.`,
 ].join("\n\n");
 
-/**
- * `PresentPlan`'s reply when auto-review is off for the thread (disabled):
- * nothing reviews the plan here, so the agent is told to fall back
- * to ending its turn and waiting for the user directly.
- */
+/** PresentPlan returns this response when review is off and the thread does not use the approval form. */
 export const PRESENT_PLAN_OFF_MESSAGE =
   `${AUTO_REVIEW_MARKER} Plan review is off here. End your turn with the plan and wait for the user's explicit approval in chat — this result is not approval.`;
 

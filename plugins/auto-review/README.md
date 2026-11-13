@@ -685,15 +685,16 @@ A chat approval never counts without a TypeSafe key, with the typesafe plugin of
 project the typesafe plugin skips (`skipProjects`). A new plan (a new `PresentPlan` arm)
 needs a new approval; `bb auto-review reset` keeps the record.
 
-With it on, `PresentPlan` opens an approval form once the review is done, on providers other
-than Claude Code. The form shows the plan text (rendered as Markdown in a scroll box, as the
+With it on, `PresentPlan` opens an approval form after review on providers other than Claude Code.
+When review is disabled, `PresentPlan` opens the configured approval form immediately and marks the plan as unreviewed.
+With the form off, it waits for explicit approval in chat. The form shows the plan text (rendered as Markdown in a scroll box, as the
 plan stands after the review's fixes), the plan path and whether the review completed, with
 Approve, Request changes (which needs feedback) and Cancel. The agent's turn stays blocked until
 you answer, and the answer is the `PresentPlan` result itself:
 
 - **Approve:** the result says the plan was approved in the form, and the agent implements it. The missing-plan Blocker of the code review counts this approval, but only when the answer was given in the app.
-- **Request changes:** the agent revises the plan file from your feedback and calls `PresentPlan` again, which runs a new review and then a new form. The feedback reaches the agent as quoted data, never as an instruction.
-- **Cancel** (or a stop, or the 60-minute limit): the plan stays unapproved. The agent ends its turn and says so; ask it to present the plan again and it calls `PresentPlan` with the same path. For an unchanged plan file, within two hours of the cancel, the form opens again without a review; a changed plan is reviewed as its delta first.
+- **Request changes:** the agent revises the plan file from your feedback and calls `PresentPlan` again, which opens a new form after any enabled review. The feedback reaches the agent as quoted data, never as an instruction.
+- **Cancel** (or a stop, or the 60-minute limit): the plan stays unapproved. The agent ends its turn and says so; ask it to present the plan again and it calls `PresentPlan` with the same path. For an unchanged plan file, within two hours of the cancel, the form opens again without a review; when review is enabled, a changed plan is reviewed as its delta first.
 - **Answer not readable:** an answer that fails the form's strict shape (for example feedback past the form's length cap) is discarded, not read as a change request. The plan stays unapproved, and the agent is told your answer was not read; ask it to present the plan again.
 
 With the form on, a chat reply is not approval: the agent's instructions say to call
@@ -711,7 +712,7 @@ renderer, the same one agent messages use.
 opens and hashes it again when you answer. If the file changed, was deleted, could not be read,
 or the read took longer than a second, the approval does not count: the row says "Not counted: the
 plan changed after the form opened", it counts as a denial for the missing-plan Blocker, and the
-agent is told to call `PresentPlan` again (a new review, then a new form). The check is made when
+agent is told to call `PresentPlan` again (a new form after any enabled review). The check is made when
 you answer; it cannot stop the agent from editing the file after you approved. Request changes
 is not checked: it carries your feedback whatever the file does.
 
@@ -719,15 +720,14 @@ is not checked: it carries your feedback whatever the file does.
 `<bb data dir>/plans/<thread id>/` (the data dir comes from the bb server, not from `~/.bb`). Paths
 are resolved first (symlinks, `..`, macOS `/var` to `/private/var`) and compared whole-segment, so
 `/ws-evil` is not inside `/ws`; the file is read from the resolved path. A path outside both gets
-the invalid-path result and the plan stays armed. The answer-time check resolves the path again and
+the invalid-path result and the plan stays armed when review is enabled. Correct the file or path and call `PresentPlan` again. With review disabled, the corrected plan is presented directly. The answer-time check resolves the path again and
 reads it only if it is still the same file inside those roots, so a file swapped for a symlink after
 the form opened cannot make the check read elsewhere.
 
 **A plan file that is missing or unreadable fails closed.** If the plan file is not there or cannot
 be read on the bb server (a typo, a deleted file, no permission), no form opens and `PresentPlan`
 returns an error: "The plan file <path> was not found or could not be read. Write the plan to that
-path and call PresentPlan again." The plan stays armed, so the next call for the same path releases
-it. The one exception is a thread on a remote host: when the thread has a workspace path and that
+path and call PresentPlan again." The plan stays armed when review is enabled. Correct the file or path and call `PresentPlan` again. With review disabled, the corrected plan is presented directly. The one exception is a thread on a remote host: when the thread has a workspace path and that
 path does not exist on the bb server, its plan file lives on another machine and cannot be read
 here. The form then opens with the path and the notice "The plan text isn't available on this host;
 open the file to read it.", nothing binds the approval to a text, and the approval is credited as

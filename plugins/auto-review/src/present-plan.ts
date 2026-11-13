@@ -131,6 +131,46 @@ async function refuseWhileFormOpen(
   return null;
 }
 
+async function preparePlanForm(
+  review: ReviewContext,
+  ctx: PluginAgentToolContext,
+  state: ThreadState,
+  planFilePath: string,
+  reviewed: boolean,
+): Promise<PluginAgentToolResult | NeedsForm> {
+  const { bb } = review;
+  const now = Date.now();
+  // Refuse a second form before clearing the arm. Read the current plan once
+  // from its resolved path, and reject invalid or missing local files first.
+  const refused = await refuseWhileFormOpen(bb, ctx.threadId, state, now);
+  if (refused !== null) {
+    return refused;
+  }
+  const planRead = await readPlanFileForForm(bb, ctx.threadId, planFilePath);
+  if (planRead.kind === "outside") {
+    return { content: [{ type: "text", text: PRESENT_PLAN_INVALID_PATH_MESSAGE }], isError: true };
+  }
+  if (planRead.kind === "missing") {
+    return { content: [{ type: "text", text: presentPlanFileMissingMessage(planFilePath) }], isError: true };
+  }
+  const openedAt = nextFormOpenedAt(state, now);
+  await writeState(bb, ctx.threadId, { presentPlanFormOpenAt: openedAt }, [...PRESENT_PLAN_KEYS]);
+  if (planRead.kind === "read") {
+    await writeReleasedPlan(bb, ctx.threadId, {
+      path: planRead.path,
+      sha256: planSha256Of(planRead.bytes),
+      reviewed,
+      openedAt,
+      at: now,
+    });
+  }
+  return {
+    form: buildPlanApprovalPayload({ planFilePath, reviewed, bytes: planRead.kind === "read" ? planRead.bytes : null }),
+    bound: planRead.kind === "read" ? { path: planRead.path, sha256: planSha256Of(planRead.bytes) } : null,
+    openedAt,
+  };
+}
+
 /**
  * The second call for an armed plan. A plan whose review never loaded
  * `review-code` (`planSkillCheck`) is sent back once instead, staying armed
@@ -200,38 +240,12 @@ async function releasePlan(
     (await reviewRanSince(bb, ctx.threadId, state.presentPlanArmedSeq, PRESENT_PLAN_GATE_TOOLS, true, false));
   const autoApproved = reviewRan && config.autoApprovePlans;
   const opensForm = formMode && !autoApproved;
-  const now = Date.now();
-  const openedAt = nextFormOpenedAt(state, now);
-  // A release that would open a form while another is open is refused before
-  // anything is cleared, so the plan stays armed for the same call to release later.
-  if (opensForm) {
-    const refused = await refuseWhileFormOpen(bb, ctx.threadId, state, now);
-    if (refused !== null) {
-      return refused;
-    }
+  const prepared = opensForm ? await preparePlanForm(review, ctx, state, planFilePath, check !== "missing") : null;
+  if (prepared !== null && !needsForm(prepared)) {
+    return prepared;
   }
-  // The form shows the plan as it stands now, after the review's fixes: read once, from the resolved
-  // path, never from the baseline staged at arm time. A path outside the allowed roots, and a plan
-  // file that is not there or cannot be read, are refused here, before anything is cleared, so the
-  // plan stays armed and no form opens. Only a plan on a remote host opens the form without text.
-  const planRead = opensForm ? await readPlanFileForForm(bb, ctx.threadId, planFilePath) : null;
-  if (planRead?.kind === "outside") {
-    return { content: [{ type: "text", text: PRESENT_PLAN_INVALID_PATH_MESSAGE }], isError: true };
-  }
-  if (planRead?.kind === "missing") {
-    return { content: [{ type: "text", text: presentPlanFileMissingMessage(planFilePath) }], isError: true };
-  }
-  // One patch: a failed write cannot leave the plan disarmed without its marker.
-  await writeState(bb, ctx.threadId, opensForm ? { presentPlanFormOpenAt: openedAt } : {}, [...PRESENT_PLAN_KEYS]);
-  if (planRead?.kind === "read") {
-    // What the form shows, so a cancelled form can reopen for this same plan without a review.
-    await writeReleasedPlan(bb, ctx.threadId, {
-      path: planRead.path,
-      sha256: planSha256Of(planRead.bytes),
-      reviewed: check !== "missing",
-      openedAt,
-      at: now,
-    });
+  if (!opensForm) {
+    await writeState(bb, ctx.threadId, {}, [...PRESENT_PLAN_KEYS]);
   }
   await settlePlanBaseline(bb, ctx.threadId, planFilePath, reviewWorked);
   if (autoApproved) {
@@ -256,28 +270,20 @@ async function releasePlan(
     warnPlanUnreviewed(bb, ctx.threadId, basename(planFilePath), check);
   }
   await recordFire(review, ctx.projectId, ctx.threadId, "stood-down", planReleaseReason(check), tallyExtras);
-  const text = check === "missing" ? PRESENT_PLAN_INCOMPLETE_MESSAGE : PRESENT_PLAN_REVIEWED_MESSAGE;
-  if (!formMode) {
-    // The text tells the agent to wait for approval in chat; the cursor is what the missing-plan gate counts typed replies from.
-    const releasedSeq = await tryCaptureSinceSeq(
-      bb,
-      ctx.threadId,
-      `the plan released to chat in ${ctx.threadId}; the missing-plan check will not count a typed approval`,
-    );
-    if (releasedSeq !== undefined) {
-      await writeState(bb, ctx.threadId, { presentPlanChatReleasedSeq: releasedSeq });
-    }
-    return text;
+  if (prepared !== null) {
+    return prepared;
   }
-  return {
-    form: buildPlanApprovalPayload({
-      planFilePath,
-      reviewed: check !== "missing",
-      bytes: planRead?.kind === "read" ? planRead.bytes : null,
-    }),
-    bound: planRead?.kind === "read" ? { path: planRead.path, sha256: planSha256Of(planRead.bytes) } : null,
-    openedAt,
-  };
+  const text = check === "missing" ? PRESENT_PLAN_INCOMPLETE_MESSAGE : PRESENT_PLAN_REVIEWED_MESSAGE;
+  // The text tells the agent to wait for approval in chat; the cursor is what the missing-plan gate counts typed replies from.
+  const releasedSeq = await tryCaptureSinceSeq(
+    bb,
+    ctx.threadId,
+    `the plan released to chat in ${ctx.threadId}; the missing-plan check will not count a typed approval`,
+  );
+  if (releasedSeq !== undefined) {
+    await writeState(bb, ctx.threadId, { presentPlanChatReleasedSeq: releasedSeq });
+  }
+  return text;
 }
 
 /**
@@ -343,7 +349,9 @@ async function presentPlan(
     const state = await readState(bb, ctx.threadId);
     const project = await readProjectConfig(bb, ctx.projectId);
     const config = effectiveConfig(review.globals, project);
-    if (!config.enabled) {
+    // The mode the thread's instructions were written with; the live setting only before one is stored.
+    const formMode = state.presentPlanFormMode ?? config.planApprovalForm;
+    if (!config.enabled && !formMode) {
       return PRESENT_PLAN_OFF_MESSAGE;
     }
     if (!SCOPE_PATH_ALLOW.test(planFilePath)) {
@@ -353,8 +361,9 @@ async function presentPlan(
       };
     }
     const now = Date.now();
-    // The mode the thread's instructions were written with; the live setting only before one is stored.
-    const formMode = state.presentPlanFormMode ?? config.planApprovalForm;
+    if (!config.enabled) {
+      return preparePlanForm(review, ctx, state, planFilePath, false);
+    }
     // An armed plan always releases: its release writes a new marker over the old one.
     if (formMode && !presentPlanArmed(state, planFilePath, now)) {
       const reopened = await reopenReleasedPlan(review, ctx, state, planFilePath, now);

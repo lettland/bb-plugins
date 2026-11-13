@@ -25,6 +25,7 @@ import {
   PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM,
   PRESENT_PLAN_APPROVED_MESSAGE,
   PRESENT_PLAN_INCOMPLETE_MESSAGE,
+  PRESENT_PLAN_OFF_MESSAGE,
   presentPlanApprovalCancelledMessage,
   presentPlanChangesRequestedMessage,
   presentPlanFormUnavailableMessage,
@@ -453,6 +454,79 @@ const MODES = [
   ["self", true],
   ["devkit", false],
 ] as const;
+
+describe("PresentPlan with review disabled", () => {
+  it("opens an unreviewed form on the first call", async () => {
+    await withFormHost({ form: true }, async ({ review, metadata, call, requestInput }) => {
+      review.globals.enabled = false;
+      for (const key of Object.keys(metadata)) delete metadata[key];
+      requestInput.mockRejectedValue(new Error("form unavailable"));
+      const result = await call();
+      expect(requestInput).toHaveBeenCalledTimes(1);
+      expect(requestInput.mock.calls[0]?.[0]).toMatchObject({ payload: { reviewed: false } });
+      expect(result).not.toBe(PRESENT_PLAN_OFF_MESSAGE);
+    });
+  });
+
+  it("honors a project disable and ignores auto-approval even for an armed review", async () => {
+    await withFormHost({ form: true }, async ({ host, settle, metadata, requestInput }) => {
+      await writeProjectConfig(host.bb, CTX.projectId, { enabled: false, autoApprovePlans: true });
+      expect(await settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
+      expect(requestInput.mock.calls[0]?.[0]).toMatchObject({ payload: { reviewed: false } });
+      expect(metadata.presentPlanArmedAt).toBeUndefined();
+      expect(metadata.presentPlanAutoApprovedSeq).toBeUndefined();
+    });
+  });
+
+  it.each([[true, false], [false, true]])("honors stored form mode %s over global mode %s", async (stored, global) => {
+    await withFormHost({ form: global }, async ({ review, metadata, call, requestInput }) => {
+      review.globals.enabled = false;
+      metadata.presentPlanFormMode = stored;
+      requestInput.mockRejectedValue(new Error("form unavailable"));
+      const result = await call();
+      expect(requestInput).toHaveBeenCalledTimes(stored ? 1 : 0);
+      if (!stored) expect(result).toBe(PRESENT_PLAN_OFF_MESSAGE);
+    });
+  });
+
+  it("returns changes requested without approving the plan", async () => {
+    await withFormHost({ form: true }, async ({ review, settle, call, requestInput }) => {
+      review.globals.enabled = false;
+      expect(await settle({ approved: false, feedback: "Revise" })).toBe(presentPlanChangesRequestedMessage("Revise"));
+      requestInput.mockResolvedValueOnce({ outcome: "cancelled", reason: "user" });
+      expect(await call()).toBe(presentPlanApprovalCancelledMessage("user"));
+      expect(requestInput.mock.calls[1]?.[0]).toMatchObject({ payload: { reviewed: false } });
+    });
+  });
+
+  it("presents an unreviewed form again after an unreadable answer", async () => {
+    await withFormHost({ form: true }, async ({ review, settle, call, requestInput }) => {
+      review.globals.enabled = false;
+      expect(await settle({ approved: false, feedback: "x".repeat(2001) })).toBe(PRESENT_PLAN_FORM_UNREADABLE_MESSAGE);
+      requestInput.mockResolvedValueOnce({ outcome: "cancelled", reason: "user" });
+      expect(await call()).toBe(presentPlanApprovalCancelledMessage("user"));
+      expect(requestInput.mock.calls[1]?.[0]).toMatchObject({ payload: { reviewed: false } });
+    });
+  });
+
+  it("retries after cancellation and refuses a second open form", async () => {
+    await withFormHost({ form: true }, async ({ review, call, requestInput, host }) => {
+      review.globals.enabled = false;
+      requestInput.mockResolvedValueOnce({ outcome: "cancelled", reason: "user" });
+      expect(await call()).toBe(presentPlanApprovalCancelledMessage("user"));
+      const controller = new AbortController();
+      const pending = call({ signal: controller.signal });
+      try {
+        await vi.waitFor(() => expect(host.harness.pendingInteractions).toHaveLength(1));
+        expect(await call()).toEqual(planFormOpenResult());
+        expect(requestInput).toHaveBeenCalledTimes(2);
+      } finally {
+        controller.abort();
+        await pending;
+      }
+    });
+  });
+});
 
 describe("PresentPlan's approval form", () => {
   it.each([
@@ -1346,6 +1420,37 @@ describe("the approval form shows the plan and binds the approval to it", () => 
     (requestInput.mock.calls[index] as [{ payload: Json }])[0].payload;
   const size = (host: ReturnType<typeof createFakePluginHost>) => reviewSize(host.bb, THREAD_ID, ["a.ts"], null, 77);
 
+  it("rejects missing and outside files when review is disabled", async () => {
+    await withFiles(async ({ base, workspace, dataDir }) => {
+      const missing = join(workspace, "docs", "missing.md");
+      const outside = join(base, "outside.md");
+      await writeFile(outside, "# Outside\n");
+      for (const [planPath, expected] of [
+        [missing, `The plan file ${missing} was not found or could not be read. Write the plan to that path and call PresentPlan again.`],
+        [outside, PRESENT_PLAN_INVALID_PATH_MESSAGE],
+      ]) {
+        await withFormHost({ form: true, planPath, workspace, dataDir }, async ({ review, call, requestInput }) => {
+          review.globals.enabled = false;
+          expect(await call()).toEqual({ content: [{ type: "text", text: expected }], isError: true });
+          expect(requestInput).not.toHaveBeenCalled();
+        });
+      }
+    });
+  });
+
+  it("does not count approval of changed bytes when review is disabled", async () => {
+    await withFiles(async ({ workspace, dataDir, plan }) => {
+      await withFormHost({ form: true, planPath: plan, workspace, dataDir }, async ({ review, settle, requestInput }) => {
+        review.globals.enabled = false;
+        const result = await settle({ approved: true }, undefined, undefined, async () => {
+          await writeFile(plan, "# Changed plan\n");
+        });
+        expect(result).toBe(PRESENT_PLAN_FORM_PLAN_CHANGED_MESSAGE);
+        expect(payloadOf(requestInput)).toMatchObject({ reviewed: false, planText: "# Plan\n\n1. first step\n" });
+      });
+    });
+  });
+
   it("shows the plan after the review's fixes, not the plan staged at arm time, and credits the approval", async () => {
     await withFiles(async ({ workspace, dataDir, plan }) => {
       await withFormHost({ form: true, planPath: plan, workspace, dataDir }, async ({ host, call, settle, metadata, requestInput, rows }) => {
@@ -1390,7 +1495,7 @@ describe("the approval form shows the plan and binds the approval to it", () => 
       await withFormHost({ form: true, planPath: plan, workspace, dataDir }, async (f) => {
         const result = await f.settle({ approved: true }, undefined, undefined, () => change(plan));
         expect(result).toBe(PRESENT_PLAN_FORM_PLAN_CHANGED_MESSAGE);
-        expect(result).toContain("Your approval did not count because the plan file changed after the form opened. Call PresentPlan again with the same path. This runs the review again, so a new form will follow.");
+        expect(result).toContain("Your approval did not count because the plan file changed after the form opened. Call PresentPlan again with the same path. It reviews the current plan when auto-review is enabled, then opens a new approval form.");
         expect(f.infos().some((line) => line.includes("changed after the form opened, so the approval did not count"))).toBe(true);
         const { description } = (f.rows[0] as { data: { interaction: { resolution: { description: Json } } } }).data.interaction.resolution;
         expect(description).toEqual({ title: PLAN_CHANGED_TITLE, payload: { approved: false, planChanged: true } });
@@ -1722,6 +1827,25 @@ describe("a cancelled approval form reopens for the unchanged plan without a rev
   const payloadAt = (f: FormHost, index: number) => (f.requestInput.mock.calls[index] as [{ payload: Json }])[0].payload;
   const cancelOnce = (f: FormHost, reason: "user" | "timeout" | "request-aborted") =>
     f.requestInput.mockResolvedValueOnce({ outcome: "cancelled", reason });
+
+  it("presents an unreviewed form after a reviewed form was cancelled and review is disabled", async () => {
+    await withPlanFiles(async (files) => {
+      await withReopenHost(files, {}, async (f) => {
+        cancelOnce(f, "user");
+        expect(await f.call()).toBe(presentPlanApprovalCancelledMessage("user"));
+        expect((await markerOf(f)).value).toMatchObject({ reviewed: true });
+        f.review.globals.enabled = false;
+        cancelOnce(f, "user");
+        expect(await f.call()).toBe(presentPlanApprovalCancelledMessage("user"));
+        expect(payloadAt(f, 1)).toMatchObject({ reviewed: false });
+        expect((await markerOf(f)).value).toMatchObject({ reviewed: false });
+        f.review.globals.enabled = true;
+        cancelOnce(f, "user");
+        expect(await f.call()).toBe(presentPlanApprovalCancelledMessage("user"));
+        expect(payloadAt(f, 2)).toMatchObject({ reviewed: false });
+      });
+    });
+  });
 
   it.each(["request-aborted", "user", "timeout"] as const)(
     "opens the form again for the unchanged plan after a %s cancel: no review prompt, no arm, no baseline write",
