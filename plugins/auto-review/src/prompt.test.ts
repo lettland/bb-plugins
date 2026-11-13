@@ -2071,6 +2071,16 @@ describe("PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM", () => {
   it("leaves the setting-off instructions without any mention of the form", () => {
     expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).not.toContain("approval form");
   });
+
+  it("makes only a form approval override a plan-only condition", () => {
+    const sentence =
+      "An approval in the approval form is the go-ahead to implement, even when the request or the plan says to plan only; after the approval form approved the plan, do not ask for approval again.";
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM).toContain(sentence);
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM.split("go-ahead")).toHaveLength(2);
+    expect(sentence).toContain("approval form");
+    expect(sentence).not.toMatch(/automatic/i);
+    expect(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN).not.toContain("go-ahead");
+  });
 });
 
 describe("the plan approval form's PresentPlan results", () => {
@@ -2090,9 +2100,16 @@ describe("the plan approval form's PresentPlan results", () => {
 
   it("states the approval in the form as the approval to implement, without naming who answered", () => {
     expect(PRESENT_PLAN_FORM_APPROVED_MESSAGE).toBe(
-      `${AUTO_REVIEW_MARKER} The plan was approved in the approval form. This PresentPlan result is the approval: implement the plan.`,
+      `${AUTO_REVIEW_MARKER} The plan was approved in the approval form. This PresentPlan result is the approval: implement the plan now. It overrides any "plan only" or "do not implement yet" condition in the request or in the plan. The approval form is closed: do not ask for approval of this plan again.`,
     );
     expect(PRESENT_PLAN_FORM_APPROVED_MESSAGE).not.toMatch(/\buser\b/);
+  });
+
+  it("keeps the automatic approval text without the form override", () => {
+    expect(PRESENT_PLAN_APPROVED_MESSAGE).toBe(
+      `${AUTO_REVIEW_MARKER} Plan reviewed and approved automatically (this project auto-approves reviewed plans). This PresentPlan result is your approval: say in your reply that auto-review approved the plan automatically (the user did not), summarize what the review changed in one or two lines, then implement the plan. If you are in plan mode, leave it with ExitPlanMode first.`,
+    );
+    expect(PRESENT_PLAN_APPROVED_MESSAGE).not.toContain("overrides");
   });
 
   it("pins the unreadable-answer text and the open-form tool error", () => {

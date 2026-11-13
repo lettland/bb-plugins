@@ -174,7 +174,7 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   a plan file that is missing or unreadable on the server opens no form and returns an error (the plan
   stays armed), and only a thread whose workspace path is not on the server (a remote host) shows the
   path only, unbound. The agent's turn stays blocked, and the answer becomes the
-  tool result: approved (implement), changes requested (revise and call `PresentPlan` again; the
+  tool result: approved (implement now; overrides a "plan only" request or plan line, and the form is closed; use Cancel to keep a plan without implementing it), changes requested (revise and call `PresentPlan` again; the
   feedback is quoted as data), cancelled (not approved; end the turn, ask again later), or "Answer
   not readable" (a value that fails the strict shape, e.g. feedback past the form's length cap, is
   discarded and never credited; not approved, the agent tells the user their answer was not read). The
