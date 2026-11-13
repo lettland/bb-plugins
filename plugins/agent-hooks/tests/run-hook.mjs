@@ -53,7 +53,8 @@ export function cleanup(dir) {
 }
 
 /** A throwaway git repo. `ignored` lists .gitignore entries; `tracked` are files
- *  committed into the tree. Used by the F5/secret-scan gitignore-gate cases. */
+ *  committed into the tree. Used by the F5/secret-scan gitignore-gate cases.
+ *  @param {{ ignored?: string[], tracked?: string[] }} [options] */
 export function makeGitRepo({ ignored = [], tracked = [] } = {}) {
   const dir = makeProjectDir();
   const git = (...args) =>
@@ -82,12 +83,12 @@ export function makeGitRepo({ ignored = [], tracked = [] } = {}) {
  * @param {unknown} toolInput
  * `envelope` is merged over the default event envelope, so a test can set
  * `agent_id`, `hook_event_name`, its own `session_id` or `transcript_path`.
- * @param {{ projectDir?: string, env?: Record<string, string>, toolName?: string, permissionMode?: string, envelope?: Record<string, unknown> }} [options]
+ * @param {{ projectDir?: string, cwd?: string, env?: Record<string, string>, toolName?: string, permissionMode?: string, envelope?: Record<string, unknown> }} [options]
  */
 export function runHook(
   script,
   toolInput,
-  { projectDir, env = {}, toolName = "Bash", permissionMode, envelope: envelopeOverride = {} } = {},
+  { projectDir, cwd, env = {}, toolName = "Bash", permissionMode, envelope: envelopeOverride = {} } = {},
 ) {
   const dir = projectDir ?? makeProjectDir();
   const owned = projectDir === undefined;
@@ -103,6 +104,7 @@ export function runHook(
 
   return new Promise((resolve) => {
     const child = spawn("bash", [path.join(HOOKS_DIR, script)], {
+      cwd: cwd ?? dir,
       env: {
         ...process.env,
         // The whole point. Never the real checkout: guard-bash appends a LOW

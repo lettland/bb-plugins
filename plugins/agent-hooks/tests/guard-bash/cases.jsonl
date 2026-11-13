@@ -277,3 +277,9 @@
 {"id": "wipe-cmdpos-find-after-xargs-prefix", "cmd": "time find . -delete", "mode": "bypassPermissions", "expect": "hard", "why": "round 1: time prefix before find"}
 {"id": "gap-wipe-quoted-command-word", "cmd": "\"rm\" -rf .", "mode": "bypassPermissions", "expect": "allow", "why": "DOCUMENTED GAP: a token that starts with a quote is never the command word, by design of the round 1 rule; the catastrophic-rm scan still covers system and home paths"}
 {"id": "gap-wipe-quoted-substitution", "cmd": "echo \"$(rm -rf .)\"", "mode": "bypassPermissions", "expect": "allow", "why": "DOCUMENTED GAP: a quoted string with whitespace is dropped as prose, including a command substitution inside it"}
+{"id": "f5-xml-declaration-tmp-thr_jvc8m2bzvw", "cmd": "printf '%s\\n' '<?xml version=\"1.0\" encoding=\"UTF-8\"?>' > /tmp/job.plist", "expect": "allow", "why": "thr_jvc8m2bzvw: XML attributes are not assignment records"}
+{"id": "f5-xml-variable-destination-thr_jvc8m2bzvw", "cmd": "printf '%s\\n' '<?xml version=\"1.0\"?>' > \"$fixture_plist\"", "expect": "allow", "why": "thr_jvc8m2bzvw: XML output does not require destination resolution"}
+{"id": "f5-echo-prose-assignment-argument-thr_jvc8m2bzvw", "cmd": "echo 'Use' 'NAME=value' > notes.txt", "expect": "allow", "why": "thr_jvc8m2bzvw: echo joins arguments into one output record"}
+{"id": "f5-printf-prose-assignment-argument-thr_jvc8m2bzvw", "cmd": "printf 'Example: %s\\n' 'NAME=value' > notes.txt", "expect": "allow", "why": "thr_jvc8m2bzvw: printf prefix makes the output prose"}
+{"id": "f5-printf-xml-assignment-argument-thr_jvc8m2bzvw", "cmd": "printf '<item value=\"%s\"/>\\n' 'NAME=value' > notes.txt", "expect": "allow", "why": "thr_jvc8m2bzvw: formatted XML is not an assignment record"}
+{"id": "f5-printf-assignment-record-thr_jvc8m2bzvw", "cmd": "printf '%s\\n' 'NAME=value' > notes.txt", "expect": "hard", "why": "thr_jvc8m2bzvw: assignment output to an unignored file remains blocked"}

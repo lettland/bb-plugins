@@ -1225,57 +1225,278 @@ fi
 # is legitimate and was wrongly blocked, while a `.env` that is NOT ignored is the
 # genuinely dangerous case the name rule waved through.
 #
-# Fails CLOSED by construction: no git, no repo, an error, or a path outside the
-# tree all return non-zero, so the name-based rule below still runs.
-path_is_gitignored() {
-  local p="$1"
-  [ -n "$p" ] || return 1
-  command -v git > /dev/null 2>&1 || return 1
-  git -C "$CLAUDE_PROJECT_DIR" rev-parse --is-inside-work-tree > /dev/null 2>&1 || return 1
-  git -C "$CLAUDE_PROJECT_DIR" check-ignore -q -- "$p" 2> /dev/null
+# Missing Git, a non-repository, and ignore-check errors cannot verify a target.
+# Tokenize the command as data and emit one record per output redirection.
+scan_env_writes() {
+  printf '%s' "$1" | awk -v sq="'" '
+    BEGIN { RS="\034"; OFS="\t"; bq=sprintf("%c",96); unknown=sprintf("%c",29); changedir=0 }
+    function word() {
+      if (started) { n++; t[n]=w; dyn[n]=dynamic; unsafe[n]=ansi_escaped; opaque[n]=opaque_evidence; kind[n]="word" }
+      w=""; dynamic=0; ansi_escaped=0; opaque_evidence=0; started=0
+    }
+    # Skip an expansion without evaluating it. Its output can include a newline.
+    function expansion(pos,    c,nx,j,depth,quote,escaped) {
+      c=substr(s,pos,1); nx=substr(s,pos+1,1)
+      if (c==bq) {
+        for (j=pos+1; j<=length(s); j++) {
+          c=substr(s,j,1)
+          if (c=="\\") { j++; continue }
+          if (c==bq) return j
+        }
+        return length(s)
+      }
+      if (nx=="(") {
+        depth=1; quote=""; escaped=0
+        for (j=pos+2; j<=length(s); j++) {
+          c=substr(s,j,1)
+          if (escaped) { escaped=0; continue }
+          if (c=="\\" && quote!=sq) { escaped=1; continue }
+          if (quote!="") { if (c==quote) quote=""; continue }
+          if (c==sq || c=="\"") { quote=c; continue }
+          if (c=="(") depth++
+          if (c==")" && --depth==0) return j
+        }
+        return length(s)
+      }
+      if (nx=="{") {
+        for (j=pos+2; j<=length(s); j++) if (substr(s,j,1)=="}") return j
+        return length(s)
+      }
+      if (nx ~ /[A-Za-z_]/) {
+        j=pos+2
+        while (substr(s,j,1) ~ /[A-Za-z0-9_]/ && j<=length(s)) j++
+        return j-1
+      }
+      if (nx ~ /[0-9@*#?$!-]/) return pos+1
+      return pos
+    }
+    function assignment(s,    empty,pos,left,right) {
+      empty=s; gsub(unknown,"",empty)
+      if (empty ~ /(^|\n)[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=/) return 1
+      while ((pos=index(s,unknown)) != 0) {
+        left=substr(s,1,pos-1); right=substr(s,pos+1)
+        gsub(unknown,"",right)
+        if ((left "\n" right) ~ /(^|\n)[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=/) return 1
+        if ((left "X" right) ~ /(^|\n)[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=/) return 1
+        if ((left "\nX" right) ~ /(^|\n)[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=/) return 1
+        s=left substr(s,pos+1)
+      }
+      return 0
+    }
+    function output(    i,j,c,nx,arg,out,used,unsupported,repeat,fmt,first) {
+      if (cmd!="echo" && cmd!="printf") return 0
+      if (cmd=="echo") {
+        out=""; first=1
+        while (first<=argc && args[first] ~ /^-[nE]+$/) first++
+        if (first<=argc && args[first] ~ /^-[neE]*e[neE]*$/) {
+          for (i=first+1; i<=argc; i++)
+            if (args[i] ~ /[A-Za-z_][A-Za-z0-9_]*=/) return 1
+        }
+        for (i=first; i<=argc; i++) {
+          if (a_opaque[i]) return 1
+          if (a_unsafe[i] && args[i] ~ /[A-Za-z_][A-Za-z0-9_]*=/) return 1
+          out=out (i==first ? "" : " ") args[i]
+        }
+        return assignment(out)
+      }
+      if (!argc) return 0
+      first=(args[1]=="--" ? 2 : 1)
+      if (first>argc) return 0
+      if (a_opaque[first]) return 1
+      fmt=args[first]; unsupported=adyn[first]; arg=first+1; out=""
+      do {
+        used=0
+        for (i=1; i<=length(fmt); i++) {
+          c=substr(fmt,i,1); nx=substr(fmt,i+1,1)
+          if (c=="%" && nx=="s") {
+            if (arg<=argc && a_opaque[arg]) return 1
+            if (arg<=argc && a_unsafe[arg] && args[arg] ~ /[A-Za-z_][A-Za-z0-9_]*=/) unsupported=1
+            out=out (arg<=argc ? args[arg++] : ""); i++; used++
+          }
+          else if (c=="%" && nx=="%") { out=out "%"; i++ }
+          else if (c=="%") unsupported=1
+          else if (c=="\\" && nx=="n") { out=out "\n"; i++ }
+          else if (c=="\\" && nx=="t") { out=out "\t"; i++ }
+          else if (c=="\\" && nx=="\\") { out=out "\\"; i++ }
+          else if (c=="\\") { unsupported=1; out=out c }
+          else out=out c
+        }
+        repeat=(used && arg<=argc)
+      } while (repeat)
+      if (unsupported) for (j=1; j<=argc; j++)
+        if (a_opaque[j] || args[j] ~ /[A-Za-z_][A-Za-z0-9_]*=/) return 1
+      return assignment(out)
+    }
+    function clause(    i,fd,idx,matched,target,d,app,sensitive,duplicate,redir_op) {
+      cmd=""; argc=0
+      for (i=1; i<=n; i++) {
+        if (kind[i]=="redir" || kind[i]=="input") { i++; continue }
+        if (kind[i]!="word") continue
+        if (!cmd && (t[i]=="then" || t[i]=="do" || t[i]=="else")) continue
+        if (!cmd) cmd=t[i]
+        else { args[++argc]=t[i]; adyn[argc]=dyn[i]; a_unsafe[argc]=unsafe[i]; a_opaque[argc]=opaque[i] }
+      }
+      matched=output()
+      for (i=1; i<=n; i++) {
+        if (kind[i]!="redir") continue
+        match(t[i],/^[0-9]+/)
+        fd=substr(t[i],1,RLENGTH); redir_op=substr(t[i],RLENGTH+1)
+        sub(/^0+/,"",fd); if (fd=="") fd="0"
+        app=(redir_op==">>"); duplicate=(redir_op==">&")
+        idx=i+1; target=(idx<=n && kind[idx]=="word" ? t[idx] : "")
+        d=(idx>n || kind[idx]!="word" || dyn[idx] || target ~ /[\t\n]/ || target=="")
+        sensitive=(target ~ /^(~\/\.|\/etc\/|\.env|\.ssh|\.claude\/settings)/)
+        if (duplicate && target ~ /^([0-9]+|-)$/ && !d) { i++; continue }
+        if (fd=="1" || sensitive)
+          print (fd=="1" ? matched : 0), app, d, changedir, sensitive, (target=="" ? "-" : target)
+        i++
+      }
+      if (cmd!="echo" && cmd!="printf")
+        for (i=1; i<=n; i++)
+          if (kind[i]=="word" && (t[i]=="cd" || t[i]=="pushd" || t[i]=="popd" || t[i]=="eval" || t[i]=="source" || t[i]==".")) changedir=1
+      for (i in t) delete t[i]
+      for (i in kind) delete kind[i]
+      for (i in dyn) delete dyn[i]
+      for (i in unsafe) delete unsafe[i]
+      for (i in opaque) delete opaque[i]
+      for (i in args) delete args[i]
+      for (i in adyn) delete adyn[i]
+      for (i in a_unsafe) delete a_unsafe[i]
+      for (i in a_opaque) delete a_opaque[i]
+      n=0; argc=0; cmd=""; matched=0
+    }
+    {
+      s=$0; n=0; q=""; w=""; started=0; dynamic=0; ansi_escaped=0; opaque_evidence=0
+      for (i=1; i<=length(s); i++) {
+        c=substr(s,i,1); nx=substr(s,i+1,1)
+        if (q==sq) {
+          if (ansi && c=="\\" && nx!="") { ansi_escaped=1; w=w c nx; i++; continue }
+          if (c==sq) { q=""; ansi=0 } else w=w c
+          continue
+        }
+        if (q=="\"") {
+          if (c=="\"") { q=""; continue }
+          if (c=="\\" && nx=="\n") { i++; continue }
+          if (c=="\\" && (nx=="$" || nx==bq || nx=="\"" || nx=="\\")) { w=w nx; i++; continue }
+          if (c=="$" || c==bq) {
+            last=expansion(i)
+            if (last>i) {
+              if (substr(s,i,last-i+1) ~ /[A-Za-z_][A-Za-z0-9_]*=/) opaque_evidence=1
+              dynamic=1; w=w unknown; i=last; continue
+            }
+            dynamic=1
+          }
+          w=w c; continue
+        }
+        if (c=="$" && nx==sq) { q=sq; ansi=1; started=1; dynamic=1; i++; continue }
+        if (c==sq || c=="\"") { q=c; started=1; continue }
+        if (c=="\\") {
+          if (nx=="\n") { i++; continue }
+          started=1
+          if (nx!="") { w=w nx; i++ } else dynamic=1
+          continue
+        }
+        if (c=="&" && nx==">") {
+          word(); operator=">"; i++
+          if (substr(s,i+1,1)==">") { operator=">>"; i++ }
+          n++; kind[n]="redir"; t[n]="1" operator
+          continue
+        }
+        if (c==">" || c=="<") {
+          fd="1"
+          if (started && w ~ /^[0-9]+$/) { fd=w; w=""; started=0; dynamic=0 }
+          else word()
+          operator=c; if (nx==c) { operator=c c; i++ }
+          else if (c==">" && nx=="&") { operator=">&"; i++ }
+          if (operator=="<<" && substr(s,i+1,1)=="<") { operator="<<<"; i++ }
+          n++; kind[n]=(c==">" ? "redir" : "input"); t[n]=fd operator
+          continue
+        }
+        if (c ~ /[;|&\n()]/) {
+          if (c=="&" && n && kind[n]=="redir") { w=w c; started=1; continue }
+          word(); clause()
+          if (c=="(" || c==")") changedir=1
+          continue
+        }
+        if (c ~ /[ \t\r]/) { word(); continue }
+        if (c=="$" || c==bq) {
+          last=expansion(i)
+          if (last>i) {
+            if (substr(s,i,last-i+1) ~ /[A-Za-z_][A-Za-z0-9_]*=/) opaque_evidence=1
+            dynamic=1; started=1; w=w unknown; i=last; continue
+          }
+          dynamic=1
+        }
+        if (c=="*" || c=="?") { dynamic=1; started=1; w=w unknown; continue }
+        if (c=="[") {
+          last=index(substr(s,i+1),"]")
+          if (last) { dynamic=1; started=1; w=w unknown; i+=last; continue }
+        }
+        if (c ~ /[{}~]/) dynamic=1
+        started=1; w=w c
+      }
+      if (q!="") dynamic=1
+      word(); clause()
+    }'
 }
 
-# Only env-assignment-shaped content is judged here. Appending prose to a tracked
-# README is nobody's business; appending `API_KEY=…` to one is.
-# Evaluated PER CLAUSE. A whole-command match is wrong and was a real false
-# positive: in a multi-line script it paired an `echo` on line 1 with a `NAME=`
-# on line 3 and a `2>/dev/null` on line 4, and refused the lot. The echo, the
-# assignment and the redirection all have to belong to the SAME clause.
-WRITE_APPROVED=0
-WRITE_CLAUSES="$(printf '%s' "$COMMAND" | tr ';|&\n' '\n' | tr -s '\n')"
-while IFS= read -r wclause; do
-  [ -z "$wclause" ] && continue
-  echo "$wclause" | grep -qE '^[[:space:]]*(echo|printf)\b' || continue
-  echo "$wclause" | grep -qE '[A-Za-z_][A-Za-z0-9_]*=' || continue
-  echo "$wclause" | grep -qE '>>?[[:space:]]*[^[:space:]]+' || continue
-
-  WRITE_TARGET="$(echo "$wclause" | sed -nE 's/.*>>?[[:space:]]*([^[:space:]|;&<>]+).*/\1/p')"
-  case "$WRITE_TARGET" in
-    "" | /dev/*) continue ;; # device sinks are not files anyone commits
-  esac
-
-  IS_APPEND=0
-  echo "$wclause" | grep -qE '>>[[:space:]]*[^[:space:]]+' && IS_APPEND=1
-
-  if [ "$IS_APPEND" = "1" ] && path_is_gitignored "$WRITE_TARGET"; then
-    # Ignored destination + append of a variable: the legitimate case. Allowed,
-    # and WRITE_APPROVED stops the name-based fallback below from re-blocking it.
-    # Truncation (`>`) is deliberately NOT exempted — destroying a populated
-    # secrets file is blocked whether or not git can see it.
-    WRITE_APPROVED=1
-    log_incident "LOW" "ALLOWED: variable appended to gitignored '$WRITE_TARGET'"
-  elif ! path_is_gitignored "$WRITE_TARGET"; then
-    log_incident "HIGH" "HARD BLOCKED: variable written to committable '$WRITE_TARGET': $COMMAND"
-    deny "HARD BLOCK: '$WRITE_TARGET' is not gitignored, so this variable could be committed." "Put it in a gitignored file (and confirm that file is in .gitignore). If it is really needed, the user runs the command themselves. Appending to an ignored file is allowed without asking."
+WRITE_SCAN=""
+case "$COMMAND" in
+  *">"*)
+    if command -v awk > /dev/null 2>&1 && WRITE_SCAN="$(scan_env_writes "$COMMAND")"; then
+      :
+    else
+      if printf '%s\n' "$COMMAND" | grep -qE '(echo|printf).*([A-Za-z_][A-Za-z0-9_]*=).*>'; then
+        deny "HARD BLOCK: Cannot verify the destination of an environment-assignment write." "Use a literal destination path so the guard can check its Git ignore status. The guard does not evaluate variables or command substitutions."
+      fi
+      if printf '%s\n' "$COMMAND" | grep -qE '>[[:space:]]*(~\/\.|\/etc\/|\.env|\.ssh|\.claude\/settings)'; then
+        [ "$FULL_ACCESS" = 1 ] || log_incident "HIGH" "SOFT BLOCKED: config/system file overwrite: $COMMAND"
+        deny "SOFT BLOCK: Writing to a sensitive config/system file." "Command blocked: system file overwrite detected. Verify this is intentional with the user."
+      fi
+    fi
+    ;;
+esac
+PROJECT_CANONICAL="$(cd "$CLAUDE_PROJECT_DIR" 2> /dev/null && pwd -P)"
+START_CANONICAL="$(pwd -P)"
+SENSITIVE_WRITE=0
+while IFS=$'\t' read -r WRITE_ASSIGN WRITE_APPEND WRITE_DYNAMIC WRITE_DIR WRITE_SENSITIVE WRITE_TARGET; do
+  [ -n "$WRITE_ASSIGN" ] || continue
+  WRITE_IGNORED=0
+  WRITE_VERIFIED=0
+  if [ "$WRITE_DYNAMIC" = 0 ]; then
+    case "$WRITE_TARGET" in
+      /dev/*) continue ;;
+      /*) WRITE_VERIFIED=1 ;;
+      *) [ -n "$PROJECT_CANONICAL" ] && [ "$START_CANONICAL" = "$PROJECT_CANONICAL" ] && [ "$WRITE_DIR" = 0 ] && WRITE_VERIFIED=1 ;;
+    esac
   fi
-done <<< "$WRITE_CLAUSES"
-
-# Overwriting system/config files. Still name-based, and still the fallback
-# whenever the gitignore test above could not run (no repo, no git, error) —
-# which is exactly what makes F5 fail CLOSED. Skipped only when the gitignore
-# gate positively approved this write.
-if [ "$WRITE_APPROVED" = "0" ] \
-  && echo "$COMMAND" | grep -qE '>[[:space:]]*(~\/\.|\/etc\/|\.env|\.ssh|\.claude\/settings)'; then
+  if [ "$WRITE_VERIFIED" = 1 ]; then
+    if ! command -v git > /dev/null 2>&1 || ! git -C "$CLAUDE_PROJECT_DIR" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+      WRITE_VERIFIED=0
+    else
+      git -C "$CLAUDE_PROJECT_DIR" check-ignore -q -- "$WRITE_TARGET" 2> /dev/null
+      WRITE_STATUS=$?
+      case "$WRITE_STATUS" in
+        0) WRITE_IGNORED=1 ;;
+        1) ;;
+        *) WRITE_VERIFIED=0 ;;
+      esac
+    fi
+  fi
+  if [ "$WRITE_ASSIGN" = 1 ]; then
+    if [ "$WRITE_VERIFIED" = 0 ]; then
+      log_incident "HIGH" "HARD BLOCKED: unverified environment-assignment destination: $COMMAND"
+      deny "HARD BLOCK: Cannot verify the destination of an environment-assignment write." "Use a literal destination path so the guard can check its Git ignore status. The guard does not evaluate variables or command substitutions."
+    elif [ "$WRITE_IGNORED" = 0 ]; then
+      log_incident "HIGH" "HARD BLOCKED: variable written to committable '$WRITE_TARGET': $COMMAND"
+      deny "HARD BLOCK: '$WRITE_TARGET' is not gitignored, so this variable could be committed." "Write environment assignments only to a verified gitignored file."
+    fi
+  fi
+  if [ "$WRITE_SENSITIVE" = 1 ] && ! { [ "$WRITE_ASSIGN" = 1 ] && [ "$WRITE_APPEND" = 1 ] && [ "$WRITE_IGNORED" = 1 ]; }; then
+    SENSITIVE_WRITE=1
+  fi
+done <<< "$WRITE_SCAN"
+if [ "$SENSITIVE_WRITE" = 1 ]; then
   [ "$FULL_ACCESS" = 1 ] || log_incident "HIGH" "SOFT BLOCKED: config/system file overwrite: $COMMAND"
   deny "SOFT BLOCK: Writing to a sensitive config/system file." "Command blocked: system file overwrite detected. Verify this is intentional with the user."
 fi
