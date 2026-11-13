@@ -623,6 +623,42 @@ describe("sidebar drafts", () => {
   const rpcMethods = (view: ReturnType<typeof renderBoard>, method: string) =>
     view.inspection.rpcCalls.filter((call: any) => call.method === method);
 
+  test("unsettled failed review and custom cards stay visible with or without drafts", async () => {
+    const tasks = [
+      mirrorCard({ number: 10, title: "Review failure", stageId: "stage-attention", threadId: "review", runState: "failed", attentionReason: "Review error" }),
+      mirrorCard({ number: 11, title: "Custom failure", stageId: "stage-holding", threadId: "custom", runState: "failed", attentionReason: "Custom error" }),
+      mirrorCard({ number: 12, title: "Ordinary failure", threadId: "ordinary", runState: "failed" }),
+      mirrorCard({ number: 13, title: "Settled failure", stageId: "stage-attention", runState: "failed", settledAt: 42 }),
+      mirrorCard({ number: 14, title: "Unknown failure", stageId: "missing", runState: "failed" }),
+      mirrorCard({ number: 15, title: "Ordinary draft", threadId: "ordinary-draft", runState: "failed", attentionReason: "Draft error" }),
+    ];
+    for (const ids of [["ordinary-draft"], ["review", "custom", "ordinary-draft"]]) {
+      renderBoard({ snapshot: snapshotOf(tasks) }, undefined, drafted(ids));
+      await screen.findByText("Review failure");
+      for (const [column, title, reason] of [["Human Review", "Review failure", "Review error"], ["Holding", "Custom failure", "Custom error"]]) {
+        const card = cardElement(title);
+        expect(within(columnOf(column)).getByText(title)).toBeTruthy();
+        expect(within(card).getByText("Failed")).toBeTruthy();
+        expect(within(card).getByText(reason)).toBeTruthy();
+      }
+      expect(within(columnOf("To Do")).getByText("Ordinary draft")).toBeTruthy();
+      for (const title of ["Ordinary failure", "Settled failure", "Unknown failure"]) expect(screen.queryByText(title)).toBeNull();
+      expect(screen.getByRole("button", { name: "All3" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Running0" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Unread3" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Settled0" })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Running0" }));
+      expect(screen.queryByText("Review failure")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Unread3" }));
+      expect(screen.getByText("Review failure")).toBeTruthy();
+      expect(screen.getByText("Custom failure")).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Settled0" }));
+      expect(screen.queryByText("Review failure")).toBeNull();
+      expect(screen.queryByText("Custom failure")).toBeNull();
+      cleanup();
+    }
+  });
+
   test("a settled mirror card with a draft shows in To Do and counts as open; without the draft it stays settled", async () => {
     const tasks = [
       mirrorCard({ number: 10, title: "Draft card", threadId: "thr-d1", settledAt: 500, readAt: 5 }),

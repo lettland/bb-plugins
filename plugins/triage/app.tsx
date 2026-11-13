@@ -25,7 +25,7 @@ import {
 } from "@/lib/triage-format";
 import { claimTriageRefresh } from "@/lib/triage-mounts";
 import { patchTaskRead, patchTaskStage, useOpenTaskRequests, useTriage } from "@/lib/triage-store";
-import type { NotificationLevel, Task } from "@/lib/triage-types";
+import type { NotificationLevel, Stage, Task } from "@/lib/triage-types";
 import "./app.css";
 
 interface RealtimePayload {
@@ -99,23 +99,27 @@ function useDraftRootIds(): ReadonlySet<string> {
   }
 }
 
+function keepsFailedCardVisible(task: Task, stages: readonly Stage[]): boolean {
+  if (task.runState !== "failed" || task.settledAt !== null) return false;
+  const role = stages.find((stage) => stage.id === task.stageId)?.systemRole;
+  return role === "attention" || role === null;
+}
+
 /**
- * A card whose session has an unsent draft, is not running, and that the board
- * would otherwise hide (settled or failed) shows as an open To Do card: if bb
- * shows the draft, so does Triage. A visible card (open, not failed) stays in its
- * stored column, whether or not it has a draft.
+ * A card with an unsent draft shows in To Do when the board would otherwise hide it.
+ * Unsettled failed cards in Human Review or custom stages remain in their stored column.
  */
-function isDraftedCard(task: Task, draftRoots: ReadonlySet<string>): boolean {
+function isDraftedCard(task: Task, draftRoots: ReadonlySet<string>, stages: readonly Stage[]): boolean {
   return (
     task.threadId !== null &&
     draftRoots.has(task.threadId) &&
     !isTaskRunning(task) &&
-    (task.settledAt !== null || task.runState === "failed")
+    (task.settledAt !== null || (task.runState === "failed" && !keepsFailedCardVisible(task, stages)))
   );
 }
 
-function matchesFilter(task: Task, filter: TaskFilter, drafted: boolean): boolean {
-  if (task.runState === "failed" && !drafted) return false;
+function matchesFilter(task: Task, filter: TaskFilter, drafted: boolean, stages: readonly Stage[]): boolean {
+  if (task.runState === "failed" && !drafted && !keepsFailedCardVisible(task, stages)) return false;
   const open = drafted || task.settledAt === null;
   switch (filter) {
     case "live":
@@ -131,6 +135,7 @@ function matchesFilter(task: Task, filter: TaskFilter, drafted: boolean): boolea
 
 function TriageBoard() {
   const { snapshot, error, loading, rpc, refresh } = useTriage();
+  const stages = snapshot?.stages ?? [];
   const { projectId: routeProjectId } = useBbContext();
   const navigate = useBbNavigate();
   const [projectFilter, setProjectFilter] = useState("all");
@@ -179,15 +184,15 @@ function TriageBoard() {
   const counts = useMemo(
     () => {
       const countOf = (filter: TaskFilter) =>
-        scopedTasks.filter((task) => matchesFilter(task, filter, isDraftedCard(task, draftRoots))).length;
+        scopedTasks.filter((task) => matchesFilter(task, filter, isDraftedCard(task, draftRoots, stages), stages)).length;
       return { all: countOf("all"), live: countOf("live"), unread: countOf("unread"), settled: countOf("settled") };
     },
-    [draftRoots, scopedTasks],
+    [draftRoots, scopedTasks, stages],
   );
 
   const visibleTasks = useMemo(
-    () => scopedTasks.filter((task) => matchesFilter(task, taskFilter, isDraftedCard(task, draftRoots))),
-    [draftRoots, scopedTasks, taskFilter],
+    () => scopedTasks.filter((task) => matchesFilter(task, taskFilter, isDraftedCard(task, draftRoots, stages), stages)),
+    [draftRoots, scopedTasks, stages, taskFilter],
   );
 
   const taskAction = async (operation: () => Promise<unknown>, message: string) => {
@@ -255,7 +260,7 @@ function TriageBoard() {
   const defaultProjectId = projectFilter !== "all" ? projectFilter : routeProjectId;
   // The server always keeps an intake stage.
   const intakeId = snapshot.stages.find((stage) => stage.systemRole === "intake")!.id;
-  const draftedTask = (task: Task) => isDraftedCard(task, draftRoots);
+  const draftedTask = (task: Task) => isDraftedCard(task, draftRoots, stages);
 
   return (
     <div className="triage-shell">

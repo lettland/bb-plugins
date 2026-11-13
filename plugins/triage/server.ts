@@ -1876,9 +1876,10 @@ export default async function plugin(bb: BbPluginApi) {
     const now = Date.now();
     const mirrored = task.origin === "mirror";
     if (mirrored) {
+      const role = getStageRow(task.stage_id).system_role;
       db.prepare(
-        "UPDATE triage_tasks SET run_state = 'failed', attention_reason = ?, settled_at = COALESCE(settled_at, ?), updated_at = ? WHERE id = ?",
-      ).run(reason, now, now, task.id);
+        "UPDATE triage_tasks SET run_state = 'failed', attention_reason = ?, settled_at = CASE WHEN ? THEN COALESCE(settled_at, ?) ELSE settled_at END, updated_at = ? WHERE id = ?",
+      ).run(reason, role === "intake" || role === "active" || role === "done" ? 1 : 0, now, now, task.id);
     } else {
       db.prepare(
         "UPDATE triage_tasks SET run_state = 'failed', attention_reason = ?, updated_at = ? WHERE id = ?",

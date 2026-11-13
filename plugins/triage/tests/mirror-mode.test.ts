@@ -592,6 +592,27 @@ test("an active turn refreshes a mirror card's title, provider and machine witho
   expect(harness.inspection.sdk.callsTo("threads.update").length).toBe(0);
 });
 
+test("failure preserves settlement in review stages and settles ordinary mirrored stages", async () => {
+  const { db, cardOf, emit, mirror, importManual, rpc } = await start();
+  const custom = await rpc("createStage", { name: "Holding" });
+  for (const [index, stageId] of ["stage-attention", custom.id, "stage-todo", "stage-progress", "stage-completed"].entries()) {
+    const id = `failure-stage-${index}`;
+    const card = await mirror(thr(id, { status: "active" }));
+    await rpc("moveTask", { number: card.number, stageId });
+    await rpc("setTaskSettled", { number: card.number, settled: false });
+    await emit("thread.failed", { thread: thr(id), error: "Provider crashed" });
+    expect(cardOf(id)).toMatchObject({ stage_id: stageId, run_state: "failed", attention_reason: "Provider crashed" });
+    if (index < 2) expect(cardOf(id).settled_at).toBeNull();
+    else expect(cardOf(id).settled_at).toBeGreaterThan(0);
+    db.prepare("UPDATE triage_tasks SET settled_at = 42 WHERE thread_id = ?").run(id);
+    await emit("thread.failed", { thread: thr(id), error: "Provider crashed" });
+    expect(cardOf(id).settled_at).toBe(42);
+  }
+  await importManual(thr("failure-manual"));
+  await emit("thread.failed", { thread: thr("failure-manual"), error: "Manual failure" });
+  expect(cardOf("failure-manual")).toMatchObject({ run_state: "failed", attention_reason: "Manual failure", settled_at: null });
+});
+
 test("a failed turn retains a card's stage and history without an attention notice", async () => {
   const { cardOf, notifications, eventsOf, emit, mirror } = await start();
   const card = await mirror(thr("f-1", { status: "active" }));

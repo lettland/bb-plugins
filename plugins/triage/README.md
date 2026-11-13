@@ -90,8 +90,10 @@ bb triage stages
 Visible top-level sessions appear on the board automatically as mirrored cards.
 Their agents receive the same stage tool and instructions as agents assigned to
 Triage tasks. Agents move finished work to Completed and work that needs your
-input to Human Review. Human Review and custom stages stay on the board when
-the session goes idle; an idle turn alone does not mark a task complete.
+input to Human Review. Human Review and custom stages stay on the board
+when the session goes idle or fails, unless you have marked the card settled.
+Failed cards retain their status and error reason. An idle turn alone does not
+mark a task complete.
 
 Mirrored cards do not change sidebar visibility and are removed when their
 session is deleted. Unclassified cards settle when their session goes idle or
