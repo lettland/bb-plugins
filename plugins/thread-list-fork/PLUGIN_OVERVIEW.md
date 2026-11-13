@@ -3,7 +3,7 @@ The sidebar thread list, as a plugin.
 ## What you get
 
 - **Pinned** and **Threads** sections, plus the custom sections you create.
-- **Spaces**: each Space bb provides is a top-level group in every organization (by project, by machine, and Custom). A thread in a Space appears only in its Space group, nested like any other group. Create a Space from a header menu's New Space…, then rename it, edit its brief, start a thread in it, or delete it from its header. Move threads with the thread action Move to Space… (or No Space).
+- **Spaces**: each Space bb provides is a top-level group in every organization (by project, by machine, and Custom). A thread in a Space appears only in its Space group, nested like any other group. Create a Space from a header menu's New Space…, then rename it, edit its brief, start a thread in it, or delete it from its header. Move threads with the thread action Move to Space… (or No Space); a move also moves the thread's child threads. A thread without a project stays in its Space and is not offered the action.
 - Organize by project, by machine, or chronologically, with independent thread and project sorting.
 - Named, collapsible project groups that keep related projects together.
 - Nested child threads, worktree grouping, drag to reorder, pin, nest, and move between sections.

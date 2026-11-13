@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useAtomValue } from "jotai";
 import { toast } from "sonner";
 import {
   experimental_THREAD_ACTION_GROUPS,
@@ -12,23 +13,34 @@ import {
   readThreadSpaceId,
   updateThreadSpace,
 } from "../../fork-sdk-types.js";
+import { sidebarThreadLifecyclesAtom } from "../preferences/atoms.js";
 import { getMutationErrorMessage } from "../ui/mutation-errors.js";
 import { selectedRoots } from "./moveThreadAction.js";
 
 interface MoveToSpaceData {
   spaces: readonly { id: string; name: string }[];
   spaceIdByThreadId: Readonly<Record<string, string>>;
+  spaceWorkspaceThreadIds: readonly string[];
 }
+
+const SPACE_WORKSPACE_PROVIDER_ID = "space-workspace";
 
 const NO_SPACE_CHOICE_ID = "no-space";
 
 export function useMoveToSpaceData(): MoveToSpaceData | null {
-  const state = experimental_useSidebarThreads();
+  const lifecycles = useAtomValue(sidebarThreadLifecyclesAtom);
+  const state = experimental_useSidebarThreads({
+    experimental_lifecycles: lifecycles,
+  });
   const spaces = readSidebarSpaces(state);
   const spaceIdByThreadId: Record<string, string> = {};
+  const spaceWorkspaceThreadIds: string[] = [];
   for (const thread of state.threads) {
     const spaceId = readThreadSpaceId(thread);
     if (spaceId !== null) spaceIdByThreadId[thread.id] = spaceId;
+    if (thread.environment?.providerId === SPACE_WORKSPACE_PROVIDER_ID) {
+      spaceWorkspaceThreadIds.push(thread.id);
+    }
   }
   const key =
     spaces.length === 0
@@ -42,6 +54,7 @@ export function useMoveToSpaceData(): MoveToSpaceData | null {
             )
             .map((space) => ({ id: space.id, name: space.name })),
           spaceIdByThreadId,
+          spaceWorkspaceThreadIds,
         });
   return useMemo(
     () => (key === "" ? null : (JSON.parse(key) as MoveToSpaceData)),
@@ -86,6 +99,13 @@ function reportMoveFailure(error: unknown, fallback: string): void {
   toast.error(getMutationErrorMessage({ error, fallbackMessage: fallback }));
 }
 
+function staysInSpace(
+  data: MoveToSpaceData,
+  thread: PluginThreadActionTarget,
+): boolean {
+  return data.spaceWorkspaceThreadIds.includes(thread.id);
+}
+
 function currentSpaceId(
   data: MoveToSpaceData,
   thread: PluginThreadActionTarget,
@@ -122,7 +142,8 @@ export const moveToSpaceAction: PluginThreadActionRegistration<MoveToSpaceData |
       if (
         data === null ||
         thread.parentThreadId !== null ||
-        thread.archivedAt !== null
+        thread.archivedAt !== null ||
+        staysInSpace(data, thread)
       ) {
         return null;
       }
@@ -142,20 +163,28 @@ export const moveToSpaceAction: PluginThreadActionRegistration<MoveToSpaceData |
       };
     },
     experimental_bulkItem: ({ threads, data, sdk }) => {
-      if (data === null || threads.length === 0) return null;
+      if (data === null) return null;
+      const movable = threads.filter((thread) => !staysInSpace(data, thread));
+      if (movable.length === 0) return null;
+      const skipped = threads.length - movable.length;
       return {
         label: "Move to Space…",
         icon: "Folder02",
         choices: choicesFor(
           data,
-          threads
+          movable
             .filter((thread) => thread.parentThreadId === null)
             .map((thread) => currentSpaceId(data, thread)),
         ),
         run: async ({ value }) => {
           const spaceId = destinationSpaceId(data, value);
           if (spaceId === undefined) return;
-          const roots = await selectedRoots(sdk, threads).catch(() => null);
+          if (skipped > 0) {
+            toast.info(
+              `${skipped} ${skipped === 1 ? "thread" : "threads"} skipped. Threads without a project stay in their Space.`,
+            );
+          }
+          const roots = await selectedRoots(sdk, movable).catch(() => null);
           if (roots === null) {
             toast.error("Failed to move threads.");
             return;

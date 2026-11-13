@@ -41,7 +41,9 @@ order keys (`sectionOrder`, `manualSectionOrder`, `machineSectionOrder`) accept
 `pinned`, and ids of Spaces that no longer exist are dropped. A collapsed Space
 is stored as `space:<spaceId>` in `collapsedProjects`. Create, rename, edit the
 brief of, and delete a Space from its group header or the header menu's New
-Space…; use Move to Space… on a thread to file it.
+Space…; use Move to Space… on a thread to file it. A move also moves the
+thread's child threads. A thread without a project stays in its Space and is
+not offered the action.
 
 Collapsed groups stay collapsed when background threads appear or become
 unread. Their headers retain activity indicators. Opening a thread reveals

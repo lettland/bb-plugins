@@ -13,16 +13,28 @@ import {
   installTestPluginRuntime,
   renderSlot,
 } from "@get-bb/plugin-sdk/testing/app";
-import { makePluginProject, makeSidebarThread, sdkResult } from "../model/fixtures.js";
+import {
+  makePluginProject,
+  makeSidebarEnvironment,
+  makeSidebarThread,
+  sdkResult,
+} from "../model/fixtures.js";
 
 const hoisted = vi.hoisted(() => ({
   spaces: undefined as unknown,
   toastError: vi.fn(),
+  toastInfo: vi.fn(),
+  sidebarArgs: [] as unknown[],
 }));
 
 vi.mock("sonner", async (importOriginal) => {
   const actual = await importOriginal<typeof import("sonner")>();
-  return { ...actual, toast: { ...actual.toast, error: hoisted.toastError } };
+  return { ...actual, toast: {
+      ...actual.toast,
+      error: hoisted.toastError,
+      info: hoisted.toastInfo,
+    },
+  };
 });
 
 vi.mock("@get-bb/plugin-sdk/app", async (importOriginal) => {
@@ -32,6 +44,7 @@ vi.mock("@get-bb/plugin-sdk/app", async (importOriginal) => {
     experimental_useSidebarThreads: (
       ...args: Parameters<typeof actual.experimental_useSidebarThreads>
     ) => {
+      hoisted.sidebarArgs.push(args[0]);
       const state = actual.experimental_useSidebarThreads(...args);
       const spaces = hoisted.spaces;
       return useMemo(
@@ -52,6 +65,8 @@ afterEach(() => {
   cleanup();
   hoisted.spaces = undefined;
   hoisted.toastError.mockClear();
+  hoisted.toastInfo.mockClear();
+  hoisted.sidebarArgs.length = 0;
 });
 
 function makeSpace(id: string, name: string) {
@@ -115,11 +130,13 @@ function Probe({ collected }: { collected: { current: Collected | null } }) {
 function renderMove({
   spaces,
   spaceByThread = {},
+  spaceWorkspaceThreads = [],
   updateImpl = sdkResult({ ok: true }),
   ancestry = {},
 }: {
   spaces: ReturnType<typeof makeSpace>[] | undefined;
   spaceByThread?: Record<string, string>;
+  spaceWorkspaceThreads?: string[];
   updateImpl?: (args: unknown) => Promise<unknown>;
   ancestry?: Record<string, string[]>;
 }) {
@@ -131,9 +148,19 @@ function renderMove({
     { children: <Probe collected={collected} /> },
     {
       sidebarThreads: {
-        threads: Object.entries(spaceByThread).map(([id, spaceId]) =>
-          makeSidebarThread({ id, experimental_spaceId: spaceId }),
-        ),
+        threads: [
+          ...Object.entries(spaceByThread).map(([id, spaceId]) =>
+            makeSidebarThread({ id, experimental_spaceId: spaceId }),
+          ),
+          ...spaceWorkspaceThreads.map((id) =>
+            makeSidebarThread({
+              id,
+              environment: makeSidebarEnvironment({
+                providerId: "space-workspace",
+              }),
+            }),
+          ),
+        ],
         projects: [makePluginProject()],
         sections: [],
       },
@@ -242,6 +269,44 @@ describe("Move to Space", () => {
     expect(update).not.toHaveBeenCalled();
   });
 
+  it("reads the sidebar threads with the sidebar's lifecycles so every selectable thread is known", async () => {
+    const { item } = renderMove({ spaces: SPACES });
+    await waitFor(() => expect(item(makeTarget())).not.toBeNull());
+    expect(hoisted.sidebarArgs.length).toBeGreaterThan(0);
+    for (const args of hoisted.sidebarArgs) {
+      expect(args).toMatchObject({ experimental_lifecycles: expect.anything() });
+    }
+  });
+
+  it("cannot tell that a target missing from the sidebar list stays in its Space, so the server's refusal is shown", async () => {
+    const update = vi.fn(() =>
+      Promise.reject({
+        status: 400,
+        message:
+          "A thread without a project works in its Space directory and cannot move to another Space",
+      }),
+    );
+    const { item, bulkItem } = renderMove({ spaces: SPACES, updateImpl: update });
+    await waitFor(() => expect(item(makeTarget())).not.toBeNull());
+    run(item(makeTarget({ id: "not_in_list" })), "spc_a");
+    await run(bulkItem([makeTarget({ id: "not_in_list" })]), "spc_a");
+    await waitFor(() =>
+      expect(hoisted.toastError).toHaveBeenCalledWith(
+        "A thread without a project works in its Space directory and cannot move to another Space",
+      ),
+    );
+    expect(hoisted.toastInfo).not.toHaveBeenCalled();
+  });
+
+  it("is hidden for a thread that works in its Space directory", async () => {
+    const { item } = renderMove({
+      spaces: SPACES,
+      spaceWorkspaceThreads: ["thr_home"],
+    });
+    await waitFor(() => expect(item(makeTarget())).not.toBeNull());
+    expect(item(makeTarget({ id: "thr_home" }))).toBeNull();
+  });
+
   it("shows the server's message when the move is rejected", async () => {
     const update = vi.fn(() =>
       Promise.reject({
@@ -314,5 +379,37 @@ describe("Move to Space for a selection", () => {
         { id: "no-space", label: "No Space", selected: false, disabled: false },
       ]),
     );
+  });
+
+  it("skips threads that work in their Space directory and says so once", async () => {
+    const { bulkItem, update } = renderMove({
+      spaces: SPACES,
+      spaceWorkspaceThreads: ["home_a", "home_b"],
+    });
+    await waitFor(() => expect(bulkItem([makeTarget({ id: "free" })])).not.toBeNull());
+    await run(
+      bulkItem([
+        makeTarget({ id: "free" }),
+        makeTarget({ id: "home_a" }),
+        makeTarget({ id: "home_b" }),
+      ]),
+      "spc_a",
+    );
+    expect(update.mock.calls).toEqual([[{ threadId: "free", spaceId: "spc_a" }]]);
+    expect(hoisted.toastInfo).toHaveBeenCalledTimes(1);
+    expect(hoisted.toastInfo).toHaveBeenCalledWith(
+      "2 threads skipped. Threads without a project stay in their Space.",
+    );
+  });
+
+  it("says nothing extra when no thread is skipped and hides the action when all are", async () => {
+    const { bulkItem } = renderMove({
+      spaces: SPACES,
+      spaceWorkspaceThreads: ["home_a"],
+    });
+    await waitFor(() => expect(bulkItem([makeTarget({ id: "free" })])).not.toBeNull());
+    await run(bulkItem([makeTarget({ id: "free" })]), "spc_a");
+    expect(hoisted.toastInfo).not.toHaveBeenCalled();
+    expect(bulkItem([makeTarget({ id: "home_a" })])).toBeNull();
   });
 });
