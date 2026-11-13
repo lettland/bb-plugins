@@ -1503,6 +1503,29 @@ test("a root's idle lookup that resolves after a sub-thread went active leaves t
   expect(cardOf("r1-root")).toMatchObject({ run_state: "working", stage_id: "stage-progress", settled_at: null });
 });
 
+test("root idle tolerates a moved or deleted card while its old stage is deleted", async () => {
+  const context = await startQuiet();
+  const { ctx, cardOf, emit, mirror, rpc } = context;
+  for (const action of ["move", "delete"]) {
+    const id = `stale-idle-${action}`;
+    const card = await mirror(thr(id, { status: "active" }));
+    const stage = await rpc("createStage", { name: `Old ${action}` });
+    await rpc("moveTask", { number: card.number, stageId: stage.id });
+    const gate = deferred<unknown[]>();
+    let asked = false;
+    ctx.running = () => { asked = true; return gate.promise; };
+    const idle = emit("thread.idle", { thread: thr(id) });
+    await until(() => asked);
+    if (action === "move") await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+    else await rpc("deleteTask", { number: card.number });
+    await rpc("deleteStage", { id: stage.id });
+    gate.resolve([]);
+    expect((await idle).errors).toStrictEqual([]);
+    if (action === "move") expect(cardOf(id)).toMatchObject({ stage_id: "stage-attention", run_state: "working", settled_at: null });
+    else expect(cardOf(id)).toBeUndefined();
+  }
+});
+
 test("a sub-thread's active walk that resolves after its idle settled the card leaves the card settled", async () => {
   const context = await startQuiet();
   const { cardOf, emit, known, mirror, harness } = context;
@@ -1784,4 +1807,29 @@ test("reconcile leaves a card reopened after its candidates were read working", 
   await flush();
   await flush();
   expect(cardOf("rr-root")).toMatchObject({ run_state: "working", stage_id: "stage-progress", settled_at: null });
+});
+
+test.each(["move", "delete"])("reconcile skips a %s card's removed stage and still settles later cards", async (action) => {
+  const context = await startQuiet();
+  const { ctx, cardOf, mirror, rpc, harness, db } = context;
+  const stale = await mirror(thr("stale-reconcile", { status: "active" }));
+  await mirror(thr("later-reconcile", { status: "active" }));
+  const stage = await rpc("createStage", { name: "Old reconcile" });
+  await rpc("moveTask", { number: stale.number, stageId: stage.id });
+  ctx.list = worldOf([thr("stale-reconcile", { status: "idle" }), thr("later-reconcile", { status: "idle" })]).handler;
+  const gate = deferred<unknown[]>();
+  let calls = 0;
+  ctx.running = () => (++calls === 2 ? gate.promise : []);
+  db.prepare("UPDATE triage_tasks SET created_at = 1 WHERE thread_id IN (?, ?)").run("stale-reconcile", "later-reconcile");
+  await harness.behavior.setSettings({ autoCardThreads: false });
+  await harness.behavior.setSettings({ autoCardThreads: true });
+  await until(() => calls === 2);
+  if (action === "move") await rpc("moveTask", { number: stale.number, stageId: "stage-attention" });
+  else await rpc("deleteTask", { number: stale.number });
+  await rpc("deleteStage", { id: stage.id });
+  gate.resolve([]);
+  await until(() => cardOf("later-reconcile").settled_at !== null);
+  if (action === "move") expect(cardOf("stale-reconcile")).toMatchObject({ stage_id: "stage-attention", run_state: "working", settled_at: null });
+  else expect(cardOf("stale-reconcile")).toBeUndefined();
+  expect(cardOf("later-reconcile")).toMatchObject({ stage_id: "stage-progress", run_state: "idle" });
 });

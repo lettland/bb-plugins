@@ -1129,6 +1129,7 @@ export default async function plugin(bb: BbPluginApi) {
   const settleUnlessLive = async (card: TaskRow, rootId: string, settleOnFailure: boolean) => {
     const live = await liveRoots();
     if (live ? live.has(rootId) : !settleOnFailure) return;
+    if (getTaskByThread(rootId)?.stage_id !== card.stage_id) return;
     const now = Date.now();
     const role = getStageRow(card.stage_id).system_role;
     db.prepare(
@@ -1276,6 +1277,7 @@ export default async function plugin(bb: BbPluginApi) {
           };
         }
       } else if (live && card.run_state === "working" && thread.status === "idle" && !live.has(card.thread_id)) {
+        if (getTaskByThread(card.thread_id)?.stage_id !== card.stage_id) continue;
         const role = getStageRow(card.stage_id).system_role;
         if (role === "active") update = settle;
         else if (role === "attention" || role === null) update = { set: "run_state = 'idle'", values: [] };
