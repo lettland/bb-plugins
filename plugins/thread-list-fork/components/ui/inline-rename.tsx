@@ -18,7 +18,8 @@ export interface InlineRenameArgs {
     | "projectGroup"
     | "section"
     | "environment"
-    | "machine";
+    | "machine"
+    | "space";
   id: string;
   name: string;
   label: string;
@@ -64,6 +65,15 @@ export function renameError(error: unknown, kind: RenameSession["kind"]) {
     ) {
       return {
         error: "A section with this name already exists.",
+        cannotRetry: false,
+      };
+    }
+    if (
+      http.code === "space_name_conflict" ||
+      (kind === "space" && http.status === 409)
+    ) {
+      return {
+        error: "A Space with this name already exists.",
         cannotRetry: false,
       };
     }

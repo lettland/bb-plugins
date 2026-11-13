@@ -110,6 +110,35 @@ describe("thread-list preferences rpc", () => {
     ).rejects.toThrow(/Invalid value for showProviderIcons/);
   });
 
+  it("accepts space:<id> hidden groups, still parses values without them, and rejects an empty id", async () => {
+    const { bb, harness } = setup();
+    await plugin(bb);
+    await expect(
+      harness.behavior.callRpc("setPreference", {
+        key: "hiddenGroups",
+        value: ["threads", "project:a", "space:spc_1"],
+      }),
+    ).resolves.toEqual({
+      key: "hiddenGroups",
+      value: ["threads", "project:a", "space:spc_1"],
+    });
+    await expect(
+      harness.behavior.callRpc("setPreference", {
+        key: "hiddenGroups",
+        value: ["section:s", "machine:m"],
+      }),
+    ).resolves.toEqual({
+      key: "hiddenGroups",
+      value: ["section:s", "machine:m"],
+    });
+    await expect(
+      harness.behavior.callRpc("setPreference", {
+        key: "hiddenGroups",
+        value: ["space:"],
+      }),
+    ).rejects.toThrow(/Invalid value for hiddenGroups/);
+  });
+
   it("dedupes hidden groups and resets to the default", async () => {
     const { bb, harness } = setup();
     await plugin(bb);

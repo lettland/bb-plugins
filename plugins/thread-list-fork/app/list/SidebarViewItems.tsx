@@ -86,6 +86,15 @@ export function SidebarHeaderMenuContents({
         <Icon name="SectionAdd" />
         New section
       </DropdownMenuItem>
+      {creation.onNewSpace ? (
+        <DropdownMenuItem
+          disabled={creation.isCreatingSpace}
+          onSelect={() => creation.onNewSpace?.()}
+        >
+          <Icon name="Folder02" />
+          New Space…
+        </DropdownMenuItem>
+      ) : null}
       <DropdownMenuSeparator />
       {(
         [

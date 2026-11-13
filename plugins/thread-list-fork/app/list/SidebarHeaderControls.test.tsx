@@ -212,6 +212,48 @@ describe("sidebar header controls", () => {
     ).toBe("true");
   });
 
+  it("offers New Space only when the host provides Spaces, and disables it while creating", async () => {
+    const store = createStore();
+    const newSpace = vi.fn();
+    const renderControls = (value: Record<string, unknown>) =>
+      render(
+        <Provider store={store}>
+          <TooltipProvider>
+            <SidebarHeaderActionsProvider value={value}>
+              <SidebarHeaderControls label="Pinned" onNewThread={vi.fn()} />
+            </SidebarHeaderActionsProvider>
+          </TooltipProvider>
+        </Provider>,
+      );
+    const without = renderControls({ onNewSection: vi.fn() });
+    await openMenu();
+    expect(screen.queryByRole("menuitem", { name: "New Space…" })).toBeNull();
+    without.unmount();
+    cleanup();
+
+    const withSpaces = renderControls({
+      onNewSection: vi.fn(),
+      onNewSpace: newSpace,
+    });
+    await openMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: "New Space…" }));
+    expect(newSpace).toHaveBeenCalledOnce();
+    withSpaces.unmount();
+    cleanup();
+
+    renderControls({
+      onNewSection: vi.fn(),
+      onNewSpace: newSpace,
+      isCreatingSpace: true,
+    });
+    await openMenu();
+    expect(
+      screen
+        .getByRole("menuitem", { name: "New Space…" })
+        .getAttribute("aria-disabled"),
+    ).toBe("true");
+  });
+
   it("keeps Organize open and exclusive across selections", async () => {
     const { store } = setup();
     await openMenu();

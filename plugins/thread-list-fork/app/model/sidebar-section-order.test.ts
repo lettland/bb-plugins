@@ -3,6 +3,7 @@ import {
   applyVisibleSidebarSectionOrder,
   buildSidebarEntitySectionId,
   insertSidebarSectionAfter,
+  insertSpaceAfterPinned,
   normalizeSidebarSectionOrder,
   reorderSidebarSectionOrder,
 } from "./sidebar-section-order.js";
@@ -183,5 +184,128 @@ describe("applyVisibleSidebarSectionOrder", () => {
         legacyEntityAnchor: "sections",
       }),
     ).toEqual(["pinned", "section:b", "section:a", "threads"]);
+  });
+});
+
+describe("Space ids in section order", () => {
+  const spaceA = buildSidebarEntitySectionId("space", "a");
+  const spaceB = buildSidebarEntitySectionId("space", "b");
+  const projectA = buildSidebarEntitySectionId("project", "a");
+  const projectB = buildSidebarEntitySectionId("project", "b");
+
+  it("builds space ids", () => {
+    expect(spaceA).toBe("space:a");
+  });
+
+  it("puts Spaces missing from a pre-Spaces stored order right after pinned, keeping the rest in order", () => {
+    const stored = ["pinned", projectB, projectA, "threads"];
+    expect(
+      normalizeSidebarSectionOrder({
+        storedOrder: stored,
+        entitySectionIds: [projectA, projectB],
+        legacyEntityAnchor: "projects",
+        hasPinnedSection: true,
+        spaceSectionIds: [spaceA, spaceB],
+      }),
+    ).toEqual(["pinned", spaceA, spaceB, projectB, projectA, "threads"]);
+  });
+
+  it("adds Spaces to the default legacy order after pinned", () => {
+    expect(
+      normalizeSidebarSectionOrder({
+        storedOrder: ["pinned", "projects", "threads"],
+        entitySectionIds: [projectA],
+        legacyEntityAnchor: "projects",
+        hasPinnedSection: true,
+        spaceSectionIds: [spaceA],
+      }),
+    ).toEqual(["pinned", spaceA, projectA, "threads"]);
+  });
+
+  it("puts Spaces first when pinned is not part of the order", () => {
+    expect(
+      normalizeSidebarSectionOrder({
+        storedOrder: [projectA, "threads"],
+        entitySectionIds: [projectA],
+        legacyEntityAnchor: "projects",
+        hasPinnedSection: false,
+        spaceSectionIds: [spaceA],
+      }),
+    ).toEqual([spaceA, projectA, "threads"]);
+  });
+
+  it("keeps a stored Space position and drops Space ids that no longer exist", () => {
+    expect(
+      normalizeSidebarSectionOrder({
+        storedOrder: ["pinned", projectA, spaceB, "space:gone", "threads"],
+        entitySectionIds: [projectA],
+        legacyEntityAnchor: "projects",
+        hasPinnedSection: true,
+        spaceSectionIds: [spaceA, spaceB],
+      }),
+    ).toEqual(["pinned", spaceA, projectA, spaceB, "threads"]);
+  });
+
+  it("drops stored Space ids when the host provides no Spaces", () => {
+    expect(
+      normalizeSidebarSectionOrder({
+        storedOrder: ["pinned", spaceA, projectA, "threads"],
+        entitySectionIds: [projectA],
+        legacyEntityAnchor: "projects",
+        hasPinnedSection: true,
+      }),
+    ).toEqual(["pinned", projectA, "threads"]);
+  });
+
+  it("reorders Space ids", () => {
+    expect(
+      reorderSidebarSectionOrder({
+        activeId: spaceB,
+        overId: projectA,
+        order: ["pinned", spaceA, spaceB, projectA, "threads"],
+      }),
+    ).toEqual(["pinned", spaceA, projectA, spaceB, "threads"]);
+  });
+
+  it("persists Space positions when the visible order changes and keeps hidden Spaces", () => {
+    expect(
+      applyVisibleSidebarSectionOrder({
+        storedOrder: ["pinned", projectA, projectB, "threads"],
+        nextVisibleOrder: ["pinned", projectA, spaceA, projectB, "threads"],
+        entitySectionIds: [projectA, projectB],
+        entityKind: "project",
+        legacyEntityAnchor: "projects",
+        spaceSectionIds: [spaceA, spaceB],
+      }),
+    ).toEqual(["pinned", projectA, spaceB, spaceA, projectB, "threads"]);
+  });
+
+  it("inserts a new Space after an anchor", () => {
+    expect(
+      insertSidebarSectionAfter({
+        storedOrder: ["pinned", projectA, "threads"],
+        entitySectionIds: [projectA],
+        legacyEntityAnchor: "projects",
+        anchorSectionId: "pinned",
+        sectionId: spaceA,
+      }),
+    ).toEqual(["pinned", spaceA, projectA, "threads"]);
+  });
+
+  it("inserts a Space id directly after pinned in the raw stored order", () => {
+    expect(insertSpaceAfterPinned(["pinned", "projects", "threads"], spaceA)).toEqual([
+      "pinned",
+      spaceA,
+      "projects",
+      "threads",
+    ]);
+    expect(insertSpaceAfterPinned(["projects"], spaceA)).toEqual([
+      spaceA,
+      "projects",
+    ]);
+    expect(insertSpaceAfterPinned(["pinned", spaceA], spaceA)).toEqual([
+      "pinned",
+      spaceA,
+    ]);
   });
 });

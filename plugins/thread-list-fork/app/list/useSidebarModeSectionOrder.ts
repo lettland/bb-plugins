@@ -1,18 +1,22 @@
 import { useCallback, useMemo } from "react";
-import { useAtom, useAtomValue } from "jotai";
+import { useAtom, useAtomValue, useSetAtom } from "jotai";
 import {
   sidebarHiddenGroupsAtom,
   sidebarManualSectionOrderAtom,
   sidebarMachineSectionOrderAtom,
+  sidebarOrganizationModeAtom,
   sidebarSectionOrderAtom,
 } from "../preferences/atoms.js";
 import type { OrganizationMode as SidebarOrganizationMode } from "../../shared/preferences.js";
 import type { SidebarSectionId } from "../model/sidebar-section-id.js";
 import {
   applyVisibleSidebarSectionOrder,
+  insertSpaceAfterPinned,
   normalizeSidebarSectionOrder,
   type LegacySidebarEntityAnchor,
 } from "../model/sidebar-section-order.js";
+
+const NO_SPACE_SECTION_IDS: readonly SidebarSectionId[] = [];
 
 const MODE_SECTION_ORDER_CONFIG: Record<
   SidebarOrganizationMode,
@@ -44,6 +48,21 @@ interface UseSidebarModeSectionOrderArgs {
   hasThreadsSection?: boolean;
   mode: SidebarOrganizationMode;
   showPinnedSection: boolean;
+  spaceSectionIds?: readonly SidebarSectionId[];
+}
+
+export function useInsertSpaceInModeOrder(): (
+  spaceSectionId: SidebarSectionId,
+) => void {
+  const mode = useAtomValue(sidebarOrganizationModeAtom);
+  const setStoredOrder = useSetAtom(MODE_SECTION_ORDER_CONFIG[mode].atom);
+  return useCallback(
+    (spaceSectionId) =>
+      setStoredOrder((current) =>
+        insertSpaceAfterPinned(current, spaceSectionId),
+      ),
+    [setStoredOrder],
+  );
 }
 
 interface UseSidebarModeSectionOrderResult {
@@ -57,6 +76,7 @@ export function useSidebarModeSectionOrder({
   hasThreadsSection,
   mode,
   showPinnedSection,
+  spaceSectionIds = NO_SPACE_SECTION_IDS,
 }: UseSidebarModeSectionOrderArgs): UseSidebarModeSectionOrderResult {
   const config = MODE_SECTION_ORDER_CONFIG[mode];
   const [storedOrder, setStoredOrder] = useAtom(config.atom);
@@ -72,12 +92,14 @@ export function useSidebarModeSectionOrder({
         entitySectionIds,
         legacyEntityAnchor: config.legacyEntityAnchor,
         hasPinnedSection: true,
+        spaceSectionIds,
         ...(hasThreadsSection === undefined ? {} : { hasThreadsSection }),
       }),
     [
       config.legacyEntityAnchor,
       entitySectionIds,
       hasThreadsSection,
+      spaceSectionIds,
       storedOrder,
     ],
   );
@@ -101,10 +123,17 @@ export function useSidebarModeSectionOrder({
             entityKind: config.entityKind,
             legacyEntityAnchor: config.legacyEntityAnchor,
             hasThreadsSection,
+            spaceSectionIds,
           }) ?? current,
       );
     },
-    [config, entitySectionIds, hasThreadsSection, setStoredOrder],
+    [
+      config,
+      entitySectionIds,
+      hasThreadsSection,
+      setStoredOrder,
+      spaceSectionIds,
+    ],
   );
   return { onOrderChange, order, persistedOrder };
 }

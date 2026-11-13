@@ -42,6 +42,7 @@ import { useSectionThreadDnd } from "../dnd/useSectionThreadDnd.js";
 import { useNestDropPreview } from "../dnd/useNestDropPreview.js";
 import {
   getErrorCode,
+  getErrorStatus,
   getMutationErrorMessage,
 } from "../ui/mutation-errors.js";
 import { cn } from "@/lib/utils";
@@ -134,8 +135,23 @@ import {
   sortProjectGroupLayout,
 } from "../model/project-groups.js";
 import { useProjectOrderSync } from "./useProjectOrderSync.js";
-import { useSidebarModeSectionOrder } from "./useSidebarModeSectionOrder.js";
+import {
+  useInsertSpaceInModeOrder,
+  useSidebarModeSectionOrder,
+} from "./useSidebarModeSectionOrder.js";
 import { useReadStatusGrouping } from "./useReadStatusGrouping.js";
+import {
+  SpaceBriefDialog,
+  SpaceCreateDialog,
+  type SpaceBriefTarget,
+} from "./SpaceDialogs.js";
+import type { SpaceSectionTarget } from "./SpaceSection.js";
+import {
+  NO_SPACE_SECTIONS,
+  useSpaceSections,
+  type SpaceSections,
+} from "./useSpaceSections.js";
+import { openComposeInSpace, readSpacesArea } from "../../fork-sdk-types.js";
 import { haveSameOrder } from "../model/stored-order.js";
 import {
   SidebarProjectsContext,
@@ -362,6 +378,19 @@ function getSectionMutationErrorMessage(
   return getMutationErrorMessage({ error, fallbackMessage });
 }
 
+function getSpaceMutationErrorMessage(
+  error: unknown,
+  fallbackMessage: string,
+): string {
+  if (
+    getErrorCode(error) === "space_name_conflict" ||
+    getErrorStatus(error) === 409
+  ) {
+    return "A Space with this name already exists.";
+  }
+  return getMutationErrorMessage({ error, fallbackMessage });
+}
+
 export function ProjectListNavigationLoadingState() {
   return (
     <div
@@ -533,6 +562,7 @@ interface ProjectModeSectionsProps
   pinnedSection: BuiltInSidebarSectionOptions;
   projects: readonly SidebarProject[];
   selectedThreadId?: string;
+  spaceSections?: SpaceSections;
   status: ThreadListStatus;
   threads: SidebarThread[];
   threadsSection: Omit<BuiltInSidebarSectionOptions, "content">;
@@ -651,6 +681,7 @@ function ProjectModeSections({
   projects,
   selectedThreadId,
   showPinnedSection,
+  spaceSections = NO_SPACE_SECTIONS,
   status,
   threads,
   threadsSection,
@@ -758,6 +789,7 @@ function ProjectModeSections({
     entitySectionIds: projectSectionIds,
     hasThreadsSection: personalThreads.length > 0 || projectRows.length === 0,
     showPinnedSection,
+    spaceSectionIds: spaceSections.sectionIds,
   });
   const { layout, order, persistedLayout, projectReorderDisabled } =
     useSortedProjectSectionOrder(
@@ -860,6 +892,7 @@ function ProjectModeSections({
   };
 
   const visibilityGroups: ThreadListVisibilityGroup[] = [
+    ...spaceSections.visibilityGroups,
     {
       id: "threads",
       title: "Threads",
@@ -975,6 +1008,12 @@ function ProjectModeSections({
               builtInSection
             );
           }
+          const spaceRow = spaceSections.renderSpace(
+            sectionId,
+            sectionReorderDisabled,
+            consumeClickSuppression,
+          );
+          if (spaceRow !== null) return spaceRow;
           const row = projectRowsBySectionId.get(sectionId);
           if (!row) return null;
           return (
@@ -1027,6 +1066,7 @@ interface SectionModeSectionsProps extends BuiltInSectionRenderState {
     PinnedThreadTreeProps["onReorderPinnedRoot"]
   >;
   selectedThreadId?: string;
+  spaceSections?: SpaceSections;
   status: ThreadListStatus;
   threads: SidebarThread[];
   threadsSection: Omit<BuiltInSidebarSectionOptions, "content">;
@@ -1055,6 +1095,7 @@ function SectionModeSections({
   onReorderPinnedThread,
   selectedThreadId,
   showPinnedSection,
+  spaceSections = NO_SPACE_SECTIONS,
   status,
   threads,
   threadsSection,
@@ -1078,6 +1119,7 @@ function SectionModeSections({
     mode: "chronological",
     entitySectionIds: threadSectionIds,
     showPinnedSection,
+    spaceSectionIds: spaceSections.sectionIds,
   });
 
   return (
@@ -1094,6 +1136,7 @@ function SectionModeSections({
       onRemoveSection={onRemoveSection}
       onToggleThreadCollapsed={onToggleThreadCollapsed}
       onToggleEnvironmentCollapsed={onToggleEnvironmentCollapsed}
+      spaceSections={spaceSections}
       fullSectionOrder={persistedOrder}
       topLevelSectionOrder={order}
       onTopLevelSectionOrderChange={onOrderChange}
@@ -1134,6 +1177,7 @@ interface MachineModeSectionsProps
   ) => ReactNode;
   isSectionDisplayOptionsOpen: (sectionId: SidebarSectionId) => boolean;
   selectedThreadId?: string;
+  spaceSections?: SpaceSections;
   status: ThreadListStatus;
   threads: SidebarThread[];
   threadsSection: Omit<BuiltInSidebarSectionOptions, "content">;
@@ -1200,6 +1244,7 @@ export function MachineModeSections({
   renderSectionDisplayOptions,
   selectedThreadId,
   showPinnedSection,
+  spaceSections = NO_SPACE_SECTIONS,
   status,
   threads,
   threadsSection,
@@ -1271,6 +1316,7 @@ export function MachineModeSections({
     entitySectionIds: machineSectionIds,
     hasThreadsSection: machineSections.length === 0,
     showPinnedSection,
+    spaceSectionIds: spaceSections.sectionIds,
   });
   const reorderDisabled = order.length < 2;
   const allThreadItems = useMemo(
@@ -1353,6 +1399,7 @@ export function MachineModeSections({
   };
 
   const visibilityGroups: ThreadListVisibilityGroup[] = [
+    ...spaceSections.visibilityGroups,
     {
       id: "threads",
       title: "Threads",
@@ -1431,6 +1478,12 @@ export function MachineModeSections({
               builtInSection
             );
           }
+          const spaceRow = spaceSections.renderSpace(
+            sectionId,
+            reorderDisabled,
+            consumeClickSuppression,
+          );
+          if (spaceRow !== null) return spaceRow;
           const section = machineSectionsById.get(sectionId);
           if (!section) return null;
           return (
@@ -1493,12 +1546,24 @@ function ProjectListComponent({
   const sdk = useSdk();
   const navigate = useBbNavigate();
   const { providers } = experimental_useProviders();
-  const { status, sections, projects, personalProject, archived } =
+  const { status, sections, projects, spaces, personalProject, archived } =
     useSidebarData();
   const personalProjectId = personalProject?.id ?? null;
   const threads = useMemo<SidebarThread[]>(
     () => projects.flatMap((project) => project.threads),
     [projects],
+  );
+  const spaceThreadIds = useMemo(
+    () =>
+      new Set(spaces.flatMap((space) => space.threads.map((t) => t.id))),
+    [spaces],
+  );
+  const groupedThreads = useMemo(
+    () =>
+      spaceThreadIds.size === 0
+        ? threads
+        : threads.filter((thread) => !spaceThreadIds.has(thread.id)),
+    [spaceThreadIds, threads],
   );
   const preferencesReady = usePreferencesReady();
   const threadListStatus = toThreadListStatus(status);
@@ -1571,6 +1636,108 @@ function ProjectListComponent({
     },
     [openRootComposeForProject],
   );
+  const handleCreateThreadInSpace = useCallback(
+    (spaceId: string) => {
+      if (personalProjectId === null) return;
+      const target = latestComposeTarget.current;
+      target.onProjectSelect?.();
+      openComposeInSpace(target.navigate, {
+        projectId: personalProjectId,
+        spaceId,
+      });
+    },
+    [personalProjectId],
+  );
+  const spacesArea = readSpacesArea(sdk);
+  const insertSpaceInModeOrder = useInsertSpaceInModeOrder();
+  const [isSpaceCreateDialogOpen, setIsSpaceCreateDialogOpen] = useState(false);
+  const [isSpaceCreatePending, setIsSpaceCreatePending] = useState(false);
+  const [spaceCreateError, setSpaceCreateError] = useState<string | null>(null);
+  const [spaceBriefTarget, setSpaceBriefTarget] =
+    useState<SpaceBriefTarget | null>(null);
+  const [isSpaceBriefPending, setIsSpaceBriefPending] = useState(false);
+  const [spaceBriefError, setSpaceBriefError] = useState<string | null>(null);
+  const spaceDeleteDialog = useDialogState<SpaceSectionTarget>();
+  const [isSpaceDeletePending, setIsSpaceDeletePending] = useState(false);
+  const handleOpenCreateSpaceDialog = useCallback(() => {
+    setSpaceCreateError(null);
+    setIsSpaceCreateDialogOpen(true);
+  }, []);
+  const handleCreateSpaceDialogOpenChange = useCallback((open: boolean) => {
+    if (!open) {
+      setSpaceCreateError(null);
+      setIsSpaceCreateDialogOpen(false);
+    }
+  }, []);
+  const handleCreateSpace = useCallback(
+    (input: { name: string; brief: string }) => {
+      if (spacesArea === null) return;
+      setSpaceCreateError(null);
+      setIsSpaceCreatePending(true);
+      void spacesArea
+        .create({
+          name: input.name,
+          ...(input.brief.length > 0 ? { brief: input.brief } : {}),
+        })
+        .then((space) => {
+          insertSpaceInModeOrder(buildSidebarEntitySectionId("space", space.id));
+          setIsSpaceCreateDialogOpen(false);
+        })
+        .catch((error: unknown) =>
+          setSpaceCreateError(
+            getSpaceMutationErrorMessage(error, "Failed to create Space."),
+          ),
+        )
+        .finally(() => setIsSpaceCreatePending(false));
+    },
+    [insertSpaceInModeOrder, spacesArea],
+  );
+  const handleEditSpaceBrief = useCallback(
+    (target: SpaceSectionTarget) => {
+      const space = spaces.find((candidate) => candidate.id === target.id);
+      if (space === undefined) return;
+      setSpaceBriefError(null);
+      setSpaceBriefTarget({ id: space.id, name: space.name, brief: space.brief });
+    },
+    [spaces],
+  );
+  const handleCancelSpaceBrief = useCallback(() => {
+    setSpaceBriefError(null);
+    setSpaceBriefTarget(null);
+  }, []);
+  const handleSaveSpaceBrief = useCallback(
+    (brief: string) => {
+      const target = spaceBriefTarget;
+      if (target === null || spacesArea === null) return;
+      setSpaceBriefError(null);
+      setIsSpaceBriefPending(true);
+      void spacesArea
+        .update({ id: target.id, brief })
+        .then(() => setSpaceBriefTarget(null))
+        .catch((error: unknown) =>
+          setSpaceBriefError(
+            getSpaceMutationErrorMessage(error, "Failed to save the brief."),
+          ),
+        )
+        .finally(() => setIsSpaceBriefPending(false));
+    },
+    [spaceBriefTarget, spacesArea],
+  );
+  const handleConfirmDeleteSpace = useCallback(() => {
+    const space = spaceDeleteDialog.target;
+    if (space === null || spacesArea === null) return;
+    setIsSpaceDeletePending(true);
+    void spacesArea
+      .delete({ id: space.id })
+      .then(() => spaceDeleteDialog.onClose())
+      .catch((error: unknown) => {
+        spaceDeleteDialog.onClose();
+        toast.error(
+          getSpaceMutationErrorMessage(error, "Failed to delete Space."),
+        );
+      })
+      .finally(() => setIsSpaceDeletePending(false));
+  }, [spaceDeleteDialog, spacesArea]);
   const [isSectionCreateDialogOpen, setIsSectionCreateDialogOpen] =
     useState(false);
   const [sectionCreateErrorMessage, setSectionCreateErrorMessage] = useState<
@@ -1814,6 +1981,27 @@ function ProjectListComponent({
       [setCollapsedSidebarSectionIdList],
     );
 
+  const spaceActions = useMemo(
+    () => ({
+      onCreateThread: handleCreateThreadInSpace,
+      onDelete: spaceDeleteDialog.onOpen,
+      onEditBrief: handleEditSpaceBrief,
+    }),
+    [handleCreateThreadInSpace, handleEditSpaceBrief, spaceDeleteDialog.onOpen],
+  );
+  const spaceSections = useSpaceSections({
+    actions: spaceActions,
+    collapsedEnvironmentIds,
+    collapsedThreadIds,
+    compareThreads: sidebarThreadComparator,
+    effectivePinnedThreadIds: pinnedSidebarState.effectivePinnedThreadIds,
+    onProjectSelect,
+    onToggleEnvironmentCollapsed: toggleEnvironmentCollapsed,
+    onToggleThreadCollapsed: toggleThreadCollapsed,
+    selectedThreadId,
+    spaces,
+  });
+
   const pinnedSectionContent = (
     <PinnedThreadTree
       rootItems={pinnedSidebarState.rootItems}
@@ -1872,6 +2060,40 @@ function ProjectListComponent({
     </ConfirmDeleteDialog>
   );
 
+  const spaceDialogs = (
+    <>
+      <SpaceCreateDialog
+        errorMessage={spaceCreateError}
+        open={isSpaceCreateDialogOpen}
+        pending={isSpaceCreatePending}
+        onOpenChange={handleCreateSpaceDialogOpenChange}
+        onCreate={handleCreateSpace}
+      />
+      <SpaceBriefDialog
+        errorMessage={spaceBriefError}
+        pending={isSpaceBriefPending}
+        space={spaceBriefTarget}
+        onCancel={handleCancelSpaceBrief}
+        onSave={handleSaveSpaceBrief}
+      />
+      <ConfirmDeleteDialog
+        open={spaceDeleteDialog.target !== null}
+        onOpenChange={spaceDeleteDialog.onOpenChange}
+      >
+        {spaceDeleteDialog.target ? (
+          <ConfirmDeleteDialogContent
+            title={`Delete ${spaceDeleteDialog.target.name}?`}
+            description="Its threads go back to their projects. The Space directory and its files stay on disk."
+            confirmLabel="Delete Space"
+            pending={isSpaceDeletePending}
+            onConfirm={handleConfirmDeleteSpace}
+            onCancel={spaceDeleteDialog.onClose}
+          />
+        ) : null}
+      </ConfirmDeleteDialog>
+    </>
+  );
+
   if (threadListStatus === "loading" || !preferencesReady) {
     return (
       <ProjectListShell>
@@ -1885,6 +2107,12 @@ function ProjectListComponent({
       value={{
         onNewSection: handleOpenCreateSectionDialog,
         isCreatingSection: isCreateThreadSectionPending,
+        ...(spacesArea === null
+          ? {}
+          : {
+              onNewSpace: handleOpenCreateSpaceDialog,
+              isCreatingSpace: isSpaceCreatePending,
+            }),
       }}
     >
       <ProjectListShell>
@@ -1893,7 +2121,8 @@ function ProjectListComponent({
           mode={organizationMode}
           renderMachine={() => (
             <MachineModeSections
-              threads={threads}
+              threads={groupedThreads}
+              spaceSections={spaceSections}
               effectivePinnedThreadIds={
                 pinnedSidebarState.effectivePinnedThreadIds
               }
@@ -1922,7 +2151,8 @@ function ProjectListComponent({
           )}
           renderChronological={() => (
             <SectionModeSections
-              threads={threads}
+              threads={groupedThreads}
+              spaceSections={spaceSections}
               effectivePinnedThreadIds={
                 pinnedSidebarState.effectivePinnedThreadIds
               }
@@ -1954,7 +2184,8 @@ function ProjectListComponent({
             <ProjectModeSections
               personalProjectId={personalProjectId}
               projects={projects}
-              threads={threads}
+              threads={groupedThreads}
+              spaceSections={spaceSections}
               effectivePinnedThreadIds={
                 pinnedSidebarState.effectivePinnedThreadIds
               }
@@ -2009,6 +2240,7 @@ function ProjectListComponent({
       </ProjectListShell>
       {sectionCreateDialog}
       {sectionDeleteDialogContent}
+      {spaceDialogs}
     </SidebarHeaderActionsProvider>
   );
   return (

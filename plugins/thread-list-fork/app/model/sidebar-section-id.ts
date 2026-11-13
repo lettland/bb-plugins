@@ -3,5 +3,6 @@ export type SidebarSectionId =
   | "threads"
   | `project:${string}`
   | `section:${string}`
-  | `machine:${string}`;
+  | `machine:${string}`
+  | `space:${string}`;
 export type CollapsibleSidebarSectionId = "pinned" | "threads";

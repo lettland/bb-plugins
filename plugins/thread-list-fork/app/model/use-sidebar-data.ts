@@ -8,6 +8,11 @@ import {
   type PluginSidebarThread,
   type PluginSidebarThreadsState,
 } from "@get-bb/plugin-sdk/app";
+import {
+  readSidebarSpaces,
+  readThreadSpaceId,
+  type ForkSidebarSpace,
+} from "../../fork-sdk-types.js";
 import type { SidebarThread } from "./sidebar-thread.js";
 
 export interface SidebarProject {
@@ -16,6 +21,10 @@ export interface SidebarProject {
   href: string;
   settingsHref: string;
   isPersonal: boolean;
+  threads: SidebarThread[];
+}
+
+export interface SidebarSpace extends ForkSidebarSpace {
   threads: SidebarThread[];
 }
 
@@ -28,6 +37,7 @@ export interface SidebarData {
   status: PluginSidebarThreadsState["status"];
   sections: readonly PluginSidebarSection[];
   projects: SidebarProject[];
+  spaces: readonly SidebarSpace[];
   personalProject: SidebarProject | null;
   hostsById: ReadonlyMap<string, SidebarHost>;
 }
@@ -65,7 +75,61 @@ function sameProjectShape(
   );
 }
 
+function sameSpaceShape(
+  previous: SidebarSpace,
+  space: ForkSidebarSpace,
+): boolean {
+  return (
+    previous.id === space.id &&
+    previous.name === space.name &&
+    previous.brief === space.brief &&
+    previous.directory === space.directory &&
+    previous.createdAt === space.createdAt &&
+    previous.updatedAt === space.updatedAt
+  );
+}
+
+function buildSidebarSpaces(
+  spaces: readonly ForkSidebarSpace[],
+  threads: readonly SidebarThread[],
+  previous: readonly SidebarSpace[],
+): readonly SidebarSpace[] {
+  if (spaces.length === 0) return previous.length === 0 ? previous : NO_SPACES;
+  const threadsBySpaceId = new Map<string, SidebarThread[]>();
+  for (const thread of threads) {
+    const spaceId = readThreadSpaceId(thread);
+    if (spaceId === null) continue;
+    const bucket = threadsBySpaceId.get(spaceId);
+    if (bucket === undefined) {
+      threadsBySpaceId.set(spaceId, [thread]);
+    } else {
+      bucket.push(thread);
+    }
+  }
+  const previousById = new Map(previous.map((space) => [space.id, space]));
+  const built = spaces.map<SidebarSpace>((space) => {
+    const bucket = threadsBySpaceId.get(space.id) ?? EMPTY_THREADS;
+    const before = previousById.get(space.id);
+    if (
+      before !== undefined &&
+      sameSpaceShape(before, space) &&
+      sameElements(before.threads, bucket)
+    ) {
+      return before;
+    }
+    return {
+      ...space,
+      threads:
+        before !== undefined && sameElements(before.threads, bucket)
+          ? before.threads
+          : bucket,
+    };
+  });
+  return sameElements(previous, built) ? previous : built;
+}
+
 const EMPTY_THREADS: SidebarThread[] = [];
+const NO_SPACES: readonly SidebarSpace[] = [];
 const EMPTY_HOSTS: readonly SidebarHost[] = [];
 
 export function buildSidebarData(
@@ -75,6 +139,7 @@ export function buildSidebarData(
   sections: readonly PluginSidebarSection[],
   hosts: readonly SidebarHost[] = [],
   previous: SidebarData | null = null,
+  spaces: readonly ForkSidebarSpace[] = [],
 ): SidebarData {
   const threadsByProjectId = new Map<string, SidebarThread[]>();
   const hostsById = new Map(hosts.map((host) => [host.id, host]));
@@ -122,6 +187,7 @@ export function buildSidebarData(
     status,
     sections,
     projects: sharedProjects,
+    spaces: buildSidebarSpaces(spaces, threads, previous?.spaces ?? []),
     personalProject:
       sharedProjects.find((project) => project.isPersonal) ?? null,
     hostsById:
@@ -137,6 +203,7 @@ interface SidebarDataCacheEntry {
   projects: readonly PluginSidebarProject[];
   sections: readonly PluginSidebarSection[];
   hosts: readonly SidebarHost[];
+  spaces: readonly ForkSidebarSpace[];
   data: SidebarData;
 }
 
@@ -145,13 +212,15 @@ let sidebarDataCache: SidebarDataCacheEntry | null = null;
 export function getSidebarData(state: PluginSidebarThreadsState): SidebarData {
   const cached = sidebarDataCache;
   const hosts = state.experimental_hosts ?? EMPTY_HOSTS;
+  const spaces = readSidebarSpaces(state);
   if (
     cached !== null &&
     cached.status === state.status &&
     cached.threads === state.threads &&
     cached.projects === state.projects &&
     cached.sections === state.sections &&
-    cached.hosts === hosts
+    cached.hosts === hosts &&
+    cached.spaces === spaces
   ) {
     return cached.data;
   }
@@ -162,6 +231,7 @@ export function getSidebarData(state: PluginSidebarThreadsState): SidebarData {
     state.sections,
     hosts,
     cached?.data ?? null,
+    spaces,
   );
   sidebarDataCache = {
     status: state.status,
@@ -169,6 +239,7 @@ export function getSidebarData(state: PluginSidebarThreadsState): SidebarData {
     projects: state.projects,
     sections: state.sections,
     hosts,
+    spaces,
     data,
   };
   return data;

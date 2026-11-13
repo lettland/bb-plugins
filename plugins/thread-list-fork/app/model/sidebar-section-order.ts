@@ -5,7 +5,8 @@ import {
 import type { SidebarSectionId } from "./sidebar-section-id.js";
 import { reorderStoredOrder } from "./stored-order.js";
 
-type SidebarEntitySectionKind = "project" | "section" | "machine";
+type SidebarModeEntityKind = "project" | "section" | "machine";
+type SidebarEntitySectionKind = SidebarModeEntityKind | "space";
 export type LegacySidebarEntityAnchor = "projects" | "sections" | "machines";
 
 export function buildSidebarEntitySectionId(
@@ -21,7 +22,8 @@ function isSidebarSectionId(value: string): value is SidebarSectionId {
     value === "threads" ||
     value.startsWith("project:") ||
     value.startsWith("section:") ||
-    value.startsWith("machine:")
+    value.startsWith("machine:") ||
+    value.startsWith("space:")
   );
 }
 
@@ -53,6 +55,7 @@ interface NormalizeSidebarSectionOrderArgs {
   legacyEntityAnchor: LegacySidebarEntityAnchor;
   hasPinnedSection: boolean;
   hasThreadsSection?: boolean;
+  spaceSectionIds?: readonly SidebarSectionId[];
 }
 
 export function normalizeSidebarSectionOrder({
@@ -61,9 +64,11 @@ export function normalizeSidebarSectionOrder({
   legacyEntityAnchor,
   hasPinnedSection,
   hasThreadsSection = true,
+  spaceSectionIds = [],
 }: NormalizeSidebarSectionOrderArgs): SidebarSectionId[] {
   const available = new Set<SidebarSectionId>([
     ...(hasPinnedSection ? (["pinned"] as const) : []),
+    ...spaceSectionIds,
     ...entitySectionIds,
     ...(hasThreadsSection ? (["threads"] as const) : []),
   ]);
@@ -96,6 +101,16 @@ export function normalizeSidebarSectionOrder({
   if (hasPinnedSection && !seen.has("pinned")) {
     normalized.unshift("pinned");
     seen.add("pinned");
+  }
+
+  const missingSpaces = spaceSectionIds.filter(
+    (sectionId) => !seen.has(sectionId),
+  );
+  if (missingSpaces.length > 0) {
+    normalized.splice(normalized.indexOf("pinned") + 1, 0, ...missingSpaces);
+    for (const sectionId of missingSpaces) {
+      seen.add(sectionId);
+    }
   }
 
   const missingEntities = entitySectionIds.filter(
@@ -131,9 +146,10 @@ interface ApplyVisibleSidebarSectionOrderArgs {
   storedOrder: readonly string[];
   nextVisibleOrder: readonly SidebarSectionId[];
   entitySectionIds: readonly SidebarSectionId[];
-  entityKind: SidebarEntitySectionKind;
+  entityKind: SidebarModeEntityKind;
   legacyEntityAnchor: LegacySidebarEntityAnchor;
   hasThreadsSection?: boolean;
+  spaceSectionIds?: readonly SidebarSectionId[];
 }
 
 export function applyVisibleSidebarSectionOrder({
@@ -143,6 +159,7 @@ export function applyVisibleSidebarSectionOrder({
   entityKind,
   legacyEntityAnchor,
   hasThreadsSection,
+  spaceSectionIds,
 }: ApplyVisibleSidebarSectionOrderArgs): SidebarSectionId[] | null {
   const nextIds = new Set(nextVisibleOrder);
   const storedEntityIds = storedOrder
@@ -157,6 +174,7 @@ export function applyVisibleSidebarSectionOrder({
     hasPinnedSection: true,
     hasThreadsSection:
       hasThreadsSection !== false || storedOrder.includes("threads"),
+    ...(spaceSectionIds === undefined ? {} : { spaceSectionIds }),
   });
   return reorderStoredOrder({
     order: fullOrder,
@@ -171,6 +189,7 @@ interface InsertSidebarSectionAfterArgs {
   legacyEntityAnchor: LegacySidebarEntityAnchor;
   anchorSectionId: SidebarSectionId;
   sectionId: SidebarSectionId;
+  spaceSectionIds?: readonly SidebarSectionId[];
 }
 
 export function insertSidebarSectionAfter({
@@ -179,15 +198,22 @@ export function insertSidebarSectionAfter({
   legacyEntityAnchor,
   anchorSectionId,
   sectionId,
+  spaceSectionIds,
 }: InsertSidebarSectionAfterArgs): SidebarSectionId[] | null {
   if (anchorSectionId === sectionId) {
     return null;
   }
+  const isSpaceSection = sectionId.startsWith("space:");
   const normalized = normalizeSidebarSectionOrder({
     storedOrder,
-    entitySectionIds: [...entitySectionIds, sectionId],
+    entitySectionIds: isSpaceSection
+      ? entitySectionIds
+      : [...entitySectionIds, sectionId],
     legacyEntityAnchor,
     hasPinnedSection: true,
+    spaceSectionIds: isSpaceSection
+      ? [...(spaceSectionIds ?? []), sectionId]
+      : (spaceSectionIds ?? []),
   }).filter((id) => id !== sectionId);
   const anchorIndex = normalized.indexOf(anchorSectionId);
   if (anchorIndex === -1) {
@@ -195,4 +221,16 @@ export function insertSidebarSectionAfter({
   }
   normalized.splice(anchorIndex + 1, 0, sectionId);
   return normalized;
+}
+
+export function insertSpaceAfterPinned(
+  storedOrder: readonly string[],
+  spaceSectionId: SidebarSectionId,
+): string[] {
+  if (storedOrder.includes(spaceSectionId)) {
+    return [...storedOrder];
+  }
+  const next = [...storedOrder];
+  next.splice(next.indexOf("pinned") + 1, 0, spaceSectionId);
+  return next;
 }

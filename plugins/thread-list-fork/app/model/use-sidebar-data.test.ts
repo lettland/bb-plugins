@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { PluginSidebarThreadsState } from "@get-bb/plugin-sdk/app";
 import { makeSidebarThread } from "./fixtures.js";
 import {
   buildSidebarData,
@@ -145,5 +146,139 @@ describe("buildSidebarData structural sharing", () => {
       data,
     );
     resetSidebarDataCacheForTest();
+  });
+});
+
+describe("buildSidebarData Spaces", () => {
+  const projects = [
+    {
+      id: "proj_a",
+      name: "A",
+      isPersonal: false,
+      href: "/a",
+      settingsHref: "/a/s",
+    },
+  ];
+  const space = (id: string, name: string) => ({
+    id,
+    name,
+    brief: "",
+    directory: `/spaces/${id}`,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+
+  it("collects each Space's threads and keeps them in their project too", () => {
+    const inSpace = makeSidebarThread({
+      id: "t1",
+      projectId: "proj_a",
+      experimental_spaceId: "spc_1",
+    });
+    const plain = makeSidebarThread({ id: "t2", projectId: "proj_a" });
+    const unknown = makeSidebarThread({
+      id: "t3",
+      projectId: "proj_a",
+      experimental_spaceId: "spc_gone",
+    });
+    const data = buildSidebarData(
+      "ready",
+      [inSpace, plain, unknown],
+      projects,
+      [],
+      [],
+      null,
+      [space("spc_1", "Payments"), space("spc_2", "Empty")],
+    );
+    expect(
+      data.spaces.map((entry) => [entry.id, entry.threads.map((t) => t.id)]),
+    ).toEqual([
+      ["spc_1", ["t1"]],
+      ["spc_2", []],
+    ]);
+    expect(data.projects[0]?.threads.map((t) => t.id)).toEqual([
+      "t1",
+      "t2",
+      "t3",
+    ]);
+  });
+
+  it("has no Spaces when the host does not provide them", () => {
+    const data = buildSidebarData(
+      "ready",
+      [makeSidebarThread({ id: "t1", projectId: "proj_a" })],
+      projects,
+      [],
+    );
+    expect(data.spaces).toEqual([]);
+  });
+
+  it("shares unchanged Space objects across updates and rebuilds a changed one", () => {
+    const t1 = makeSidebarThread({
+      id: "t1",
+      projectId: "proj_a",
+      experimental_spaceId: "spc_1",
+    });
+    const spaces = [space("spc_1", "Payments"), space("spc_2", "Other")];
+    const first = buildSidebarData("ready", [t1], projects, [], [], null, spaces);
+    const same = buildSidebarData("ready", [t1], projects, [], [], first, [
+      space("spc_1", "Payments"),
+      space("spc_2", "Other"),
+    ]);
+    expect(same.spaces).toBe(first.spaces);
+    const renamed = buildSidebarData("ready", [t1], projects, [], [], first, [
+      space("spc_1", "Payments v2"),
+      space("spc_2", "Other"),
+    ]);
+    expect(renamed.spaces).not.toBe(first.spaces);
+    expect(renamed.spaces[0]?.name).toBe("Payments v2");
+    expect(renamed.spaces[0]?.threads).toBe(first.spaces[0]?.threads);
+    expect(renamed.spaces[1]).toBe(first.spaces[1]);
+  });
+});
+
+describe("getSidebarData Spaces cache", () => {
+  const baseState = {
+    status: "ready" as const,
+    threads: [],
+    experimental_hosts: [],
+    projects: [],
+    sections: [],
+    experimental_archived: null,
+  };
+
+  it("rebuilds when only the Spaces list changes and reuses the result otherwise", () => {
+    resetSidebarDataCacheForTest();
+    const spacesA = [
+      {
+        id: "spc_1",
+        name: "One",
+        brief: "",
+        directory: "/s/1",
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ];
+    const withSpaces: PluginSidebarThreadsState = {
+      ...baseState,
+      ...{ experimental_spaces: spacesA },
+    };
+    const first = getSidebarData(withSpaces);
+    expect(getSidebarData({ ...withSpaces })).toBe(first);
+    const second = getSidebarData({
+      ...baseState,
+      ...{ experimental_spaces: [...spacesA, { ...spacesA[0], id: "spc_2" }] },
+    });
+    expect(second).not.toBe(first);
+    expect(second.spaces.map((entry) => entry.id)).toEqual(["spc_1", "spc_2"]);
+  });
+
+  it("ignores a malformed Spaces field", () => {
+    resetSidebarDataCacheForTest();
+    const data = getSidebarData({
+      ...baseState,
+      experimental_spaces: [{ id: 1 }, null, "x"],
+    } as never);
+    expect(data.spaces).toEqual([]);
+    expect(getSidebarData(baseState).spaces).toEqual([]);
   });
 });

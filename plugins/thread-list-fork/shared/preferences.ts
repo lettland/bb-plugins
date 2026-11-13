@@ -95,7 +95,7 @@ const hiddenGroupsSchema = z
   .array(
     z.union([
       z.literal("threads"),
-      listItemSchema.regex(/^(project|section|machine):\S+$/),
+      listItemSchema.regex(/^(project|section|machine|space):\S+$/),
     ]),
   )
   .max(LIST_MAX_LENGTH)
@@ -229,7 +229,7 @@ export const preferenceDefinitions = {
   hiddenGroups: definePreference(
     hiddenGroupsSchema,
     [],
-    "Groups moved into More: threads, project:<id>, section:<id>, or machine:<id>.",
+    "Groups moved into More: threads, project:<id>, section:<id>, machine:<id>, or space:<id>.",
     "sidebar.hiddenGroups",
   ),
   rowActions: definePreference(
@@ -248,7 +248,7 @@ export const preferenceDefinitions = {
   collapsedProjects: definePreference(
     stringListSchema,
     [],
-    "Project ids whose rows are collapsed.",
+    "Project ids whose rows are collapsed, and space:<id> keys for collapsed Space groups.",
     null,
   ),
   collapsedThreads: definePreference(

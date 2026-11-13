@@ -33,6 +33,16 @@ section are bb core state: use `bb thread section` and `bb thread update`.
 On first load the plugin copies any non-default `sidebar.*` values from
 `bb settings ui` once; after that the two are independent.
 
+Spaces (named groups of threads from any project, managed with `bb space`)
+are top-level groups next to the project, section, and machine groups in every
+organization. A thread with a Space shows only in its Space group. The three
+order keys (`sectionOrder`, `manualSectionOrder`, `machineSectionOrder`) accept
+`space:<spaceId>` entries; a Space missing from an order is placed right after
+`pinned`, and ids of Spaces that no longer exist are dropped. A collapsed Space
+is stored as `space:<spaceId>` in `collapsedProjects`. Create, rename, edit the
+brief of, and delete a Space from its group header or the header menu's New
+Space…; use Move to Space… on a thread to file it.
+
 Collapsed groups stay collapsed when background threads appear or become
 unread. Their headers retain activity indicators. Opening a thread reveals
 its containing groups; background activity does not change collapse preferences.
@@ -46,8 +56,9 @@ for dates, A–Z for titles), `ascending`, or `descending`.
 
 `hiddenGroups` (default `[]`) moves groups into More, the same as a group
 menu's Hide from list. Keys are `threads`, `project:<projectId>`,
-`section:<sectionId>`, and `machine:<hostId>` (`machine:no-machine` for the
-unassigned group); `threads` applies in every organization. Pinned cannot be
+`section:<sectionId>`, `machine:<hostId>` (`machine:no-machine` for the
+unassigned group), and `space:<spaceId>`; `threads` and `space:<spaceId>`
+apply in every organization. Pinned cannot be
 hidden, hiding keeps a group's threads, order, and collapse state, and IDs that
 no longer exist stay saved without producing rows. `set` replaces the whole
 list across organizations, so include existing keys to keep them hidden;

@@ -155,6 +155,7 @@ import type { ConsumeDragClickSuppression } from "@/components/ui/use-drag-click
 import type { NeighborReorderRequest } from "../model/neighbor-reorder.js";
 import { SidebarChildToggleChevron } from "../rows/SidebarChildToggleChevron.js";
 import { SidebarSectionOrderList } from "./SidebarSectionOrderList.js";
+import type { SpaceSections } from "./useSpaceSections.js";
 import {
   useSectionThreadDnd,
   type SectionThreadDndState,
@@ -249,6 +250,7 @@ interface ChronologicalBuiltInSidebarSections {
 
 interface ChronologicalSectionThreadSectionsProps extends SectionThreadTreeProps {
   builtInSections: ChronologicalBuiltInSidebarSections;
+  spaceSections?: SpaceSections;
   onCreateThread?: () => void;
   topLevelSectionOrder: readonly SidebarSectionId[];
   fullSectionOrder: readonly SidebarSectionId[];
@@ -1894,6 +1896,7 @@ export const ChronologicalSectionThreadSections = memo(
     onToggleThreadCollapsed,
     onToggleEnvironmentCollapsed,
     builtInSections,
+    spaceSections,
     topLevelSectionOrder,
     fullSectionOrder,
     onTopLevelSectionOrderChange,
@@ -2025,6 +2028,7 @@ export const ChronologicalSectionThreadSections = memo(
     };
 
     const visibilityGroups: ThreadListVisibilityGroup[] = [
+      ...(spaceSections?.visibilityGroups ?? []),
       {
         id: "threads",
         title: "Threads",
@@ -2100,6 +2104,12 @@ export const ChronologicalSectionThreadSections = memo(
               <div key={sectionId}>{builtInSection}</div>
             );
           }
+          const spaceRow = spaceSections?.renderSpace(
+            sectionId,
+            topLevelSectionOrder.length < 2,
+            consumeClickSuppression,
+          );
+          if (spaceRow) return spaceRow;
           const sectionItem = sectionItemsBySectionId.get(sectionId);
           return sectionItem ? (
             <ThreadListVisibilityGroupScope key={sectionId} id={sectionId}>

@@ -14,6 +14,7 @@ export type SidebarThreadOverrides = Partial<
 > & {
   activity?: Partial<PluginSidebarThread["activity"]>;
   indicator?: PluginSidebarThreadIndicator;
+  experimental_spaceId?: string | null;
 };
 
 function defaultDisplayTitle(

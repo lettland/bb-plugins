@@ -26,7 +26,7 @@ export interface ThreadSectionMoveDestination {
 const THREADS_CHOICE_ID = "threads";
 const ANCESTORS_BATCH_SIZE = 200;
 
-async function selectedRoots(
+export async function selectedRoots(
   sdk: PluginBrowserBbSdk,
   threads: readonly PluginThreadActionTarget[],
 ): Promise<PluginThreadActionTarget[]> {

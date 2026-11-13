@@ -22,6 +22,8 @@ import { SidebarHeaderMenuContents } from "./SidebarViewItems.js";
 export interface HeaderCreationActions {
   onNewSection?: (anchorSectionId?: SidebarSectionId) => void;
   isCreatingSection?: boolean;
+  onNewSpace?: () => void;
+  isCreatingSpace?: boolean;
 }
 
 const HeaderCreationContext = createContext<HeaderCreationActions>({});
