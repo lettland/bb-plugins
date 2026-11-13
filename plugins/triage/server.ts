@@ -718,8 +718,9 @@ export default async function plugin(bb: BbPluginApi) {
     db.prepare(
       `UPDATE triage_tasks SET stage_id = ?, run_state = ?,
        attention_reason = CASE WHEN ? = 'attention' THEN attention_reason ELSE NULL END,
-       read_at = CASE WHEN ? = 'agent' THEN NULL ELSE read_at END, updated_at = ? WHERE id = ?`,
-    ).run(stage.id, nextRunState, stage.system_role, actor, now, task.id);
+       read_at = CASE WHEN ? = 'agent' THEN NULL ELSE read_at END,
+       settled_at = CASE WHEN ? = 'agent' THEN NULL ELSE settled_at END, updated_at = ? WHERE id = ?`,
+    ).run(stage.id, nextRunState, stage.system_role, actor, actor, now, task.id);
     addEvent(task.id, actor, `moved to ${stage.name}`, summary);
     if (shouldNotify) {
       notify({
@@ -1129,9 +1130,10 @@ export default async function plugin(bb: BbPluginApi) {
     const live = await liveRoots();
     if (live ? live.has(rootId) : !settleOnFailure) return;
     const now = Date.now();
+    const role = getStageRow(card.stage_id).system_role;
     db.prepare(
-      "UPDATE triage_tasks SET run_state = CASE WHEN run_state = 'working' THEN 'idle' ELSE run_state END, settled_at = COALESCE(settled_at, ?), updated_at = ? WHERE id = ? AND updated_at = ?",
-    ).run(now, now, card.id, card.updated_at);
+      "UPDATE triage_tasks SET run_state = CASE WHEN run_state = 'working' THEN 'idle' ELSE run_state END, settled_at = CASE WHEN ? THEN COALESCE(settled_at, ?) ELSE settled_at END, updated_at = ? WHERE id = ? AND updated_at = ?",
+    ).run(role === "intake" || role === "active" ? 1 : 0, now, now, card.id, card.updated_at);
     publishSoon();
   };
 
@@ -1273,11 +1275,10 @@ export default async function plugin(bb: BbPluginApi) {
             values: [getSystemStage("active").id],
           };
         }
-      } else if (
-        live && card.run_state === "working" && thread.status === "idle" && !live.has(card.thread_id) &&
-        card.stage_id === getSystemStage("active").id
-      ) {
-        update = settle;
+      } else if (live && card.run_state === "working" && thread.status === "idle" && !live.has(card.thread_id)) {
+        const role = getStageRow(card.stage_id).system_role;
+        if (role === "active") update = settle;
+        else if (role === "attention" || role === null) update = { set: "run_state = 'idle'", values: [] };
       }
       if (!update) continue;
       // `set` is always one of the literal fragments above; values stay bound parameters.
@@ -1759,8 +1760,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.configure((context) => {
     const task = getTaskByThread(context.thread.id);
-    // Mirror cards are a view: no agent tooling, as if the session had no card.
-    if (!task || task.origin !== "manual") return { tools: [], skills: [] };
+    if (!task) return { tools: [], skills: [] };
     return {
       tools: ["triage_move_task"],
       skills: [],
@@ -1837,11 +1837,11 @@ export default async function plugin(bb: BbPluginApi) {
         await settleUnlessLive(task, thread.id, true);
         return;
       }
-      // A view stays quiet: no read marker change, no notification, no history row.
-      // It still settles, so an idle session leaves In Progress; thread.active reopens it.
+      // Idle mirrors stay quiet: no read marker change, no notification, no history row.
       const now = Date.now();
-      db.prepare("UPDATE triage_tasks SET run_state = 'idle', settled_at = COALESCE(settled_at, ?), updated_at = ? WHERE id = ?")
-        .run(now, now, task.id);
+      const role = getStageRow(task.stage_id).system_role;
+      db.prepare("UPDATE triage_tasks SET run_state = 'idle', settled_at = CASE WHEN ? THEN COALESCE(settled_at, ?) ELSE settled_at END, updated_at = ? WHERE id = ?")
+        .run(role === "intake" || role === "active" ? 1 : 0, now, now, task.id);
       republish();
       return;
     }

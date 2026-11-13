@@ -500,13 +500,15 @@ test("deleting a session removes its mirror card and history but keeps the manua
   expect(notifications().map((entry) => entry.title)).toStrictEqual([`Triage #${manual.number} · Lost its thread`]);
 });
 
-test("agent configuration: mirror cards get nothing, manual cards get the stage tool", async () => {
+test("agent configuration: mirror and manual cards get the stage tool", async () => {
   const { harness, mirror, importManual } = await start();
   await mirror(thr("c-mirror"));
   await importManual(thr("c-manual"));
   const configFor = (id: string) =>
     harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id } }));
-  expect(await configFor("c-mirror")).toMatchObject({ tools: [], skills: [], instructions: null });
+  const mirrored = await configFor("c-mirror");
+  expect(JSON.stringify(mirrored)).toContain("triage_move_task");
+  expect(JSON.stringify(mirrored)).toContain("You own Triage #");
   const manual = await configFor("c-manual");
   expect(JSON.stringify(manual)).toContain("triage_move_task");
   expect(JSON.stringify(manual)).toContain("You own Triage #");
@@ -848,6 +850,49 @@ function gateProjects(context: Setup) {
   });
   return release;
 }
+
+test("configuration waits for a linked row without waiting for pending creation", async () => {
+  const context = await start();
+  const { harness, emit, cardOf } = context;
+  const release = gateProjects(context);
+  const config = () => harness.behavior.resolveAgentConfiguration(
+    makePluginAgentConfigurationContext({ thread: { id: "config-pending" } }),
+  );
+  expect(await config()).toMatchObject({ tools: [], instructions: null });
+  await emit("thread.created", { thread: thr("config-pending") });
+  expect(await config()).toMatchObject({ tools: [], instructions: null });
+  release();
+  await until(() => cardOf("config-pending") !== undefined);
+  expect(JSON.stringify(await config())).toContain("triage_move_task");
+  expect(harness.inspection.sdk.callsTo("threads.update")).toHaveLength(0);
+});
+
+test("configuration excludes unlinked disabled, tombstoned and child threads", async () => {
+  const { harness, db, emit } = await start();
+  db.prepare("INSERT INTO triage_mirror_tombstones (thread_id, created_at) VALUES ('config-tomb', 1)").run();
+  await emit("thread.created", { thread: thr("config-tomb") });
+  await emit("thread.created", { thread: thr("config-child", { parentThreadId: "root", visibility: "hidden" }) });
+  await harness.behavior.setSettings({ autoCardThreads: false });
+  await emit("thread.created", { thread: thr("config-disabled") });
+  for (const id of ["config-tomb", "config-child", "config-disabled"]) {
+    expect(await harness.behavior.resolveAgentConfiguration(
+      makePluginAgentConfigurationContext({ thread: { id } }),
+    )).toMatchObject({ tools: [], instructions: null });
+  }
+});
+
+test("a mirrored agent can complete its own card and resume work", async () => {
+  const { harness, mirror, emit, cardOf } = await start();
+  const card = await mirror(thr("agent-complete", { status: "active" }));
+  const move = { number: card.number, stage: "Completed", summary: "Verified" };
+  await expect(harness.behavior.callAgentTool("triage_move_task", move, { threadId: "other" }))
+    .rejects.toThrow(/not assigned to this thread/);
+  await harness.behavior.callAgentTool("triage_move_task", move, { threadId: "agent-complete" });
+  await emit("thread.idle", { thread: thr("agent-complete") });
+  expect(cardOf("agent-complete")).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: null });
+  await emit("thread.active", { thread: thr("agent-complete", { status: "active" }) });
+  expect(cardOf("agent-complete")).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+});
 
 test("a failure that arrives while the card is still being created settles the card and marks it failed", async () => {
   const context = await start();
@@ -1656,13 +1701,16 @@ test("a pass that is switched off while it looks up running threads cards no liv
   expect(cards()).toStrictEqual([]);
 });
 
-test("reconcile settles a working active-stage card whose thread is idle with nothing running below it, and only that", async () => {
+test("reconcile settles active-stage cards and keeps attention cards visible when work stops", async () => {
   const context = await startQuiet();
   const { db, cardOf, known, mirror, rpc } = context;
-  const ids = ["rs-settle", "rs-live", "rs-idlecard", "rs-active", "rs-attention"];
+  const ids = ["rs-settle", "rs-live", "rs-idlecard", "rs-active", "rs-attention", "rs-custom", "rs-done"];
   for (const id of ids) await mirror(thr(id, { status: "active" }));
   db.prepare("UPDATE triage_tasks SET run_state = 'idle' WHERE thread_id = 'rs-idlecard'").run();
   await rpc("moveTask", { number: cardOf("rs-attention").number, stageId: "stage-attention" });
+  const custom = await rpc("createStage", { name: "Holding" });
+  await rpc("moveTask", { number: cardOf("rs-custom").number, stageId: custom.id });
+  db.prepare("UPDATE triage_tasks SET stage_id = 'stage-completed' WHERE thread_id = 'rs-done'").run();
   const threads = ids.map((id) => thr(id, { status: id === "rs-active" ? "active" : "idle" }));
   known.set("rs-kid", kid("rs-kid", "rs-live"));
   context.ctx.list = worldOf([...threads, known.get("rs-kid")]).handler;
@@ -1672,11 +1720,47 @@ test("reconcile settles a working active-stage card whose thread is idle with no
   expect(cardOf("rs-settle")).toMatchObject({ run_state: "idle", stage_id: "stage-progress" });
   expect(cardOf("rs-settle").settled_at).toBeGreaterThan(0);
   // The running root rs-active is reopened by the backfill like any live root, which only touches updated_at.
-  for (const id of ids.filter((id) => id !== "rs-settle" && id !== "rs-live")) {
+  expect(cardOf("rs-attention")).toMatchObject({ run_state: "idle", stage_id: "stage-attention", settled_at: null });
+  expect(cardOf("rs-custom")).toMatchObject({ run_state: "idle", stage_id: custom.id, settled_at: null });
+  for (const id of ids.filter((id) => !["rs-settle", "rs-live", "rs-attention", "rs-custom"].includes(id))) {
     expect({ ...cardOf(id), updated_at: 0 }).toStrictEqual({ ...before[id], updated_at: 0 });
   }
   // The live root was reopened by the backfill: still working, still unsettled.
   expect(cardOf("rs-live")).toMatchObject({ run_state: "working", stage_id: "stage-progress", settled_at: null });
+});
+
+test("child end before root idle preserves agent-selected attention and custom stages", async () => {
+  const context = await startQuiet();
+  const { harness, cardOf, known, emit, mirror, rpc, db } = context;
+  const custom = await rpc("createStage", { name: "Holding" });
+  const cases = [
+    { id: "race-attention", stage: "Human Review", stageId: "stage-attention" },
+    { id: "race-custom", stage: "Holding", stageId: custom.id },
+    { id: "race-active", stage: "In Progress", stageId: "stage-progress" },
+  ];
+  for (const item of cases) {
+    const card = await mirror(thr(item.id, { status: "active" }));
+    db.prepare("UPDATE triage_tasks SET settled_at = 1 WHERE id = ?").run(card.id);
+    await harness.behavior.callAgentTool("triage_move_task", {
+      number: card.number, stage: item.stage, summary: "Work status",
+    }, { threadId: item.id });
+    expect(cardOf(item.id).settled_at).toBeNull();
+    known.set(item.id, thr(item.id, { status: "idle" }));
+    const child = kid(`${item.id}-child`, item.id, { status: "idle" });
+    known.set(child.id, child);
+    await emit("thread.idle", { thread: child });
+    expect(cardOf(item.id)).toMatchObject({ stage_id: item.stageId, run_state: "idle" });
+    if (item.stage === "In Progress") expect(cardOf(item.id).settled_at).toBeGreaterThan(0);
+    else expect(cardOf(item.id).settled_at).toBeNull();
+    await emit("thread.idle", { thread: known.get(item.id) });
+    if (item.stage === "In Progress") expect(cardOf(item.id).settled_at).toBeGreaterThan(0);
+    else expect(cardOf(item.id).settled_at).toBeNull();
+  }
+  context.ctx.list = worldOf(cases.map((item) => known.get(item.id))).handler;
+  await rerun(context, 2);
+  for (const item of cases.slice(0, 2)) {
+    expect(cardOf(item.id)).toMatchObject({ stage_id: item.stageId, run_state: "idle", settled_at: null });
+  }
 });
 
 test("reconcile leaves a card reopened after its candidates were read working", async () => {

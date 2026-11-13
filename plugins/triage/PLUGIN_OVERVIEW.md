@@ -12,7 +12,10 @@ Each card opens its linked conversation.
 - See every session on the board automatically, not just tasks you create.
 - Optionally show linked sessions in the sidebar.
 
-Assigned agents report progress and completion through `triage_move_task`.
+Agents in automatically mirrored sessions and assigned tasks receive
+`triage_move_task` when BB next starts their agent session. They move finished
+work to Completed and work that needs your input to Human Review. An idle turn
+alone does not mark a task complete.
 Use `bb triage list`, `bb triage show`, and `bb triage move` from the CLI.
 
 ## Requirements

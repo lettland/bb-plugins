@@ -87,16 +87,18 @@ bb triage stages
 
 ## Sessions and the sidebar
 
-Every session appears on the board automatically as a view-only card — including
-sessions bb hides from the sidebar, such as plugin-spawned workers. Mirror cards
-never notify, never change sidebar visibility, and are removed when their
-session is deleted. A mirror card settles (moves to the Settled view) when its
-session goes idle (unless the card sits in the done column) or fails, and
-reopens when the session becomes active again.
-Reopening a mirror card by hand lasts until its session's next idle or failed
-turn; to keep a session on the board, move it to Triage instead. Turn this off
-in Settings → Triage ("Automatically card every session"); existing mirror
-cards then stay until deleted individually.
+Visible top-level sessions appear on the board automatically as mirrored cards.
+Their agents receive the same stage tool and instructions as agents assigned to
+Triage tasks. Agents move finished work to Completed and work that needs your
+input to Human Review. Human Review and custom stages stay on the board when
+the session goes idle; an idle turn alone does not mark a task complete.
+
+Mirrored cards do not change sidebar visibility and are removed when their
+session is deleted. Unclassified cards settle when their session goes idle or
+fails, and reopen when it becomes active again. Reopening an unclassified card
+by hand lasts until its session's next idle or failed turn. Turn automatic
+card creation off in Settings → Triage ("Automatically card every session");
+existing mirrored cards stay until deleted individually.
 The first run numbers every session, so card numbers jump by the count of
 existing sessions; sessions that are idle or failed start settled and live under
 the Settled view.
@@ -112,8 +114,10 @@ the Settled view.
   list. It defaults to **off**. Changing it applies to all linked sessions;
   individual show/hide actions override it until the next setting change.
 
-Imported sessions receive their assigned Triage agent tool and instructions on
-subsequent agent configuration. Importing does not interrupt a running turn.
+All linked sessions, including automatically mirrored sessions, receive the
+Triage agent tool and instructions when BB next starts their agent session.
+A card still being created becomes eligible after its row exists. Importing a
+session does not interrupt a running turn.
 
 ## Board controls
 
