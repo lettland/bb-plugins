@@ -85,7 +85,8 @@ function sameSpaceShape(
     previous.brief === space.brief &&
     previous.directory === space.directory &&
     previous.createdAt === space.createdAt &&
-    previous.updatedAt === space.updatedAt
+    previous.updatedAt === space.updatedAt &&
+    previous.archivedAt === space.archivedAt
   );
 }
 

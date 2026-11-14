@@ -8,7 +8,6 @@ import {
   readSidebarSpaces,
   readSpacesArea,
   readThreadSpaceId,
-  updateThreadSpace,
 } from "../../fork-sdk-types.js";
 import { makeSidebarThread } from "./fixtures.js";
 
@@ -30,6 +29,7 @@ const SPACE = {
   directory: "/spaces/spc_1",
   createdAt: 1,
   updatedAt: 2,
+  archivedAt: null,
   briefUpdatedBy: "someone",
 };
 
@@ -71,8 +71,19 @@ describe("readSidebarSpaces", () => {
         directory: "/spaces/spc_1",
         createdAt: 1,
         updatedAt: 2,
+        archivedAt: null,
       },
     ]);
+  });
+
+  it("reads archivedAt as a number and treats a missing or non-number value as null", () => {
+    const archivedAt = (value: unknown) =>
+      readSidebarSpaces(stateWith([value]))[0]?.archivedAt;
+    expect(archivedAt({ ...SPACE, archivedAt: 9 })).toBe(9);
+    expect(archivedAt({ ...SPACE, archivedAt: null })).toBeNull();
+    expect(archivedAt({ ...SPACE, archivedAt: "9" })).toBeNull();
+    const { archivedAt: _omitted, ...older } = SPACE;
+    expect(archivedAt(older)).toBeNull();
   });
 
   it("treats a missing or non-array field as no Spaces and skips malformed entries", () => {
@@ -102,21 +113,10 @@ describe("readSpacesArea", () => {
     ).toBeNull();
   });
 
-  it("returns the area when create, update and delete exist", () => {
-    const area = { create: vi.fn(), update: vi.fn(), delete: vi.fn() };
+  it("returns the area when create and update exist", () => {
+    const area = { create: vi.fn(), update: vi.fn() };
     expect(
       readSpacesArea({ experimental_spaces: area } as unknown as PluginBrowserBbSdk),
     ).toBe(area);
-  });
-});
-
-describe("updateThreadSpace", () => {
-  it("sends the Space id, or null to leave the Space", async () => {
-    const update = vi.fn(async () => ({ ok: true }));
-    const sdk = { threads: { update } } as unknown as PluginBrowserBbSdk;
-    await updateThreadSpace(sdk, "thr_1", "spc_1");
-    await updateThreadSpace(sdk, "thr_1", null);
-    expect(update).toHaveBeenNthCalledWith(1, { threadId: "thr_1", spaceId: "spc_1" });
-    expect(update).toHaveBeenNthCalledWith(2, { threadId: "thr_1", spaceId: null });
   });
 });

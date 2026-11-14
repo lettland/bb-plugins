@@ -39,11 +39,12 @@ organization. A thread with a Space shows only in its Space group. The three
 order keys (`sectionOrder`, `manualSectionOrder`, `machineSectionOrder`) accept
 `space:<spaceId>` entries; a Space missing from an order is placed right after
 `pinned`, and ids of Spaces that no longer exist are dropped. A collapsed Space
-is stored as `space:<spaceId>` in `collapsedProjects`. Create, rename, edit the
-brief of, and delete a Space from its group header or the header menu's New
-Space…; use Move to Space… on a thread to file it. A move also moves the
-thread's child threads. A thread without a project stays in its Space and is
-not offered the action.
+is stored as `space:<spaceId>` in `collapsedProjects`. Create a Space from the
+header menu's New Space…; rename it, edit its brief, and archive or unarchive
+it from its group header. An archived Space keeps its threads, shows
+" (archived)" after its name, and offers no new thread. The thread menu's core
+Move to Space action moves threads. The Space directory, the allowed projects,
+and the archive state are also managed in Settings → Valksor → Spaces.
 
 Collapsed groups stay collapsed when background threads appear or become
 unread. Their headers retain activity indicators. Opening a thread reveals

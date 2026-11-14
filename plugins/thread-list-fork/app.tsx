@@ -8,7 +8,6 @@ import { PreferencesSync } from "./app/preferences/PreferencesSync.js";
 import { ProjectList } from "./app/list/ProjectList.js";
 import { useSidebarThreadReveal } from "./app/list/useSidebarThreadReveal.js";
 import { moveThreadAction } from "./app/rows/moveThreadAction.js";
-import { moveToSpaceAction } from "./app/rows/moveToSpaceAction.js";
 import { ThreadSelectionProvider } from "./app/selection/threadSelection.js";
 
 function ThreadList({
@@ -41,5 +40,4 @@ export default definePluginApp((app) => {
     component: ThreadList,
   });
   app.slots.experimental_threadAction(moveThreadAction);
-  app.slots.experimental_threadAction(moveToSpaceAction);
 });

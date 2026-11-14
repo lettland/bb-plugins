@@ -34,6 +34,12 @@ import {
 import type { OrganizationMode } from "../../shared/preferences.js";
 
 const spacesState = vi.hoisted(() => ({ spaces: undefined as unknown }));
+const toastError = vi.hoisted(() => vi.fn());
+
+vi.mock("sonner", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("sonner")>();
+  return { ...actual, toast: { ...actual.toast, error: toastError } };
+});
 
 vi.mock("@get-bb/plugin-sdk/app", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@get-bb/plugin-sdk/app")>();
@@ -77,7 +83,12 @@ function Harness({
   );
 }
 
-function makeSpace(id: string, name: string, brief = "") {
+function makeSpace(
+  id: string,
+  name: string,
+  brief = "",
+  archivedAt: number | null = null,
+) {
   return {
     id,
     name,
@@ -85,20 +96,19 @@ function makeSpace(id: string, name: string, brief = "") {
     directory: `/spaces/${id}`,
     createdAt: 1,
     updatedAt: 1,
+    archivedAt,
   };
 }
 
 interface SpacesSdkFake {
   create: ReturnType<typeof vi.fn>;
   update: ReturnType<typeof vi.fn>;
-  delete: ReturnType<typeof vi.fn>;
 }
 
 function makeSpacesSdk(): SpacesSdkFake {
   return {
     create: vi.fn(sdkResult(makeSpace("spc_new", "Created"))),
     update: vi.fn(sdkResult(makeSpace("spc_1", "Payments"))),
-    delete: vi.fn(sdkResult({ ok: true })),
   };
 }
 
@@ -560,7 +570,7 @@ describe("Space actions", () => {
     expect(spacesSdk.update).not.toHaveBeenCalled();
   });
 
-  it("deletes a Space after confirmation", async () => {
+  it("archives a Space", async () => {
     const { spacesSdk } = renderSidebar({
       mode: "project",
       threads: MIXED_THREADS,
@@ -569,16 +579,123 @@ describe("Space actions", () => {
       await screen.findByRole("button", { name: "Payments actions" }),
       { button: 0 },
     );
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete Space…" }));
-    expect(
-      await screen.findByText(
-        "Its threads go back to their projects. The Space directory and its files stay on disk.",
-      ),
-    ).not.toBeNull();
-    expect(spacesSdk.delete).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Delete Space" }));
+    expect(screen.queryByRole("menuitem", { name: "Delete Space…" })).toBeNull();
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive Space" }));
     await waitFor(() =>
-      expect(spacesSdk.delete).toHaveBeenCalledWith({ id: "spc_1" }),
+      expect(spacesSdk.update).toHaveBeenCalledWith({
+        id: "spc_1",
+        archived: true,
+      }),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("unarchives an archived Space", async () => {
+    const { spacesSdk } = renderSidebar({
+      mode: "project",
+      threads: MIXED_THREADS,
+      spaces: [makeSpace("spc_1", "Payments", "", 5)],
+    });
+    fireEvent.pointerDown(
+      await screen.findByRole("button", { name: "Payments actions" }),
+      { button: 0 },
+    );
+    expect(screen.queryByRole("menuitem", { name: "Archive Space" })).toBeNull();
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Unarchive Space" }),
+    );
+    await waitFor(() =>
+      expect(spacesSdk.update).toHaveBeenCalledWith({
+        id: "spc_1",
+        archived: false,
+      }),
+    );
+  });
+
+  it("archives and unarchives from the context menu", async () => {
+    const archive = renderSidebar({ mode: "project", threads: MIXED_THREADS });
+    fireEvent.contextMenu(await screen.findByText("Payments"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive Space" }));
+    await waitFor(() =>
+      expect(archive.spacesSdk.update).toHaveBeenCalledWith({
+        id: "spc_1",
+        archived: true,
+      }),
+    );
+    archive.unmount();
+    const restore = renderSidebar({
+      mode: "project",
+      threads: MIXED_THREADS,
+      spaces: [makeSpace("spc_1", "Payments", "", 5)],
+    });
+    fireEvent.contextMenu(await screen.findByText("Payments (archived)"));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Unarchive Space" }),
+    );
+    await waitFor(() =>
+      expect(restore.spacesSdk.update).toHaveBeenCalledWith({
+        id: "spc_1",
+        archived: false,
+      }),
+    );
+  });
+
+  it("shows a toast when archiving fails", async () => {
+    const spacesSdk = makeSpacesSdk();
+    spacesSdk.update.mockRejectedValueOnce(new Error("boom"));
+    renderSidebar({ mode: "project", threads: MIXED_THREADS, spacesSdk });
+    fireEvent.pointerDown(
+      await screen.findByRole("button", { name: "Payments actions" }),
+      { button: 0 },
+    );
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Archive Space" }));
+    await waitFor(() => expect(spacesSdk.update).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+  });
+});
+
+describe("an archived Space group", () => {
+  it("has no new-thread control and shows the (archived) label, unlike an active Space", async () => {
+    renderSidebar({
+      mode: "project",
+      threads: MIXED_THREADS,
+      spaces: [
+        makeSpace("spc_1", "Payments", "", 5),
+        makeSpace("spc_2", "Growth"),
+      ],
+    });
+    expect(await screen.findByText("Payments (archived)")).not.toBeNull();
+    expect(screen.queryByText("Growth (archived)")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "New thread in Payments" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "New thread in Growth" }),
+    ).not.toBeNull();
+    expect(
+      within(spaceGroup("spc_1")).queryByRole("button", {
+        name: "New thread in Payments",
+      }),
+    ).toBeNull();
+  });
+
+  it.each([
+    ["an active", null, true],
+    ["an archived", 5, false],
+  ])("offers New thread in More only for %s empty Space", async (_label, archivedAt, offered) => {
+    renderSidebar({
+      mode: "project",
+      threads: [],
+      spaces: [makeSpace("spc_1", "Payments", "", archivedAt)],
+      setup: (store) => store.set(sidebarHiddenGroupsAtom, ["space:spc_1"]),
+    });
+    const more = await screen.findByRole("button", { name: /^More / });
+    fireEvent.keyDown(more, { key: "Enter" });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Payments/ }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "New thread" }) !== null,
+      ).toBe(offered),
     );
   });
 });

@@ -1657,8 +1657,6 @@ function ProjectListComponent({
     useState<SpaceBriefTarget | null>(null);
   const [isSpaceBriefPending, setIsSpaceBriefPending] = useState(false);
   const [spaceBriefError, setSpaceBriefError] = useState<string | null>(null);
-  const spaceDeleteDialog = useDialogState<SpaceSectionTarget>();
-  const [isSpaceDeletePending, setIsSpaceDeletePending] = useState(false);
   const handleOpenCreateSpaceDialog = useCallback(() => {
     setSpaceCreateError(null);
     setIsSpaceCreateDialogOpen(true);
@@ -1723,21 +1721,23 @@ function ProjectListComponent({
     },
     [spaceBriefTarget, spacesArea],
   );
-  const handleConfirmDeleteSpace = useCallback(() => {
-    const space = spaceDeleteDialog.target;
-    if (space === null || spacesArea === null) return;
-    setIsSpaceDeletePending(true);
-    void spacesArea
-      .delete({ id: space.id })
-      .then(() => spaceDeleteDialog.onClose())
-      .catch((error: unknown) => {
-        spaceDeleteDialog.onClose();
-        toast.error(
-          getSpaceMutationErrorMessage(error, "Failed to delete Space."),
-        );
-      })
-      .finally(() => setIsSpaceDeletePending(false));
-  }, [spaceDeleteDialog, spacesArea]);
+  const handleToggleSpaceArchived = useCallback(
+    (space: SpaceSectionTarget) => {
+      if (spacesArea === null) return;
+      const archive = space.archivedAt === null;
+      void spacesArea
+        .update({ id: space.id, archived: archive })
+        .catch((error: unknown) => {
+          toast.error(
+            getSpaceMutationErrorMessage(
+              error,
+              archive ? "Failed to archive Space." : "Failed to unarchive Space.",
+            ),
+          );
+        });
+    },
+    [spacesArea],
+  );
   const [isSectionCreateDialogOpen, setIsSectionCreateDialogOpen] =
     useState(false);
   const [sectionCreateErrorMessage, setSectionCreateErrorMessage] = useState<
@@ -1984,10 +1984,10 @@ function ProjectListComponent({
   const spaceActions = useMemo(
     () => ({
       onCreateThread: handleCreateThreadInSpace,
-      onDelete: spaceDeleteDialog.onOpen,
       onEditBrief: handleEditSpaceBrief,
+      onToggleArchived: handleToggleSpaceArchived,
     }),
-    [handleCreateThreadInSpace, handleEditSpaceBrief, spaceDeleteDialog.onOpen],
+    [handleCreateThreadInSpace, handleEditSpaceBrief, handleToggleSpaceArchived],
   );
   const spaceSections = useSpaceSections({
     actions: spaceActions,
@@ -2076,21 +2076,6 @@ function ProjectListComponent({
         onCancel={handleCancelSpaceBrief}
         onSave={handleSaveSpaceBrief}
       />
-      <ConfirmDeleteDialog
-        open={spaceDeleteDialog.target !== null}
-        onOpenChange={spaceDeleteDialog.onOpenChange}
-      >
-        {spaceDeleteDialog.target ? (
-          <ConfirmDeleteDialogContent
-            title={`Delete ${spaceDeleteDialog.target.name}?`}
-            description="Its threads go back to their projects. The Space directory and its files stay on disk."
-            confirmLabel="Delete Space"
-            pending={isSpaceDeletePending}
-            onConfirm={handleConfirmDeleteSpace}
-            onCancel={spaceDeleteDialog.onClose}
-          />
-        ) : null}
-      </ConfirmDeleteDialog>
     </>
   );
 

@@ -166,6 +166,7 @@ describe("buildSidebarData Spaces", () => {
     directory: `/spaces/${id}`,
     createdAt: 1,
     updatedAt: 1,
+    archivedAt: null,
   });
 
   it("collects each Space's threads and keeps them in their project too", () => {
@@ -256,6 +257,7 @@ describe("getSidebarData Spaces cache", () => {
         directory: "/s/1",
         createdAt: 1,
         updatedAt: 1,
+        archivedAt: null,
       },
     ];
     const withSpaces: PluginSidebarThreadsState = {
@@ -270,6 +272,30 @@ describe("getSidebarData Spaces cache", () => {
     });
     expect(second).not.toBe(first);
     expect(second.spaces.map((entry) => entry.id)).toEqual(["spc_1", "spc_2"]);
+  });
+
+  it("rebuilds a Space when only its archived state changes", () => {
+    resetSidebarDataCacheForTest();
+    const active = {
+      id: "spc_1",
+      name: "One",
+      brief: "",
+      directory: "/s/1",
+      createdAt: 1,
+      updatedAt: 1,
+      archivedAt: null,
+    };
+    const first = getSidebarData({
+      ...baseState,
+      ...{ experimental_spaces: [active] },
+    });
+    const second = getSidebarData({
+      ...baseState,
+      ...{ experimental_spaces: [{ ...active, archivedAt: 5 }] },
+    });
+    expect(first.spaces[0]?.archivedAt).toBeNull();
+    expect(second.spaces[0]?.archivedAt).toBe(5);
+    expect(second.spaces[0]).not.toBe(first.spaces[0]);
   });
 
   it("ignores a malformed Spaces field", () => {

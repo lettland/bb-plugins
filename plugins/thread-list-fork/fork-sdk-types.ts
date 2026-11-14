@@ -26,6 +26,7 @@ export interface ForkSidebarSpace {
   directory: string;
   createdAt: number;
   updatedAt: number;
+  archivedAt: number | null;
 }
 
 export interface ForkSpacesArea {
@@ -34,8 +35,8 @@ export interface ForkSpacesArea {
     id: string;
     name?: string;
     brief?: string;
+    archived?: boolean;
   }): Promise<ForkSidebarSpace>;
-  delete(args: { id: string }): Promise<unknown>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -61,7 +62,8 @@ function readSidebarSpace(value: unknown): ForkSidebarSpace | null {
   ) {
     return null;
   }
-  return { id, name, brief, directory, createdAt, updatedAt };
+  const archivedAt = typeof value.archivedAt === "number" ? value.archivedAt : null;
+  return { id, name, brief, directory, createdAt, updatedAt, archivedAt };
 }
 
 const NO_SPACES: readonly ForkSidebarSpace[] = [];
@@ -96,20 +98,8 @@ export function readSpacesArea(sdk: PluginBrowserBbSdk): ForkSpacesArea | null {
   }
   const hasMethods =
     typeof Reflect.get(area, "create") === "function" &&
-    typeof Reflect.get(area, "update") === "function" &&
-    typeof Reflect.get(area, "delete") === "function";
+    typeof Reflect.get(area, "update") === "function";
   return hasMethods ? (area as ForkSpacesArea) : null;
-}
-
-export function updateThreadSpace(
-  sdk: PluginBrowserBbSdk,
-  threadId: string,
-  spaceId: string | null,
-): ReturnType<PluginBrowserBbSdk["threads"]["update"]> {
-  const args: Parameters<PluginBrowserBbSdk["threads"]["update"]>[0] & {
-    spaceId: string | null;
-  } = { threadId, spaceId };
-  return sdk.threads.update(args);
 }
 
 export function openComposeInSpace(

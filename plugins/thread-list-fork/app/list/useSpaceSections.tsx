@@ -27,8 +27,8 @@ import {
 
 export interface SpaceActions {
   onCreateThread: (spaceId: string) => void;
-  onDelete: (space: SpaceSectionTarget) => void;
   onEditBrief: (space: SpaceSectionTarget) => void;
+  onToggleArchived: (space: SpaceSectionTarget) => void;
 }
 
 interface UseSpaceSectionsArgs {
@@ -134,7 +134,10 @@ export function useSpaceSections({
         id: model.sectionId,
         title: model.space.name,
         threads: getProjectThreadItemDescendants(model.items),
-        onNewThread: () => actions.onCreateThread(model.space.id),
+        onNewThread:
+          model.space.archivedAt === null
+            ? () => actions.onCreateThread(model.space.id)
+            : undefined,
         renderContent: (close: () => void) => (
           <ProjectThreadTree
             rootItems={model.items}
@@ -183,8 +186,8 @@ export function useSpaceSections({
             compareThreads={compareThreads}
             onProjectSelect={onProjectSelect}
             onCreateThread={actions.onCreateThread}
-            onDelete={actions.onDelete}
             onEditBrief={actions.onEditBrief}
+            onToggleArchived={actions.onToggleArchived}
             onToggleCollapsed={toggleCollapsed}
             onToggleThreadCollapsed={onToggleThreadCollapsed}
             onToggleEnvironmentCollapsed={onToggleEnvironmentCollapsed}

@@ -29,6 +29,7 @@ import { ThreadListVisibilityMenuItems } from "./ThreadListVisibility.js";
 export interface SpaceSectionTarget {
   id: string;
   name: string;
+  archivedAt: number | null;
 }
 
 interface SpaceSectionProps {
@@ -39,9 +40,9 @@ interface SpaceSectionProps {
   disabled: boolean;
   isCollapsed: boolean;
   onCreateThread: (spaceId: string) => void;
-  onDelete: (space: SpaceSectionTarget) => void;
   onEditBrief: (space: SpaceSectionTarget) => void;
   onProjectSelect?: () => void;
+  onToggleArchived: (space: SpaceSectionTarget) => void;
   onToggleCollapsed: (spaceId: string) => void;
   onToggleEnvironmentCollapsed: (environmentId: string) => void;
   onToggleThreadCollapsed: (threadId: string) => void;
@@ -57,14 +58,16 @@ export function getSpaceSectionId(spaceId: string): SidebarSectionId {
 
 function SpaceMenuItems({
   surface,
-  onDelete,
+  isArchived,
   onEditBrief,
   onRename,
+  onToggleArchived,
 }: {
   surface: ActionMenuSurface;
-  onDelete: () => void;
+  isArchived: boolean;
   onEditBrief: () => void;
   onRename: () => void;
+  onToggleArchived: () => void;
 }) {
   return (
     <>
@@ -78,11 +81,10 @@ function SpaceMenuItems({
       <ActionMenuSeparator surface={surface} />
       <ActionMenuItem
         surface={surface}
-        icon="Trash2"
-        variant="destructive"
-        onSelect={onDelete}
+        icon={isArchived ? "ArchiveRestore" : "Archive"}
+        onSelect={onToggleArchived}
       >
-        Delete Space…
+        {isArchived ? "Unarchive Space" : "Archive Space"}
       </ActionMenuItem>
     </>
   );
@@ -140,9 +142,9 @@ export const SpaceSection = memo(function SpaceSection({
   disabled,
   isCollapsed,
   onCreateThread,
-  onDelete,
   onEditBrief,
   onProjectSelect,
+  onToggleArchived,
   onToggleCollapsed,
   onToggleEnvironmentCollapsed,
   onToggleThreadCollapsed,
@@ -175,13 +177,18 @@ export const SpaceSection = memo(function SpaceSection({
     [onToggleCollapsed, space.id],
   );
   const handleEditBrief = useCallback(() => onEditBrief(space), [onEditBrief, space]);
-  const handleDelete = useCallback(() => onDelete(space), [onDelete, space]);
+  const handleToggleArchived = useCallback(
+    () => onToggleArchived(space),
+    [onToggleArchived, space],
+  );
+  const isArchived = space.archivedAt !== null;
   const renderItems = (surface: ActionMenuSurface) => (
     <SpaceMenuItems
       surface={surface}
-      onDelete={handleDelete}
+      isArchived={isArchived}
       onEditBrief={handleEditBrief}
       onRename={rename.startEditingFromMenu}
+      onToggleArchived={handleToggleArchived}
     />
   );
   const actions = (
@@ -189,6 +196,7 @@ export const SpaceSection = memo(function SpaceSection({
       label={space.name}
       sectionId={sectionId}
       onNewThread={() => onCreateThread(space.id)}
+      showNewThread={!isArchived}
       open={isDropdownOpen}
       onOpenChange={setIsDropdownOpen}
       onCloseAutoFocus={rename.onCloseAutoFocus}
@@ -208,7 +216,7 @@ export const SpaceSection = memo(function SpaceSection({
         <SortableSidebarSection
           id={sectionId}
           sectionId={space.id}
-          label={space.name}
+          label={isArchived ? `${space.name} (archived)` : space.name}
           labelEditor={rename.editor}
           onRename={rename.startEditingFromDoubleClick}
           disabled={disabled || rename.isEditing}
