@@ -455,12 +455,12 @@ describe("dispatchReview sizes the change before it dispatches", () => {
   const overFloor = workspaceOf([{ path: "a.ts", status: "M", insertions: 30, deletions: 30 }]);
   const nullStats = workspaceOf([{ path: "a.ts", status: "M", insertions: null, deletions: null }]);
 
-  it("self-reviews a fresh trivial verdict whose one file is within the floor, without the blocker", async () => {
+  it("sizes the actual diff for a fresh trivial verdict without the blocker", async () => {
     await withDispatch(
       { reviewMode: "auto", plugins: [], environments: inFloor, callRpc: { verdict: "trivial", messageSeq: 10 } },
       async (_calls, _bb, sent) => {
-        expect(sent[0]).toContain(selfStep);
-        expect(sent[0]).not.toContain(lensesStep);
+        expect(sent[0]).toContain("Before reviewer setup, read the actual in-scope diff");
+        expect(sent[0]).toContain(lensesStep);
         expect(sent[0]).not.toContain(BLOCKER_LINE);
       },
     );

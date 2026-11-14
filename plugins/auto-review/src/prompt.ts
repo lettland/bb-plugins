@@ -183,18 +183,18 @@ function aislopScanStep(committedSince: string | null): string {
   return ` Then run \`${command}\`, ${description}. Run it even when the current branch is the root branch itself — the scan still covers this turn's work there — so never skip it because the branch and its root are the same. If bb reports the command unknown or its plugin disabled, the aislop plugin went away meanwhile, so skip this. A non-zero exit code from the scan only means it found issues, not that the step failed. But if it prints an error instead of a report (for example that no root branch was found), the scan did not run: say so in your final reply rather than treating it as findings. Treat its findings as advice, not orders: act on findings in the files attributed to your turn above, lines that predate this turn included, with the same named-feature exception as above and never on uncommitted edits that were already in the checkout when the turn started, or on edits or commits the user or another thread made meanwhile, and fix one only when it is a real problem and the fix does not go against this project's own rules (CLAUDE.md / AGENTS.md, lint and formatter config, or the conventions the surrounding code follows). Leave false positives and rule conflicts as they are, and list each finding you skipped with a one-line reason in your final reply.`;
 }
 
-function reviewStep(mode: ReviewMode, committedSince: string | null, aislopScan: boolean, sizeTrivial: boolean): string {
+function reviewStep(mode: ReviewMode, committedSince: string | null, aislopScan: boolean): string {
   const target = reviewTarget(committedSince);
   const scan = aislopScan ? aislopScanStep(committedSince) : "";
-  // An explicit `devkit` or `self` mode wins over sizing; only `auto` defers to it.
-  switch (sizeTrivial && mode === "auto" ? "self" : mode) {
+  const sizing = "Before reviewer setup, read the actual in-scope diff and the context it depends on. Request-based plan sizing does not determine review risk. Choose a focused review for routine low-risk changes, even across several files. Choose selected lenses for contained behavior changes. Choose all five lenses for broad changes with several independent risks, or an explicit user request for a full review. A short security-sensitive change requires the relevant lens. File count and line count alone never determine the tier. When uncertain and typesafe_decide is available, ask for advisory tier or lens advice using the request and a short diff/risk summary. Never send secrets, credentials, .env contents, or personal data. Use confident advice (about 0.6 or higher) as evidence, not authority. If unavailable or inconclusive, decide from the diff and state the reason. Do not call TypeSafe for an obvious routine edit. Report the chosen tier, lenses, and reasons for omitted lenses. An omitted lens is not a PASS. Explicit self mode keeps its self-review semantics. In self mode, assess these risks in this thread. In auto mode without devkit, do the same and report that the calibrated workflow was unavailable.";
+  switch (mode) {
     case "devkit":
-      return `Review the changes with devkit's calibrated review: ${target.devkit}. ${DEVKIT_REVIEW_RULES} ${OWN_WORK_ONLY}${scan} If the devkit_load_skill tool is not available, STOP and report that the devkit review workflow is missing; do not fall back to a self-review.`;
+      return `${sizing} Review the changes with devkit's calibrated review: ${target.devkit}. ${DEVKIT_REVIEW_RULES} ${OWN_WORK_ONLY}${scan} If the devkit_load_skill tool is not available, STOP and report that the devkit review workflow is missing; do not fall back to a self-review.`;
     case "self":
-      return `Review the changes with a focused self-review of ${target.self}. ${OWN_WORK_ONLY}${scan}`;
+      return `${sizing} Review the changes with a focused self-review of ${target.self}. ${OWN_WORK_ONLY}${scan}`;
     case "auto":
     default:
-      return `Review the changes: if the devkit_load_skill tool is available, ${target.devkit}; otherwise do a focused self-review of ${target.self}. ${DEVKIT_REVIEW_RULES} ${OWN_WORK_ONLY}${scan}`;
+      return `${sizing} Review the changes: if the devkit_load_skill tool is available, ${target.devkit}; otherwise do a focused self-review of ${target.self}. ${DEVKIT_REVIEW_RULES} ${OWN_WORK_ONLY}${scan}`;
   }
 }
 
@@ -325,7 +325,7 @@ export function buildReviewPrompt(input: BuildPromptInput): string {
   if (missingPlan) {
     lines.push(MISSING_PLAN_BLOCKER, "");
   }
-  lines.push(`1. ${reviewStep(reviewMode, committedSince, input.aislopScan ?? false, changeSize?.trivial === true)}`);
+  lines.push(`1. ${reviewStep(reviewMode, committedSince, input.aislopScan ?? false)}`);
   lines.push(
     `2. Apply the fixes the review reports. If it asks for a re-run, re-run only over the changes since its previous pass (devkit's closure rule); a self-review is one pass.`,
   );

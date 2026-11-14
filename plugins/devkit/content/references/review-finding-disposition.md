@@ -108,15 +108,19 @@ finding:
    If no runnable verification exists, say exactly what you inspected instead; do not call the
    work verified.
 
-6. **Run a closure review.** After valid findings have been fixed, perform a follow-up review
-   of that round's delta before reporting done. Scope it per `references/review-delta-scope.md`:
-   before applying the fixes (step 2), take a round snapshot of the in-scope files in its own
-   flat `mktemp -d` dir; the closure reviews only what changed since that snapshot, and is given
-   the previous round's findings to confirm closed. For calibrated commands (`/review-code`,
-   `/review-impl`, `/review-plan`), this means one additional pass with the same review
-   perspectives over the round delta, focused on whether the original findings are closed and
-   whether the fixes introduced new Blockers or Concerns. For the single-pass `/review` and
-   `security-audit` commands, do the same closure pass in-session against the round delta.
+6. **Run a closure review.**
+
+   For `/review-code` and `/review-impl`, follow the tier-based closure rules in `review-code`.
+   No fix delta means no closure worker. Verify focused fixes yourself in this thread.
+   For selected or full code reviews, use only the selected lenses over the fix delta.
+   Reassess those lenses if a fix introduces new risk. Do not restore omitted lenses for closure.
+
+   For `/review-plan`, retain the full or caller-specified light policy and the plan limits below.
+   For the single-pass `/review` and `security-audit` commands, verify fixes in-session against the round delta.
+
+   Before applying fixes, take the round snapshot described in `references/review-delta-scope.md`.
+   Use a flat `mktemp -d` directory. Review only changes since that snapshot.
+   Include the prior findings so closure can check them. Check whether fixes introduce new Blockers or Concerns.
    Disposition any new valid closure finding using this same protocol; the next round (a fresh
    snapshot, taken before that fix) covers only that fix's delta. The cap depends on the review
    kind. A code review runs at most 3 closure rounds. A plan review runs at most one closure

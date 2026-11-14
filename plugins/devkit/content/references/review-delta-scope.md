@@ -84,6 +84,10 @@ The review's report states its scope:
 
 ## Closure rounds cap
 
+For code review, no fix delta means no closure worker. Verify focused fixes yourself.
+Selected and full reviews use only their selected lenses over the fix delta. Reassess if the fix introduces new risk.
+These rules do not change the full or light plan policy below.
+
 A code review runs at most **3 closure rounds**; a plan review runs at most **one closure round**:
 findings that round leaves open, and any new finding it raises, are verified by the reviewing agent
 itself against the code and carried into the presentation as open findings — never another reviewer

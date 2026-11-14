@@ -182,6 +182,46 @@ const REVIEWER_LENSES = [
 ];
 
 describe("review-code content", () => {
+  it("keeps closure within the chosen code-review tier and preserves plan limits", async () => {
+    const result = await loadSkill(path.join(import.meta.dirname, "..", "content"), undefined, "review-finding-disposition");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const text = result.content.replace(/\s+/g, " ");
+    expect(text).toContain("follow the tier-based closure rules in");
+    expect(text).toContain("Verify focused fixes yourself in this thread.");
+    expect(text).toContain("Do not restore omitted lenses for closure.");
+    expect(text).not.toContain("the same review perspectives");
+    expect(text).toContain("A plan review runs at most one closure round over the round delta");
+    expect(text).toContain("A plan review the caller marked light runs no closure reviewer at all");
+  });
+  it("delivers risk-based tiers before reviewer setup", async () => {
+    const result = await loadSkill(path.join(import.meta.dirname, "..", "content"), "review-code");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const text = result.content.replace(/\s+/g, " ");
+    for (const phrase of [
+      "For `plan`, keep all five lenses unless the caller specifies the light tier.",
+      "An explicit user request for a full review requires all five lenses.",
+      "Routine low-risk changes, including wording or mechanical changes across several files.",
+      "Start senior-dev and senior-qa.",
+      "Security: trust boundaries, credentials, execution, dependencies, or installation.",
+      "End user: user-visible workflows or public contracts.",
+      "Compliance: privacy, licensing, or regulatory changes.",
+      "A short security-sensitive change requires the security lens.",
+      "Choosing lenses never removes source hunks from scope.",
+      "consult `typesafe_decide` if available",
+      "Do not call TypeSafe for an obvious routine edit.",
+      "An omitted lens is not a PASS.",
+      "no fix delta means no closure worker",
+      "Reassess when a fix introduces new risk.",
+    ]) expect(text).toContain(phrase);
+    expect(text.indexOf("### Choose the code-review tier")).toBeLessThan(text.indexOf("## 2. Prepare the reviewer brief"));
+  });
+  it("does not require five reviewers for every code review", async () => {
+    const result = await loadSkill(path.join(import.meta.dirname, "..", "content"), "review-code");
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.content).not.toContain("## 3. Run the five reviewers");
+  });
   const contentRoot = path.join(import.meta.dirname, "..", "content");
 
   // Content is immutable across these tests; load once and compare against `normalized`
@@ -550,9 +590,7 @@ describe("review-code content", () => {
 
     expect(normalized).toContain("excludes other parties' concurrent edits, not pre-existing code in the turn's files");
     expect(normalized).not.toContain("(auto-review: only your own work from this turn) or");
-    expect(normalized).toContain(
-      "findings unrelated to a named feature, or findings outside review scope (reported), with a one-line reason",
-    );
+    expect(normalized).toContain('reference: "review-finding-disposition"');
 
     const compliance = await collapse("reviewer-compliance");
     expect(compliance).not.toContain("Pre-existing gaps in code the change does not touch are not findings");
@@ -612,9 +650,9 @@ describe("review-code content", () => {
     const section5Start = content.indexOf("## 5.");
     expect(section5Start).toBeGreaterThan(-1);
     const section5 = normalized.slice(normalized.indexOf("## 5."));
-    expect(section5).toContain("closure review");
-    expect(section5).toContain("with its own tree guard");
-    expect(section5).toContain("fresh baseline");
+    expect(section5).toContain("Use section 3's fallbacks");
+    expect(section5).toContain("Take a fresh tree-guard baseline after your fixes");
+    expect(section5).toContain("Never compare your fixes against the initial review's tree guard");
   });
 
   it("ends the plan-scope review once the plan-approval call returns approved", () => {
@@ -715,7 +753,7 @@ describe("review-code content", () => {
   });
 
   it("the closure review's brief explicitly overrides §2 item 2's stop-on-failed-calibration rule", () => {
-    expect(normalized).toContain("overrides §2 item 2");
+    expect(normalized).toContain("If one calibration fails, name that lens and continue with the others. Repeat only the failed lens in this thread.");
   });
 
   it("slices the config/hooks/ignore (a) group and confirms hooks content precedes (b)", () => {
@@ -790,8 +828,8 @@ describe("review-code content", () => {
   it("keeps the closure brief free of a Request block and ends §5 with the recomputed Done verdict", () => {
     expect(normalized.indexOf("## 5.")).toBeGreaterThan(-1);
     const section5 = normalized.slice(normalized.indexOf("## 5."));
-    expect(section5).toContain("The closure brief carries no `Request:` block");
-    expect(section5).toContain("restate the final `Done:` line");
+    expect(section5).toContain("Its brief has no Request block because closure checks fixes, not request coverage.");
+    expect(section5).toContain("Restate the final Done line for the current state.");
   });
 
   it("adds scope verification, the Done verdict and backwards compatibility to §4", () => {
