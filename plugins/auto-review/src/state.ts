@@ -171,13 +171,7 @@ export const threadStateSchema = z.object({
   planReviewArmedSeq: z.number().int().nonnegative().optional(),
   /** Set once the plan was sent back for a full review after `review-code` was never loaded; a second miss releases it. */
   planReviewRedone: z.literal(true).optional(),
-  /**
-   * The plan review's size tier, computed by `lightPlan` from the plan's text
-   * when the gate armed (and recomputed by a redo from its own plan). Release
-   * and hold expiry read it for the round tally and never recompute it from
-   * the re-presented plan: review fixes routinely shrink a plan across the
-   * 40-line boundary, which would flip the reviewer budget in both directions.
-   */
+  /** Legacy metadata is accepted and cleared for sessions created before risk-based selection. */
   planReviewLight: z.boolean().optional(),
   /** The last plan the gate left with the user, for `gatePlan`'s same-turn re-presentation check. */
   planReleased: z
@@ -200,7 +194,7 @@ export const threadStateSchema = z.object({
   presentPlanArmedSeq: z.number().int().nonnegative().optional(),
   /** `planReviewRedone` for `PresentPlan`: the one redo this arm has used. */
   presentPlanRedone: z.literal(true).optional(),
-  /** `planReviewLight` for the `PresentPlan` arm: computed from the plan file at arm time, read back at release. */
+  /** Legacy PresentPlan metadata, accepted and cleared but not used for selection. */
   presentPlanLight: z.boolean().optional(),
   presentPlanAutoApprovedSeq: z.number().int().nonnegative().optional(), // Auto-approval cursor the missing-plan gate reads; outside PRESENT_PLAN_KEYS and the latch keys on purpose, so a reset keeps it.
   presentPlanFormMode: z.boolean().optional(), // Whether the thread's instructions describe the approval form, written once at its first configure; outside PRESENT_PLAN_KEYS and the latch keys on purpose, so a reset keeps it: it must match the instructions the thread was started with.

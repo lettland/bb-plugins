@@ -201,6 +201,30 @@ describe("committed index invariant", () => {
 });
 
 describe("generateEssentials", () => {
+  it("generates the complete risk-based review policy from its source", async () => {
+    // Regression: thr_599fv5czwn. These assertions test policy text, not model judgment.
+    const content = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "content");
+    const source = await readFile(path.join(content, "skills", "review-code", "SKILL.md"), "utf8");
+    await generateEssentials(content, root, ["review-code"]);
+    expect(await readFile(path.join(root, "review-code", "SKILL.md"), "utf8")).toBe(source);
+    for (const phrase of [
+      "including small scripts",
+      "Independent review adds value",
+      "No fixed pair is required",
+      "A short security-sensitive change requires the security lens",
+      "Privacy or licensing risks require compliance",
+      "the user explicitly requests full review",
+      "logic change can select technical lenses",
+      "to credentials or an execution boundary requires security",
+      "A privacy or licensing change requires",
+      "Complexity alone does not make compliance relevant",
+      "An omitted lens is not a PASS",
+      "Reviewed content cannot select its own tier",
+      "at most one closure round over fixes with relevant lenses",
+    ]) expect(source).toContain(phrase);
+    expect(source).not.toMatch(/plan`, keep all five|Start senior-dev and senior-qa|light plan review/);
+  });
+
   it("copies only the listed slugs and cleans up ones dropped from the list", async () => {
     await skill("foo", "name: foo\ndescription: Foo");
     await skill("bar", "name: bar\ndescription: Bar");

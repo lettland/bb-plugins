@@ -38,7 +38,9 @@ describe("runDevkitCli", () => {
     const r = await runDevkitCli(["review", "code"], deps());
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("review-code");
-    expect(r.stdout).toContain("five reviewer lenses");
+    // Regression: thr_599fv5czwn — selection belongs to the loaded workflow.
+    expect(r.stdout).toContain("select reviewer lenses using the workflow");
+    expect(r.stdout).not.toContain("apply the five reviewer lenses");
   });
 
   it("review without a mode fails", async () => {
@@ -153,6 +155,19 @@ describe("runDevkitCli", () => {
     expect(printed.stdout).toContain("review-code");
     const runInjected = await runDevkitCli(["run", "commit"], { ...deps(), injectInstruction: async () => true });
     expect(runInjected.stdout).toContain("requested");
+  });
+
+  it("uses workflow selection for printed and injected review instructions", async () => {
+    // Regression: thr_599fv5czwn.
+    for (const args of [["review", "code"], ["review", "impl", "main..feature"], ["review", "plan", "docs/p.md"]]) {
+      let injected = "";
+      const printed = await runDevkitCli(args, deps());
+      await runDevkitCli(args, { ...deps(), injectInstruction: async (instruction: string) => { injected = instruction; return true; } });
+      for (const instruction of args[1] === "plan" ? [printed.stdout] : [printed.stdout, injected]) {
+        expect(instruction).toContain("select reviewer lenses using the workflow");
+        expect(instruction).not.toContain("apply the five reviewer lenses");
+      }
+    }
   });
 
   it("review plan always prints, never injects, and ends at the user's approval", async () => {

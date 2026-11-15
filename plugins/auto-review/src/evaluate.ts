@@ -310,7 +310,6 @@ export async function evaluate(
         bb,
         thread.id,
         nativeHold ? state.planReviewArmedAt : state.presentPlanArmedAt,
-        (nativeHold ? state.planReviewLight : state.presentPlanLight) === true,
       ),
     );
     await carryOver(ctx, thread, state, false, "plan-in-review", tallyExtras);

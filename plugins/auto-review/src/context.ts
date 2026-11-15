@@ -15,7 +15,7 @@ export interface GateThreadLike extends GateThread {
   projectId: string;
 }
 
-export type FireExtra = Partial<Omit<LastFire, "at" | "outcome" | "reason">>;
+export type FireExtra = Partial<Omit<LastFire, "at" | "outcome" | "reason" | "planReviewTier">>;
 
 export type EffectiveConfig = ReturnType<typeof effectiveConfig>;
 
@@ -63,7 +63,6 @@ export async function recordFire(
     ...(extra.parkedPaths === undefined ? {} : { parkedPaths: extra.parkedPaths }),
     ...(extra.skippedCommits === undefined ? {} : { skippedCommits: extra.skippedCommits }),
     ...(extra.planReviewerCount === undefined ? {} : { planReviewerCount: extra.planReviewerCount }),
-    ...(extra.planReviewTier === undefined ? {} : { planReviewTier: extra.planReviewTier }),
   };
   await writeLastFire(bb, projectId, threadId, fire);
 }

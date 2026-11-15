@@ -83,7 +83,7 @@ export function planScopeRule(scope: PlanScope, devkit: boolean): string {
  * document itself, nothing else.
  */
 export const APPLY_PLAN_FINDINGS =
-  "Apply every valid finding directly to the plan document, whatever its severity; skip a false positive with a one-line reason. Editing the plan document is allowed in plan mode — do not edit any other project file. The review itself is also allowed in plan mode: writing its brief files outside the checkout and spawning, waiting on, stopping, archiving and deleting its bb child threads do not change the project, so try them rather than skipping them; fall back only after a real failure or a denied call.";
+  "Apply every valid finding directly to the plan document, whatever its severity; skip a false positive with a one-line reason. Editing the plan document is allowed in plan mode — do not edit any other project file. The review itself is also allowed in plan mode: writing its brief files outside the checkout and spawning, waiting on, stopping, archiving and deleting its bb child threads do not change the project, so when lenses are selected, try them rather than skipping them; fall back only after a real failure or a denied call. Focused reviews need no reviewer setup.";
 
 /** What stops a plan from being presented: a decision for the user, or a finding the review could not close. */
 export const PLAN_OPEN_IF = `If the review leaves a decision only the user can make (scope, a product trade-off), or a ${BLOCKER} is still open after the review (and its closure rounds, if any),`;

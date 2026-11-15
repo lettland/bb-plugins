@@ -197,7 +197,6 @@ describe("evaluate", () => {
       outcome: "deferred",
       reason: "plan-in-review",
       planReviewerCount: 0,
-      planReviewTier: "standard",
     });
   });
 
@@ -216,7 +215,6 @@ describe("evaluate", () => {
       outcome: "deferred",
       reason: "plan-in-review",
       planReviewerCount: 0,
-      planReviewTier: "light",
     });
   });
 

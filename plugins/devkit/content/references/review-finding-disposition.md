@@ -115,10 +115,10 @@ finding:
    For selected or full code reviews, use only the selected lenses over the fix delta.
    Reassess those lenses if a fix introduces new risk. Do not restore omitted lenses for closure.
 
-   For `/review-plan`, retain the full or caller-specified light policy and the plan limits below.
+   For `/review-plan`, verify focused fixes yourself. Use relevant selected lenses for any closure round.
    For the single-pass `/review` and `security-audit` commands, verify fixes in-session against the round delta.
 
-   Before applying fixes, take the round snapshot described in `references/review-delta-scope.md`.
+   When a closure review is needed, take the round snapshot described in `references/review-delta-scope.md` before applying fixes.
    Use a flat `mktemp -d` directory. Review only changes since that snapshot.
    Include the prior findings so closure can check them. Check whether fixes introduce new Blockers or Concerns.
    Disposition any new valid closure finding using this same protocol; the next round (a fresh
@@ -126,8 +126,7 @@ finding:
    kind. A code review runs at most 3 closure rounds. A plan review runs at most one closure
    round over the round delta: findings that round leaves open, and any new finding it raises,
    are verified by the reviewing agent itself against the code and carried into the presentation
-   as open findings — never another reviewer round. A plan review the caller marked light runs
-   no closure reviewer at all: fixes are verified by the reviewing agent itself. After the cap,
+   as open findings — never another reviewer round. After the cap,
    report the still-open findings as open and end the loop. A Blocker or security Concern
    still open after the review (and its closure rounds, if any): do not commit and do not present
    a plan for approval as if clean — stop and report it to the user. Do not stop after merely

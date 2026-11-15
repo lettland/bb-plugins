@@ -128,152 +128,56 @@ describe("PresentPlan without a readable cursor", () => {
   });
 });
 
-describe("PresentPlan's light tier", () => {
+describe("PresentPlan risk-based selection", () => {
   const lines = (count: number) => Array.from({ length: count }, (_, index) => `line ${index}`).join("\n");
-  /** A reviewer child that already finished, created after any arm in these tests. */
-  const child = (id: string) => ({
-    id,
-    title: "review: security",
-    createdAt: Date.now(),
-    parentThreadId: THREAD_ID,
-    originPluginId: null,
-    status: "idle",
-    archivedAt: 1,
-    deletedAt: null,
-  });
-  const lastFire = (host: ReturnType<typeof createFakePluginHost>) =>
-    host.bb.storage.kv.get(`lastfire:${CTX.projectId}:${THREAD_ID}`) as Promise<Record<string, unknown> | null>;
 
-  it("arms with the tier from the plan file, and a null plan is never light", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "auto-review-plan-"));
-    try {
-      const short = join(dir, "short.md");
-      await writeFile(short, lines(40));
-      await withHost(async (host, metadata) => {
-        await host.harness.callAgentTool("PresentPlan", { planFilePath: short }, CTX);
-        expect(metadata.presentPlanLight).toBe(true);
-      });
-      const long = join(dir, "long.md");
-      await writeFile(long, lines(41));
-      await withHost(async (host, metadata) => {
-        await host.harness.callAgentTool("PresentPlan", { planFilePath: long }, CTX);
-        expect(metadata.presentPlanLight).toBe(false);
-      });
-      await withHost(async (host, metadata) => {
-        // PLAN does not exist, so `readPlanFile` returns null: standard tier.
-        await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX);
-        expect(metadata.presentPlanLight).toBe(false);
-      });
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("keeps the armed tier across a redo, and records the tally at the release fire point", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "auto-review-plan-"));
-    try {
-      const short = join(dir, "short.md");
-      await writeFile(short, lines(40));
-      await withHost(async (host, metadata, _review, _dropTimeline, setChildren) => {
-        await host.harness.callAgentTool("PresentPlan", { planFilePath: short }, CTX);
-        expect(metadata.presentPlanLight).toBe(true);
-        // Armed light and still light, the redo's recompute keeps two lenses.
-        const redo = await host.harness.callAgentTool("PresentPlan", { planFilePath: short }, CTX);
-        expect(redo).toBe(presentPlanRedoMessage("devkit", true));
-        expect(metadata.presentPlanLight).toBe(true);
-        setChildren([child("r0"), child("r1"), child("r2"), child("r3")]);
-        const released = await host.harness.callAgentTool("PresentPlan", { planFilePath: short }, CTX);
-        expect(released).toContain("released without a complete calibrated review");
-        expect(await lastFire(host)).toMatchObject({
-          outcome: "stood-down",
-          reason: "plan-review-incomplete",
-          planReviewTier: "light",
-          planReviewerCount: 4,
-        });
-      });
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("never sizes a redo lighter than its arm: a shrunk standard plan keeps no light block", async () => {
+  it("uses equivalent instructions at 39, 40, 41 and 48 lines, including redo", async () => {
+    // Regression: thr_599fv5czwn.
     const dir = await mkdtemp(join(tmpdir(), "auto-review-plan-"));
     try {
       const plan = join(dir, "plan.md");
-      await writeFile(plan, lines(41));
-      await withHost(async (host, metadata) => {
-        await host.harness.callAgentTool("PresentPlan", { planFilePath: plan }, CTX);
-        expect(metadata.presentPlanLight).toBe(false);
-        await writeFile(plan, lines(20));
-        // The redo re-reads the file, but an armed standard stays standard.
-        const redo = await host.harness.callAgentTool("PresentPlan", { planFilePath: plan }, CTX);
-        expect(redo).toBe(presentPlanRedoMessage("devkit"));
-        expect(metadata.presentPlanLight).toBe(false);
-      });
+      const initial: unknown[] = [];
+      const redo: unknown[] = [];
+      for (const count of [39, 40, 41, 48]) {
+        await writeFile(plan, lines(count));
+        await withHost(async (host, metadata) => {
+          initial.push(await host.harness.callAgentTool("PresentPlan", { planFilePath: plan }, CTX));
+          expect(metadata.presentPlanLight).toBeUndefined();
+          redo.push(await host.harness.callAgentTool("PresentPlan", { planFilePath: plan }, CTX));
+        });
+      }
+      expect(new Set(initial).size).toBe(1);
+      expect(new Set(redo).size).toBe(1);
+      for (const text of [...initial, ...redo]) {
+        expect(text).toContain("focused, selected, or full tier");
+        expect(text).not.toMatch(/light tier|five separate reviewers/);
+      }
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  it("warns past the light budget at release: four children over the budget of three", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "auto-review-plan-"));
-    try {
-      const short = join(dir, "short.md");
-      await writeFile(short, lines(40));
-      await withHost(async (host, metadata, _review, _dropTimeline, setChildren) => {
-        // Skip the redo by arming with the flag already set, so the second call releases.
-        Object.assign(metadata, {
-          presentPlanArmedAt: Date.now(),
-          presentPlanArmedPath: short,
-          presentPlanArmedSeq: 77,
-          presentPlanLight: true,
-          presentPlanRedone: true,
-        });
-        setChildren([child("r0"), child("r1"), child("r2"), child("r3")]);
-        await host.harness.callAgentTool("PresentPlan", { planFilePath: short }, CTX);
-        expect(await lastFire(host)).toMatchObject({
-          outcome: "stood-down",
-          reason: "plan-review-incomplete",
-          planReviewTier: "light",
-          planReviewerCount: 4,
-        });
-        expect(metadata.presentPlanLight).toBeUndefined();
-      });
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+  it.each([true, false])("ignores and clears legacy metadata %s on release", async (legacy) => {
+    await withHost(async (host, metadata) => {
+      Object.assign(metadata, { presentPlanArmedAt: Date.now(), presentPlanArmedPath: PLAN, presentPlanArmedSeq: 77, presentPlanLight: legacy, presentPlanRedone: true });
+      const result = await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX);
+      expect(result).toContain("released without a complete calibrated review");
+      expect(metadata.presentPlanLight).toBeUndefined();
+      const fire = await host.bb.storage.kv.get(`lastfire:${CTX.projectId}:${THREAD_ID}`);
+      expect(fire).toMatchObject({ reason: "plan-review-incomplete", planReviewerCount: 0 });
+      expect(fire).not.toHaveProperty("planReviewTier");
+    });
   });
 
-  it("does not count plugin-origin helpers past the threshold", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "auto-review-plan-"));
-    try {
-      const short = join(dir, "short.md");
-      await writeFile(short, lines(40));
-      await withHost(async (host, metadata, _review, _dropTimeline, setChildren) => {
-        // Skip the redo by arming with the flag already set, so the second call releases.
-        Object.assign(metadata, {
-          presentPlanArmedAt: Date.now(),
-          presentPlanArmedPath: short,
-          presentPlanArmedSeq: 77,
-          presentPlanLight: true,
-          presentPlanRedone: true,
-        });
-        setChildren(
-          Array.from({ length: 8 }, (_, index) => ({
-            ...child(`h${index}`),
-            originPluginId: "advisor",
-          })),
-        );
-        await host.harness.callAgentTool("PresentPlan", { planFilePath: short }, CTX);
-        expect(await lastFire(host)).toMatchObject({
-          reason: "plan-review-incomplete",
-          planReviewTier: "light",
-          planReviewerCount: 0,
-        });
-      });
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+  it("records reviewer children on release without assigning a tier", async () => {
+    await withHost(async (host, metadata, _review, _dropTimeline, setChildren) => {
+      Object.assign(metadata, { presentPlanArmedAt: Date.now() - 100, presentPlanArmedPath: PLAN, presentPlanArmedSeq: 77, presentPlanRedone: true });
+      setChildren([{ id: "reviewer", parentThreadId: THREAD_ID, createdAt: Date.now(), originPluginId: null, status: "idle", archivedAt: 1, deletedAt: null }]);
+      await host.harness.callAgentTool("PresentPlan", { planFilePath: PLAN }, CTX);
+      const fire = await host.bb.storage.kv.get(`lastfire:${CTX.projectId}:${THREAD_ID}`);
+      expect(fire).toMatchObject({ reason: "plan-review-incomplete", planReviewerCount: 1 });
+      expect(fire).not.toHaveProperty("planReviewTier");
+    });
   });
 });
 

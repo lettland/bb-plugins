@@ -379,158 +379,58 @@ describe("gatePlan: a sent review whose deny fails", () => {
   });
 });
 
-describe("gatePlan: the plan review's size tier and round tally", () => {
+describe("gatePlan: risk-based selection and reviewer tally", () => {
   const lines = (count: number) => Array.from({ length: count }, (_, index) => `line ${index}`).join("\n");
   const approvalWithPlan = (plan: string) => ({ ...approval(), plan }) as PlanApproval;
-  /** A reviewer child that already finished, created after the arm (tests arm before calling this). */
-  const child = (id: string, overrides: Record<string, unknown> = {}) => ({
-    id,
-    title: "review: senior-dev",
-    createdAt: Date.now(),
-    parentThreadId: "thr",
-    originPluginId: null,
-    status: "idle",
-    archivedAt: 1,
-    deletedAt: null,
-    ...overrides,
-  });
   const lastFire = (f: ReturnType<typeof fakeBb>) => {
     const key = [...f.kv.keys()].find((name) => name.startsWith("lastfire:"));
     return f.kv.get(key ?? "") as Record<string, unknown>;
   };
-  const release = async (f: ReturnType<typeof fakeBb>, plan = "# Plan") => {
+
+  it("uses the same instructions at 39, 40, 41 and 48 lines, including redo", async () => {
+    // Regression: thr_599fv5czwn.
+    const initial: string[] = [];
+    const redo: string[] = [];
+    for (const count of [39, 40, 41, 48]) {
+      const f = fakeBb();
+      (f.ctx as { globals: { reviewMode: string } }).globals.reviewMode = "devkit";
+      await gatePlan(f.ctx, f.thread, approvalWithPlan(lines(count)));
+      initial.push(f.sent[0]);
+      expect(f.metadata().planReviewLight).toBeUndefined();
+      f.bb.sdk.threads.queuedMessages.list = async () => [];
+      await gatePlan(f.ctx, f.thread, approvalWithPlan(lines(count)));
+      redo.push(f.sent[1]);
+    }
+    expect(new Set(initial).size).toBe(1);
+    expect(new Set(redo).size).toBe(1);
+    for (const text of [...initial, ...redo]) {
+      expect(text).toContain("focused, selected, or full tier");
+      expect(text).not.toMatch(/light tier|five separate reviewers/);
+    }
+  });
+
+  it.each([true, false])("ignores and clears legacy light metadata %s while recording zero", async (legacy) => {
+    const f = fakeBb({ planReviewArmedAt: Date.now(), planReviewDeliveredSeq: 7, planReviewLight: legacy });
     f.bb.sdk.threads.queuedMessages.list = async () => [];
-    await gatePlan(f.ctx, f.thread, approvalWithPlan(plan));
-  };
-
-  it("arms with the tier computed from the armed plan", async () => {
-    const light = fakeBb();
-    await gatePlan(light.ctx, light.thread, approvalWithPlan(lines(40)));
-    expect(light.metadata().planReviewLight).toBe(true);
-    const standard = fakeBb();
-    await gatePlan(standard.ctx, standard.thread, approvalWithPlan(lines(41)));
-    expect(standard.metadata().planReviewLight).toBe(false);
-  });
-
-  it("releases with the stored tier, not the re-presented plan's: a trimmed standard plan keeps budget 7", async () => {
-    const f = fakeBb();
-    await gatePlan(f.ctx, f.thread, approvalWithPlan(lines(41)));
-    expect(f.metadata().planReviewLight).toBe(false);
-    f.setChildren([child("r0"), child("r1"), child("r2"), child("r3")]);
-    await release(f, lines(20));
-    expect(lastFire(f)).toMatchObject({
-      outcome: "stood-down",
-      reason: "plan-reviewed",
-      planReviewTier: "standard",
-      planReviewerCount: 4,
-    });
-    // Four children pass a standard arm; a tier recomputed from the trimmed plan would have warned.
-    expect(f.warnings).toEqual([]);
-  });
-
-  it("warns past the stored tier's budget: a light arm with four children", async () => {
-    const f = fakeBb({ planReviewArmedAt: Date.now(), planReviewDeliveredSeq: 7, planReviewLight: true });
-    f.setChildren([child("r0"), child("r1"), child("r2"), child("r3")]);
-    await release(f);
-    expect(f.warnings[0]).toContain("spawned 4 bb child threads since the arm, over the light budget of 3");
-    expect(lastFire(f)).toMatchObject({ reason: "plan-reviewed", planReviewTier: "light", planReviewerCount: 4 });
-  });
-
-  it("gives an escalated standard arm the standard budget: six children pass", async () => {
-    const f = fakeBb({ planReviewArmedAt: Date.now(), planReviewDeliveredSeq: 7, planReviewLight: false });
-    f.setChildren(Array.from({ length: 6 }, (_, index) => child(`r${index}`)));
-    await release(f);
-    expect(f.warnings).toEqual([]);
-    expect(lastFire(f)).toMatchObject({ planReviewTier: "standard", planReviewerCount: 6 });
-  });
-
-  it("counts null-titled children, naming ids only", async () => {
-    const f = fakeBb({ planReviewArmedAt: Date.now(), planReviewDeliveredSeq: 7, planReviewLight: true });
-    f.setChildren([
-      child("r0", { title: null }),
-      child("r1", { title: null }),
-      child("r2", { title: null }),
-      child("r3", { title: null }),
-    ]);
-    await release(f);
-    expect(f.warnings[0]).toContain("r0, r1, r2, r3");
-    // Ids only: the children's titles never appear.
-    expect(f.warnings[0]).not.toContain("senior-dev");
-    expect(lastFire(f)).toMatchObject({ planReviewerCount: 4 });
-  });
-
-  it("does not count children from before the arm, nor plugin-origin helpers", async () => {
-    const f = fakeBb({ planReviewArmedAt: Date.now(), planReviewDeliveredSeq: 7, planReviewLight: true });
-    f.setChildren([
-      child("pre-arm", { createdAt: 0 }),
-      child("helper", { originPluginId: "advisor" }),
-      child("helper-2", { originPluginId: "advisor" }),
-      child("helper-3", { originPluginId: "advisor" }),
-      child("helper-4", { originPluginId: "advisor" }),
-    ]);
-    await release(f);
-    expect(f.warnings).toEqual([]);
-    expect(lastFire(f)).toMatchObject({ planReviewTier: "light", planReviewerCount: 0 });
-  });
-
-  it("never sizes a redo lighter than its arm: a shrunk standard plan stays standard", async () => {
-    const f = fakeBb();
-    (f.ctx as { globals: { reviewMode: string } }).globals.reviewMode = "devkit";
-    await gatePlan(f.ctx, f.thread, approvalWithPlan(lines(41)));
-    expect(f.metadata().planReviewLight).toBe(false);
-    await release(f, lines(20));
-    expect(f.metadata().planReviewRedone).toBe(true);
-    // The no-downgrade pin: the redo prompt carries no light block and the stored key stays false.
-    expect(f.metadata().planReviewLight).toBe(false);
-    expect(f.sent[1]).not.toContain("sized this plan as the light tier");
-  });
-
-  it("sizes a redo standard when an armed light plan grows past the line", async () => {
-    const f = fakeBb({ planReviewArmedAt: Date.now(), planReviewArmedSeq: 7, planReviewLight: true });
-    (f.ctx as { globals: { reviewMode: string } }).globals.reviewMode = "devkit";
-    await release(f, lines(41));
-    expect(f.metadata().planReviewRedone).toBe(true);
-    expect(f.metadata().planReviewLight).toBe(false);
-    expect(f.sent[0]).not.toContain("sized this plan as the light tier");
-  });
-
-  it("keeps a redo light when the armed light plan is still light", async () => {
-    const f = fakeBb({ planReviewArmedAt: Date.now(), planReviewArmedSeq: 7, planReviewLight: true });
-    (f.ctx as { globals: { reviewMode: string } }).globals.reviewMode = "devkit";
-    await release(f, lines(20));
-    expect(f.metadata().planReviewRedone).toBe(true);
-    expect(f.metadata().planReviewLight).toBe(true);
-    expect(f.sent[0]).toContain("sized this plan as the light tier");
-  });
-
-  it("re-arms the tally window at the redo: children from before it count nothing at release", async () => {
-    const f = fakeBb();
-    (f.ctx as { globals: { reviewMode: string } }).globals.reviewMode = "devkit";
-    await gatePlan(f.ctx, f.thread, approvalWithPlan(lines(41)));
-    await release(f, lines(20));
-    f.setChildren(Array.from({ length: 4 }, (_, index) => child(`r${index}`, { createdAt: 0 })));
-    await release(f, lines(20));
-    // The redo's release legitimately warns of the missing skill load; the
-    // tally itself stays under budget and silent. The redo stayed standard,
-    // so the light budget never applies.
-    expect(f.warnings.some((message) => message.includes("over the light budget"))).toBe(false);
-    expect(lastFire(f)).toMatchObject({ reason: "plan-review-incomplete", planReviewTier: "standard", planReviewerCount: 0 });
-  });
-
-  it("carries the tally into the plan-hold-expired fire record", async () => {
-    const f = fakeBb({
-      planReviewArmedAt: Date.now() - STALE_WINDOW_MS - 1,
-      planReviewEntryId: "qm-1",
-      planReviewLight: true,
-    });
-    f.setChildren([child("r0"), child("r1"), child("r2"), child("r3")]);
     await gatePlan(f.ctx, f.thread, approval());
-    expect(lastFire(f)).toMatchObject({
-      outcome: "stood-down",
-      reason: "plan-hold-expired",
-      planReviewTier: "light",
-      planReviewerCount: 4,
-    });
-    expect(f.warnings[0]).toContain("over the light budget of 3");
+    expect(f.metadata().planReviewLight).toBeUndefined();
+    expect(lastFire(f)).toMatchObject({ reason: "plan-reviewed", planReviewerCount: 0 });
+    expect(lastFire(f)).not.toHaveProperty("planReviewTier");
+  });
+
+  it("records reviewer children on release without assigning a tier", async () => {
+    const f = fakeBb({ planReviewArmedAt: Date.now() - 100, planReviewDeliveredSeq: 7 });
+    f.setChildren([{ id: "reviewer", parentThreadId: "thr", createdAt: Date.now(), originPluginId: null, status: "idle", archivedAt: 1, deletedAt: null }]);
+    f.bb.sdk.threads.queuedMessages.list = async () => [];
+    await gatePlan(f.ctx, f.thread, approval());
+    expect(lastFire(f)).toMatchObject({ reason: "plan-reviewed", planReviewerCount: 1 });
+    expect(lastFire(f)).not.toHaveProperty("planReviewTier");
+  });
+
+  it("records the count on hold expiry without a tier", async () => {
+    const f = fakeBb({ planReviewArmedAt: Date.now() - STALE_WINDOW_MS - 1, planReviewEntryId: "qm-1", planReviewLight: true });
+    await gatePlan(f.ctx, f.thread, approval());
+    expect(lastFire(f)).toMatchObject({ reason: "plan-hold-expired", planReviewerCount: 0 });
+    expect(lastFire(f)).not.toHaveProperty("planReviewTier");
   });
 });

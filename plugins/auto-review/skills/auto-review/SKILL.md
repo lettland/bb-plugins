@@ -384,10 +384,12 @@ All commands accept `--json`.
 - **Review mode** — `auto` (devkit's calibrated review via `devkit_load_skill` when that
   tool is available, else self-review), `devkit` (require devkit's review), or `self`
   (always self-review). Applies to both plan and code review. Under bb, `auto` (with devkit)
-  and `devkit` modes hand the five lens reviews and the closure review to bb child threads when
-  the thread can spawn children (otherwise provider subagents, or sequentially in the same
-  thread); `self` mode and the no-devkit case in `auto` still review in this thread. A full
-  calibrated review costs about six sessions on the provider (five lenses plus closure).
+  and `devkit` modes use focused, selected, or full review for plans and code. Focused
+  reviews run in this thread. Selected reviews use only lenses with relevant work; full
+  reviews use all five when requested or applicable. Selected lenses use bb child threads
+  when available, then the workflow's fallbacks. `self` mode and the no-devkit case in
+  `auto` review in this thread. Plan fixes have at most one closure round, and focused
+  fixes are verified in this thread.
   In `devkit` and `auto` (with devkit) modes the plan gate also checks that the agent loaded
   `review-code` (see *The review-code check*); `self` mode checks nothing.
 

@@ -192,7 +192,7 @@ describe("review-code content", () => {
     expect(text).toContain("Do not restore omitted lenses for closure.");
     expect(text).not.toContain("the same review perspectives");
     expect(text).toContain("A plan review runs at most one closure round over the round delta");
-    expect(text).toContain("A plan review the caller marked light runs no closure reviewer at all");
+    expect(text).toContain("For `/review-plan`, verify focused fixes yourself.");
   });
   it("delivers risk-based tiers before reviewer setup", async () => {
     const result = await loadSkill(path.join(import.meta.dirname, "..", "content"), "review-code");
@@ -200,12 +200,12 @@ describe("review-code content", () => {
     if (!result.ok) return;
     const text = result.content.replace(/\s+/g, " ");
     for (const phrase of [
-      "For `plan`, keep all five lenses unless the caller specifies the light tier.",
+      "Apply this decision to `code`, `impl`, and `plan`.",
       "An explicit user request for a full review requires all five lenses.",
-      "Routine low-risk changes, including wording or mechanical changes across several files.",
-      "Start senior-dev and senior-qa.",
+      "Routine changes with limited consequences and straightforward verification, including small scripts.",
+      "No fixed pair is required.",
       "Security: trust boundaries, credentials, execution, dependencies, or installation.",
-      "End user: user-visible workflows or public contracts.",
+      "End user: user-visible workflows or public contracts;",
       "Compliance: privacy, licensing, or regulatory changes.",
       "A short security-sensitive change requires the security lens.",
       "Choosing lenses never removes source hunks from scope.",
@@ -215,7 +215,7 @@ describe("review-code content", () => {
       "no fix delta means no closure worker",
       "Reassess when a fix introduces new risk.",
     ]) expect(text).toContain(phrase);
-    expect(text.indexOf("### Choose the code-review tier")).toBeLessThan(text.indexOf("## 2. Prepare the reviewer brief"));
+    expect(text.indexOf("### Choose the review tier")).toBeLessThan(text.indexOf("## 2. Prepare the reviewer brief"));
   });
   it("does not require five reviewers for every code review", async () => {
     const result = await loadSkill(path.join(import.meta.dirname, "..", "content"), "review-code");
@@ -584,7 +584,7 @@ describe("review-code content", () => {
     expect(disposition).toContain("A code review runs at most 3 closure rounds");
     expect(disposition).toContain("A plan review runs at most one closure round over the round delta");
     expect(disposition).toContain("never another reviewer round");
-    expect(disposition).toContain("A plan review the caller marked light runs no closure reviewer at all");
+    expect(disposition).toContain("For `/review-plan`, verify focused fixes yourself.");
     expect(disposition).not.toContain("you did not write");
     expect(disposition).not.toContain("wrong, out of scope, or already handled");
 
@@ -976,7 +976,7 @@ describe("devkit README", () => {
         "baseline <dir>",
         "**3 closure rounds**",
         "**one closure round**",
-        "runs no closure reviewer at all",
+        "Focused plan fixes are verified by the reviewing agent itself.",
         "{ shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-64",
         "not 64 hex characters",
         "## Promoting",

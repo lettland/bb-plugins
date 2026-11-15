@@ -25,7 +25,6 @@ import { recordFire, type EffectiveConfig, type ReviewContext } from "./context.
 import { tryCaptureSinceSeq } from "./detect.js";
 import { isNativePlanGateProvider } from "./gate.js";
 import {
-  lightPlan,
   planReleaseReason,
   planReviewerTally,
   planReviewTallyExtras,
@@ -201,18 +200,12 @@ async function releasePlan(
     const redoSeq = await captureArmedSeq(review, ctx.threadId);
     // The redo reviews the whole plan: its baseline goes, and the plan as it stands is staged afresh.
     const content = await readPlanFile(planFilePath);
-    // A redo is never sized lighter than its arm: an armed standard stays
-    // standard even when review fixes shrink the file across the light line;
-    // anything else recomputes from the file as it stands. Either way the tier
-    // is stored, so the redo's prompt and its release tally agree.
-    const light = state.presentPlanLight === false ? false : lightPlan(content);
     await writeState(
       bb,
       ctx.threadId,
       {
         presentPlanArmedAt: Date.now(),
         presentPlanRedone: true,
-        presentPlanLight: light,
         ...(redoSeq === undefined ? {} : { presentPlanArmedSeq: redoSeq }),
       },
       redoSeq === undefined ? ["presentPlanArmedSeq", ...PRESENT_PLAN_CHAT_KEYS] : [...PRESENT_PLAN_CHAT_KEYS],
@@ -220,12 +213,12 @@ async function releasePlan(
     await recordFire(review, ctx.projectId, ctx.threadId, "fired", "plan-review-redo");
     await clearPlanBaseline(bb, ctx.threadId, planFilePath);
     await stagePlanPending(bb, ctx.threadId, planFilePath, content, Date.now());
-    return presentPlanRedoMessage(config.reviewMode, light);
+    return presentPlanRedoMessage(config.reviewMode);
   }
   // The release moment is exactly when the reviewers are done, so the tally
-  // counts them here, from the tier the arm stored.
+  // counts them here.
   const tallyExtras = planReviewTallyExtras(
-    await planReviewerTally(bb, ctx.threadId, state.presentPlanArmedAt, state.presentPlanLight === true),
+    await planReviewerTally(bb, ctx.threadId, state.presentPlanArmedAt),
   );
   // The baseline accepts a review that spans turns: child-thread reviewers end
   // the turn and bb wakes the agent later. Auto-approve still needs the
@@ -375,18 +368,13 @@ async function presentPlan(
       return releasePlan(review, ctx, state, config, planFilePath, formMode);
     }
     const armedSeq = await captureArmedSeq(review, ctx.threadId);
-    // The tier comes from the file as armed; release reads the stored key,
-    // never the re-read file, whose review fixes routinely shrink it across
-    // the light boundary.
     const content = await readPlanFile(planFilePath);
-    const light = lightPlan(content);
     await writeState(
       bb,
       ctx.threadId,
       {
         presentPlanArmedAt: now,
         presentPlanArmedPath: planFilePath,
-        presentPlanLight: light,
         ...(armedSeq === undefined ? {} : { presentPlanArmedSeq: armedSeq }),
       },
       // A redo flag left by an expired arm must not skip this plan's redo; an earlier plan's chat approval must not carry over.
@@ -398,7 +386,6 @@ async function presentPlan(
     const prompt = buildPresentPlanReviewPrompt({
       reviewMode: config.reviewMode,
       planFilePath,
-      light,
       baseline: await planScope(bb, ctx.threadId, planFilePath, content, now),
     });
     await stagePlanPending(bb, ctx.threadId, planFilePath, content, now);

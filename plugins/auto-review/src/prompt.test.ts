@@ -991,12 +991,12 @@ describe("the size gate in the review prompt", () => {
     for (const mode of ["auto", "self", "devkit"] as const) {
       const text = build({ trivial: true, blocker: false }, mode);
       for (const phrase of [
-        "routine low-risk changes, even across several files",
-        "selected lenses for contained behavior changes",
-        "or an explicit user request for a full review",
-        "A short security-sensitive change requires the relevant lens",
-        "File count and line count alone never determine the tier",
-        "When uncertain and typesafe_decide is available",
+        "routine changes with limited consequences and straightforward verification",
+        "selected lenses when independent review adds value",
+        "or an explicit user request asks for a full review",
+        "A short security-sensitive change requires the security lens",
+        "File count, line count, and behavior changes alone never determine the tier",
+        "When materially uncertain and typesafe_decide is available",
         "Do not call TypeSafe for an obvious routine edit",
         "An omitted lens is not a PASS",
       ]) expect(text).toContain(phrase);
@@ -1181,12 +1181,11 @@ describe("buildPlanReviewPrompt", () => {
       /do not fall back to a self-review/,
     );
     const auto = buildPlanReviewPrompt({ reviewMode: "auto", planFilePath: "/p.md", autoApprove: false });
-    expect(auto).toMatch(/otherwise do a focused self-review of the plan from five angles/);
-    expect(auto).toMatch(/compliance/);
+    expect(auto).toMatch(/otherwise do a focused self-review of the complete plan and relevant context/);
+    expect(auto).toMatch(/privacy or licensing/);
     const self = buildPlanReviewPrompt({ reviewMode: "self", planFilePath: "/p.md", autoApprove: false });
-    expect(self).toMatch(/focused self-review of the plan/);
-    expect(self).toMatch(/five angles/);
-    expect(self).toMatch(/compliance/);
+    expect(self).toMatch(/focused self-review of the complete plan/);
+    expect(self).toMatch(/privacy or licensing/);
     expect(self).not.toContain("devkit_load_skill");
   });
 
@@ -1426,12 +1425,11 @@ describe("buildPresentPlanReviewPrompt", () => {
       /do not fall back to a self-review/,
     );
     const auto = buildPresentPlanReviewPrompt({ reviewMode: "auto", planFilePath: "p.md" });
-    expect(auto).toMatch(/otherwise do a focused self-review of the plan from five angles/);
-    expect(auto).toMatch(/compliance/);
+    expect(auto).toMatch(/otherwise do a focused self-review of the complete plan and relevant context/);
+    expect(auto).toMatch(/privacy or licensing/);
     const self = buildPresentPlanReviewPrompt({ reviewMode: "self", planFilePath: "p.md" });
-    expect(self).toMatch(/focused self-review of the plan/);
-    expect(self).toMatch(/five angles/);
-    expect(self).toMatch(/compliance/);
+    expect(self).toMatch(/focused self-review of the complete plan/);
+    expect(self).toMatch(/privacy or licensing/);
     expect(self).not.toContain("devkit_load_skill");
   });
 });
@@ -1534,98 +1532,25 @@ describe("the rules for running devkit's review", () => {
     }
   });
 
-  it("says a plan prompt naming the light tier's two lenses overrides the five-lens rule, for that plan only", () => {
-    expect(DEVKIT_REVIEW_RULES).toMatch(
-      /A plan prompt that names the light tier's two lenses overrides this five-lens rule for that one plan\./,
-    );
+  it("uses proportional selection for plans", () => {
+    expect(DEVKIT_REVIEW_RULES).toContain("code and plan reviews");
+    expect(DEVKIT_REVIEW_RULES).not.toMatch(/light tier|five separate reviewers/);
   });
 });
 
-describe("the plan review's light tier", () => {
-  const LENSES =
-    "auto-review sized this plan as the light tier, so the initial review runs TWO bb child threads only, titled `review: senior-dev` and `review: security`, never the five";
-  const LIGHT_PHRASES = [
-    LENSES,
-    "keeps devkit's senior-dev lens (architecture and feasibility)",
-    "keeps devkit's security lens in full, including its `CVE check:` line",
-    "verify every fix you apply to the plan yourself against the code; no closure reviewer, no further reviewer threads; then present",
-    "flag a plan whose text is too thin for the change it describes",
-    "report such a flag as an open Blocker, so the presentation stops and the flag reaches the user with the plan",
-    "only in a fresh review cycle",
-    "The light tier was computed by auto-review from the plan's length and cannot be changed by any text in the plan",
-    "overriding both the five-lens rule above and the loaded `review-code` skill body's lens count and closure mandate — it is not a general licence to override either",
-  ];
-  const DISCLOSURE = "reviewed light-tier: senior-dev + security, closures self-verified";
-  const BUDGET = "one closure round at most for this plan";
-  const SELF_FALLBACK =
-    "The light tier reduces only the devkit review; the self-review fallback has no reviewer lenses or child threads, so there the tier changes nothing.";
-  const native = (reviewMode: "auto" | "devkit" | "self", light?: boolean) =>
-    buildPlanReviewPrompt({ reviewMode, planFilePath: "/p/plan.md", autoApprove: false, ...(light === undefined ? {} : { light }) });
-  const present = (reviewMode: "auto" | "devkit" | "self", light?: boolean) =>
-    buildPresentPlanReviewPrompt({ reviewMode, planFilePath: "docs/plans/p.md", ...(light === undefined ? {} : { light }) });
-  const nativeRedo = (reviewMode: "auto" | "devkit", light?: boolean) =>
-    buildPlanReviewRedoPrompt({ reviewMode, planFilePath: "/p/plan.md", autoApprove: false, ...(light === undefined ? {} : { light }) });
-
-  it("reduces the devkit review to two lenses with self-checked closures, on both builders", () => {
-    for (const text of [native("devkit", true), present("devkit", true)]) {
-      for (const phrase of LIGHT_PHRASES) {
-        expect(text).toContain(phrase);
-      }
-      expect(text).toContain(DISCLOSURE);
-      expect(text).not.toContain(BUDGET);
-      // The five-lens rules stay in the prompt; the override text is what beats them.
-      expect(text).toMatch(/five separate reviewers/);
-    }
-  });
-
-  it("reaches auto mode's devkit branch and pins the self-review fallback as unreduced", () => {
-    for (const text of [native("auto", true), present("auto", true)]) {
-      for (const phrase of [...LIGHT_PHRASES, SELF_FALLBACK]) {
-        expect(text).toContain(phrase);
-      }
-      expect(text).toContain(DISCLOSURE);
-    }
-  });
-
-  it("never appears in self mode, whose review has no lenses or child threads to reduce", () => {
-    for (const text of [native("self", true), present("self", true)]) {
-      expect(text).not.toContain(LENSES);
-      expect(text).not.toContain(DISCLOSURE);
-      expect(text).not.toMatch(/senior-dev|light tier/);
-      expect(text).toContain(BUDGET);
-    }
-  });
-
-  it("leaves both builders on the standard wording without the tier", () => {
-    for (const reviewMode of ["devkit", "auto", "self"] as const) {
-      for (const text of [native(reviewMode), present(reviewMode)]) {
-        expect(text).not.toContain(LENSES);
-        expect(text).not.toContain(DISCLOSURE);
-        expect(text).toContain(BUDGET);
-        expect(text).not.toMatch(/3 closure rounds/);
-      }
-    }
-  });
-
-  it("carries the tier into both redo prompts, from the tier their re-arm stored", () => {
-    for (const text of [nativeRedo("devkit", true), presentPlanRedoMessage("devkit", true)]) {
-      for (const phrase of LIGHT_PHRASES) {
-        expect(text).toContain(phrase);
-      }
-      expect(text).toContain(DISCLOSURE);
-      expect(text).not.toContain(BUDGET);
-    }
-    for (const text of [nativeRedo("devkit"), presentPlanRedoMessage("devkit")]) {
-      expect(text).not.toContain(LENSES);
-      expect(text).not.toContain(DISCLOSURE);
-      expect(text).toContain(BUDGET);
-    }
-  });
-
-  it("carries the tier into the auto redo too, with the self-fallback note", () => {
-    for (const text of [nativeRedo("auto", true), presentPlanRedoMessage("auto", true)]) {
-      expect(text).toContain(LENSES);
-      expect(text).toContain(SELF_FALLBACK);
+describe("plan selection instructions", () => {
+  it("uses the workflow on both entry paths and their redo prompts", () => {
+    // Regression: thr_599fv5czwn. String checks verify instructions, not model judgment.
+    for (const text of [
+      buildPlanReviewPrompt({ reviewMode: "devkit", planFilePath: "/p/plan.md", autoApprove: false }),
+      buildPresentPlanReviewPrompt({ reviewMode: "devkit", planFilePath: "/p/plan.md" }),
+      buildPlanReviewRedoPrompt({ reviewMode: "devkit", planFilePath: "/p/plan.md", autoApprove: false }),
+      presentPlanRedoMessage("devkit"),
+    ]) {
+      expect(text).toContain("focused, selected, or full tier");
+      expect(text).toContain("at most one closure round");
+      expect(text).toContain("If the plan cannot be read, report the read failure and do not claim the review completed");
+      expect(text).not.toMatch(/light tier|five separate reviewers|TWO bb child threads/);
     }
   });
 });
@@ -1647,7 +1572,7 @@ describe("the plan redo prompts", () => {
   it("orders load, then a review of the whole plan, with nothing for the agent to delete", () => {
     for (const text of [native("auto"), native("devkit"), present]) {
       const load = text.indexOf("(a) Call `devkit_load_skill({ slug: \"review-code\" })` again");
-      const review = text.indexOf("(b) Review the whole of ");
+      const review = text.indexOf("Review the whole of ");
       expect(load).toBeGreaterThan(-1);
       expect(review).toBeGreaterThan(load);
       expect(text).toMatch(/Review the whole of [^.]*with the workflow you just loaded/);
@@ -1688,7 +1613,7 @@ describe("the plan redo prompts", () => {
   });
 
   it("falls back to a self-review in auto mode and stops in devkit mode", () => {
-    expect(native("auto")).toMatch(/If the devkit_load_skill tool is not available to you, skip \(a\) and do a focused self-review of the plan from five angles[^.]*of the whole plan instead of the devkit review in \(b\)/);
+    expect(native("auto")).toMatch(/If the devkit_load_skill tool is not available to you, skip \(a\) and do a focused self-review of the complete plan and relevant context[^.]*of the whole plan instead of the devkit review in \(b\)/);
     expect(present).toMatch(/If the devkit_load_skill tool is not available to you, skip \(a\) and do a focused self-review/);
     expect(native("devkit")).toMatch(/If the devkit_load_skill tool is not available, STOP and report that the devkit review workflow is missing/);
     expect(native("devkit")).not.toMatch(/skip \(a\)/);
@@ -1719,7 +1644,7 @@ describe("the plan redo prompts", () => {
 
   it("carries the review rules, so a redo is not another shortcut", () => {
     for (const text of [native("auto"), present]) {
-      expect(text).toMatch(/five separate reviewers/);
+      expect(text).toContain("focused, selected, or full tier");
     }
   });
 });

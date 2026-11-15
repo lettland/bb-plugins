@@ -23,7 +23,6 @@ import {
   reviewRanSince,
   userQuestionOf,
   warnPlanUnreviewed,
-  lightPlan,
   type PlanApproval,
 } from "./plan.js";
 import { planHoldDenyMessage } from "./prompt-plan.js";
@@ -84,23 +83,18 @@ export async function gatePlan(
   }
 
   const now = Date.now();
-  // The tier is computed once, from the plan as armed: release reads the
-  // stored key, never the re-presented plan, whose review fixes routinely
-  // shrink it across the light boundary.
-  const light = lightPlan(approval.plan);
   // A new cycle starts clean: keys left by an expired earlier one (a delivery
   // cursor, a queued id) must never leak into this review's evidence.
   await writeState(
     bb,
     thread.id,
-    { planReviewArmedAt: now, planReviewLight: light },
-    PLAN_GATE_KEYS.filter((key) => key !== "planReviewArmedAt" && key !== "planReviewLight"),
+    { planReviewArmedAt: now },
+    PLAN_GATE_KEYS.filter((key) => key !== "planReviewArmedAt"),
   );
   const prompt = buildPlanReviewPrompt({
     reviewMode: config.reviewMode,
     planFilePath: approval.planFilePath,
     autoApprove: config.autoApprovePlans,
-    light,
     baseline: await planScope(bb, thread.id, approval.planFilePath, approval.plan, now),
   });
   if (await armReview(ctx, thread, approval, prompt)) {
@@ -214,14 +208,14 @@ async function releaseReviewedPlan(
     ? "loaded"
     : await planSkillCheck(bb, thread.id, config.reviewMode, state.planReviewArmedSeq);
   if (check === "missing" && state.planReviewRedone !== true) {
-    await redoPlanReview(ctx, thread, state, approval, config);
+    await redoPlanReview(ctx, thread, approval, config);
     return;
   }
   await writeState(bb, thread.id, {}, [...PLAN_GATE_KEYS]);
   // The release moment is exactly when the reviewers are done, so the tally
-  // counts them here, from the tier the arm stored.
+  // counts them here.
   const tallyExtras = planReviewTallyExtras(
-    await planReviewerTally(bb, thread.id, state.planReviewArmedAt, state.planReviewLight === true),
+    await planReviewerTally(bb, thread.id, state.planReviewArmedAt),
   );
   const { planReviewDeliveredSeq } = state;
   // The baseline accepts a review that spans turns: child-thread reviewers end
@@ -275,25 +269,19 @@ async function releaseReviewedPlan(
  * Send a plan back for a full review: re-arm the gate with a fresh clock and
  * cursor, mark the cycle as redone so the next release cannot redo again, and
  * drop the first round's queued id, delivery cursor and deny cursor so none of
- * them stands in for the redo's. The tier is never sized lighter than the
- * arm's: a standard arm stays standard even when review fixes shrink the
- * re-presented plan across the light line; otherwise it is recomputed from
- * this redo's own plan. Either way it is stored, so the redo's prompt and its
- * release tally agree.
+ * them stands in for the redo's.
  */
 async function redoPlanReview(
   ctx: ReviewContext,
   thread: GateThreadLike,
-  state: ThreadState,
   approval: PlanApproval,
   config: EffectiveConfig,
 ): Promise<void> {
   const { bb } = ctx;
-  const light = state.planReviewLight === false ? false : lightPlan(approval.plan);
   await writeState(
     bb,
     thread.id,
-    { planReviewArmedAt: Date.now(), planReviewRedone: true, planReviewLight: light },
+    { planReviewArmedAt: Date.now(), planReviewRedone: true },
     ["planReviewEntryId", "planReviewDeliveredSeq", "planDenied"],
   );
   // The redo reviews the whole plan: its baseline goes before the prompt is built.
@@ -302,7 +290,6 @@ async function redoPlanReview(
     reviewMode: config.reviewMode,
     planFilePath: approval.planFilePath,
     autoApprove: config.autoApprovePlans,
-    light,
   });
   if (await armReview(ctx, thread, approval, prompt)) {
     await stagePlanPending(bb, thread.id, approval.planFilePath, approval.plan, Date.now());
@@ -350,9 +337,9 @@ async function holdOrReleasePlan(
   }
   await writeState(bb, thread.id, {}, [...PLAN_GATE_KEYS]);
   // Expiry is the fire point that catches a runaway whose release never ran:
-  // the user stopped it, so this count is the one record of the overage.
+  // the user stopped it, so this count is retained for diagnostics.
   const tallyExtras = planReviewTallyExtras(
-    await planReviewerTally(bb, thread.id, state.planReviewArmedAt, state.planReviewLight === true),
+    await planReviewerTally(bb, thread.id, state.planReviewArmedAt),
   );
   await recordFire(ctx, thread.projectId, thread.id, "stood-down", "plan-hold-expired", tallyExtras);
 }

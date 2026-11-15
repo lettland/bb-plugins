@@ -918,6 +918,15 @@ describe("auto-review cli: status", () => {
     });
   });
 
+  it.each(["light", "standard"] as const)("reads historical %s plan fire records", async (tier) => {
+    await withHost({}, async (host) => {
+      const stored = lastFire({ outcome: "stood-down", reason: "plan-reviewed", planReviewTier: tier, planReviewerCount: 0 });
+      await host.kv.set(`lastfire:${PROJECT_ID}:${THREAD_ID}`, stored);
+      const payload = await host.run(["status", THREAD_ID, "--json"]);
+      expect(parse(payload.stdout)).toMatchObject({ lastFire: { planReviewTier: tier, planReviewerCount: 0 } });
+    });
+  });
+
   it("shows the count of changes the thread's family did not make, from a stored last fire that parses through the schema", async () => {
     await withHost({}, async (host) => {
       const stored = lastFire({ outcome: "stood-down", reason: "unclaimed-changes", scopePaths: [], unclaimedCount: 3 });

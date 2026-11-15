@@ -66,8 +66,7 @@ Files with a copy there are reviewed as their delta; files without one keep the 
 ## Promoting
 
 A caller that parks content as `<hash>.pending` before a review promotes it over `.copy` (and
-updates the manifest row) only when the review completed — every lens reported, security
-included — and no Blocker or security Concern is still open; otherwise delete the `.pending` so
+updates the manifest row) only when the review completed — every selected lens reported, including security when selected — and no Blocker or security Concern is still open; otherwise delete the `.pending` so
 the next pass is full. Delete the copies (pending and promoted) of any file in which a secret was
 found or removed.
 
@@ -86,13 +85,12 @@ The review's report states its scope:
 
 For code review, no fix delta means no closure worker. Verify focused fixes yourself.
 Selected and full reviews use only their selected lenses over the fix delta. Reassess if the fix introduces new risk.
-These rules do not change the full or light plan policy below.
+Focused plan fixes are verified by the reviewing agent itself.
 
 A code review runs at most **3 closure rounds**; a plan review runs at most **one closure round**:
 findings that round leaves open, and any new finding it raises, are verified by the reviewing agent
 itself against the code and carried into the presentation as open findings — never another reviewer
-round. A plan review the caller marked light runs no closure reviewer at all: fixes are verified by
-the reviewing agent itself (see `review-finding-disposition` §6). Each round covers only the
+round. Each round covers only the
 previous round's fix delta. After the cap, report the still-open findings as open and end the loop.
 
 A Blocker or security Concern still open after the review (and its closure rounds, if any): do not
