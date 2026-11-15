@@ -182,6 +182,29 @@ const REVIEWER_LENSES = [
 ];
 
 describe("review-code content", () => {
+  it.each(["review-code", "review-finding-disposition"])("routes focused plan disposition in %s", async (document) => {
+    const root = path.join(import.meta.dirname, "..", "content");
+    const result = document === "review-code"
+      ? await loadSkill(root, document)
+      : await loadSkill(root, undefined, document);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const text = result.content.replace(/\s+/g, " ");
+    const section = text.slice(text.indexOf(document === "review-code" ? "## 5. Disposition" : "6. **Run a closure review.**"));
+    for (const phrase of [
+      "For a focused plan review, validate and disposition every finding in this thread.",
+      "If no plan edits are made, skip fix verification and closure setup.",
+      "If plan edits are made, verify the edits in this thread.",
+      "Do not create closure snapshots, run directories, reviewer briefs, tree guards, or closure worker threads.",
+      "Reassess the review tier if a fix introduces new risk.",
+      "Keep applicable project checks, secret scans, and open-finding gates.",
+      "Skip the later worker-closure instructions. Continue to reporting and plan approval.",
+    ]) expect(section, phrase).toContain(phrase);
+    expect(section.indexOf("For a focused plan review")).toBeLessThan(section.indexOf("For selected or full"));
+    if (document === "review-code") {
+      expect(text.slice(0, text.indexOf("## 2. Prepare the reviewer brief"))).toContain("For focused plan reviews, follow the focused-plan path in section 5.");
+    }
+  });
   it("keeps closure within the chosen code-review tier and preserves plan limits", async () => {
     const result = await loadSkill(path.join(import.meta.dirname, "..", "content"), undefined, "review-finding-disposition");
     expect(result.ok).toBe(true);

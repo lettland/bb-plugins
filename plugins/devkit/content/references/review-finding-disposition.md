@@ -110,12 +110,20 @@ finding:
 
 6. **Run a closure review.**
 
+   For a focused plan review, validate and disposition every finding in this thread.
+   If no plan edits are made, skip fix verification and closure setup.
+   If plan edits are made, verify the edits in this thread.
+   Do not create closure snapshots, run directories, reviewer briefs, tree guards, or closure worker threads.
+   Reassess the review tier if a fix introduces new risk.
+   Keep applicable project checks, secret scans, and open-finding gates.
+   Skip the later worker-closure instructions. Continue to reporting and plan approval.
+
    For `/review-code` and `/review-impl`, follow the tier-based closure rules in `review-code`.
    No fix delta means no closure worker. Verify focused fixes yourself in this thread.
    For selected or full code reviews, use only the selected lenses over the fix delta.
    Reassess those lenses if a fix introduces new risk. Do not restore omitted lenses for closure.
 
-   For `/review-plan`, verify focused fixes yourself. Use relevant selected lenses for any closure round.
+   For `/review-plan`, verify focused fixes yourself. For selected or full plan reviews, use relevant selected lenses for any closure round.
    For the single-pass `/review` and `security-audit` commands, verify fixes in-session against the round delta.
 
    When a closure review is needed, take the round snapshot described in `references/review-delta-scope.md` before applying fixes.
