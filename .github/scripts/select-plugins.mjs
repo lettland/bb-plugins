@@ -26,6 +26,7 @@ function latestTag(id) {
 
 function pluginChangedSince(id, tag) {
   if (!tag) return true;
+  if (git("log", "--no-merges", "-1", "--format=%H", `${tag}..HEAD`, "--", `plugins/${id}`)) return true;
   try {
     execFileSync("git", ["diff", "--quiet", tag, "HEAD", "--", `plugins/${id}`]);
     return false;

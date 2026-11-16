@@ -11,7 +11,7 @@ const node = process.execPath;
 const npm = join(dirname(node), "npm");
 const git = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
 
-function exercise({ start = "0.3.1", commits = [], forced = "", expected, prerelease = false, canPublish = true }) {
+function exercise({ start = "0.3.1", commits = [], forced = "", onlyPlugin = "", revertLast = false, expected, prerelease = false, canPublish = true }) {
   const cwd = mkdtempSync(join(tmpdir(), "release-test-"));
   try {
     const bin = join(cwd, "bin");
@@ -40,9 +40,10 @@ function exercise({ start = "0.3.1", commits = [], forced = "", expected, prerel
       runGit("add", ".");
       runGit("-c", "commit.gpgsign=false", "commit", "-m", subject);
     }
+    if (revertLast) runGit("-c", "commit.gpgsign=false", "revert", "--no-edit", "HEAD");
     const out = join(cwd, "output");
     const selected = spawnSync(node, [join(scripts, "select-plugins.mjs")], {
-      cwd, env: { ...env, PATH: `${dirname(node)}:/usr/bin:/bin`, GITHUB_OUTPUT: out, ONLY_PLUGIN: "a", FORCED_BUMP: forced }, encoding: "utf8",
+      cwd, env: { ...env, PATH: `${dirname(node)}:/usr/bin:/bin`, GITHUB_OUTPUT: out, ONLY_PLUGIN: onlyPlugin, FORCED_BUMP: forced }, encoding: "utf8",
     });
     assert.equal(selected.status, 0, selected.stderr);
     const matrix = readFileSync(out, "utf8").match(/^matrix=(.*)$/m)[1];
@@ -80,13 +81,14 @@ function exercise({ start = "0.3.1", commits = [], forced = "", expected, prerel
 
 for (const [name, options] of [
   ["two patches", { commits: ["fix: one", "fix: two"], expected: "0.3.3" }],
+  ["fix and revert", { commits: ["fix: one"], revertLast: true, expected: "0.3.3" }],
   ["single patch", { commits: ["fix: one"], expected: "0.3.2" }],
   ["fix then feature", { commits: ["fix: one", "feat: two"], expected: "0.4.0" }],
   ["feature then fix", { commits: ["feat: one", "fix: two"], expected: "0.4.1" }],
   ["repeated features", { commits: ["feat: one", "feat: two"], expected: "0.5.0" }],
   ["breaking on zero", { commits: ["fix!: one"], expected: "0.4.0" }],
   ["breaking on one", { start: "1.2.3", commits: ["fix!: one"], expected: "2.0.0" }],
-  ["unchanged fallback", { expected: "0.3.2" }],
+  ["unchanged fallback", { onlyPlugin: "a", expected: "0.3.2" }],
   ["without publish token", { commits: ["fix: one"], expected: "0.3.2", canPublish: false }],
   ["forced patch", { commits: ["fix: one", "fix: two"], forced: "patch", expected: "0.3.2" }],
   ["forced minor", { commits: ["fix: one", "fix: two"], forced: "minor", expected: "0.4.0" }],

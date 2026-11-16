@@ -86,6 +86,15 @@ test("two fixes after 0.3.1 each produce a patch increment", () => {
   assert.deepEqual(select(repo).matrix[0].bumps, ["patch", "patch"]);
 });
 
+test("a fix and its revert select the plugin when the tagged tree is restored", () => {
+  // Review found that endpoint-only selection skipped a fix followed by its revert.
+  const repo = makeRepo({ a: "0.3.1" });
+  repo.change("plugins/a/x.txt", "fix: first");
+  repo.git("-c", "commit.gpgsign=false", "revert", "--no-edit", "HEAD");
+  assert.equal(repo.git("diff", "a/v0.3.1", "HEAD", "--", "plugins/a"), "");
+  assert.deepEqual(bumps(select(repo)), { a: ["patch", "patch"] });
+});
+
 test("nothing changed selects nothing", () => {
   const repo = makeRepo();
   const res = select(repo);
