@@ -25,7 +25,7 @@ Review recent updates and find work that needs your attention.
 
 ## Requirements
 
-- BB 0.42+ with a compatible Plugin SDK 0.4.47 runtime.
+- BB 0.42+ with a compatible Plugin SDK 0.6.104 runtime.
 - A configured agent provider. Provider accounts and usage charges still apply.
 - BB and Triage must be running for scheduled work to start. Overdue tasks are
   picked up when the scheduler resumes.
@@ -147,7 +147,7 @@ session does not interrupt a running turn.
 
 ## Compatibility and verification
 
-Requires BB 0.42+ and Plugin SDK 0.4.47 or newer. This repository's GitHub
+Requires BB 0.42+ and Plugin SDK 0.6.104 or newer. This repository's GitHub
 Actions workflow runs `npm run test:coverage` (`tsc --noEmit` plus the test
 suite with 100% coverage thresholds) on every push and pull request.
 

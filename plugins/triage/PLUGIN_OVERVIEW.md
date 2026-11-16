@@ -20,7 +20,7 @@ Use `bb triage list`, `bb triage show`, and `bb triage move` from the CLI.
 
 ## Requirements
 
-Requires BB 0.42+ with a compatible Plugin SDK 0.4.47 runtime and a configured
+Requires BB 0.42+ with a compatible Plugin SDK 0.6.104 runtime and a configured
 agent provider. Provider accounts and usage charges apply. No separate Triage
 account is needed. Cards and updates stay in BB's plugin-owned SQLite database.
 

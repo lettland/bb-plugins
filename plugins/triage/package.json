@@ -4,7 +4,7 @@
   "type": "module",
   "engines": {
     "bb": ">=0.42",
-    "bbPluginSdk": ">=0.4.47"
+    "bbPluginSdk": ">=0.6.104"
   },
   "bb": {
     "name": "Triage",
@@ -31,7 +31,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "0.6.90",
+    "@get-bb/plugin-sdk": "0.6.104",
     "@radix-ui/react-dialog": "^1.1.19",
     "@testing-library/dom": "^10.4.2",
     "@testing-library/react": "^16.3.3",

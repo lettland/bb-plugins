@@ -11,7 +11,7 @@ the triage files derived from it, and the upstream license text verbatim.
 
 - Upstream: <https://github.com/MayankBansal12/bb-plugin-triage>, author Mayank Bansal.
 - Provenance: commit `5e74ed686c03a853c5ff3bf33883b91e75c16c2f` (upstream release 0.1.0), fetched 2026-10-21. The whole plugin derives from it; the upstream `LICENSE` is kept verbatim in this directory.
-- Derived triage files (modified): `package.json` (package name, repository, homepage, bugs, and `publishConfig` point at this collection; `engines.bbPluginSdk` widened to `>=0.4.47`; `test` script runs `tsc --noEmit` before the test suite), `package-lock.json` (root package name and engines to match), and `README.md` (installation and development docs for this collection). The upstream `.github/` workflows and `.gitignore` are dropped, and `THIRD_PARTY_NOTICES.md` (this file) is added.
+- Derived triage files (modified): `package.json` (package name, repository, homepage, bugs, and `publishConfig` point at this collection; `engines.bbPluginSdk` raised to `>=0.6.104`; `test` script runs `tsc --noEmit` before the test suite), `package-lock.json` (root package name and engines to match), and `README.md` (installation and development docs for this collection). The upstream `.github/` workflows and `.gitignore` are dropped, and `THIRD_PARTY_NOTICES.md` (this file) is added.
 - Copyright: `Copyright (c) 2026 Mayank Bansal`, per the upstream `README` license line and `package.json` author field.
 
 License text: [`LICENSE`](LICENSE) in this directory (kept verbatim from upstream).
