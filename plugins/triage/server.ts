@@ -1,5 +1,6 @@
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { hasUserResponse } from "./lib/handoff-responses.ts";
 
 const stageSchema = z.object({
   id: z.string(),
@@ -523,6 +524,7 @@ export default async function plugin(bb: BbPluginApi) {
   const initialSettings = await settings.get();
   let showThreadsInSidebar = initialSettings.showThreadsInSidebar;
   let autoCardThreads = initialSettings.autoCardThreads;
+  let mirroringGeneration = 0;
   const pendingVisibility = new Map<string, { visible: boolean }>();
   // A mirror card's creation in flight, by thread id. Lifecycle events for that
   // thread wait for it, or they find no card yet and are lost.
@@ -562,6 +564,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
   };
   settings.onChange((next, prev) => {
+    if (next.autoCardThreads !== prev.autoCardThreads) mirroringGeneration += 1;
     showThreadsInSidebar = next.showThreadsInSidebar;
     autoCardThreads = next.autoCardThreads;
     // Turning mirroring off is not destructive; turning it on catches up.
@@ -675,8 +678,35 @@ export default async function plugin(bb: BbPluginApi) {
     }, PUBLISH_DEBOUNCE_MS);
   };
 
+  const clearAnsweredHandoff = async (threadId: string) => {
+    if (disposed || !autoCardThreads) return false;
+    const generation = mirroringGeneration;
+    const wanted = () => !disposed && autoCardThreads && generation === mirroringGeneration;
+    const card = getTaskByThread(threadId);
+    if (!card || card.origin !== "mirror" || card.run_state === "stopped" || card.run_state === "failed" || card.settled_at !== null || getStageRow(card.stage_id).system_role !== "attention") return false;
+    const placement = db.prepare("SELECT rowid, created_at FROM triage_events WHERE task_id = ? AND event LIKE 'moved to %' ORDER BY rowid DESC LIMIT 1").get(card.id) as { rowid: number; created_at: number } | undefined;
+    if (!placement) return false;
+    try {
+      if (!await hasUserResponse(bb, threadId, placement.created_at, wanted) || !wanted()) return false;
+      if ((await bb.sdk.threads.interactions.list({ threadId })).length > 0 || !wanted()) return false;
+      const thread = await bb.sdk.threads.get({ threadId });
+      if (!wanted() || !thread || !isMirrorable(thread) || thread.status === "error" || thread.archivedAt !== null || thread.deletedAt !== null) return false;
+      const current = getTaskByThread(threadId);
+      const latest = db.prepare("SELECT rowid FROM triage_events WHERE task_id = ? AND event LIKE 'moved to %' ORDER BY rowid DESC LIMIT 1").get(card.id) as { rowid: number } | undefined;
+      if (!current || current.id !== card.id || current.stage_id !== card.stage_id || current.run_state === "stopped" || current.run_state === "failed" || current.settled_at !== null || latest?.rowid !== placement.rowid) return false;
+      db.prepare("UPDATE triage_tasks SET stage_id = ?, attention_reason = NULL, updated_at = ? WHERE id = ?").run(getSystemStage("active").id, Date.now(), card.id);
+      addEvent(card.id, "bb", `moved to ${getSystemStage("active").name}`);
+      publishSoon();
+      return thread;
+    } catch (error) {
+      if (!disposed) bb.log.warn(`Triage could not check responses for session ${threadId}: ${errorMessage(error)}`);
+      return false;
+    }
+  };
+
   let readStateGeneration = 0;
   const unsubscribeReadState = bb.sdk.subscribe({ event: "thread:changed", callback: (event) => {
+    if (event.id && event.changes.includes("events-appended")) void clearAnsweredHandoff(event.id);
     if (!event.changes.includes("read-state-changed")) return;
     if (event.id) {
       const task = getTaskByThread(event.id);
@@ -1411,6 +1441,14 @@ export default async function plugin(bb: BbPluginApi) {
         .run(...update.values, now, card.id, card.updated_at, card.stage_id, card.run_state, completing ? 1 : 0, card.read_at);
       if (result.changes && completing) addEvent(card.id, "bb", "turn completed");
     }
+    for (const card of existing) {
+      const thread = found.get(card.thread_id);
+      if (!thread || !isMirrorable(thread) || thread.status === "error" || thread.archivedAt !== null || thread.deletedAt !== null) continue;
+      const root = await clearAnsweredHandoff(card.thread_id);
+      if (!mirroringWanted()) return;
+      const current = root && getTaskByThread(card.thread_id);
+      if (root && current && root.status === "idle") await settleUnlessLive(current, root);
+    }
   };
   /**
    * Give every existing session a mirror card. Pages are collected first, then
@@ -1965,6 +2003,7 @@ export default async function plugin(bb: BbPluginApi) {
         db.prepare("UPDATE triage_tasks SET run_state = 'working', settled_at = NULL, updated_at = ? WHERE id = ?")
           .run(Date.now(), task.id);
         publishSoon();
+        if (role === "attention") await clearAnsweredHandoff(thread.id);
         return;
       }
       db.prepare(
