@@ -30,15 +30,17 @@ delete buildEnv.GH_TOKEN;
 delete buildEnv.NODE_AUTH_TOKEN;
 
 const released = [];
-for (const { id, dir, bump } of matrix) {
-  console.log(`\n=== ${id}: ${bump} ===`);
+for (const { id, dir, bumps } of matrix) {
+  console.log(`\n=== ${id}: ${bumps.join(", ")} ===`);
   run("npm", ["install", "--include=dev", "--legacy-peer-deps"], dir, buildEnv);
   run("npm", ["run", "test"], dir, buildEnv);
   run("bb", ["plugin", "build"], dir, buildEnv);
 
-  const versionArgs = ["version", bump, "--no-git-tag-version"];
-  if (bump === "prerelease") versionArgs.push("--preid", "beta");
-  run("npm", versionArgs, dir);
+  for (const bump of bumps) {
+    const versionArgs = ["version", bump, "--no-git-tag-version"];
+    if (bump === "prerelease") versionArgs.push("--preid", "beta");
+    run("npm", versionArgs, dir);
+  }
 
   const version = JSON.parse(readFileSync(`${dir}/package.json`, "utf8")).version;
   const prerelease = version.includes("-");

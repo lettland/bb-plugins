@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { bumpFor, effectiveBump, highestBump, parseSubject } from "./conventional.mjs";
+import { bumpFor, effectiveBump, parseSubject } from "./conventional.mjs";
 
 const TYPES = ["feat", "fix", "perf", "refactor", "revert", "docs", "test", "chore", "ci", "build", "style"];
 
@@ -49,13 +49,6 @@ test("fixup and other forms are invalid", () => {
   assert.equal(parseSubject("feat:x"), null);
   assert.equal(parseSubject("feat: "), null);
   assert.equal(bumpFor("random words", ""), "patch");
-});
-
-test("highestBump", () => {
-  assert.equal(highestBump(["patch", "minor", "patch"]), "minor");
-  assert.equal(highestBump(["patch", "major", "minor"]), "major");
-  assert.equal(highestBump(["patch"]), "patch");
-  assert.equal(highestBump([]), "patch");
 });
 
 test("effectiveBump downgrades major only on a 0.x plugin", () => {

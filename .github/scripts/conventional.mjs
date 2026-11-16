@@ -5,7 +5,6 @@ const SUBJECT_RE =
   /^(feat|fix|perf|refactor|revert|docs|test|chore|ci|build|style)(\(([^()\s][^()]*)\))?(!)?: \S/;
 const GIT_REVERT_RE = /^(Revert|Reapply) ".+"$/;
 const BREAKING_FOOTER_RE = /^BREAKING[ -]CHANGE: /m;
-const RANK = { patch: 1, minor: 2, major: 3 };
 
 export function parseSubject(subject) {
   const m = SUBJECT_RE.exec(subject);
@@ -19,12 +18,6 @@ export function bumpFor(subject, body) {
   if (parsed?.breaking || BREAKING_FOOTER_RE.test(body ?? "")) return "major";
   if (parsed?.type === "feat") return "minor";
   return "patch";
-}
-
-export function highestBump(list) {
-  let best = "patch";
-  for (const b of list) if (RANK[b] > RANK[best]) best = b;
-  return best;
 }
 
 export function effectiveBump(bump, currentVersion) {

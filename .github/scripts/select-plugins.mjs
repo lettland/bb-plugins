@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { appendFileSync, readdirSync, readFileSync, existsSync } from "node:fs";
-import { bumpFor, effectiveBump, highestBump, parseSubject } from "./conventional.mjs";
+import { bumpFor, effectiveBump, parseSubject } from "./conventional.mjs";
 
 const NAMED_BUMPS = new Set(["patch", "minor", "major", "prerelease"]);
 const EXACT_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -48,11 +48,11 @@ function isAbove(target, current) {
 }
 
 function inferBump(id, tag, currentVersion) {
-  if (forcedBump) return forcedBump;
+  if (forcedBump) return [forcedBump];
   const range = tag ? `${tag}..HEAD` : "HEAD";
   const records = execFileSync(
     "git",
-    ["log", "--no-merges", "--format=%H%x1f%s%x1f%b%x1e", range, "--", `plugins/${id}`],
+    ["log", "--reverse", "--no-merges", "--format=%H%x1f%s%x1f%b%x1e", range, "--", `plugins/${id}`],
     { encoding: "utf8" },
   )
     .split("\x1e")
@@ -63,7 +63,7 @@ function inferBump(id, tag, currentVersion) {
   let malformed = 0;
   for (const record of records) {
     const [sha, subject = "", body = ""] = record.split("\x1f");
-    bumps.push(bumpFor(subject, body));
+    bumps.push(effectiveBump(bumpFor(subject, body), currentVersion));
     if (parseSubject(subject) === null) {
       malformed++;
       console.log(`malformed subject ${sha}: ${subject}`);
@@ -72,11 +72,10 @@ function inferBump(id, tag, currentVersion) {
 
   if (bumps.length === 0) {
     console.log(`warning ${id}: changed but no non-merge commits in range; using patch`);
-    return "patch";
+    return ["patch"];
   }
-  const bump = effectiveBump(highestBump(bumps), currentVersion);
-  console.log(`${id}: ${bump} (${bumps.length} commits${malformed ? `, ${malformed} malformed` : ""})`);
-  return bump;
+  console.log(`${id}: ${bumps.join(", ")} (${bumps.length} commits${malformed ? `, ${malformed} malformed` : ""})`);
+  return bumps;
 }
 
 const pluginsDir = "plugins";
@@ -95,7 +94,7 @@ for (const entry of readdirSync(pluginsDir, { withFileTypes: true })) {
   if (!forced && !pluginChangedSince(id, tag)) continue;
 
   currentVersions.set(id, pkg.version);
-  selected.push({ id, dir: `${pluginsDir}/${id}`, name: pkg.name, bump: inferBump(id, tag, pkg.version) });
+  selected.push({ id, dir: `${pluginsDir}/${id}`, name: pkg.name, bumps: inferBump(id, tag, pkg.version) });
 }
 
 if (EXACT_VERSION.test(forcedBump)) {
@@ -110,7 +109,7 @@ if (EXACT_VERSION.test(forcedBump)) {
 
 const matrix = JSON.stringify(selected);
 const any = selected.length > 0 ? "true" : "false";
-console.log(`Selected ${selected.length} plugin(s): ${selected.map((p) => `${p.id}(${p.bump})`).join(", ") || "none"}`);
+console.log(`Selected ${selected.length} plugin(s): ${selected.map((p) => `${p.id}(${p.bumps.join(", ")})`).join(", ") || "none"}`);
 
 const out = process.env.GITHUB_OUTPUT;
 if (out) {

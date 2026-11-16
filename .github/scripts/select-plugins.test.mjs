@@ -76,7 +76,15 @@ function select(repo, env = {}) {
   };
 }
 
-const bumps = (res) => Object.fromEntries(res.matrix.map((p) => [p.id, p.bump]));
+const bumps = (res) => Object.fromEntries(res.matrix.map((p) => [p.id, p.bumps]));
+
+test("two fixes after 0.3.1 each produce a patch increment", () => {
+  // Triage commits e0bd084 and b910860 exposed the collapsed increment.
+  const repo = makeRepo({ a: "0.3.1" });
+  repo.change("plugins/a/x.txt", "fix: first");
+  repo.change("plugins/a/y.txt", "fix: second");
+  assert.deepEqual(select(repo).matrix[0].bumps, ["patch", "patch"]);
+});
 
 test("nothing changed selects nothing", () => {
   const repo = makeRepo();
@@ -91,7 +99,7 @@ test("feat is a minor and matrix entries keep their keys", () => {
   repo.change("plugins/a/x.txt", "feat(a): add x");
   const res = select(repo);
   assert.equal(res.status, 0, res.all);
-  assert.deepEqual(res.matrix, [{ id: "a", dir: "plugins/a", name: "@x/a", bump: "minor" }]);
+  assert.deepEqual(res.matrix, [{ id: "a", dir: "plugins/a", name: "@x/a", bumps: ["minor"] }]);
   assert.equal(res.any, "true");
   assert.match(res.stdout, /^a: minor \(1 commits\)$/m);
 });
@@ -99,42 +107,52 @@ test("feat is a minor and matrix entries keep their keys", () => {
 test("a breaking change is a minor on a 0.x plugin", () => {
   const repo = makeRepo();
   repo.change("plugins/a/x.txt", "feat!: drop x");
-  assert.deepEqual(bumps(select(repo)), { a: "minor" });
+  assert.deepEqual(bumps(select(repo)), { a: ["minor"] });
 });
 
 test("a breaking change is a major on a plugin at 1.0.0", () => {
   const repo = makeRepo({ a: "1.0.0" });
   repo.change("plugins/a/x.txt", "feat!: drop x");
-  assert.deepEqual(bumps(select(repo)), { a: "major" });
+  assert.deepEqual(bumps(select(repo)), { a: ["major"] });
 });
 
 test("a BREAKING CHANGE footer in a multi-line body is breaking", () => {
   const repo = makeRepo({ a: "1.0.0" });
   repo.change("plugins/a/x.txt", "fix: tweak x\n\nlong explanation\nsecond line\n\nBREAKING CHANGE: x is gone");
-  assert.deepEqual(bumps(select(repo)), { a: "major" });
+  assert.deepEqual(bumps(select(repo)), { a: ["major"] });
 });
 
 test("a manual major on a 0.x plugin stays major", () => {
   const repo = makeRepo();
   repo.change("plugins/a/x.txt", "fix: x");
   const res = select(repo, { FORCED_BUMP: "major" });
-  assert.deepEqual(bumps(res), { a: "major", b: "major" });
+  assert.deepEqual(bumps(res), { a: ["major"], b: ["major"] });
 });
 
 test("docs-only changes are a patch", () => {
   const repo = makeRepo();
   repo.change("plugins/a/x.txt", "docs(a): explain x");
-  assert.deepEqual(bumps(select(repo)), { a: "patch" });
+  assert.deepEqual(bumps(select(repo)), { a: ["patch"] });
 });
 
-test("the highest bump over the range wins", () => {
+test("bumps follow commit order", () => {
   const repo = makeRepo();
   repo.change("plugins/a/x.txt", "fix: one");
   repo.change("plugins/a/y.txt", "feat: two");
   repo.change("plugins/a/z.txt", "docs: three");
   const res = select(repo);
-  assert.deepEqual(bumps(res), { a: "minor" });
-  assert.match(res.stdout, /^a: minor \(3 commits\)$/m);
+  assert.deepEqual(bumps(res), { a: ["patch", "minor", "patch"] });
+  assert.match(res.stdout, /^a: patch, minor, patch \(3 commits\)$/m);
+});
+
+test("plugin histories use their own latest tag boundaries", () => {
+  const repo = makeRepo();
+  repo.change("plugins/a/x.txt", "fix: before tag");
+  repo.git("tag", "a/v0.1.1");
+  repo.change("plugins/b/x.txt", "feat: b");
+  repo.change("plugins/a/y.txt", "feat: a first");
+  repo.change("plugins/a/z.txt", "feat: a second");
+  assert.deepEqual(bumps(select(repo)), { a: ["minor", "minor"], b: ["minor"] });
 });
 
 test("one commit touching a and b bumps both", () => {
@@ -143,14 +161,14 @@ test("one commit touching a and b bumps both", () => {
   repo.write("plugins/b/x.txt", "1\n");
   repo.git("add", "-A");
   repo.commit("feat(a,b): shared");
-  assert.deepEqual(bumps(select(repo)), { a: "minor", b: "minor" });
+  assert.deepEqual(bumps(select(repo)), { a: ["minor"], b: ["minor"] });
 });
 
 test("a legacy subject is a patch and logs a malformed line at the start of the line", () => {
   const repo = makeRepo();
   repo.change("plugins/a/x.txt", "a: thing");
   const res = select(repo);
-  assert.deepEqual(bumps(res), { a: "patch" });
+  assert.deepEqual(bumps(res), { a: ["patch"] });
   const line = res.stdout.split("\n").find((l) => l.startsWith("malformed subject "));
   assert.ok(line, res.stdout);
   assert.match(line, /^malformed subject [0-9a-f]{40}: a: thing$/);
@@ -170,8 +188,8 @@ test("empty and multi-line bodies split into separate commits", () => {
   repo.change("plugins/a/y.txt", "fix: body\n\nline one\nline two\nline three");
   repo.change("plugins/a/z.txt", "feat: last");
   const res = select(repo);
-  assert.deepEqual(bumps(res), { a: "minor" });
-  assert.match(res.stdout, /^a: minor \(3 commits\)$/m);
+  assert.deepEqual(bumps(res), { a: ["patch", "patch", "minor"] });
+  assert.match(res.stdout, /^a: patch, patch, minor \(3 commits\)$/m);
   assert.ok(!res.stdout.includes("malformed"), res.stdout);
 });
 
@@ -183,7 +201,7 @@ test("merge commits are ignored", () => {
   repo.change("README.md", "docs: root readme");
   repo.git("-c", "commit.gpgsign=false", "merge", "--no-ff", "-m", "Merge branch side", "side");
   const res = select(repo);
-  assert.deepEqual(bumps(res), { a: "minor" });
+  assert.deepEqual(bumps(res), { a: ["minor"] });
   assert.match(res.stdout, /^a: minor \(1 commits\)$/m);
   assert.ok(!res.stdout.includes("malformed"), res.stdout);
 });
@@ -199,27 +217,27 @@ test("a change that arrives only through a merge commit is a patch with a warnin
   repo.git("add", "-A");
   repo.commit("Merge branch side");
   const res = select(repo);
-  assert.deepEqual(bumps(res), { a: "patch" });
+  assert.deepEqual(bumps(res), { a: ["patch"] });
   assert.match(res.stdout, /^warning a: changed but no non-merge commits in range; using patch$/m);
 });
 
 test("a forced bump selects a and b even without changes, never c", () => {
   const repo = makeRepo();
   const res = select(repo, { FORCED_BUMP: "minor" });
-  assert.deepEqual(bumps(res), { a: "minor", b: "minor" });
+  assert.deepEqual(bumps(res), { a: ["minor"], b: ["minor"] });
 });
 
 test("ONLY_PLUGIN without FORCED_BUMP uses the inferred bump", () => {
   const repo = makeRepo();
   repo.change("plugins/a/x.txt", "feat: x");
   const res = select(repo, { ONLY_PLUGIN: "a" });
-  assert.deepEqual(bumps(res), { a: "minor" });
+  assert.deepEqual(bumps(res), { a: ["minor"] });
 });
 
 test("ONLY_PLUGIN on an unchanged plugin is still selected, with a patch", () => {
   const repo = makeRepo();
   const res = select(repo, { ONLY_PLUGIN: "b" });
-  assert.deepEqual(bumps(res), { b: "patch" });
+  assert.deepEqual(bumps(res), { b: ["patch"] });
 });
 
 test("a directory without package.json is never selected", () => {
@@ -240,7 +258,7 @@ test("an exact version above every selected plugin selects all with that bump", 
   const repo = makeRepo();
   const res = select(repo, { FORCED_BUMP: "0.3.0" });
   assert.equal(res.status, 0, res.all);
-  assert.deepEqual(bumps(res), { a: "0.3.0", b: "0.3.0" });
+  assert.deepEqual(bumps(res), { a: ["0.3.0"], b: ["0.3.0"] });
 });
 
 test("an exact version equal to a selected plugin's version exits 1 naming it", () => {
@@ -272,7 +290,7 @@ test("a current prerelease is below its release version", () => {
   const repo = makeRepo({ a: "0.3.0-beta.1" });
   const res = select(repo, { FORCED_BUMP: "0.3.0", ONLY_PLUGIN: "a" });
   assert.equal(res.status, 0, res.all);
-  assert.deepEqual(bumps(res), { a: "0.3.0" });
+  assert.deepEqual(bumps(res), { a: ["0.3.0"] });
 });
 
 test("build metadata on the current version is ignored by the exact-version guard", () => {
@@ -280,7 +298,7 @@ test("build metadata on the current version is ignored by the exact-version guar
   // number is NaN, which made 0.3.1 look not above 0.3.0+abc.
   const above = select(makeRepo({ a: "0.3.0+abc" }), { FORCED_BUMP: "0.3.1", ONLY_PLUGIN: "a" });
   assert.equal(above.status, 0, above.all);
-  assert.deepEqual(bumps(above), { a: "0.3.1" });
+  assert.deepEqual(bumps(above), { a: ["0.3.1"] });
   const equal = select(makeRepo({ a: "0.3.0+abc" }), { FORCED_BUMP: "0.3.0", ONLY_PLUGIN: "a" });
   assert.equal(equal.status, 1, equal.all);
 });
@@ -289,5 +307,5 @@ test("the guard applies only to selected plugins", () => {
   const repo = makeRepo();
   const res = select(repo, { ONLY_PLUGIN: "a", FORCED_BUMP: "0.2.0" });
   assert.equal(res.status, 0, res.all);
-  assert.deepEqual(bumps(res), { a: "0.2.0" });
+  assert.deepEqual(bumps(res), { a: ["0.2.0"] });
 });
