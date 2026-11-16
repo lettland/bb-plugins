@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
-import { useRpc, type PluginRpcClient } from "@get-bb/plugin-sdk/app";
+import { useRealtimeConnectionState, useRpc, type PluginRpcClient } from "@get-bb/plugin-sdk/app";
 
 import type { rpcContract } from "../server";
+import { claimReconnectRefresh } from "./triage-mounts";
 import type { AgentOptions, Snapshot } from "./triage-types";
 
 export type TriageRpc = PluginRpcClient<typeof rpcContract>;
@@ -106,11 +107,16 @@ export interface TriageData extends TriageState {
 export function useTriage(): TriageData {
   const rpc = useRpc<typeof rpcContract>();
   const current = useSyncExternalStore(subscribe, getState, getState);
+  const connection = useRealtimeConnectionState();
   const refresh = useCallback(() => refreshTriage(rpc), [rpc]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (claimReconnectRefresh(connection)) void refresh();
+  }, [connection, refresh]);
 
   return { ...current, rpc, refresh };
 }

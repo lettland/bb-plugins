@@ -209,6 +209,34 @@ describe("useTriage and refreshTriage", () => {
     // Leave the store in a clean, loaded state for the following tests.
     await refreshTriage(snapshotRpc());
   });
+
+  test("a realtime reconnect refetches once for all consumers; no transition does not", async () => {
+    let snapshots = 0;
+    function TwoProbes() {
+      return (
+        <>
+          <StoreProbe />
+          <StoreProbe />
+        </>
+      );
+    }
+    const view = renderSlot({ component: TwoProbes }, {}, {
+      rpc: { snapshot: () => { snapshots += 1; return SNAPSHOT; } } as never,
+    });
+    await view.setRealtimeConnectionState("connected");
+    await waitFor(() => expect(snapshots).toBeGreaterThan(0));
+    await waitFor(() => expect((screen.getAllByTestId("store")[0] as HTMLElement).dataset.loading).toBe("false"));
+    const settled = snapshots;
+    await view.setRealtimeConnectionState("connected");
+    expect(snapshots).toBe(settled);
+    await view.setRealtimeConnectionState("reconnecting");
+    expect(snapshots).toBe(settled);
+    await view.setRealtimeConnectionState("connected");
+    await waitFor(() => expect(snapshots).toBe(settled + 1));
+    await view.setRealtimeConnectionState("connected");
+    expect(snapshots).toBe(settled + 1);
+    view.unmount();
+  });
 });
 
 describe("optimistic patches", () => {

@@ -1,3 +1,5 @@
+import type { PluginRealtimeConnectionState } from "@get-bb/plugin-sdk/app";
+
 /**
  * Coordination between Triage's mount points. The board and the thread header
  * action are separate React roots in the host shell, so what one needs to tell
@@ -23,4 +25,18 @@ export function claimTriageRefresh(payload: unknown): boolean {
   if (at === claimedAt) return false;
   claimedAt = at;
   return true;
+}
+
+/**
+ * Plugin realtime signals are not replayed, so an event published while the
+ * socket is down is lost. The first mount that sees the connection return
+ * claims one refetch and the rest skip it. An initial `connecting` to
+ * `connected` also claims, because an event can arrive before the socket opens.
+ */
+let lastConnection: PluginRealtimeConnectionState | null = null;
+
+export function claimReconnectRefresh(connection: PluginRealtimeConnectionState): boolean {
+  const reconnected = connection === "connected" && lastConnection !== null && lastConnection !== "connected";
+  lastConnection = connection;
+  return reconnected;
 }
