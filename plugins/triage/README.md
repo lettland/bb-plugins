@@ -94,6 +94,9 @@ Review. Hidden sessions and child sessions stay out of automatic mirroring.
 Mirror cards do not change sidebar visibility, and deleting a session removes
 its card.
 
+The thread context card lists sessions in In Progress, Human Review, and
+Completed, so you can jump between them without leaving the thread.
+
 Completed contains finished turns you have not read. Opening a completed card
 or marking its thread read removes the card automatically, including when you
 read through the regular sidebar. No manual settlement is required. Read cards

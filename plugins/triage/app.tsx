@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import {
   definePluginApp,
+  experimental_THREAD_INFO_SECTION_GROUPS,
   experimental_useSidebarThreads,
   useBbContext,
   useBbNavigate,
@@ -18,8 +19,10 @@ import { TaskComposerDialog } from "@/components/triage/task-composer-dialog";
 import { TriageHeaderActions } from "@/components/triage/header-actions";
 import { ThreadTriageAction } from "@/components/triage/thread-triage-action";
 import { TaskCard } from "@/components/triage/task-card";
+import { TriageThreadsSection } from "@/components/triage/thread-context-section";
 import {
   isTaskRunning,
+  keepsFailedCardVisible,
   supportsTaskRead,
   stageTone,
 } from "@/lib/triage-format";
@@ -97,12 +100,6 @@ function useDraftRootIds(): ReadonlySet<string> {
     }
     return NO_DRAFTS;
   }
-}
-
-function keepsFailedCardVisible(task: Task, stages: readonly Stage[]): boolean {
-  if (task.runState !== "failed" || task.settledAt !== null) return false;
-  const role = stages.find((stage) => stage.id === task.stageId)?.systemRole;
-  return role === "attention" || role === null;
 }
 
 /**
@@ -404,6 +401,13 @@ export default definePluginApp((app) => {
     id: "triage-thread-action",
     title: "Triage",
     component: ThreadTriageAction,
+  });
+  app.slots.experimental_threadContextCardSection({
+    id: "triage-threads",
+    title: "Triage",
+    group: experimental_THREAD_INFO_SECTION_GROUPS.related,
+    order: 20,
+    component: TriageThreadsSection,
   });
   app.slots.navPanel({
     id: "triage-board",

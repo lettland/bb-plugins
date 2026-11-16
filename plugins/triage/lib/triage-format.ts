@@ -247,3 +247,9 @@ export function localDateAt(hour: number, minute: number, dayOffset: number): nu
   if (date.getTime() <= Date.now()) date.setDate(date.getDate() + 1);
   return date.getTime();
 }
+
+export function keepsFailedCardVisible(task: Task, stages: readonly Stage[]): boolean {
+  if (task.runState !== "failed" || task.settledAt !== null) return false;
+  const role = stages.find((stage) => stage.id === task.stageId)?.systemRole;
+  return role === "attention" || role === null;
+}

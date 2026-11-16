@@ -9,6 +9,7 @@ import {
   fromDatetimeLocal,
   isPending,
   isTaskRunning,
+  keepsFailedCardVisible,
   localDateAt,
   needsAttention,
   nextScheduleTime,
@@ -271,5 +272,45 @@ describe("schedule helpers", () => {
     const offsetDay = localDateAt(23, 59, 1);
     expect(new Date(offsetDay).getDate()).toBe(16);
     expect(offsetDay).toBeGreaterThan(Date.now());
+  });
+});
+
+describe("keepsFailedCardVisible", () => {
+  const stages = [stage("intake"), stage("active"), stage("attention"), stage("done"), stage(null)];
+  const failed = (role: Stage["systemRole"], overrides: Partial<Task> = {}) =>
+    task({ runState: "failed", stageId: `stage-${String(role)}`, ...overrides });
+
+  test("an unsettled failed card stays visible in an attention stage", () => {
+    expect(keepsFailedCardVisible(failed("attention"), stages)).toBe(true);
+  });
+
+  test("an unsettled failed card stays visible in a custom stage with no system role", () => {
+    expect(keepsFailedCardVisible(failed(null), stages)).toBe(true);
+  });
+
+  test("an unsettled failed card is hidden in an active stage", () => {
+    expect(keepsFailedCardVisible(failed("active"), stages)).toBe(false);
+  });
+
+  test("an unsettled failed card is hidden in a done stage", () => {
+    expect(keepsFailedCardVisible(failed("done"), stages)).toBe(false);
+  });
+
+  test("an unsettled failed card is hidden in an intake stage", () => {
+    expect(keepsFailedCardVisible(failed("intake"), stages)).toBe(false);
+  });
+
+  test("an unsettled failed card in an unknown stage is hidden", () => {
+    expect(keepsFailedCardVisible(task({ runState: "failed", stageId: "stage-missing" }), stages)).toBe(false);
+  });
+
+  test("a settled failed card is hidden even in an attention or custom stage", () => {
+    expect(keepsFailedCardVisible(failed("attention", { settledAt: 5 }), stages)).toBe(false);
+    expect(keepsFailedCardVisible(failed(null, { settledAt: 5 }), stages)).toBe(false);
+  });
+
+  test("a card that has not failed is never kept by this rule", () => {
+    expect(keepsFailedCardVisible(task({ runState: "idle", stageId: "stage-attention" }), stages)).toBe(false);
+    expect(keepsFailedCardVisible(task({ runState: "working", stageId: "stage-null" }), stages)).toBe(false);
   });
 });

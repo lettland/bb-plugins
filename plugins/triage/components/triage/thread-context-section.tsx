@@ -1,0 +1,74 @@
+import {
+  experimental_InfoList as InfoList,
+  experimental_ThreadContextCardRow as ThreadContextCardRow,
+  useBbNavigate,
+  useRealtime,
+  type ExperimentalThreadContextCardProps,
+} from "@get-bb/plugin-sdk/app";
+
+import { StatusDot } from "@/components/ui/status-dot";
+import {
+  formatShortWhen,
+  isTaskRunning,
+  keepsFailedCardVisible,
+  runStateLabel,
+  stageTone,
+} from "@/lib/triage-format";
+import { claimTriageRefresh } from "@/lib/triage-mounts";
+import { useTriage } from "@/lib/triage-store";
+import type { Stage, Task } from "@/lib/triage-types";
+
+type ThreadTask = Task & { threadId: string };
+
+const GROUP_ROLES = ["active", "attention", "done"] as const;
+const DONE_LIMIT = 10;
+const ROW_LIMIT = 3;
+
+export function TriageThreadsSection(_props: ExperimentalThreadContextCardProps) {
+  const { snapshot, refresh } = useTriage();
+  const navigate = useBbNavigate();
+  useRealtime("triage", (payload) => {
+    if (claimTriageRefresh(payload)) void refresh();
+  });
+  if (!snapshot) return null;
+
+  const groups = GROUP_ROLES.flatMap((role) => {
+    const stage = snapshot.stages.find((candidate) => candidate.systemRole === role);
+    if (!stage) return [];
+    const rows = snapshot.tasks
+      .filter((task): task is ThreadTask => task.stageId === stage.id && task.threadId !== null)
+      .filter((task) => task.runState !== "failed" || keepsFailedCardVisible(task, snapshot.stages))
+      .filter((task) => role === "done" || task.settledAt === null)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    const shown = role === "done" ? rows.slice(0, DONE_LIMIT) : rows;
+    return shown.length === 0 ? [] : [{ stage, rows: shown }];
+  });
+  if (groups.length === 0) return null;
+
+  const renderRow = (stage: Stage) => (task: ThreadTask) => {
+    const running = isTaskRunning(task);
+    const announced = running || task.runState === "failed";
+    return (
+      <li className="list-none">
+        <ThreadContextCardRow
+          leading={<StatusDot tone={stageTone(stage)} pulse={running} label={announced ? runStateLabel(task.runState) : undefined} />}
+          label={`#${task.number} ${task.title}`}
+          title={`#${task.number} ${task.title} · ${task.projectName}`}
+          trailing={formatShortWhen(task.updatedAt)}
+          onClick={() => navigate.toThread(task.threadId)}
+        />
+      </li>
+    );
+  };
+
+  return (
+    <>
+      {groups.map(({ stage, rows }) => (
+        <div key={stage.id}>
+          <h4 className="px-2 text-[11px] font-medium text-muted-foreground">{stage.name}</h4>
+          <InfoList items={rows} getKey={(task) => task.id} limit={ROW_LIMIT} renderItem={renderRow(stage)} />
+        </div>
+      ))}
+    </>
+  );
+}

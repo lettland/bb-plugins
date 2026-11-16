@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { useRpc } from "@get-bb/plugin-sdk/app";
+import { experimental_THREAD_INFO_SECTION_GROUPS, useRpc } from "@get-bb/plugin-sdk/app";
 import { installTestPluginRuntime, loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { ReactElement } from "react";
 import { toast } from "sonner";
@@ -201,6 +201,10 @@ describe("registration", () => {
     expect(boardSlot.path).toBe("triage");
     expect((boardSlot as any).headerContent).toBeTypeOf("function");
     expect(app.threadHeaderActions.map((action: any) => action.id)).toStrictEqual(["triage-thread-action"]);
+    expect(app.threadContextCardSections).toStrictEqual([
+      expect.objectContaining({ id: "triage-threads", title: "Triage", group: experimental_THREAD_INFO_SECTION_GROUPS.related, order: 20 }),
+    ]);
+    expect(experimental_THREAD_INFO_SECTION_GROUPS.related).toBe("1_related");
     // The sidebar list retirement left no thread-list registration behind.
     expect(app.threadLists).toStrictEqual([]);
   });

@@ -10,6 +10,7 @@ Each card opens its linked conversation.
 - Filter running tasks, unread updates, and settled work.
 - See recent activity and tasks that need your attention.
 - See every session on the board automatically, not just tasks you create.
+- See In Progress, Human Review, and recently Completed sessions in the thread context card.
 - Optionally show linked sessions in the sidebar.
 
 Agents in automatically mirrored sessions and assigned tasks receive
