@@ -1113,6 +1113,7 @@ export default async function plugin(bb: BbPluginApi) {
    */
   const reopenMirrorCard = (root: RootThread, card: TaskRow) => db.transaction(() => {
     if (!isMirrorable(root) || root.archivedAt !== null || root.deletedAt !== null || card.origin !== "mirror" || card.run_state === "stopped") return;
+    if ((root.status === "error" || card.run_state === "failed") && root.status !== "active" && root.status !== "starting") return;
     if (card.settled_at !== null && root.status !== "active" && root.status !== "starting") {
       const last = db.prepare("SELECT event, created_at FROM triage_events WHERE task_id = ? AND actor = 'user' AND event IN ('marked settled', 'reopened') ORDER BY created_at DESC, rowid DESC LIMIT 1").get(card.id) as { event: string; created_at: number } | undefined;
       if (last?.event === "marked settled" && last.created_at >= (root.latestAttentionAt ?? 0)) return;
@@ -1144,17 +1145,18 @@ export default async function plugin(bb: BbPluginApi) {
     const live = await liveRoots();
     if (live ? live.has(rootId) : !settleOnFailure) return;
     const current = getTaskByThread(rootId);
-    if (!current || current.stage_id !== card.stage_id || current.updated_at !== card.updated_at || current.read_at !== card.read_at || current.settled_at !== card.settled_at) return;
+    if (!current || current.stage_id !== card.stage_id || current.updated_at !== card.updated_at || current.run_state !== card.run_state || current.settled_at !== card.settled_at) return;
     const now = Date.now();
     const role = getStageRow(card.stage_id).system_role;
     if (live && (role === "intake" || role === "active") && card.settled_at === null) {
       db.prepare(
-        "UPDATE triage_tasks SET stage_id = ?, run_state = 'completed', attention_reason = NULL, settled_at = NULL, read_at = NULL, updated_at = ? WHERE id = ? AND updated_at = ? AND read_at IS ? AND settled_at IS NULL",
-      ).run(getSystemStage("done").id, now, card.id, card.updated_at, card.read_at);
+        "UPDATE triage_tasks SET stage_id = ?, run_state = 'completed', attention_reason = NULL, settled_at = NULL, read_at = CASE WHEN read_at IS ? THEN NULL ELSE read_at END, updated_at = ? WHERE id = ? AND updated_at = ? AND stage_id = ? AND run_state = ? AND settled_at IS NULL",
+      ).run(getSystemStage("done").id, card.read_at, now, card.id, card.updated_at, card.stage_id, card.run_state);
       addEvent(card.id, "bb", "turn completed");
       publishSoon();
       return;
     }
+    if (current.read_at !== card.read_at) return;
     db.prepare(
       "UPDATE triage_tasks SET run_state = CASE WHEN run_state = 'working' THEN 'idle' ELSE run_state END, settled_at = CASE WHEN ? THEN COALESCE(settled_at, ?) ELSE settled_at END, updated_at = ? WHERE id = ? AND updated_at = ?",
     ).run(role === "intake" || role === "active" ? 1 : 0, now, now, card.id, card.updated_at);
@@ -1290,7 +1292,7 @@ export default async function plugin(bb: BbPluginApi) {
       } else if (thread.archivedAt !== null) {
         update = settle;
       } else if (card.stage_id === intake?.id && card.run_state !== "stopped") {
-        if (thread.status === "idle" && live && !live.has(card.thread_id) && (card.run_state === "idle" || card.run_state === "working")) update = { set: "stage_id = ?, run_state = 'completed', attention_reason = NULL, read_at = NULL", values: [getSystemStage("done").id] };
+        if (thread.status === "idle" && live && !live.has(card.thread_id) && (card.run_state === "idle" || card.run_state === "working")) update = { set: "stage_id = ?, run_state = 'completed', attention_reason = NULL, read_at = CASE WHEN read_at IS ? THEN NULL ELSE read_at END", values: [getSystemStage("done").id, card.read_at] };
         else if (thread.status === "error") {
           update = {
             set: "run_state = 'failed', attention_reason = 'The assigned BB thread failed.', settled_at = COALESCE(settled_at, ?)",
@@ -1305,14 +1307,15 @@ export default async function plugin(bb: BbPluginApi) {
       } else if (live && (card.run_state === "working" || card.run_state === "idle") && thread.status === "idle" && !live.has(card.thread_id)) {
         if (getTaskByThread(card.thread_id)?.stage_id !== card.stage_id) continue;
         const role = getStageRow(card.stage_id).system_role;
-        if (role === "active") update = { set: "stage_id = ?, run_state = 'completed', attention_reason = NULL, read_at = NULL", values: [getSystemStage("done").id] };
+        if (role === "active") update = { set: "stage_id = ?, run_state = 'completed', attention_reason = NULL, read_at = CASE WHEN read_at IS ? THEN NULL ELSE read_at END", values: [getSystemStage("done").id, card.read_at] };
         else if (role === "attention" || role === null) update = { set: "run_state = 'idle'", values: [] };
       }
       if (!update) continue;
       // `set` is always one of the literal fragments above; values stay bound parameters.
-      const result = db.prepare(`UPDATE triage_tasks SET ${update.set}, updated_at = ? WHERE id = ? AND updated_at = ? AND read_at IS ? AND settled_at IS NULL`)
-        .run(...update.values, now, card.id, card.updated_at, card.read_at);
-      if (result.changes && update.set.includes("run_state = 'completed'")) addEvent(card.id, "bb", "turn completed");
+      const completing = update.set.includes("run_state = 'completed'");
+      const result = db.prepare(`UPDATE triage_tasks SET ${update.set}, updated_at = ? WHERE id = ? AND updated_at = ? AND stage_id = ? AND run_state = ? AND (? OR read_at IS ?) AND settled_at IS NULL`)
+        .run(...update.values, now, card.id, card.updated_at, card.stage_id, card.run_state, completing ? 1 : 0, card.read_at);
+      if (result.changes && completing) addEvent(card.id, "bb", "turn completed");
     }
   };
   let backfilling = false;
@@ -1381,6 +1384,7 @@ export default async function plugin(bb: BbPluginApi) {
         for (const { thread, card } of restore) {
           if (!card || card.origin !== "mirror" || card.run_state !== "idle" || card.settled_at === null || !shouldMirror(thread) || thread.archivedAt !== null || thread.deletedAt !== null || thread.status !== "idle" || live.has(thread.id)) continue;
           if (thread.latestAttentionAt === null || thread.latestAttentionAt <= (thread.lastReadAt ?? 0)) continue;
+          if (card.read_at !== null && card.read_at >= thread.latestAttentionAt) continue;
           const role = db.prepare("SELECT system_role FROM triage_stages WHERE id = ?").get(card.stage_id) as { system_role: string | null } | undefined;
           if (!role || (role.system_role !== "intake" && role.system_role !== "active")) continue;
           const placement = db.prepare("SELECT 1 FROM triage_events WHERE task_id = ? AND actor = 'user' AND event LIKE 'moved to %' AND created_at >= ? LIMIT 1").get(card.id, thread.latestAttentionAt);

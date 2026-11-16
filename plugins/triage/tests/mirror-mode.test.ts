@@ -907,6 +907,18 @@ test("backfill restores the reported unread auto-settled mirror", async () => {
   expect(context.cardOf(thread.id).settled_at).not.toBeNull();
 });
 
+test.each([-1, 0, 1])("legacy restoration respects Triage read time relative to reply: %s", async (offset) => {
+  const context = await start();
+  const attention = Date.now() - 1000;
+  const thread = thr(`legacy-read-${offset}`, { status: "idle", latestAttentionAt: attention, lastReadAt: 0 });
+  const card = await context.mirror(thread);
+  context.db.prepare("UPDATE triage_tasks SET stage_id = 'stage-progress', settled_at = 42, read_at = ? WHERE id = ?").run(attention + offset, card.id);
+  context.ctx.list = worldOf([thread]).handler;
+  await runPass(context, 2);
+  if (offset < 0) expect(context.cardOf(thread.id)).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: null, read_at: null });
+  else expect(context.cardOf(thread.id)).toMatchObject({ stage_id: "stage-progress", run_state: "idle", settled_at: 42, read_at: attention + offset });
+});
+
 test("backfill protects acknowledged and ineligible legacy cards", async () => {
   const context = await start();
   const attention = Date.now() - 1000;
@@ -1643,7 +1655,41 @@ test("a child ending does not complete a root that is active or failed", async (
   }
 });
 
-test("a user read or settlement during liveness lookup wins over completion", async () => {
+test.each(["event", "backfill"])("failed root stays failed during child activity through %s until root resumes", async (path) => {
+  const context = await startQuiet();
+  const { cardOf, emit, known, mirror } = context;
+  const root = thr(`failed-root-${path}`, { status: "error" });
+  await mirror(thr(root.id, { status: "active" }));
+  await emit("thread.failed", { thread: root, error: "failure" });
+  known.set(root.id, root);
+  const child = kid(`failed-child-${path}`, root.id);
+  known.set(child.id, child);
+  const before = { ...cardOf(root.id) };
+  if (path === "event") await emit("thread.active", { thread: child });
+  else {
+    context.ctx.list = worldOf([root, child]).handler;
+    running(context, child.id);
+    await rerun(context, 1);
+  }
+  expect(cardOf(root.id)).toStrictEqual(before);
+  await emit("thread.active", { thread: thr(root.id, { status: "active" }) });
+  expect(cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", attention_reason: null, settled_at: null });
+});
+
+test.each(["idle", "active", "starting"])("child activity respects a failed card when root status is %s", async (status) => {
+  const context = await startQuiet();
+  const { cardOf, emit, known, mirror } = context;
+  const id = `failed-card-${status}`;
+  await mirror(thr(id, { status: "active" }));
+  await emit("thread.failed", { thread: thr(id, { status: "error" }), error: "failure" });
+  known.set(id, thr(id, { status }));
+  const before = { ...cardOf(id) };
+  await emit("thread.active", { thread: kid(`child-${id}`, id) });
+  if (status === "idle") expect(cardOf(id)).toStrictEqual(before);
+  else expect(cardOf(id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", attention_reason: null, settled_at: null });
+});
+
+test("completion preserves a concurrent read and respects concurrent settlement", async () => {
   const context = await startQuiet();
   const { cardOf, ctx, emit, mirror, rpc } = context;
   for (const action of ["read", "settle"]) {
@@ -1656,12 +1702,51 @@ test("a user read or settlement during liveness lookup wins over completion", as
     await until(() => asked);
     if (action === "read") await rpc("setTaskRead", { number: card.number, read: true });
     else await rpc("setTaskSettled", { number: card.number, settled: true });
+    const readAt = cardOf(id).read_at;
     gate.resolve([]);
     await idle;
-    expect(cardOf(id)).toMatchObject({ stage_id: "stage-progress", run_state: "working" });
-    if (action === "read") expect(cardOf(id).read_at).not.toBeNull();
-    else expect(cardOf(id).settled_at).not.toBeNull();
+    if (action === "read") expect(cardOf(id)).toMatchObject({ stage_id: "stage-completed", run_state: "completed", read_at: readAt, settled_at: null });
+    else {
+      expect(cardOf(id)).toMatchObject({ stage_id: "stage-progress", run_state: "working" });
+      expect(cardOf(id).settled_at).not.toBeNull();
+    }
   }
+});
+
+test("reconciliation completes while preserving a concurrent read", async () => {
+  const context = await startQuiet();
+  const { ctx, cardOf, mirror, rpc } = context;
+  const card = await mirror(thr("reconcile-read", { status: "active" }));
+  ctx.list = worldOf([thr("reconcile-read", { status: "idle" })]).handler;
+  const gate = deferred<unknown[]>();
+  let calls = 0;
+  ctx.running = () => (++calls === 2 ? gate.promise : []);
+  context.db.prepare("UPDATE triage_tasks SET created_at = 1 WHERE id = ?").run(card.id);
+  await context.harness.behavior.setSettings({ autoCardThreads: false });
+  await context.harness.behavior.setSettings({ autoCardThreads: true });
+  await until(() => calls === 2);
+  await rpc("setTaskRead", { number: card.number, read: true });
+  const readAt = cardOf("reconcile-read").read_at;
+  gate.resolve([]);
+  await flush();
+  await flush();
+  expect(cardOf("reconcile-read")).toMatchObject({ stage_id: "stage-completed", run_state: "completed", read_at: readAt, settled_at: null });
+});
+
+test("a concurrent read is retained when liveness lookup fails", async () => {
+  const context = await startQuiet();
+  const { cardOf, ctx, emit, mirror, rpc } = context;
+  const card = await mirror(thr("read-failed-lookup", { status: "active" }));
+  const gate = deferred<unknown[]>();
+  let asked = false;
+  ctx.running = async () => { asked = true; await gate.promise; throw new Error("lookup failed"); };
+  const idle = emit("thread.idle", { thread: thr("read-failed-lookup", { status: "idle" }) });
+  await until(() => asked);
+  await rpc("setTaskRead", { number: card.number, read: true });
+  const readAt = cardOf("read-failed-lookup").read_at;
+  gate.resolve([]);
+  await idle;
+  expect(cardOf("read-failed-lookup")).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null, read_at: readAt });
 });
 
 test("a child end under a card that is not working, failed, stopped, done, manual or missing makes no lookup", async () => {
