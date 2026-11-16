@@ -480,19 +480,20 @@ describe("realtime notifications", () => {
 });
 
 describe("card actions", () => {
-  test("a completed mirror remains on the default board until settled", async () => {
-    let settledAt: number | null = null;
+  test("opening a completed card removes it before the read call completes", async () => {
+    const read = deferred<unknown>();
     const completed = task({ number: 10, title: "Finished mirror", origin: "mirror", threadId: "finished", stageId: "stage-completed", runState: "completed" });
     const view = renderBoard({
-      snapshot: () => ({ ...cloneSnapshot(), tasks: [{ ...completed, settledAt }] }),
-      setTaskSettled: () => { settledAt = 123; return { ...completed, settledAt }; },
+      snapshot: () => ({ ...cloneSnapshot(), tasks: [completed] }),
+      setTaskRead: () => read.promise,
     });
     await screen.findByText("Finished mirror");
     expect(within(columnOf("Completed")).getByText("Finished mirror")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Mark Triage #10 settled" }));
-    await waitFor(() => expect(view.inspection.rpcCalls).toContainEqual({ method: "setTaskSettled", input: { number: 10, settled: true } }));
-    await view.behavior.emitRealtime("triage", { kind: "changed", at: Date.now() });
-    await waitFor(() => expect(screen.queryByText("Finished mirror")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Finished mirror" }));
+    expect(screen.queryByText("Finished mirror")).toBeNull();
+    expect(view.inspection.rpcCalls).toContainEqual({ method: "setTaskRead", input: { number: 10, read: true } });
+    expect(view.inspection.rpcCalls.some((call: any) => call.method === "setTaskSettled")).toBe(false);
+    read.release({ ...completed, readAt: 123, settledAt: 123 });
   });
 
   test("the settle button settles, and the settled lens offers the reopen", async () => {

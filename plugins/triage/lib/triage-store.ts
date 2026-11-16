@@ -87,8 +87,13 @@ export function patchTaskStage(taskNumber: number, stageId: string): void {
 
 export function patchTaskRead(taskNumber: number, read: boolean): void {
   if (!state.snapshot) return;
+  const stages = state.snapshot.stages;
+  const now = Date.now();
   setState({ ...state, snapshot: { ...state.snapshot, tasks: state.snapshot.tasks.map((task) =>
-    task.number === taskNumber ? { ...task, readAt: read ? Date.now() : null } : task,
+    task.number === taskNumber ? {
+      ...task, readAt: read ? now : null,
+      ...(stages.find((stage) => stage.id === task.stageId)?.systemRole === "done" ? { settledAt: read ? now : null } : {}),
+    } : task,
   ) } });
 }
 

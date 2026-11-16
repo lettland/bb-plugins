@@ -40,7 +40,10 @@ async function setup() {
   const { bb, harness } = createFakePluginHost({
     pluginId: "triage",
     sdk: {
+      subscribe: () => () => {},
       threads: {
+        markRead: async () => thread,
+        markUnread: async () => thread,
         get: async () => thread,
         list: async () => [],
         spawn: async () => makeThreadResponse({ id: `spawned-${(spawnCount += 1)}` }),
@@ -544,6 +547,17 @@ test("setTaskSettled archives a resolved card without losing its stage", async (
     const unread = await rpc("setTaskRead", { number: task.number, read: false });
     expect(unread.readAt).toBe(null);
     await expect(rpc("setTaskSettled", { number: 999, settled: true })).rejects.toThrow(/was not found/);
+  } finally { await harness.lifecycle.dispose(); }
+});
+
+test("reopening an unlinked read completed card clears its read marker", async () => {
+  const { harness, createTask, rpc } = await setup();
+  try {
+    const task = await createTask();
+    await rpc("moveTask", { number: task.number, stageId: "stage-completed" });
+    await rpc("setTaskRead", { number: task.number, read: true });
+    expect(await rpc("setTaskSettled", { number: task.number, settled: false })).toMatchObject({ readAt: null, settledAt: null });
+    expect(harness.inspection.sdk.callsTo("threads.markUnread")).toHaveLength(0);
   } finally { await harness.lifecycle.dispose(); }
 });
 

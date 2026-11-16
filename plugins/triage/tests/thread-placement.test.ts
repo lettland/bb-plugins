@@ -8,6 +8,7 @@ async function setup(options: { failUpdate?: boolean; archived?: boolean } = {})
   const { bb, harness } = createFakePluginHost({
     pluginId: "triage",
     sdk: {
+      subscribe: () => () => {},
       threads: {
         get: async () => thread,
         // The snapshot reads carded sessions through batched list calls; the

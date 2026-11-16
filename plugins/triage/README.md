@@ -94,16 +94,21 @@ Review. Hidden sessions and child sessions stay out of automatic mirroring.
 Mirror cards do not change sidebar visibility, and deleting a session removes
 its card.
 
-When a session finishes its turn, a mirror card in To Do or In Progress moves
-to Completed and stays visible until you select Mark settled. Reading the
-reply does not hide the card. A new turn moves the card back to In Progress. A
-running child keeps the top-level card working until the work stops. Cards
-placed in Human Review or a custom column keep that placement. Failed or
-archived sessions retain their existing handling.
+Completed contains finished turns you have not read. Opening a completed card
+or marking its thread read removes the card automatically, including when you
+read through the regular sidebar. No manual settlement is required. Read cards
+remain available in the Settled view. Marking a completed card unread returns
+it to Completed.
+
+A new turn moves the card to In Progress. A running child keeps the top-level
+card working until the work stops. Reading a working card, a Human Review card,
+or a card in a custom column does not hide it. Cards in Human Review or a custom
+column keep their placement. Failed or archived sessions retain their existing
+handling.
 
 Unread replies hidden by the earlier automatic-settlement behavior return to
-Completed. Cards you explicitly settled and historical replies you already
-read stay settled. Turn automatic mirroring off in Settings → Triage
+Completed. Already-read completed cards leave Completed when Triage loads. Turn
+automatic mirroring off in Settings → Triage
 (Automatically card every session). Existing mirror cards remain until deleted
 individually.
 

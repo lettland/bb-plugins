@@ -16,6 +16,7 @@ async function setup() {
   const { bb, harness } = createFakePluginHost({
     pluginId: "triage",
     sdk: {
+      subscribe: () => () => {},
       threads: {
         get: async () => thread,
         defaultExecutionOptions: async () => null,

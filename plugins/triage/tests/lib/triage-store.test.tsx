@@ -84,6 +84,7 @@ function StoreProbe() {
               data-number={taskItem.number}
               data-stage={taskItem.stageId}
               data-read={taskItem.readAt === null ? "unread" : "read"}
+              data-settled={taskItem.settledAt === null ? "open" : "settled"}
             >
               #{taskItem.number}
             </span>
@@ -211,6 +212,21 @@ describe("useTriage and refreshTriage", () => {
 });
 
 describe("optimistic patches", () => {
+  test("read patches settle only cards in the done stage", async () => {
+    const fixture = {
+      ...SNAPSHOT,
+      stages: [...SNAPSHOT.stages, { id: "done", name: "Done", position: 300, systemRole: "done" as const }, { id: "custom", name: "Custom", position: 400, systemRole: null }],
+      tasks: [task({ number: 1, stageId: "done", runState: "completed" }), task({ number: 2, stageId: "custom", runState: "completed" })],
+    };
+    await refreshTriage(fakeRpc({ snapshot: () => fixture }) as unknown as TriageRpc);
+    renderStoreProbe({ snapshot: () => fixture });
+    const probe = screen.getByTestId("store");
+    act(() => { patchTaskRead(1, true); patchTaskRead(2, true); });
+    expect(probe.querySelector<HTMLElement>('[data-number="1"]')?.dataset.settled).toBe("settled");
+    expect(probe.querySelector<HTMLElement>('[data-number="2"]')?.dataset.settled).toBe("open");
+    act(() => patchTaskRead(1, false));
+    expect(probe.querySelector<HTMLElement>('[data-number="1"]')?.dataset.settled).toBe("open");
+  });
   test("patches rewrite the matching card for every subscriber at once", async () => {
     await refreshTriage(snapshotRpc());
     renderStoreProbe({ snapshot: () => SNAPSHOT });
