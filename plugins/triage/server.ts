@@ -678,19 +678,29 @@ export default async function plugin(bb: BbPluginApi) {
     }, PUBLISH_DEBOUNCE_MS);
   };
 
+  const responseChecks = new Map<string, Set<{ valid: boolean }>>();
+  const invalidateResponseChecks = (threadId: string) => {
+    for (const check of responseChecks.get(threadId) ?? []) check.valid = false;
+  };
+
   const clearAnsweredHandoff = async (threadId: string) => {
     if (disposed || !autoCardThreads) return false;
     const generation = mirroringGeneration;
-    const wanted = () => !disposed && autoCardThreads && generation === mirroringGeneration;
     const card = getTaskByThread(threadId);
     if (!card || card.origin !== "mirror" || card.run_state === "stopped" || card.run_state === "failed" || card.settled_at !== null || getStageRow(card.stage_id).system_role !== "attention") return false;
     const placement = db.prepare("SELECT rowid, created_at FROM triage_events WHERE task_id = ? AND event LIKE 'moved to %' ORDER BY rowid DESC LIMIT 1").get(card.id) as { rowid: number; created_at: number } | undefined;
     if (!placement) return false;
+    const check = { valid: true };
+    const checks = responseChecks.get(threadId) ?? new Set();
+    checks.add(check);
+    responseChecks.set(threadId, checks);
+    const wanted = () => check.valid && !disposed && autoCardThreads && generation === mirroringGeneration;
     try {
       if (!await hasUserResponse(bb, threadId, placement.created_at, wanted) || !wanted()) return false;
       if ((await bb.sdk.threads.interactions.list({ threadId })).length > 0 || !wanted()) return false;
       const thread = await bb.sdk.threads.get({ threadId });
       if (!wanted() || !thread || !isMirrorable(thread) || thread.status === "error" || thread.archivedAt !== null || thread.deletedAt !== null) return false;
+      if ((await bb.sdk.threads.interactions.list({ threadId })).length > 0 || !wanted()) return false;
       const current = getTaskByThread(threadId);
       const latest = db.prepare("SELECT rowid FROM triage_events WHERE task_id = ? AND event LIKE 'moved to %' ORDER BY rowid DESC LIMIT 1").get(card.id) as { rowid: number } | undefined;
       if (!current || current.id !== card.id || current.stage_id !== card.stage_id || current.run_state === "stopped" || current.run_state === "failed" || current.settled_at !== null || latest?.rowid !== placement.rowid) return false;
@@ -701,11 +711,15 @@ export default async function plugin(bb: BbPluginApi) {
     } catch (error) {
       if (!disposed) bb.log.warn(`Triage could not check responses for session ${threadId}: ${errorMessage(error)}`);
       return false;
+    } finally {
+      checks.delete(check);
+      if (checks.size === 0) responseChecks.delete(threadId);
     }
   };
 
   let readStateGeneration = 0;
   const unsubscribeReadState = bb.sdk.subscribe({ event: "thread:changed", callback: (event) => {
+    if (event.id && event.changes.includes("interactions-changed")) invalidateResponseChecks(event.id);
     if (event.id && event.changes.includes("events-appended")) void clearAnsweredHandoff(event.id);
     if (!event.changes.includes("read-state-changed")) return;
     if (event.id) {
@@ -716,6 +730,7 @@ export default async function plugin(bb: BbPluginApi) {
     publishSoon();
   } });
   bb.onDispose(unsubscribeReadState);
+  bb.events.on("interaction.pending", ({ thread }) => { invalidateResponseChecks(thread.id); });
 
   const notify = (input: {
     taskNumber: number | null;

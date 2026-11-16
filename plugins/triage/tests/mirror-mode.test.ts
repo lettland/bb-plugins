@@ -2239,6 +2239,100 @@ test("a user reply returns Human Review to In Progress on activity", async () =>
   expect(cardOf(thread.id).stage_id).toBe("stage-progress");
 });
 
+// auto-review/src/detect-plan-form.ts:planFormResolution accepts only app-submitted form answers.
+test.each([["app", true], ["api", false], [undefined, false], ["unknown", false]])("plugin form answer via %s clears only app submissions", async (answeredVia, clears) => {
+  const { mirror, rpc, emit, cardOf, harness } = await startQuiet();
+  const thread = thr("form-answer", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  harness.inspection.sdk.stub("threads.events.list", async () => [{ seq: 1, createdAt: Date.now() + 1000, type: "system/interaction/lifecycle", data: { interaction: {
+    id: "form-1", origin: { kind: "plugin", pluginId: "example", rendererId: "form" },
+    payload: { kind: "plugin", title: "Question" }, status: "resolved",
+    resolution: { kind: "plugin_submitted", ...(answeredVia === undefined ? {} : { answeredVia }) },
+  } } }]);
+  await emit("thread.active", { thread });
+  expect(cardOf(thread.id).stage_id).toBe(clears ? "stage-progress" : "stage-attention");
+});
+
+test.each(["realtime", "pending"])("new interaction during thread lookup preserves handoff via %s", async (source) => {
+  const { mirror, rpc, emit, cardOf, harness, ctx } = await startQuiet();
+  const thread = thr("pending-race", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  harness.inspection.sdk.stub("threads.events.list", async () => [{ seq: 1, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "user", originPluginId: null, senderThreadId: null } }]);
+  const gate = deferred<any>();
+  let asked = false;
+  let pending = false;
+  harness.inspection.sdk.stub("threads.interactions.list", async () => pending ? [{ id: "question-2" }] : []);
+  harness.inspection.sdk.stub("threads.get", async () => { asked = true; return gate.promise; });
+  const active = emit("thread.active", { thread });
+  await until(() => asked);
+  pending = true;
+  if (source === "realtime") ctx.readChanged({ id: thread.id, changes: ["interactions-changed"] });
+  else await emit("interaction.pending", { thread, interaction: { id: "question-2" } });
+  gate.resolve(thread);
+  await active;
+  expect(cardOf(thread.id).stage_id).toBe("stage-attention");
+});
+
+test("a pending interaction discovered after thread lookup preserves the handoff without a notification", async () => {
+  const { mirror, rpc, emit, cardOf, harness } = await startQuiet();
+  const thread = thr("pending-unannounced", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  harness.inspection.sdk.stub("threads.events.list", async () => [{ seq: 1, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "user", originPluginId: null, senderThreadId: null } }]);
+  const gate = deferred<any>();
+  let asked = false;
+  let pending = false;
+  harness.inspection.sdk.stub("threads.interactions.list", async () => pending ? [{ id: "question-2" }] : []);
+  harness.inspection.sdk.stub("threads.get", async () => { asked = true; return gate.promise; });
+  const active = emit("thread.active", { thread });
+  await until(() => asked);
+  pending = true;
+  gate.resolve(thread);
+  await active;
+  expect(cardOf(thread.id).stage_id).toBe("stage-attention");
+});
+
+test.each(["realtime", "pending"])("another thread's interaction does not cancel a response check via %s", async (source) => {
+  const { mirror, rpc, emit, cardOf, harness, ctx } = await startQuiet();
+  const thread = thr("unrelated-race", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  harness.inspection.sdk.stub("threads.events.list", async () => [{ seq: 1, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "user", originPluginId: null, senderThreadId: null } }]);
+  const gate = deferred<any>();
+  let asked = false;
+  harness.inspection.sdk.stub("threads.get", async () => { asked = true; return gate.promise; });
+  const active = emit("thread.active", { thread });
+  await until(() => asked);
+  if (source === "realtime") ctx.readChanged({ id: "other-root", changes: ["interactions-changed"] });
+  else await emit("interaction.pending", { thread: thr("other-root"), interaction: { id: "question" } });
+  gate.resolve(thread);
+  await active;
+  expect(cardOf(thread.id).stage_id).toBe("stage-progress");
+});
+
+test("a new interaction invalidates concurrent response checks for the same thread", async () => {
+  const { mirror, rpc, emit, cardOf, harness, ctx } = await startQuiet();
+  const thread = thr("concurrent-responses", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  harness.inspection.sdk.stub("threads.events.list", async () => [{ seq: 1, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "user", originPluginId: null, senderThreadId: null } }]);
+  const first = deferred<any>();
+  const second = deferred<any>();
+  let calls = 0;
+  harness.inspection.sdk.stub("threads.get", async () => (++calls === 1 ? first.promise : second.promise));
+  const active1 = emit("thread.active", { thread });
+  const active2 = emit("thread.active", { thread });
+  await until(() => calls === 2);
+  ctx.readChanged({ id: thread.id, changes: ["interactions-changed"] });
+  first.resolve(thread);
+  await active1;
+  second.resolve(thread);
+  await active2;
+  expect(cardOf(thread.id).stage_id).toBe("stage-attention");
+});
+
 test.each([
   ["answer", { status: "resolved", resolution: { kind: "user_answer" } }, true],
   ["request answer", { status: "resolved", resolution: { kind: "request_answer" } }, true],
