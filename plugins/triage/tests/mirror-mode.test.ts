@@ -1183,6 +1183,13 @@ test("agent configuration: mirror and manual cards get the stage tool", async ()
   const manual = await configFor("c-manual");
   expect(JSON.stringify(manual)).toContain("triage_move_task");
   expect(JSON.stringify(manual)).toContain("You own Triage #");
+  for (const config of [mirrored, manual]) {
+    expect(JSON.stringify(config)).toContain("Do not call triage_move_task to move the card to Completed.");
+    expect(JSON.stringify(config)).not.toContain("Before your final response, call triage_move_task");
+  }
+  const tool = harness.inspection.registrations.agentTools.find((entry) => entry.name === "triage_move_task");
+  expect(tool?.instructions).toContain("Do not call this tool to mark work completed.");
+  expect(tool?.instructions).not.toContain("move completed work to the completion stage");
 });
 
 test("the sidebar setting sweeps manual cards' sessions only", async () => {

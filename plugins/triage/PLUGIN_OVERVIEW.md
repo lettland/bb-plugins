@@ -14,9 +14,10 @@ Each card opens its linked conversation.
 - Optionally show linked sessions in the sidebar.
 
 Agents in automatically mirrored sessions and assigned tasks receive
-`triage_move_task` when BB next starts their agent session. They move finished
-work to Completed and work that needs your input to Human Review. An idle turn
-alone does not mark a task complete.
+`triage_move_task` when BB next starts their agent session. They use it for
+active work and work that needs your input. Agents do not call it to mark work
+Completed. Automatically mirrored sessions move to Completed through BB's
+existing lifecycle.
 Use `bb triage list`, `bb triage show`, and `bb triage move` from the CLI.
 
 ## Requirements

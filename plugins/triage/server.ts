@@ -845,7 +845,7 @@ export default async function plugin(bb: BbPluginApi) {
     const done = getSystemStage("done").name;
     return `Available stages: ${listStages().map((stage) => stage.name).join(", ")}. ` +
       `Keep the card's stage accurate using triage_move_task. ${intake} means work has not started; use ${active} while working, including when resuming a completed task for new requests. ` +
-      `Before your final response, call triage_move_task with ${done} when the requested scope is satisfied, relevant verification passed, and no required work remains. Do not leave finished work in ${intake} or ${active}. ` +
+      `Do not call triage_move_task to move the card to ${done}. ` +
       `Use ${attention} when a person must approve, decide, provide access, or interpret incomplete verification. Explain what is needed in the summary. ` +
       `A turn ending does not by itself mean the task is complete. For a user-created stage, use it only when its name unambiguously matches the work state; otherwise use ${attention} and explain why.`;
   };
@@ -1893,7 +1893,7 @@ export default async function plugin(bb: BbPluginApi) {
     description:
       "Move the Triage card assigned to this BB thread into another workflow stage and leave a concise handoff summary.",
     instructions:
-      "Keep the assigned card accurate when work starts or resumes. Before the final response, move completed work to the completion stage or work requiring user input to the attention stage, with a concise summary.",
+      "Keep the assigned card accurate when work starts or resumes. Move work requiring user input to the attention stage with a concise summary. Do not call this tool to mark work completed.",
     presentation: {
       label: {
         pending: "Updating the Triage card",

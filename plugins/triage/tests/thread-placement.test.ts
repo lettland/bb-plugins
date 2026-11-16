@@ -187,9 +187,9 @@ test("agent instructions explain completion and attention using current stage na
     await harness.behavior.callRpc("renameStage", { id: "stage-completed", name: "Shipped" });
     const config = await harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: thread.id } }));
     const instructions = JSON.stringify(config);
-    expect(instructions).toMatch(/Before your final response/);
-    expect(instructions).toMatch(/call triage_move_task with Shipped/);
-    expect(instructions).toMatch(/Do not leave finished work/);
+    expect(instructions).toContain("Do not call triage_move_task to move the card to Shipped.");
+    expect(instructions).not.toContain("Before your final response, call triage_move_task");
+    expect(instructions).not.toContain("Do not leave finished work");
     expect(instructions).toMatch(/approve, decide, provide access/);
   } finally { await harness.lifecycle.dispose(); }
 });
