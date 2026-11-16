@@ -1,6 +1,6 @@
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { hasUserResponse } from "./lib/handoff-responses.ts";
+import { hasUserResponse, type ResponseProgress } from "./lib/handoff-responses.ts";
 
 const stageSchema = z.object({
   id: z.string(),
@@ -525,6 +525,7 @@ export default async function plugin(bb: BbPluginApi) {
   let showThreadsInSidebar = initialSettings.showThreadsInSidebar;
   let autoCardThreads = initialSettings.autoCardThreads;
   let mirroringGeneration = 0;
+  const responseProgress = new Map<string, { cardId: string; placementId: number; progress?: ResponseProgress }>();
   const pendingVisibility = new Map<string, { visible: boolean }>();
   // A mirror card's creation in flight, by thread id. Lifecycle events for that
   // thread wait for it, or they find no card yet and are lost.
@@ -535,6 +536,7 @@ export default async function plugin(bb: BbPluginApi) {
     disposed = true;
     pendingVisibility.clear();
     pendingMirror.clear();
+    responseProgress.clear();
     clearTimeout(publishTimer);
   });
   let sidebarWrites: Promise<unknown> = Promise.resolve();
@@ -567,6 +569,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (next.autoCardThreads !== prev.autoCardThreads) mirroringGeneration += 1;
     showThreadsInSidebar = next.showThreadsInSidebar;
     autoCardThreads = next.autoCardThreads;
+    if (!autoCardThreads) responseProgress.clear();
     // Turning mirroring off is not destructive; turning it on catches up.
     if (next.autoCardThreads && !prev.autoCardThreads) void runBackfill();
     if (next.showThreadsInSidebar === prev.showThreadsInSidebar) return;
@@ -641,6 +644,8 @@ export default async function plugin(bb: BbPluginApi) {
         updatedAt !== undefined &&
         db.prepare("SELECT 1 FROM triage_tasks WHERE id = ? AND updated_at = ?").get(taskId, updatedAt) === undefined
       ) return false;
+      const task = db.prepare("SELECT thread_id FROM triage_tasks WHERE id = ?").get(taskId) as { thread_id: string };
+      responseProgress.delete(task.thread_id);
       db.prepare("DELETE FROM triage_events WHERE task_id = ?").run(taskId);
       db.prepare("DELETE FROM triage_tasks WHERE id = ?").run(taskId);
       return true;
@@ -687,16 +692,36 @@ export default async function plugin(bb: BbPluginApi) {
     if (disposed || !autoCardThreads) return false;
     const generation = mirroringGeneration;
     const card = getTaskByThread(threadId);
-    if (!card || card.origin !== "mirror" || card.run_state === "stopped" || card.run_state === "failed" || card.settled_at !== null || getStageRow(card.stage_id).system_role !== "attention") return false;
+    if (!card || card.origin !== "mirror" || card.run_state === "stopped" || card.run_state === "failed" || card.settled_at !== null || getStageRow(card.stage_id).system_role !== "attention") {
+      responseProgress.delete(threadId);
+      return false;
+    }
     const placement = db.prepare("SELECT rowid, created_at FROM triage_events WHERE task_id = ? AND event LIKE 'moved to %' ORDER BY rowid DESC LIMIT 1").get(card.id) as { rowid: number; created_at: number } | undefined;
     if (!placement) return false;
+    let owner = responseProgress.get(threadId);
+    if (!owner || owner.cardId !== card.id || owner.placementId !== placement.rowid) {
+      owner = { cardId: card.id, placementId: placement.rowid };
+      responseProgress.set(threadId, owner);
+    }
+    const previous = owner.progress;
     const check = { valid: true };
     const checks = responseChecks.get(threadId) ?? new Set();
     checks.add(check);
     responseChecks.set(threadId, checks);
     const wanted = () => check.valid && !disposed && autoCardThreads && generation === mirroringGeneration;
     try {
-      if (!await hasUserResponse(bb, threadId, placement.created_at, wanted) || !wanted()) return false;
+      const scan = await hasUserResponse(bb, threadId, placement.created_at, wanted, previous);
+      if (scan.kind === "cancelled" || !wanted() || responseProgress.get(threadId) !== owner || owner.progress !== previous) return false;
+      const latestPlacement = db.prepare("SELECT rowid FROM triage_events WHERE task_id = ? AND event LIKE 'moved to %' ORDER BY rowid DESC LIMIT 1").get(card.id) as { rowid: number } | undefined;
+      const scanCard = getTaskByThread(threadId);
+      if (!scanCard || scanCard.id !== card.id || scanCard.stage_id !== card.stage_id || scanCard.run_state === "stopped" || scanCard.run_state === "failed" || scanCard.settled_at !== null || latestPlacement?.rowid !== placement.rowid) return false;
+      owner.progress = scan.progress;
+      if (scan.kind === "incomplete") {
+        retryBackfill = true;
+        startBackfillRetry();
+        return false;
+      }
+      if (scan.kind !== "found") return false;
       if ((await bb.sdk.threads.interactions.list({ threadId })).length > 0 || !wanted()) return false;
       const thread = await bb.sdk.threads.get({ threadId });
       if (!wanted() || !thread || !isMirrorable(thread) || thread.status === "error" || thread.archivedAt !== null || thread.deletedAt !== null) return false;
@@ -705,6 +730,7 @@ export default async function plugin(bb: BbPluginApi) {
       const latest = db.prepare("SELECT rowid FROM triage_events WHERE task_id = ? AND event LIKE 'moved to %' ORDER BY rowid DESC LIMIT 1").get(card.id) as { rowid: number } | undefined;
       if (!current || current.id !== card.id || current.stage_id !== card.stage_id || current.run_state === "stopped" || current.run_state === "failed" || current.settled_at !== null || latest?.rowid !== placement.rowid) return false;
       db.prepare("UPDATE triage_tasks SET stage_id = ?, attention_reason = NULL, updated_at = ? WHERE id = ?").run(getSystemStage("active").id, Date.now(), card.id);
+      responseProgress.delete(threadId);
       addEvent(card.id, "bb", `moved to ${getSystemStage("active").name}`);
       publishSoon();
       return thread;
@@ -777,6 +803,7 @@ export default async function plugin(bb: BbPluginApi) {
     shouldNotify = false,
   ) => {
     const task = getTaskRow(number);
+    if (task.thread_id) responseProgress.delete(task.thread_id);
     const stage = getStageRow(stageId);
     const now = Date.now();
     const nextRunState = stage.system_role === "done" ? "completed" : task.run_state;
@@ -935,6 +962,7 @@ export default async function plugin(bb: BbPluginApi) {
       } as SpawnArgs;
       const thread = await bb.sdk.threads.spawn(spawnArgs);
       const activeStage = getSystemStage("active");
+      responseProgress.delete(thread.id);
       db.transaction(() => {
         // The spawn can announce its thread before this link lands, so a mirror
         // card may already hold the id. The composer card is the commitment and
@@ -1558,7 +1586,7 @@ export default async function plugin(bb: BbPluginApi) {
         }
       }
       if (completed && mirroringWanted()) await reconcileMirrorCards(passStart, passCards);
-      publish();
+      if (mirroringWanted()) publish();
     } finally {
       backfilling = false;
       startBackfillRetry();
@@ -1826,6 +1854,7 @@ export default async function plugin(bb: BbPluginApi) {
         throw new Error(`Triage #${number} is not currently running`);
       }
       await bb.sdk.threads.stop({ threadId: task.thread_id });
+      responseProgress.delete(task.thread_id);
       db.prepare(
         "UPDATE triage_tasks SET run_state = 'stopped', updated_at = ? WHERE id = ?",
       ).run(Date.now(), task.id);
@@ -1836,6 +1865,7 @@ export default async function plugin(bb: BbPluginApi) {
     deleteTask({ number }) {
       const task = getTaskRow(number);
       if (task.thread_id) pendingVisibility.delete(task.thread_id);
+      if (task.thread_id) responseProgress.delete(task.thread_id);
       db.transaction(() => {
         if (task.origin === "mirror" && task.thread_id) {
           db.prepare("INSERT OR REPLACE INTO triage_mirror_tombstones (thread_id, created_at) VALUES (?, ?)")
@@ -2119,6 +2149,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.events.on("thread.archived", async ({ thread }) => {
+    responseProgress.delete(thread.id);
     if (thread.parentThreadId !== null) await trackChildHandler(childEnded(thread));
     const creating = pendingMirror.get(thread.id);
     if (creating) await creating;
@@ -2154,6 +2185,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.events.on("thread.deleted", async ({ thread }) => {
+    responseProgress.delete(thread.id);
     pendingVisibility.delete(thread.id);
     if (thread.parentThreadId !== null) await trackChildHandler(childEnded(thread));
     const creating = pendingMirror.get(thread.id);

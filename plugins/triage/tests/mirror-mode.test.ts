@@ -2323,6 +2323,7 @@ test("a new interaction invalidates concurrent response checks for the same thre
   let calls = 0;
   harness.inspection.sdk.stub("threads.get", async () => (++calls === 1 ? first.promise : second.promise));
   const active1 = emit("thread.active", { thread });
+  await until(() => calls === 1);
   const active2 = emit("thread.active", { thread });
   await until(() => calls === 2);
   ctx.readChanged({ id: thread.id, changes: ["interactions-changed"] });
@@ -2394,12 +2395,275 @@ test("event pagination stops at the handoff timestamp", async () => {
   const thread = thr("old-page", { status: "active" });
   const card = await mirror(thread);
   await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
-  harness.inspection.sdk.stub("threads.events.list", async () => Array.from({ length: 100 }, (_, i) => ({
+  harness.inspection.sdk.stub("threads.events.list", async (args: { afterSeq?: string }) => args.afterSeq ? [] : Array.from({ length: 100 }, (_, i) => ({
     seq: 200 - i, createdAt: i < 50 ? Date.now() + 1000 : 1, type: "client/turn/requested", data: { initiator: "agent" },
   })));
   const before = harness.inspection.sdk.callsTo("threads.events.list").length;
   await emit("thread.active", { thread });
-  expect(harness.inspection.sdk.callsTo("threads.events.list")).toHaveLength(before + 1);
+  expect(harness.inspection.sdk.callsTo("threads.events.list")).toHaveLength(before + 2);
+});
+
+test("short history catches a response arriving after its first snapshot", async () => {
+  const { mirror, rpc, emit, cardOf, ctx } = await startQuiet();
+  const thread = thr("short-catchup", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  const events = [{ seq: 1, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "agent" } as Record<string, unknown> }];
+  const calls: any[] = [];
+  ctx.events = (args) => {
+    calls.push(args);
+    const page = events.filter((event) => !args.afterSeq || event.seq > Number(args.afterSeq))
+      .sort((a, b) => args.order === "asc" ? a.seq - b.seq : b.seq - a.seq).slice(0, 100);
+    if (calls.length === 1) events.push({ seq: 2, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "user", originPluginId: null, senderThreadId: null } });
+    return page;
+  };
+  await emit("thread.active", { thread });
+  expect(cardOf(thread.id).stage_id).toBe("stage-progress");
+  expect(calls).toHaveLength(2);
+  expect(calls[1]).toMatchObject({ order: "asc", afterSeq: "1", limit: "100" });
+});
+
+test("forward catch-up resumes past full pages to find an older response", async () => {
+  const { mirror, rpc, emit, cardOf, ctx } = await startQuiet();
+  const thread = thr("forward-deep-response", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  const events = [{ seq: 1, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "agent" } as Record<string, unknown> }];
+  const calls: any[] = [];
+  ctx.events = (args) => {
+    calls.push(args);
+    const page = events.filter((event) => (!args.beforeSeq || event.seq < Number(args.beforeSeq)) && (!args.afterSeq || event.seq > Number(args.afterSeq)))
+      .sort((a, b) => args.order === "asc" ? a.seq - b.seq : b.seq - a.seq).slice(0, 100);
+    if (calls.length === 1) {
+      for (let seq = 2; seq <= 1001; seq += 1) events.push({ seq, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "agent" } });
+      events.push({ seq: 1002, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "user", originPluginId: null, senderThreadId: null } });
+      for (let seq = 1003; seq <= 1103; seq += 1) events.push({ seq, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "agent" } });
+    }
+    return page;
+  };
+  ctx.list = worldOf([thread]).handler;
+  await emit("thread.active", { thread });
+  await until(() => cardOf(thread.id).stage_id === "stage-progress");
+  expect(calls.filter((args) => args.order === "asc").map((args) => args.afterSeq)).toContain("901");
+  expect(calls.filter((args) => args.order === "asc").map((args) => args.afterSeq)).toContain("1001");
+});
+
+// Late independent review, 2026-11-16: a reply beyond 1,000 events must be reached by automatic retries.
+test("automatic backfill finds a response beyond the first event budget", async () => {
+  const { mirror, rpc, emit, cardOf, ctx } = await startQuiet();
+  const thread = thr("deep-response", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  const events = Array.from({ length: 1101 }, (_, i) => ({
+    seq: 1101 - i, createdAt: Date.now() + 1000, type: "client/turn/requested",
+    data: i === 1100 ? { initiator: "user", originPluginId: null, senderThreadId: null } : { initiator: "agent" },
+  }));
+  const batches: number[] = [];
+  ctx.events = (args) => {
+    if (!args.beforeSeq && !args.afterSeq) batches.push(0);
+    batches[batches.length - 1] += 1;
+    return events.filter((event) => (!args.beforeSeq || event.seq < Number(args.beforeSeq)) && (!args.afterSeq || event.seq > Number(args.afterSeq)))
+      .sort((a, b) => args.order === "asc" ? a.seq - b.seq : b.seq - a.seq).slice(0, Number(args.limit));
+  };
+  ctx.list = worldOf([thread]).handler;
+  await emit("thread.active", { thread });
+  await until(() => cardOf(thread.id).stage_id === "stage-progress");
+  expect(batches.length).toBeGreaterThan(1);
+  expect(Math.max(...batches)).toBeLessThanOrEqual(10);
+});
+
+test.each([0, 101])("recovery finds a new response followed by %i automated events", async (laterCount) => {
+  const { mirror, rpc, emit, cardOf, ctx } = await startQuiet();
+  const thread = thr("arriving-response", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  const events = Array.from({ length: 1101 }, (_, i) => ({ seq: 1101 - i, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "agent" } as Record<string, unknown> }));
+  let calls = 0;
+  let forwardCalls = 0;
+  ctx.events = (args) => {
+    calls += 1;
+    if (args.order === "asc") forwardCalls += 1;
+    const page = events.filter((event) => (!args.beforeSeq || event.seq < Number(args.beforeSeq)) && (!args.afterSeq || event.seq > Number(args.afterSeq)))
+      .sort((a, b) => args.order === "asc" ? a.seq - b.seq : b.seq - a.seq).slice(0, 100);
+    if (calls === 10) {
+      events.push({ seq: 1102, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "user", originPluginId: null, senderThreadId: null } });
+      for (let i = 0; i < laterCount; i += 1) events.push({ seq: 1103 + i, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "agent" } });
+    }
+    return page;
+  };
+  ctx.list = worldOf([thread]).handler;
+  await emit("thread.active", { thread });
+  await until(() => cardOf(thread.id).stage_id === "stage-progress");
+  if (laterCount) expect(forwardCalls).toBeGreaterThan(0);
+});
+
+test("automated history finishes without repeated backfills", async () => {
+  const { mirror, rpc, emit, cardOf, ctx } = await startQuiet();
+  const thread = thr("automated-history", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  const events = Array.from({ length: 1101 }, (_, i) => ({ seq: 1101 - i, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "agent" } }));
+  let calls = 0;
+  let forward = false;
+  ctx.events = (args) => {
+    calls += 1;
+    if (args.order === "asc") forward = true;
+    return events.filter((event) => (!args.beforeSeq || event.seq < Number(args.beforeSeq)) && (!args.afterSeq || event.seq > Number(args.afterSeq)))
+      .sort((a, b) => args.order === "asc" ? a.seq - b.seq : b.seq - a.seq).slice(0, 100);
+  };
+  ctx.list = worldOf([thread]).handler;
+  await emit("thread.active", { thread });
+  await until(() => forward);
+  await flush();
+  const finished = calls;
+  await flush();
+  await flush();
+  expect(calls).toBe(finished);
+  expect(cardOf(thread.id).stage_id).toBe("stage-attention");
+});
+
+test("a failed resumed scan does not retry in a loop", async () => {
+  const context = await startQuiet();
+  const { mirror, rpc, emit, cardOf, ctx } = context;
+  const thread = thr("failed-deep-scan", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  let calls = 0;
+  ctx.events = () => {
+    calls += 1;
+    if (calls > 10) throw new Error("unavailable");
+    return Array.from({ length: 100 }, (_, i) => ({ seq: 1200 - (calls - 1) * 100 - i, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "agent" } }));
+  };
+  ctx.list = worldOf([thread]).handler;
+  await emit("thread.active", { thread });
+  await until(() => warned(context, "could not check responses"));
+  await flush();
+  const finished = calls;
+  await flush();
+  await flush();
+  expect(calls).toBe(finished);
+  expect(cardOf(thread.id).stage_id).toBe("stage-attention");
+});
+
+test("a completed scan advances the forward cursor across full pages", async () => {
+  const { mirror, rpc, emit, cardOf, ctx, harness } = await startQuiet();
+  const thread = thr("forward-tail", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  let events: any[] = [];
+  ctx.events = (args) => events.filter((event) => (!args.beforeSeq || event.seq < Number(args.beforeSeq)) && (!args.afterSeq || event.seq > Number(args.afterSeq)))
+    .sort((a, b) => args.order === "asc" ? a.seq - b.seq : b.seq - a.seq).slice(0, 100);
+  await emit("thread.active", { thread });
+  events = Array.from({ length: 100 }, (_, i) => ({ seq: i + 1, createdAt: 1, type: "client/turn/requested", data: { initiator: "agent" } }));
+  const before = harness.inspection.sdk.callsTo("threads.events.list").length;
+  ctx.readChanged({ id: thread.id, changes: ["events-appended"] });
+  await until(() => harness.inspection.sdk.callsTo("threads.events.list").length >= before + 3);
+  await flush();
+  expect(cardOf(thread.id).stage_id).toBe("stage-attention");
+});
+
+test("a stage move during the final pending check wins over a found response", async () => {
+  const { mirror, rpc, emit, cardOf, harness, ctx } = await startQuiet();
+  const thread = thr("final-check-move", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  ctx.events = () => [{ seq: 1, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "user", originPluginId: null, senderThreadId: null } }];
+  const gate = deferred<any[]>();
+  let calls = 0;
+  harness.inspection.sdk.stub("threads.interactions.list", async () => (++calls === 2 ? gate.promise : []));
+  const active = emit("thread.active", { thread });
+  await until(() => calls === 2);
+  await rpc("moveTask", { number: card.number, stageId: "stage-todo" });
+  gate.resolve([]);
+  await active;
+  expect(cardOf(thread.id).stage_id).toBe("stage-todo");
+});
+
+test("a found response remains available while another interaction is pending", async () => {
+  const { mirror, rpc, emit, cardOf, ctx, harness } = await startQuiet();
+  const thread = thr("remember-response", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  let pending = true;
+  ctx.events = () => [{ seq: 1, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "user", originPluginId: null, senderThreadId: null } }];
+  harness.inspection.sdk.stub("threads.interactions.list", async () => pending ? [{ id: "question" }] : []);
+  await emit("thread.active", { thread });
+  expect(cardOf(thread.id).stage_id).toBe("stage-attention");
+  pending = false;
+  ctx.events = () => [];
+  ctx.readChanged({ id: thread.id, changes: ["events-appended"] });
+  await until(() => cardOf(thread.id).stage_id === "stage-progress");
+});
+
+test("reload resumes deep response recovery from history", async () => {
+  const { mirror, rpc, ctx, harness } = await startQuiet();
+  const thread = thr("reload-deep-response", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  const events = Array.from({ length: 1101 }, (_, i) => ({ seq: 1101 - i, createdAt: Date.now() + 1000, type: "client/turn/requested", data: i === 1100 ? { initiator: "user", originPluginId: null, senderThreadId: null } : { initiator: "agent" } }));
+  ctx.events = (args) => events.filter((event) => (!args.beforeSeq || event.seq < Number(args.beforeSeq)) && (!args.afterSeq || event.seq > Number(args.afterSeq)))
+    .sort((a, b) => args.order === "asc" ? a.seq - b.seq : b.seq - a.seq).slice(0, 100);
+  ctx.list = worldOf([thread]).handler;
+  const reloaded = await harness.lifecycle.reload(plugin);
+  const db = reloaded.bb.storage.database();
+  await until(() => (db.prepare("SELECT stage_id FROM triage_tasks WHERE id = ?").get(card.id) as any).stage_id === "stage-progress");
+  await reloaded.harness.lifecycle.dispose();
+});
+
+test("a replacement handoff discards a deep scan in flight", async () => {
+  const { mirror, rpc, emit, cardOf, ctx } = await startQuiet();
+  const thread = thr("replace-deep", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  const gate = deferred<any[]>();
+  let calls = 0;
+  ctx.events = () => {
+    calls += 1;
+    if (calls === 10) return gate.promise;
+    return Array.from({ length: 100 }, (_, i) => ({ seq: 1101 - (calls - 1) * 100 - i, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "agent" } }));
+  };
+  const active = emit("thread.active", { thread });
+  await until(() => calls === 10);
+  await rpc("moveTask", { number: card.number, stageId: "stage-progress" });
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  gate.resolve(Array.from({ length: 100 }, (_, i) => ({ seq: 201 - i, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "agent" } })));
+  await active;
+  await flush();
+  expect(calls).toBe(10);
+  expect(cardOf(thread.id).stage_id).toBe("stage-attention");
+});
+
+test("out-of-order scans cannot replace newer completed progress", async () => {
+  const { mirror, rpc, emit, cardOf, ctx } = await startQuiet();
+  const thread = thr("reverse-scans", { status: "active" });
+  const card = await mirror(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  const events = Array.from({ length: 1101 }, (_, i) => ({ seq: 1101 - i, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "agent" } }));
+  const first = deferred<any[]>();
+  const backfill = deferred<unknown[]>();
+  const requests: any[] = [];
+  let blocked = false;
+  ctx.list = () => { blocked = true; return backfill.promise; };
+  ctx.events = (args) => {
+    requests.push(args);
+    if (requests.length === 1) return first.promise;
+    return events.filter((event) => (!args.beforeSeq || event.seq < Number(args.beforeSeq)) && (!args.afterSeq || event.seq > Number(args.afterSeq)))
+      .sort((a, b) => args.order === "asc" ? a.seq - b.seq : b.seq - a.seq).slice(0, 100);
+  };
+  const slow = emit("thread.active", { thread });
+  await until(() => requests.length === 1);
+  await emit("thread.active", { thread });
+  await until(() => blocked);
+  await emit("thread.active", { thread });
+  first.resolve(events.slice(0, 100));
+  await slow;
+  const before = requests.length;
+  ctx.list = worldOf([thread]).handler;
+  backfill.resolve([]);
+  await until(() => requests.length >= before + 2);
+  await flush();
+  expect(requests.slice(before).some((args) => args.beforeSeq)).toBe(false);
+  expect(cardOf(thread.id).stage_id).toBe("stage-attention");
 });
 
 test.each([false, true])("event pagination checks at most ten pages (response on last page: %s)", async (responded) => {
@@ -2408,16 +2672,17 @@ test.each([false, true])("event pagination checks at most ten pages (response on
   const card = await mirror(thread);
   await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
   let calls = 0;
-  harness.inspection.sdk.stub("threads.events.list", async () => {
+  harness.inspection.sdk.stub("threads.events.list", async (args: { beforeSeq?: string; afterSeq?: string; order?: string }) => {
     calls += 1;
-    return Array.from({ length: 100 }, (_, index) => ({
-      seq: 1100 - (calls - 1) * 100 - index,
+    return Array.from({ length: 1000 }, (_, index) => ({
+      seq: 1000 - index,
       createdAt: Date.now() + 1000,
       type: "client/turn/requested",
-      data: responded && calls === 10 && index === 99
+      data: responded && index === 999
         ? { initiator: "user", originPluginId: null, senderThreadId: null }
         : { initiator: "user", originPluginId: "auto-review", senderThreadId: null },
-    }));
+    })).filter((event) => (!args.beforeSeq || event.seq < Number(args.beforeSeq)) && (!args.afterSeq || event.seq > Number(args.afterSeq)))
+      .sort((a, b) => args.order === "asc" ? a.seq - b.seq : b.seq - a.seq).slice(0, 100);
   });
   await emit("thread.active", { thread });
   expect(calls).toBe(10);
