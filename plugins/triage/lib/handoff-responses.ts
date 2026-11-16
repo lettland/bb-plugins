@@ -11,9 +11,9 @@ function isUserResponse(event: EventRow): boolean {
   // The event list request below limits rows to these two types.
   const { status, resolution } = (event as Extract<EventRow, { type: "system/interaction/lifecycle" }>).data.interaction;
   if (status !== "resolved" || !resolution) return false;
+  if ((resolution as typeof resolution & { answeredVia?: unknown }).answeredVia !== "app") return false;
   if ("kind" in resolution) {
-    if (resolution.kind === "plugin_submitted") return (resolution as typeof resolution & { answeredVia?: unknown }).answeredVia === "app";
-    return resolution.kind === "user_answer" || resolution.kind === "request_answer";
+    return resolution.kind === "plugin_submitted" || resolution.kind === "user_answer" || resolution.kind === "request_answer";
   }
   return resolution.decision === "allow_once" || resolution.decision === "allow_for_session";
 }

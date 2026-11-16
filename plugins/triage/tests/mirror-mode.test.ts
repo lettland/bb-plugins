@@ -2335,11 +2335,18 @@ test("a new interaction invalidates concurrent response checks for the same thre
 });
 
 test.each([
-  ["answer", { status: "resolved", resolution: { kind: "user_answer" } }, true],
-  ["request answer", { status: "resolved", resolution: { kind: "request_answer" } }, true],
-  ["approval once", { status: "resolved", resolution: { decision: "allow_once" } }, true],
-  ["session approval", { status: "resolved", resolution: { decision: "allow_for_session" } }, true],
-  ["denial", { status: "resolved", resolution: { decision: "deny" } }, false],
+  // BB core 349216e2c6, 2026-11-16 investigation: native resolution kinds also occur for automatic resolutions.
+  ...[
+    ["answer", { kind: "user_answer" }],
+    ["request answer", { kind: "request_answer" }],
+    ["approval once", { decision: "allow_once" }],
+    ["session approval", { decision: "allow_for_session" }],
+  ].flatMap(([name, resolution]) => ["app", "api", undefined, "unknown", null].map((answeredVia): [string, { status: string; resolution: Record<string, unknown> }, boolean] => [
+    `${name} via ${String(answeredVia)}`,
+    { status: "resolved", resolution: { ...resolution as object, ...(answeredVia === undefined ? {} : { answeredVia }) } },
+    answeredVia === "app",
+  ])),
+  ["app denial", { status: "resolved", resolution: { decision: "deny", answeredVia: "app" } }, false],
   ["pending", { status: "pending", resolution: null }, false],
   ["interrupted", { status: "interrupted", resolution: null }, false],
   ["cancelled", { status: "resolved", resolution: null }, false],
