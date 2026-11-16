@@ -75,8 +75,9 @@ function inferBump(id, tag, currentVersion) {
     console.log(`warning ${id}: changed but no non-merge commits in range; using patch`);
     return ["patch"];
   }
-  console.log(`${id}: ${bumps.join(", ")} (${bumps.length} commits${malformed ? `, ${malformed} malformed` : ""})`);
-  return bumps;
+  const selected = bumps.includes("major") ? ["major"] : bumps.includes("minor") ? ["minor"] : bumps;
+  console.log(`${id}: ${selected.join(", ")} (${bumps.length} commits${malformed ? `, ${malformed} malformed` : ""})`);
+  return selected;
 }
 
 const pluginsDir = "plugins";

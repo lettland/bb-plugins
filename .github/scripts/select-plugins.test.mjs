@@ -144,14 +144,38 @@ test("docs-only changes are a patch", () => {
   assert.deepEqual(bumps(select(repo)), { a: ["patch"] });
 });
 
-test("bumps follow commit order", () => {
+test("a mixed batch selects one minor and logs the commit count", () => {
   const repo = makeRepo();
   repo.change("plugins/a/x.txt", "fix: one");
   repo.change("plugins/a/y.txt", "feat: two");
   repo.change("plugins/a/z.txt", "docs: three");
   const res = select(repo);
-  assert.deepEqual(bumps(res), { a: ["patch", "minor", "patch"] });
-  assert.match(res.stdout, /^a: patch, minor, patch \(3 commits\)$/m);
+  assert.deepEqual(bumps(res), { a: ["minor"] });
+  assert.match(res.stdout, /^a: minor \(3 commits\)$/m);
+});
+
+test("a feature followed by a fix selects one minor", () => {
+  const repo = makeRepo();
+  repo.change("plugins/a/x.txt", "feat: one");
+  repo.change("plugins/a/y.txt", "fix: two");
+  assert.deepEqual(bumps(select(repo)), { a: ["minor"] });
+});
+
+test("major takes precedence and repeated breaking changes select one major", () => {
+  const repo = makeRepo({ a: "1.2.3" });
+  repo.change("plugins/a/x.txt", "feat: one");
+  repo.change("plugins/a/y.txt", "fix!: two");
+  repo.change("plugins/a/z.txt", "feat!: three");
+  repo.change("plugins/a/w.txt", "fix: four");
+  assert.deepEqual(bumps(select(repo)), { a: ["major"] });
+});
+
+test("breaking changes on 0.x select one effective minor with patches", () => {
+  const repo = makeRepo({ a: "0.3.1" });
+  repo.change("plugins/a/x.txt", "fix: one");
+  repo.change("plugins/a/y.txt", "fix!: two");
+  repo.change("plugins/a/z.txt", "feat!: three");
+  assert.deepEqual(bumps(select(repo)), { a: ["minor"] });
 });
 
 test("plugin histories use their own latest tag boundaries", () => {
@@ -161,7 +185,7 @@ test("plugin histories use their own latest tag boundaries", () => {
   repo.change("plugins/b/x.txt", "feat: b");
   repo.change("plugins/a/y.txt", "feat: a first");
   repo.change("plugins/a/z.txt", "feat: a second");
-  assert.deepEqual(bumps(select(repo)), { a: ["minor", "minor"], b: ["minor"] });
+  assert.deepEqual(bumps(select(repo)), { a: ["minor"], b: ["minor"] });
 });
 
 test("one commit touching a and b bumps both", () => {
@@ -197,8 +221,8 @@ test("empty and multi-line bodies split into separate commits", () => {
   repo.change("plugins/a/y.txt", "fix: body\n\nline one\nline two\nline three");
   repo.change("plugins/a/z.txt", "feat: last");
   const res = select(repo);
-  assert.deepEqual(bumps(res), { a: ["patch", "patch", "minor"] });
-  assert.match(res.stdout, /^a: patch, patch, minor \(3 commits\)$/m);
+  assert.deepEqual(bumps(res), { a: ["minor"] });
+  assert.match(res.stdout, /^a: minor \(3 commits\)$/m);
   assert.ok(!res.stdout.includes("malformed"), res.stdout);
 });
 

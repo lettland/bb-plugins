@@ -62,7 +62,9 @@ function exercise({ start = "0.3.1", commits = [], forced = "", onlyPlugin = "",
     for (const [name, action] of [["npm", "install"], ["npm", "run"], ["bb", "plugin"], ["git", "tag"], ["gh", "release"]]) {
       assert.equal(calls.filter((c) => c[0] === name && c[1] === action).length, 1, `${name} ${action}`);
     }
-    if (forced) assert.equal(calls.filter((c) => c[0] === "npm" && c[1] === "version").length, 1);
+    if (forced || commits.some((subject) => subject.startsWith("feat") || subject.includes("!:"))) {
+      assert.equal(calls.filter((c) => c[0] === "npm" && c[1] === "version").length, 1);
+    }
     for (const call of calls.filter((c) => (c[0] === "npm" && ["install", "run"].includes(c[1])) || c[0] === "bb")) {
       assert.deepEqual(call.slice(-2), [false, false]);
     }
@@ -84,10 +86,15 @@ for (const [name, options] of [
   ["fix and revert", { commits: ["fix: one"], revertLast: true, expected: "0.3.3" }],
   ["single patch", { commits: ["fix: one"], expected: "0.3.2" }],
   ["fix then feature", { commits: ["fix: one", "feat: two"], expected: "0.4.0" }],
-  ["feature then fix", { commits: ["feat: one", "fix: two"], expected: "0.4.1" }],
-  ["repeated features", { commits: ["feat: one", "feat: two"], expected: "0.5.0" }],
+  ["feature then fix", { commits: ["feat: one", "fix: two"], expected: "0.4.0" }],
+  ["repeated features", { commits: ["feat: one", "feat: two"], expected: "0.4.0" }],
+  // Commits a77a1f5, c515b38, and 9c3b840 led to release b3c7784 at 0.4.1.
+  ["reported triage batch", { start: "0.3.6", commits: ["build(triage): raise the plugin SDK to 0.6.104", "feat(triage): list board sessions in the thread context card", "fix(triage): leave completion calls to BB"], expected: "0.4.0" }],
   ["breaking on zero", { commits: ["fix!: one"], expected: "0.4.0" }],
   ["breaking on one", { start: "1.2.3", commits: ["fix!: one"], expected: "2.0.0" }],
+  ["mixed breaking on one", { start: "1.2.3", commits: ["feat: one", "fix!: two", "fix: three"], expected: "2.0.0" }],
+  ["repeated breaking on one", { start: "1.2.3", commits: ["fix!: one", "feat!: two"], expected: "2.0.0" }],
+  ["breaking with patches on zero", { commits: ["fix: one", "fix!: two", "fix!: three", "fix: four"], expected: "0.4.0" }],
   ["unchanged fallback", { onlyPlugin: "a", expected: "0.3.2" }],
   ["without publish token", { commits: ["fix: one"], expected: "0.3.2", canPublish: false }],
   ["forced patch", { commits: ["fix: one", "fix: two"], forced: "patch", expected: "0.3.2" }],
