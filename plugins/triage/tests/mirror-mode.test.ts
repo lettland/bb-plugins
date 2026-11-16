@@ -527,17 +527,34 @@ test("the sidebar setting sweeps manual cards' sessions only", async () => {
   expect(harness.inspection.sdk.callsTo("threads.update").some(([args]: any) => args.threadId === "v-mirror")).toBe(false);
 });
 
-test("an idle turn on a mirror card settles it and changes nothing else", async () => {
+test("finished unread mirror remains visible in Completed until settled", async () => {
+  const { cardOf, emit, mirror, rpc } = await start();
+  const card = await mirror(thr("finished-unread", { status: "active" }));
+  await emit("thread.idle", { thread: thr("finished-unread", { status: "idle" }) });
+  expect(cardOf("finished-unread")).toMatchObject({
+    stage_id: "stage-completed", run_state: "completed", settled_at: null, read_at: null,
+  });
+  await rpc("setTaskRead", { number: card.number, read: true });
+  const readAt = cardOf("finished-unread").read_at;
+  await emit("thread.idle", { thread: thr("finished-unread", { status: "idle" }) });
+  expect(cardOf("finished-unread")).toMatchObject({ read_at: readAt, settled_at: null });
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  const settledAt = cardOf("finished-unread").settled_at;
+  expect(settledAt).toBeGreaterThan(0);
+  await emit("thread.idle", { thread: thr("finished-unread", { status: "idle" }) });
+  expect(cardOf("finished-unread")).toMatchObject({ settled_at: settledAt, read_at: readAt });
+});
+
+test("an idle turn completes a mirror card and resets its read marker", async () => {
   const { cardOf, notifications, eventsOf, emit, mirror, rpc } = await start();
   const card = await mirror(thr("i-1", { status: "active" }));
   await rpc("setTaskRead", { number: card.number, read: true });
   const readAt = cardOf("i-1").read_at;
   expect(readAt).toBeGreaterThan(0);
   await emit("thread.idle", { thread: thr("i-1"), lastAssistantText: "Done" });
-  expect(cardOf("i-1")).toMatchObject({ run_state: "idle", read_at: readAt });
-  expect(cardOf("i-1").settled_at).toBeGreaterThan(0);
+  expect(cardOf("i-1")).toMatchObject({ stage_id: "stage-completed", run_state: "completed", read_at: null, settled_at: null });
   expect(notifications()).toStrictEqual([]);
-  expect(eventsOf(card.id)).toStrictEqual([{ actor: "bb", event: "mirrored" }]);
+  expect(eventsOf(card.id)).toStrictEqual([{ actor: "bb", event: "mirrored" }, { actor: "bb", event: "turn completed" }]);
   // A mirror card the user moved to the done stage keeps its completed state.
   await rpc("moveTask", { number: card.number, stageId: "stage-completed" });
   // It stays visible in the done column: the early return does not settle it.
@@ -550,14 +567,14 @@ test("an idle turn on a mirror card settles it and changes nothing else", async 
   expect(notifications()).toStrictEqual([]);
 });
 
-test("an idle mirror card keeps its first settled time, and reopens when its session is active again", async () => {
+test("a completed mirror keeps settlement on repeated idle and reopens on activity", async () => {
   const { db, cardOf, emit, mirror } = await start();
   await mirror(thr("r-1", { status: "active" }));
   await emit("thread.active", { thread: thr("r-1") });
   expect(cardOf("r-1")).toMatchObject({ stage_id: "stage-progress", settled_at: null });
   await emit("thread.idle", { thread: thr("r-1"), lastAssistantText: "Done" });
-  expect(cardOf("r-1").settled_at).toBeGreaterThan(0);
-  // COALESCE: a second idle turn does not move the settled time.
+  expect(cardOf("r-1")).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: null });
+  // A second idle event does not change an explicitly set settlement time.
   db.prepare("UPDATE triage_tasks SET settled_at = 41 WHERE thread_id = ?").run("r-1");
   await emit("thread.idle", { thread: thr("r-1"), lastAssistantText: "Done" });
   expect(cardOf("r-1").settled_at).toBe(41);
@@ -861,6 +878,92 @@ async function runPass(context: Setup, expectedCalls: number) {
 const idLookups = (context: Setup) =>
   (context.harness.inspection.sdk.callsTo("threads.list") as [ListArgs][]).map(([args]) => args).filter((args) => args.threadIds);
 
+// Regression provenance: reported card #3055 was idle and auto-settled despite an unread native reply.
+test.each(["failed", "stopped", "queued", "scheduled", "completed"])("backfill does not restore a settled %s card", async (state) => {
+  const context = await start();
+  const thread = thr(`legacy-${state}`, { status: "idle", latestAttentionAt: Date.now() - 1000, lastReadAt: 0 });
+  const card = await context.mirror(thread);
+  context.db.prepare("UPDATE triage_tasks SET stage_id = 'stage-progress', run_state = ?, settled_at = 42 WHERE id = ?").run(state, card.id);
+  context.ctx.list = worldOf([thread]).handler;
+  await runPass(context, 2);
+  expect(context.cardOf(thread.id)).toMatchObject({ stage_id: "stage-progress", run_state: state, settled_at: 42 });
+});
+
+test("backfill restores the reported unread auto-settled mirror", async () => {
+  const context = await start();
+  const thread = thr("thr_9bp6k4usyd", {
+    status: "idle", latestAttentionAt: 1794822963043, lastReadAt: 1794822909135,
+  });
+  await context.mirror(thread);
+  context.db.prepare("UPDATE triage_tasks SET stage_id = 'stage-progress', run_state = 'idle', read_at = NULL, settled_at = ? WHERE thread_id = ?")
+    .run(1794822963075, thread.id);
+  context.ctx.list = worldOf([thread]).handler;
+  await runPass(context, 2);
+  expect(context.cardOf(thread.id)).toMatchObject({
+    stage_id: "stage-completed", run_state: "completed", read_at: null, settled_at: null,
+  });
+  await context.rpc("setTaskSettled", { number: context.cardOf(thread.id).number, settled: true });
+  await runPass(context, 2);
+  expect(context.cardOf(thread.id).settled_at).not.toBeNull();
+});
+
+test("backfill protects acknowledged and ineligible legacy cards", async () => {
+  const context = await start();
+  const attention = Date.now() - 1000;
+  const ids = ["legacy-settled", "legacy-read", "legacy-custom", "legacy-attention", "legacy-hidden", "legacy-child", "legacy-archived", "legacy-deleted", "legacy-optout", "legacy-moved", "legacy-old-action", "legacy-reopened"];
+  for (const id of ids) {
+    const card = await context.mirror(thr(id, { status: "idle" }));
+    context.db.prepare("UPDATE triage_tasks SET stage_id = 'stage-progress', settled_at = 42 WHERE id = ?").run(card.id);
+  }
+  await context.rpc("setTaskSettled", { number: context.cardOf("legacy-settled").number, settled: true });
+  await context.rpc("moveTask", { number: context.cardOf("legacy-moved").number, stageId: "stage-progress" });
+  await context.rpc("setTaskSettled", { number: context.cardOf("legacy-reopened").number, settled: true });
+  await context.rpc("setTaskSettled", { number: context.cardOf("legacy-reopened").number, settled: false });
+  context.db.prepare("UPDATE triage_tasks SET settled_at = 42 WHERE thread_id = 'legacy-reopened'").run();
+  context.db.prepare("UPDATE triage_tasks SET stage_id = 'stage-attention' WHERE thread_id = 'legacy-attention'").run();
+  const stage = await context.rpc("createStage", { name: "Holding" });
+  context.db.prepare("UPDATE triage_tasks SET stage_id = ? WHERE thread_id = 'legacy-custom'").run(stage.id);
+  context.db.prepare("INSERT INTO triage_mirror_tombstones (thread_id, created_at) VALUES ('legacy-optout', 1)").run();
+  const old = context.cardOf("legacy-old-action");
+  context.db.prepare("INSERT INTO triage_events (id, task_id, actor, event, created_at) VALUES (?, ?, 'user', 'marked settled', ?)").run("old-event", old.id, attention - 1);
+  const threads = ids.map((id) => thr(id, {
+    status: "idle", latestAttentionAt: attention, lastReadAt: id === "legacy-read" ? attention : 0,
+    visibility: id === "legacy-hidden" ? "hidden" : "visible",
+    parentThreadId: id === "legacy-child" ? "parent" : null,
+    archivedAt: id === "legacy-archived" ? 1 : null,
+    deletedAt: id === "legacy-deleted" ? 1 : null,
+  }));
+  context.ctx.list = worldOf(threads).handler;
+  await runPass(context, 2);
+  for (const id of ids.filter((id) => !["legacy-old-action", "legacy-reopened"].includes(id))) expect(context.cardOf(id).settled_at).not.toBeNull();
+  expect(context.cardOf("legacy-old-action")).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: null });
+  expect(context.cardOf("legacy-reopened")).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: null });
+});
+
+test("backfill does not overwrite a read or movement during liveness lookup", async () => {
+  const context = await start();
+  const attention = Date.now() - 1000;
+  const threads = ["restore-race-settle", "restore-race-move"].map((id) => thr(id, { status: "idle", latestAttentionAt: attention, lastReadAt: 0 }));
+  for (const thread of threads) {
+    const card = await context.mirror(thread);
+    context.db.prepare("UPDATE triage_tasks SET stage_id = 'stage-progress', settled_at = 42 WHERE id = ?").run(card.id);
+  }
+  context.ctx.list = worldOf(threads).handler;
+  const gate = deferred<unknown[]>();
+  let asked = false;
+  context.ctx.running = () => { asked = true; return gate.promise; };
+  await context.harness.behavior.setSettings({ autoCardThreads: false });
+  await context.harness.behavior.setSettings({ autoCardThreads: true });
+  await until(() => asked);
+  await context.rpc("setTaskRead", { number: context.cardOf(threads[0].id).number, read: true });
+  await context.rpc("moveTask", { number: context.cardOf(threads[1].id).number, stageId: "stage-attention" });
+  gate.resolve([]);
+  await flush();
+  await flush();
+  expect(context.cardOf(threads[0].id)).toMatchObject({ settled_at: 42, read_at: expect.any(Number) });
+  expect(context.cardOf(threads[1].id)).toMatchObject({ stage_id: "stage-attention", settled_at: 42 });
+});
+
 // A project lookup that blocks until released, so a card creation stays in flight.
 function gateProjects(context: Setup) {
   let release: () => void = () => {};
@@ -948,7 +1051,7 @@ test("active, idle, archived and unarchived events wait for the card creation in
   const { cardOf, cards, emit } = context;
   const cases = [
     { event: "thread.active", extra: {}, check: (card: any) => expect(card).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null }) },
-    { event: "thread.idle", extra: { lastAssistantText: "Done" }, check: (card: any) => { expect(card.run_state).toBe("idle"); expect(card.settled_at).toBeGreaterThan(0); } },
+    { event: "thread.idle", extra: { lastAssistantText: "Done" }, check: (card: any) => expect(card).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: null }) },
     { event: "thread.archived", extra: {}, check: (card: any) => expect(card.settled_at).toBeGreaterThan(0) },
     { event: "thread.unarchived", extra: {}, check: (card: any) => expect(card.origin).toBe("mirror") },
   ];
@@ -1001,10 +1104,9 @@ test("events for a thread with no creation in flight are handled synchronously",
   const { cardOf, emit, mirror } = await start();
   await mirror(thr("sync-1", { status: "active" }));
   await flush();
-  // A top-level idle asks which threads still run, so it settles after that lookup.
+  // A top-level idle asks which threads still run, then completes after that lookup.
   await emit("thread.idle", { thread: thr("sync-1"), lastAssistantText: "Done" });
-  expect(cardOf("sync-1")).toMatchObject({ run_state: "idle" });
-  expect(cardOf("sync-1").settled_at).toBeGreaterThan(0);
+  expect(cardOf("sync-1")).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: null });
   // No await between the emit and the check: the handler did not defer.
   void emit("thread.failed", { thread: thr("sync-1"), error: "late" });
   expect(cardOf("sync-1")).toMatchObject({ run_state: "failed", attention_reason: "late" });
@@ -1076,8 +1178,7 @@ test("reconcile repairs open intake cards: a confirmed-deleted thread loses its 
   expect(harness.logEntries.some((entry: any) => entry.message.includes("could not confirm session rc-unanswered"))).toBe(false);
   expect(cardOf("rc-error")).toMatchObject({ run_state: "failed", attention_reason: "The assigned BB thread failed.", stage_id: "stage-todo" });
   expect(cardOf("rc-error").settled_at).toBeGreaterThan(0);
-  expect(cardOf("rc-idle")).toMatchObject({ run_state: "idle", stage_id: "stage-todo" });
-  expect(cardOf("rc-idle").settled_at).toBeGreaterThan(0);
+  expect(cardOf("rc-idle")).toMatchObject({ run_state: "completed", stage_id: "stage-completed", settled_at: null });
   expect(cardOf("rc-archived")).toMatchObject({ run_state: "idle", stage_id: "stage-todo" });
   expect(cardOf("rc-archived").settled_at).toBeGreaterThan(0);
   for (const id of ["rc-active", "rc-starting", "rc-omitted"]) {
@@ -1244,7 +1345,7 @@ test("reconcile leaves a card alone when an event changed it after it was read",
   expect(eventCount(db, before.gone.id)).toBe(1);
 });
 
-test("reconcile keeps the stage of a mirror card the user moved out of intake", async () => {
+test("reconcile completes an idle card moved to active and keeps other states", async () => {
   const context = await start();
   const { cardOf, mirror, rpc } = context;
   for (const id of ["mv-idle", "mv-error", "mv-active"]) {
@@ -1259,7 +1360,8 @@ test("reconcile keeps the stage of a mirror card the user moved out of intake", 
   ]);
   context.ctx.list = handler;
   await runPass(context, 4);
-  expect(["mv-idle", "mv-error", "mv-active"].map((id) => cardOf(id))).toStrictEqual(before);
+  expect(cardOf("mv-idle")).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: null });
+  expect(["mv-error", "mv-active"].map((id) => cardOf(id))).toStrictEqual(before.slice(1));
 });
 
 test("reconcile never touches manual cards, queued, scheduled or imported", async () => {
@@ -1332,16 +1434,14 @@ async function rerun(context: Setup, lookups: number) {
   await flush();
 }
 
-test("a sub-thread going active reopens its settled top-level card as working, with no card, history or notice of its own", async () => {
+test("a sub-thread going active reopens its completed top-level card without its own card or notice", async () => {
   const context = await startQuiet();
   const { db, cards, cardOf, eventsOf, notifications, emit, known, mirror } = context;
   const root = await mirror(thr("root-1", { status: "active" }));
   known.set("kid-1", kid("kid-1", "root-1"));
   running(context);
   await emit("thread.idle", { thread: thr("root-1") });
-  expect(cardOf("root-1")).toMatchObject({ run_state: "idle" });
-  expect(cardOf("root-1").settled_at).toBeGreaterThan(0);
-  db.prepare("UPDATE triage_tasks SET stage_id = 'stage-todo', attention_reason = 'needs you' WHERE id = ?").run(root.id);
+  expect(cardOf("root-1")).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: null });
   const history = eventsOf(root.id);
   await emit("thread.active", { thread: known.get("kid-1") });
   expect(cardOf("root-1")).toMatchObject({ stage_id: "stage-progress", run_state: "working", attention_reason: null, settled_at: null });
@@ -1388,11 +1488,70 @@ test("a done or stopped top-level card is not reopened by a running sub-thread",
   db.prepare("UPDATE triage_tasks SET run_state = 'stopped' WHERE id = ?").run(stopped.id);
   const before = { done: { ...cardOf("root-done") }, stopped: { ...cardOf("root-stopped") } };
   known.set("kid-done", kid("kid-done", "root-done"));
+  known.set("root-done", thr("root-done", { status: "idle" }));
   known.set("kid-stopped", kid("kid-stopped", "root-stopped"));
   await emit("thread.active", { thread: known.get("kid-done") });
   await emit("thread.active", { thread: known.get("kid-stopped") });
   expect(cardOf("root-done")).toStrictEqual(before.done);
   expect(cardOf("root-stopped")).toStrictEqual(before.stopped);
+});
+
+test("a child cannot reopen explicit settlement for the current reply", async () => {
+  const context = await startQuiet();
+  const { cardOf, db, emit, known, mirror, rpc } = context;
+  const card = await mirror(thr("settled-root", { status: "active" }));
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  const settledEvent = db.prepare("SELECT created_at FROM triage_events WHERE task_id = ? AND event = 'marked settled'").get(card.id) as { created_at: number };
+  known.set("settled-root", thr("settled-root", { status: "idle", latestAttentionAt: settledEvent.created_at - 1 }));
+  const before = { ...cardOf("settled-root") };
+  await emit("thread.active", { thread: kid("settled-child", "settled-root") });
+  expect(cardOf("settled-root")).toStrictEqual(before);
+  known.set("settled-root", thr("settled-root", { status: "idle", latestAttentionAt: null }));
+  await emit("thread.active", { thread: kid("settled-child-null", "settled-root") });
+  expect(cardOf("settled-root")).toStrictEqual(before);
+  known.set("settled-root", thr("settled-root", { status: "idle", latestAttentionAt: settledEvent.created_at + 1 }));
+  await emit("thread.active", { thread: kid("new-child", "settled-root") });
+  expect(cardOf("settled-root")).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+});
+
+test("child activity preserves settlement made while its root lookup is pending", async () => {
+  const context = await startQuiet();
+  const { cardOf, emit, harness, known, mirror, rpc } = context;
+  const root = thr("settlement-race-root", { status: "idle" });
+  const card = await mirror(root);
+  const gate = deferred<unknown>();
+  let asked = false;
+  harness.inspection.sdk.stub("threads.get", async () => { asked = true; return gate.promise; });
+  const active = emit("thread.active", { thread: kid("settlement-race-child", root.id) });
+  await until(() => asked);
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  const settledAt = cardOf(root.id).settled_at;
+  gate.resolve(known.get(root.id));
+  await active;
+  expect(cardOf(root.id)).toMatchObject({ stage_id: "stage-todo", run_state: "idle", settled_at: settledAt });
+});
+
+test("activity preserves attention and custom placement, and invalid roots stay unchanged", async () => {
+  const context = await startQuiet();
+  const { cardOf, db, emit, known, mirror, rpc } = context;
+  const custom = await rpc("createStage", { name: "Holding" });
+  for (const [id, stageId] of [["keep-attention", "stage-attention"], ["keep-custom", custom.id]]) {
+    const card = await mirror(thr(id, { status: "active" }));
+    await rpc("moveTask", { number: card.number, stageId });
+    db.prepare("UPDATE triage_tasks SET run_state = 'idle' WHERE id = ?").run(card.id);
+    await emit("thread.active", { thread: thr(id, { status: "active" }) });
+    expect(cardOf(id)).toMatchObject({ stage_id: stageId, run_state: "working", settled_at: null });
+    db.prepare("UPDATE triage_tasks SET run_state = 'idle' WHERE id = ?").run(card.id);
+    known.set(id, thr(id, { status: "idle" }));
+    await emit("thread.active", { thread: kid(`${id}-child`, id) });
+    expect(cardOf(id)).toMatchObject({ stage_id: stageId, run_state: "working", settled_at: null });
+  }
+  for (const [id, overrides] of [["idle-hidden", { visibility: "hidden" }], ["idle-archived", { archivedAt: 1 }], ["idle-deleted", { deletedAt: 1 }]] as const) {
+    await mirror(thr(id, { status: "active" }));
+    const before = { ...cardOf(id) };
+    await emit("thread.idle", { thread: thr(id, { status: "idle", ...overrides }) });
+    expect(cardOf(id)).toStrictEqual(before);
+  }
 });
 
 test("a tombstoned, hidden or archived top-level thread gets no card from a running sub-thread", async () => {
@@ -1423,17 +1582,17 @@ test("an existing card of a hidden top-level thread, and a manual card, do not r
   expect(cardOf("root-man").origin).toBe("manual");
 });
 
-test("a sub-thread going idle, failed, archived or deleted settles the top-level card when nothing else runs, adding no attention", async () => {
+test("a sub-thread ending completes the idle top-level card when nothing else runs", async () => {
   const context = await startQuiet();
   const { cardOf, emit, known, mirror } = context;
   running(context);
   for (const event of ["thread.idle", "thread.failed", "thread.archived", "thread.deleted"]) {
     const rootId = `root-${event}`;
     await mirror(thr(rootId, { status: "active" }));
+    known.set(rootId, thr(rootId, { status: "idle" }));
     known.set(`kid-${event}`, kid(`kid-${event}`, rootId));
     await emit(event, { thread: known.get(`kid-${event}`), error: "boom" });
-    expect(cardOf(rootId)).toMatchObject({ stage_id: "stage-progress", run_state: "idle", attention_reason: null });
-    expect(cardOf(rootId).settled_at).toBeGreaterThan(0);
+    expect(cardOf(rootId)).toMatchObject({ stage_id: "stage-completed", run_state: "completed", attention_reason: null, settled_at: null });
   }
 });
 
@@ -1459,16 +1618,50 @@ test("the card stays working while the top-level thread or another sub-thread st
   }
 });
 
-test("a thread listRunning names but the host now lists as idle is not live, so the root card settles", async () => {
+test("a thread listRunning names but the host now lists as idle is not live, so the root card completes", async () => {
   const context = await startQuiet();
   const { cardOf, emit, known, mirror } = context;
   await mirror(thr("root-stop", { status: "active" }));
+  known.set("root-stop", thr("root-stop", { status: "idle" }));
   known.set("kid-stop", kid("kid-stop", "root-stop"));
   running(context, "kid-stop");
   context.ctx.list = worldOf([thr("kid-stop", { parentThreadId: "root-stop", status: "idle" })]).handler;
   await emit("thread.idle", { thread: known.get("kid-stop") });
-  expect(cardOf("root-stop")).toMatchObject({ stage_id: "stage-progress", run_state: "idle" });
-  expect(cardOf("root-stop").settled_at).toBeGreaterThan(0);
+  expect(cardOf("root-stop")).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: null });
+});
+
+test("a child ending does not complete a root that is active or failed", async () => {
+  const context = await startQuiet();
+  const { cardOf, emit, known, mirror } = context;
+  for (const status of ["active", "error"]) {
+    const id = `root-current-${status}`;
+    await mirror(thr(id, { status: "active" }));
+    known.set(id, thr(id, { status }));
+    const before = { ...cardOf(id) };
+    await emit("thread.idle", { thread: kid(`child-${status}`, id, { status: "idle" }) });
+    expect(cardOf(id)).toStrictEqual(before);
+  }
+});
+
+test("a user read or settlement during liveness lookup wins over completion", async () => {
+  const context = await startQuiet();
+  const { cardOf, ctx, emit, mirror, rpc } = context;
+  for (const action of ["read", "settle"]) {
+    const id = `during-${action}`;
+    const card = await mirror(thr(id, { status: "active" }));
+    const gate = deferred<unknown[]>();
+    let asked = false;
+    ctx.running = () => { asked = true; return gate.promise; };
+    const idle = emit("thread.idle", { thread: thr(id, { status: "idle" }) });
+    await until(() => asked);
+    if (action === "read") await rpc("setTaskRead", { number: card.number, read: true });
+    else await rpc("setTaskSettled", { number: card.number, settled: true });
+    gate.resolve([]);
+    await idle;
+    expect(cardOf(id)).toMatchObject({ stage_id: "stage-progress", run_state: "working" });
+    if (action === "read") expect(cardOf(id).read_at).not.toBeNull();
+    else expect(cardOf(id).settled_at).not.toBeNull();
+  }
 });
 
 test("a child end under a card that is not working, failed, stopped, done, manual or missing makes no lookup", async () => {
@@ -1480,6 +1673,7 @@ test("a child end under a card that is not working, failed, stopped, done, manua
   await mirror(thr("nw-idle", { status: "pending" }));
   const doneWorking = await mirror(thr("nw-done", { status: "active" }));
   db.prepare("UPDATE triage_tasks SET stage_id = 'stage-completed' WHERE id = ?").run(doneWorking.id);
+  known.set("nw-done", thr("nw-done", { status: "idle" }));
   await importManual(thr("nw-manual", { status: "pending" }));
   known.set("nw-nocard", thr("nw-nocard"));
   const before = ["nw-failed", "nw-stopped", "nw-idle", "nw-done", "nw-manual"].map((id) => ({ ...cardOf(id) }));
@@ -1505,6 +1699,23 @@ test("a root's own idle on a failed or stopped card keeps today's path and asks 
   expect(cardOf("own-stopped").run_state).toBe("stopped");
   expect(cardOf("own-failed").settled_at).toBeGreaterThan(0);
   expect(runningCalls(context)).toBe(asked);
+});
+
+test("queued mirror cards do not become completed during reconciliation", async () => {
+  const context = await startQuiet();
+  const { db, mirror, cardOf, emit, rpc } = context;
+  const card = await mirror(thr("queued-reconcile", { status: "pending" }));
+  db.prepare("UPDATE triage_tasks SET run_state = 'queued' WHERE id = ?").run(card.id);
+  context.ctx.list = worldOf([thr("queued-reconcile", { status: "idle" })]).handler;
+  await rerun(context, 2);
+  expect(cardOf("queued-reconcile")).toMatchObject({ stage_id: "stage-todo", run_state: "queued", settled_at: null });
+  await emit("thread.idle", { thread: thr("queued-reconcile", { status: "idle" }) });
+  expect(cardOf("queued-reconcile")).toMatchObject({ run_state: "idle", settled_at: expect.any(Number) });
+  const custom = await rpc("createStage", { name: "Holding" });
+  await rpc("moveTask", { number: card.number, stageId: custom.id });
+  db.prepare("UPDATE triage_tasks SET run_state = 'queued', settled_at = NULL WHERE id = ?").run(card.id);
+  await emit("thread.idle", { thread: thr("queued-reconcile", { status: "idle" }) });
+  expect(cardOf("queued-reconcile")).toMatchObject({ stage_id: custom.id, run_state: "idle", settled_at: null });
 });
 
 test("a root's idle lookup that resolves after a sub-thread went active leaves the card working", async () => {
@@ -1547,10 +1758,11 @@ test("root idle tolerates a moved or deleted card while its old stage is deleted
   }
 });
 
-test("a sub-thread's active walk that resolves after its idle settled the card leaves the card settled", async () => {
+test("a sub-thread's active walk overtaken by idle leaves the card completed", async () => {
   const context = await startQuiet();
   const { cardOf, emit, known, mirror, harness } = context;
   await mirror(thr("r2-root", { status: "active" }));
+  known.set("r2-root", thr("r2-root", { status: "idle" }));
   known.set("r2-kid", kid("r2-kid", "r2-root"));
   running(context);
   const gate = deferred<unknown>();
@@ -1560,11 +1772,10 @@ test("a sub-thread's active walk that resolves after its idle settled the card l
   const active = emit("thread.active", { thread: known.get("r2-kid") });
   await sleep(3);
   await emit("thread.idle", { thread: known.get("r2-kid") });
-  expect(cardOf("r2-root").run_state).toBe("idle");
+  expect(cardOf("r2-root").run_state).toBe("completed");
   gate.resolve(known.get("r2-root"));
   await active;
-  expect(cardOf("r2-root")).toMatchObject({ run_state: "idle", stage_id: "stage-progress" });
-  expect(cardOf("r2-root").settled_at).toBeGreaterThan(0);
+  expect(cardOf("r2-root")).toMatchObject({ run_state: "completed", stage_id: "stage-completed", settled_at: null });
 });
 
 test("a sub-thread's active that is overtaken while its top-level card is being created leaves the new card unopened", async () => {
@@ -1597,17 +1808,18 @@ test("sub-thread events wait for their top-level card's creation in flight", asy
   release();
   await active;
   expect(cardOf("w-root")).toMatchObject({ stage_id: "stage-progress", run_state: "working" });
-  // The same wait on a child's end: a creation in flight delays it, then the card settles.
+  // The same wait on a child's end: creation delays completion of the card.
   const gate = gateProjects(context);
   known.set("e-root", thr("e-root", { status: "active" }));
   known.set("e-kid", kid("e-kid", "e-root"));
   void emit("thread.created", { thread: known.get("e-root") });
   await sleep(5);
+  known.set("e-root", thr("e-root", { status: "idle" }));
   const ended = emit("thread.idle", { thread: known.get("e-kid") });
   await sleep(5);
   gate();
   await ended;
-  expect(cardOf("e-root")).toMatchObject({ run_state: "idle" });
+  expect(cardOf("e-root")).toMatchObject({ run_state: "completed", stage_id: "stage-completed", settled_at: null });
 });
 
 test("a failed card creation for a running sub-thread's top-level thread is logged, not thrown", async () => {
@@ -1644,6 +1856,7 @@ test("a failed running-threads lookup leaves a child end unchanged and settles a
   const context = await startQuiet();
   const { cardOf, emit, known, mirror } = context;
   await mirror(thr("q-root", { status: "active" }));
+  known.set("q-root", thr("q-root", { status: "idle" }));
   await mirror(thr("q-own", { status: "active" }));
   known.set("q-kid", kid("q-kid", "q-root"));
   context.ctx.running = () => { throw new Error("listRunning down"); };
@@ -1666,6 +1879,7 @@ test("running threads resolve in chunks of 200 with both halves and hidden threa
   const context = await startQuiet();
   const { cardOf, emit, known, mirror } = context;
   await mirror(thr("chunk-root", { status: "active" }));
+  known.set("chunk-root", thr("chunk-root", { status: "idle" }));
   known.set("chunk-kid", kid("chunk-kid", "chunk-root"));
   running(context, ...Array.from({ length: 201 }, (_, index) => `run-${index}`));
   await emit("thread.idle", { thread: known.get("chunk-kid") });
@@ -1674,7 +1888,7 @@ test("running threads resolve in chunks of 200 with both halves and hidden threa
   expect(lookups.map((args) => args.threadIds!.length).sort((left, right) => left - right)).toStrictEqual([1, 1, 200, 200]);
   expect(lookups.filter((args) => args.archived === true).length).toBe(2);
   for (const args of lookups) expect(args).toMatchObject({ includeHidden: true, limit: 200 });
-  expect(cardOf("chunk-root").run_state).toBe("idle");
+  expect(cardOf("chunk-root").run_state).toBe("completed");
 });
 
 test("the backfill gives a root with a running sub-thread the active stage and working, for an existing and a new card", async () => {
@@ -1745,7 +1959,7 @@ test("a pass that is switched off while it looks up running threads cards no liv
   expect(cards()).toStrictEqual([]);
 });
 
-test("reconcile settles active-stage cards and keeps attention cards visible when work stops", async () => {
+test("reconcile completes active-stage cards and keeps attention cards visible when work stops", async () => {
   const context = await startQuiet();
   const { db, cardOf, known, mirror, rpc } = context;
   const ids = ["rs-settle", "rs-live", "rs-idlecard", "rs-active", "rs-attention", "rs-custom", "rs-done"];
@@ -1761,12 +1975,12 @@ test("reconcile settles active-stage cards and keeps attention cards visible whe
   running(context, "rs-kid", "rs-active");
   const before = Object.fromEntries(ids.map((id) => [id, { ...cardOf(id) }]));
   await rerun(context, 2);
-  expect(cardOf("rs-settle")).toMatchObject({ run_state: "idle", stage_id: "stage-progress" });
-  expect(cardOf("rs-settle").settled_at).toBeGreaterThan(0);
+  expect(cardOf("rs-settle")).toMatchObject({ run_state: "completed", stage_id: "stage-completed", settled_at: null });
+  expect(cardOf("rs-idlecard")).toMatchObject({ run_state: "completed", stage_id: "stage-completed", settled_at: null });
   // The running root rs-active is reopened by the backfill like any live root, which only touches updated_at.
   expect(cardOf("rs-attention")).toMatchObject({ run_state: "idle", stage_id: "stage-attention", settled_at: null });
   expect(cardOf("rs-custom")).toMatchObject({ run_state: "idle", stage_id: custom.id, settled_at: null });
-  for (const id of ids.filter((id) => !["rs-settle", "rs-live", "rs-attention", "rs-custom"].includes(id))) {
+  for (const id of ids.filter((id) => !["rs-settle", "rs-idlecard", "rs-live", "rs-attention", "rs-custom"].includes(id))) {
     expect({ ...cardOf(id), updated_at: 0 }).toStrictEqual({ ...before[id], updated_at: 0 });
   }
   // The live root was reopened by the backfill: still working, still unsettled.
@@ -1793,12 +2007,10 @@ test("child end before root idle preserves agent-selected attention and custom s
     const child = kid(`${item.id}-child`, item.id, { status: "idle" });
     known.set(child.id, child);
     await emit("thread.idle", { thread: child });
-    expect(cardOf(item.id)).toMatchObject({ stage_id: item.stageId, run_state: "idle" });
-    if (item.stage === "In Progress") expect(cardOf(item.id).settled_at).toBeGreaterThan(0);
-    else expect(cardOf(item.id).settled_at).toBeNull();
+    if (item.stage === "In Progress") expect(cardOf(item.id)).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: null });
+    else expect(cardOf(item.id)).toMatchObject({ stage_id: item.stageId, run_state: "idle", settled_at: null });
     await emit("thread.idle", { thread: known.get(item.id) });
-    if (item.stage === "In Progress") expect(cardOf(item.id).settled_at).toBeGreaterThan(0);
-    else expect(cardOf(item.id).settled_at).toBeNull();
+    expect(cardOf(item.id).settled_at).toBeNull();
   }
   context.ctx.list = worldOf(cases.map((item) => known.get(item.id))).handler;
   await rerun(context, 2);
@@ -1830,7 +2042,7 @@ test("reconcile leaves a card reopened after its candidates were read working", 
   expect(cardOf("rr-root")).toMatchObject({ run_state: "working", stage_id: "stage-progress", settled_at: null });
 });
 
-test.each(["move", "delete"])("reconcile skips a %s card's removed stage and still settles later cards", async (action) => {
+test.each(["move", "delete"])("reconcile skips a %s card's removed stage and still completes later cards", async (action) => {
   const context = await startQuiet();
   const { ctx, cardOf, mirror, rpc, harness, db } = context;
   const stale = await mirror(thr("stale-reconcile", { status: "active" }));
@@ -1849,8 +2061,8 @@ test.each(["move", "delete"])("reconcile skips a %s card's removed stage and sti
   else await rpc("deleteTask", { number: stale.number });
   await rpc("deleteStage", { id: stage.id });
   gate.resolve([]);
-  await until(() => cardOf("later-reconcile").settled_at !== null);
+  await until(() => cardOf("later-reconcile").run_state === "completed");
   if (action === "move") expect(cardOf("stale-reconcile")).toMatchObject({ stage_id: "stage-attention", run_state: "working", settled_at: null });
   else expect(cardOf("stale-reconcile")).toBeUndefined();
-  expect(cardOf("later-reconcile")).toMatchObject({ stage_id: "stage-progress", run_state: "idle" });
+  expect(cardOf("later-reconcile")).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: null });
 });

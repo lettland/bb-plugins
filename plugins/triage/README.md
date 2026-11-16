@@ -87,23 +87,29 @@ bb triage stages
 
 ## Sessions and the sidebar
 
-Visible top-level sessions appear on the board automatically as mirrored cards.
-Their agents receive the same stage tool and instructions as agents assigned to
-Triage tasks. Agents move finished work to Completed and work that needs your
-input to Human Review. Human Review and custom stages stay on the board
-when the session goes idle or fails, unless you have marked the card settled.
-Failed cards retain their status and error reason. An idle turn alone does not
-mark a task complete.
+Visible top-level sessions appear on the board automatically as mirrored
+cards. Their agents receive the same stage tool and instructions as agents
+assigned to Triage tasks. Agents can move work that needs your input to Human
+Review. Hidden sessions and child sessions stay out of automatic mirroring.
+Mirror cards do not change sidebar visibility, and deleting a session removes
+its card.
 
-Mirrored cards do not change sidebar visibility and are removed when their
-session is deleted. Unclassified cards settle when their session goes idle or
-fails, and reopen when it becomes active again. Reopening an unclassified card
-by hand lasts until its session's next idle or failed turn. Turn automatic
-card creation off in Settings → Triage ("Automatically card every session");
-existing mirrored cards stay until deleted individually.
+When a session finishes its turn, a mirror card in To Do or In Progress moves
+to Completed and stays visible until you select Mark settled. Reading the
+reply does not hide the card. A new turn moves the card back to In Progress. A
+running child keeps the top-level card working until the work stops. Cards
+placed in Human Review or a custom column keep that placement. Failed or
+archived sessions retain their existing handling.
+
+Unread replies hidden by the earlier automatic-settlement behavior return to
+Completed. Cards you explicitly settled and historical replies you already
+read stay settled. Turn automatic mirroring off in Settings → Triage
+(Automatically card every session). Existing mirror cards remain until deleted
+individually.
+
 The first run numbers every session, so card numbers jump by the count of
-existing sessions; sessions that are idle or failed start settled and live under
-the Settled view.
+existing sessions. Idle history you already read and failed sessions start
+settled and live under the Settled view.
 
 - Open a session and choose **Move to Triage** in its header. Triage creates a
   card for the existing conversation and hides it from the regular session list.

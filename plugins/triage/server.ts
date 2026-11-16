@@ -245,7 +245,7 @@ type ThreadListItem = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["list"]>>
 type CardThread = Pick<
   ThreadListItem,
   | "id" | "projectId" | "environmentId" | "providerId" | "status" | "title" | "titleFallback" | "archivedAt" | "deletedAt"
-  | "parentThreadId" | "visibility"
+  | "parentThreadId" | "visibility" | "latestAttentionAt"
 >;
 /** A thread as the root walk and shouldMirror read it. */
 type RootThread = CardThread & { originPluginId: string | null };
@@ -1111,27 +1111,50 @@ export default async function plugin(bb: BbPluginApi) {
    * writes no history row. `card` is the row as it was read; the UPDATE
    * writes only if no event touched the card since.
    */
-  const reopenMirrorCard = (root: RootThread, card: TaskRow) => {
-    if (!isMirrorable(root) || card.origin !== "mirror" || card.run_state === "stopped") return;
-    if (getStageRow(card.stage_id).system_role === "done") return;
+  const reopenMirrorCard = (root: RootThread, card: TaskRow) => db.transaction(() => {
+    if (!isMirrorable(root) || root.archivedAt !== null || root.deletedAt !== null || card.origin !== "mirror" || card.run_state === "stopped") return;
+    if (card.settled_at !== null && root.status !== "active" && root.status !== "starting") {
+      const last = db.prepare("SELECT event, created_at FROM triage_events WHERE task_id = ? AND actor = 'user' AND event IN ('marked settled', 'reopened') ORDER BY created_at DESC, rowid DESC LIMIT 1").get(card.id) as { event: string; created_at: number } | undefined;
+      if (last?.event === "marked settled" && last.created_at >= (root.latestAttentionAt ?? 0)) return;
+    }
+    const role = getStageRow(card.stage_id).system_role;
+    if (role === "done") {
+      const last = db.prepare("SELECT actor, event FROM triage_events WHERE task_id = ? AND (event = 'turn completed' OR event LIKE 'moved to %') ORDER BY rowid DESC LIMIT 1").get(card.id) as { actor: string; event: string } | undefined;
+      if (last?.actor !== "bb" || last.event !== "turn completed") return;
+    } else if (role !== "active" && role !== "intake") {
+      db.prepare("UPDATE triage_tasks SET run_state = 'working', settled_at = NULL, updated_at = ? WHERE id = ? AND updated_at = ? AND settled_at IS ?")
+        .run(Date.now(), card.id, card.updated_at, card.settled_at);
+      publishSoon();
+      return;
+    }
     db.prepare(
-      "UPDATE triage_tasks SET stage_id = ?, run_state = 'working', attention_reason = NULL, settled_at = NULL, updated_at = ? WHERE id = ? AND updated_at = ?",
-    ).run(getSystemStage("active").id, Date.now(), card.id, card.updated_at);
+      "UPDATE triage_tasks SET stage_id = ?, run_state = 'working', attention_reason = NULL, settled_at = NULL, updated_at = ? WHERE id = ? AND updated_at = ? AND settled_at IS ?",
+    ).run(getSystemStage("active").id, Date.now(), card.id, card.updated_at, card.settled_at);
     publishSoon();
-  };
+  })();
 
   /**
-   * Settle a working mirror card unless its thread or a descendant still runs.
+   * Complete an ordinary mirror card when its thread and descendants are idle.
    * `card` is read before the lookup's await and the UPDATE is guarded by its
    * updated_at, so an event that touched the card meanwhile (a child going
-   * active reopens it) wins. A failed lookup settles only for `settleOnFailure`.
+   * active reopens it) wins. A failed lookup retains the settlement fallback
+   * only for `settleOnFailure`; it never infers completion.
    */
   const settleUnlessLive = async (card: TaskRow, rootId: string, settleOnFailure: boolean) => {
     const live = await liveRoots();
     if (live ? live.has(rootId) : !settleOnFailure) return;
-    if (getTaskByThread(rootId)?.stage_id !== card.stage_id) return;
+    const current = getTaskByThread(rootId);
+    if (!current || current.stage_id !== card.stage_id || current.updated_at !== card.updated_at || current.read_at !== card.read_at || current.settled_at !== card.settled_at) return;
     const now = Date.now();
     const role = getStageRow(card.stage_id).system_role;
+    if (live && (role === "intake" || role === "active") && card.settled_at === null) {
+      db.prepare(
+        "UPDATE triage_tasks SET stage_id = ?, run_state = 'completed', attention_reason = NULL, settled_at = NULL, read_at = NULL, updated_at = ? WHERE id = ? AND updated_at = ? AND read_at IS ? AND settled_at IS NULL",
+      ).run(getSystemStage("done").id, now, card.id, card.updated_at, card.read_at);
+      addEvent(card.id, "bb", "turn completed");
+      publishSoon();
+      return;
+    }
     db.prepare(
       "UPDATE triage_tasks SET run_state = CASE WHEN run_state = 'working' THEN 'idle' ELSE run_state END, settled_at = CASE WHEN ? THEN COALESCE(settled_at, ?) ELSE settled_at END, updated_at = ? WHERE id = ? AND updated_at = ?",
     ).run(role === "intake" || role === "active" ? 1 : 0, now, now, card.id, card.updated_at);
@@ -1176,9 +1199,9 @@ export default async function plugin(bb: BbPluginApi) {
     if (card) reopenMirrorCard(root, card);
   };
 
-  /** A sub-thread stopped running: its top-level thread's card settles unless something below it still runs. */
+  /** A sub-thread stopped: complete its idle root unless another descendant runs. */
   const childEnded = async (child: RootThread) => {
-    stampChildEvent(child.id);
+    const stamp = stampChildEvent(child.id);
     let root: RootThread;
     try {
       root = await topLevelOf(child, parentLookup());
@@ -1188,6 +1211,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
     const creating = pendingMirror.get(root.id);
     if (creating) await creating;
+    if (childEventSeq.get(child.id) !== stamp || !isMirrorable(root) || root.archivedAt !== null || root.deletedAt !== null || root.status !== "idle") return;
     const card = getTaskByThread(root.id);
     // No working mirror card: stop before any lookup, so hidden workers under unmirrored roots stay cheap.
     if (card?.origin !== "mirror" || card.run_state !== "working") return;
@@ -1198,16 +1222,17 @@ export default async function plugin(bb: BbPluginApi) {
    * Repair open mirror cards whose thread events never arrived (a creation that
    * raced its events, a thread deleted while the plugin was unloaded, a child
    * deleted with its parent). Each card is judged against a fresh lookup by id
-   * and written only if no event touched it since it was read. If the list
-   * lookup fails nothing is changed; a card whose thread threads.get cannot
-   * confirm is settled, never deleted. The caller publishes afterwards.
+   * and written only if no event touched it since it was read. Confirmed idle
+   * ordinary cards move to done when no descendant runs. If the list lookup
+   * fails nothing is changed; an unconfirmed thread's card is settled, never
+   * deleted. The caller publishes afterwards.
    */
   const reconcileMirrorCards = async (passStart: number) => {
     const candidates = db
       .prepare(
-        "SELECT id, thread_id, stage_id, run_state, updated_at FROM triage_tasks WHERE origin = 'mirror' AND settled_at IS NULL AND thread_id IS NOT NULL AND created_at < ?",
+        "SELECT id, thread_id, stage_id, run_state, read_at, updated_at FROM triage_tasks WHERE origin = 'mirror' AND settled_at IS NULL AND thread_id IS NOT NULL AND created_at < ? AND NOT EXISTS (SELECT 1 FROM triage_mirror_tombstones WHERE thread_id = triage_tasks.thread_id)",
       )
-      .all(passStart) as { id: string; thread_id: string; stage_id: string; run_state: string; updated_at: number }[];
+      .all(passStart) as { id: string; thread_id: string; stage_id: string; run_state: string; read_at: number | null; updated_at: number }[];
     if (candidates.length === 0) return;
     // Same lookup quirks as snapshot: ids go out in chunks, includeHidden is on
     // every call, archived:true selects only the archived half, and a deleted
@@ -1240,7 +1265,7 @@ export default async function plugin(bb: BbPluginApi) {
         bb.log.warn(`Triage could not confirm session ${missing[index]}; settling its card: ${errorMessage(answer.reason)}`);
       }
     });
-    // Fresh, never the backfill's set: a working card in the active stage settles only when
+    // Fresh, never the backfill's set: an idle card moves to done only when
     // its thread is idle and nothing below it runs. A failed lookup skips that repair.
     const live = await liveRoots();
     // The writes below run without an await, so this check covers every one of them.
@@ -1262,9 +1287,10 @@ export default async function plugin(bb: BbPluginApi) {
         update = settle;
       } else if (!isMirrorable(thread)) {
         update = settle;
-      } else if (card.stage_id === intake?.id) {
-        if (thread.archivedAt !== null) update = settle;
-        else if (thread.status === "idle") update = { set: "run_state = 'idle', settled_at = COALESCE(settled_at, ?)", values: [now] };
+      } else if (thread.archivedAt !== null) {
+        update = settle;
+      } else if (card.stage_id === intake?.id && card.run_state !== "stopped") {
+        if (thread.status === "idle" && live && !live.has(card.thread_id) && (card.run_state === "idle" || card.run_state === "working")) update = { set: "stage_id = ?, run_state = 'completed', attention_reason = NULL, read_at = NULL", values: [getSystemStage("done").id] };
         else if (thread.status === "error") {
           update = {
             set: "run_state = 'failed', attention_reason = 'The assigned BB thread failed.', settled_at = COALESCE(settled_at, ?)",
@@ -1276,16 +1302,17 @@ export default async function plugin(bb: BbPluginApi) {
             values: [getSystemStage("active").id],
           };
         }
-      } else if (live && card.run_state === "working" && thread.status === "idle" && !live.has(card.thread_id)) {
+      } else if (live && (card.run_state === "working" || card.run_state === "idle") && thread.status === "idle" && !live.has(card.thread_id)) {
         if (getTaskByThread(card.thread_id)?.stage_id !== card.stage_id) continue;
         const role = getStageRow(card.stage_id).system_role;
-        if (role === "active") update = settle;
+        if (role === "active") update = { set: "stage_id = ?, run_state = 'completed', attention_reason = NULL, read_at = NULL", values: [getSystemStage("done").id] };
         else if (role === "attention" || role === null) update = { set: "run_state = 'idle'", values: [] };
       }
       if (!update) continue;
       // `set` is always one of the literal fragments above; values stay bound parameters.
-      db.prepare(`UPDATE triage_tasks SET ${update.set}, updated_at = ? WHERE id = ? AND updated_at = ?`)
-        .run(...update.values, now, card.id, card.updated_at);
+      const result = db.prepare(`UPDATE triage_tasks SET ${update.set}, updated_at = ? WHERE id = ? AND updated_at = ? AND read_at IS ? AND settled_at IS NULL`)
+        .run(...update.values, now, card.id, card.updated_at, card.read_at);
+      if (result.changes && update.set.includes("run_state = 'completed'")) addEvent(card.id, "bb", "turn completed");
     }
   };
   let backfilling = false;
@@ -1347,8 +1374,24 @@ export default async function plugin(bb: BbPluginApi) {
           bb.log.warn(`Triage could not card session ${listed.id}: ${errorMessage(error)}`);
         }
       }
+      const restore = oldestFirst.map((thread) => ({ thread, card: getTaskByThread(thread.id) }));
       // Roots with a running descendant get their card back to working; one lookup serves the whole pass.
       const live = completed && mirroringWanted() ? await liveRoots() : undefined;
+      if (live && mirroringWanted()) {
+        for (const { thread, card } of restore) {
+          if (!card || card.origin !== "mirror" || card.run_state !== "idle" || card.settled_at === null || !shouldMirror(thread) || thread.archivedAt !== null || thread.deletedAt !== null || thread.status !== "idle" || live.has(thread.id)) continue;
+          if (thread.latestAttentionAt === null || thread.latestAttentionAt <= (thread.lastReadAt ?? 0)) continue;
+          const role = db.prepare("SELECT system_role FROM triage_stages WHERE id = ?").get(card.stage_id) as { system_role: string | null } | undefined;
+          if (!role || (role.system_role !== "intake" && role.system_role !== "active")) continue;
+          const placement = db.prepare("SELECT 1 FROM triage_events WHERE task_id = ? AND actor = 'user' AND event LIKE 'moved to %' AND created_at >= ? LIMIT 1").get(card.id, thread.latestAttentionAt);
+          const acknowledgment = db.prepare("SELECT event FROM triage_events WHERE task_id = ? AND actor = 'user' AND event IN ('marked settled', 'reopened') AND created_at >= ? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(card.id, thread.latestAttentionAt) as { event: string } | undefined;
+          if (placement || acknowledgment?.event === "marked settled") continue;
+          const now = Date.now();
+          const result = db.prepare("UPDATE triage_tasks SET stage_id = ?, run_state = 'completed', attention_reason = NULL, read_at = NULL, settled_at = NULL, updated_at = ? WHERE id = ? AND updated_at = ? AND read_at IS ? AND settled_at IS ? AND stage_id = ? AND run_state = 'idle'")
+            .run(getSystemStage("done").id, now, card.id, card.updated_at, card.read_at, card.settled_at, card.stage_id);
+          if (result.changes) addEvent(card.id, "bb", "turn completed");
+        }
+      }
       for (const root of live?.values() ?? []) {
         if (!mirroringWanted()) break;
         if (!shouldMirror(root)) continue;
@@ -1796,7 +1839,14 @@ export default async function plugin(bb: BbPluginApi) {
     const active = getSystemStage("active");
     if (task.origin === "mirror") {
       // A settled card of a sub-thread or hidden session is not reopened.
-      if (!isMirrorable(thread)) return;
+      if (!isMirrorable(thread) || thread.archivedAt !== null || thread.deletedAt !== null || task.run_state === "stopped") return;
+      const role = getStageRow(task.stage_id).system_role;
+      if (role === null || role === "attention") {
+        db.prepare("UPDATE triage_tasks SET run_state = 'working', settled_at = NULL, updated_at = ? WHERE id = ?")
+          .run(Date.now(), task.id);
+        publishSoon();
+        return;
+      }
       db.prepare(
         "UPDATE triage_tasks SET stage_id = ?, run_state = 'working', attention_reason = NULL, settled_at = NULL, title = ?, provider_id = ?, updated_at = ? WHERE id = ?",
       ).run(
@@ -1834,12 +1884,14 @@ export default async function plugin(bb: BbPluginApi) {
       return;
     }
     if (mirrored) {
-      // A running descendant keeps a top-level card working. A failed lookup settles it as before.
-      if (thread.parentThreadId === null && task.run_state === "working") {
+      if (!isMirrorable(thread) || thread.archivedAt !== null || thread.deletedAt !== null) return;
+      // A running descendant keeps the card working; confirmed idle completes it.
+      // A failed lookup retains the previous settlement fallback.
+      if (thread.parentThreadId === null && (task.run_state === "working" || task.run_state === "idle")) {
         await settleUnlessLive(task, thread.id, true);
         return;
       }
-      // Idle mirrors stay quiet: no read marker change, no notification, no history row.
+      // Other mirror states keep the previous idle and settlement handling.
       const now = Date.now();
       const role = getStageRow(task.stage_id).system_role;
       db.prepare("UPDATE triage_tasks SET run_state = 'idle', settled_at = CASE WHEN ? THEN COALESCE(settled_at, ?) ELSE settled_at END, updated_at = ? WHERE id = ?")
@@ -1866,7 +1918,7 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.events.on("thread.failed", async ({ thread, error }) => {
-    // A failed sub-thread settles its top-level card like an idle one; the failure belongs to the child.
+    // A failed sub-thread ends its work like an idle one; the failure belongs to the child.
     if (thread.parentThreadId !== null) await childEnded(thread);
     const creating = pendingMirror.get(thread.id);
     if (creating) await creating;
