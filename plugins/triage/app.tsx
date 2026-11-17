@@ -402,14 +402,17 @@ export default definePluginApp((app) => {
     title: "Triage",
     component: ThreadTriageAction,
   });
-  app.slots.experimental_threadContextCardSection({
+  const threadContextSection: Parameters<typeof app.slots.experimental_threadContextCardSection>[0] & {
+    experimental_newThreadComponent: typeof TriageThreadsSection;
+  } = {
     id: "triage-threads",
     title: "Triage",
     group: experimental_THREAD_INFO_SECTION_GROUPS.related,
     order: 20,
     component: TriageThreadsSection,
     experimental_newThreadComponent: TriageThreadsSection,
-  });
+  };
+  app.slots.experimental_threadContextCardSection(threadContextSection);
   app.slots.navPanel({
     id: "triage-board",
     title: "Triage",

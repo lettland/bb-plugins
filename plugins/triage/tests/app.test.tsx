@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { experimental_THREAD_INFO_SECTION_GROUPS, useRpc } from "@get-bb/plugin-sdk/app";
+import { definePluginApp, experimental_THREAD_INFO_SECTION_GROUPS, useRpc } from "@get-bb/plugin-sdk/app";
 import { installTestPluginRuntime, loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { ReactElement } from "react";
 import { toast } from "sonner";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { TriageThreadsSection } from "../components/triage/thread-context-section";
 
 // The draft hook is real unless a test switches it: `missing` is a host that lacks it, `throws` one where it breaks.
 const draftHook = vi.hoisted(() => ({ mode: "real" as "real" | "missing" | "throws" }));
@@ -196,6 +197,24 @@ afterEach(() => {
 });
 
 describe("registration", () => {
+  test("preserves the New Thread component with the published SDK from Actions run 44092220389", async () => {
+    const registrations: unknown[] = [];
+    const plugin = (await import("../app")).default;
+    await loadPluginApp({ default: definePluginApp((host) => {
+      const register = host.slots.experimental_threadContextCardSection;
+      host.slots.experimental_threadContextCardSection = (registration) => {
+        registrations.push(registration);
+        register(registration);
+      };
+      plugin.setup(host);
+    }) });
+    expect(registrations).toContainEqual(expect.objectContaining({
+      id: "triage-threads",
+      component: TriageThreadsSection,
+      experimental_newThreadComponent: TriageThreadsSection,
+    }));
+  });
+
   test("the plugin registers the board and the thread action", () => {
     expect(app.navPanels.map((panel: any) => panel.id)).toStrictEqual(["triage-board"]);
     expect(boardSlot.path).toBe("triage");
