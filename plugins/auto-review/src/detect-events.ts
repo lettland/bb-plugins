@@ -140,10 +140,9 @@ function isReviewWake(data: TurnRequestData): boolean {
     return false;
   }
   const subject = data.systemMessageSubject;
-  return (
-    subject?.kind === "thread-batch" &&
-    subject.outcomes?.every(({ status }) => REVIEW_WAKE_OUTCOMES.has(status)) === true
-  );
+  // An empty batch reports no reviewer at all, and `every` on it would be vacuously true.
+  const outcomes = subject?.kind === "thread-batch" ? (subject.outcomes ?? []) : [];
+  return outcomes.length > 0 && outcomes.every(({ status }) => REVIEW_WAKE_OUTCOMES.has(status));
 }
 
 /**

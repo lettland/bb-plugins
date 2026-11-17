@@ -4924,6 +4924,7 @@ describe("auto-review plugin", () => {
         ["a stopped reviewer", [wake(103, "child-interrupted")]],
         ["a system message with no kind", [{ seq: 103, initiator: "system", text: "[bb system] something" }]],
         ["a batch holding a stopped reviewer", [batch(103, ["completed", "interrupted"])]],
+        ["a batch with an empty outcome list", [batch(103, [])]],
         ["a batch without outcomes", [{ ...wake(103, "child-outcome-batch"), systemMessageSubject: { kind: "thread-batch", count: 2 } }]],
         ["a batch without a subject", [wake(103, "child-outcome-batch")]],
         [
