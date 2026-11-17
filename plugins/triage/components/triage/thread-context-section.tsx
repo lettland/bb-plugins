@@ -38,7 +38,7 @@ export function TriageThreadsSection(_props: ExperimentalThreadContextCardProps)
     const rows = snapshot.tasks
       .filter((task): task is ThreadTask => task.stageId === stage.id && task.threadId !== null)
       .filter((task) => task.runState !== "failed" || keepsFailedCardVisible(task, snapshot.stages))
-      .filter((task) => role === "done" || task.settledAt === null)
+      .filter((task) => task.settledAt === null)
       .sort((a, b) => b.updatedAt - a.updatedAt);
     const shown = role === "done" ? rows.slice(0, DONE_LIMIT) : rows;
     return shown.length === 0 ? [] : [{ stage, rows: shown }];

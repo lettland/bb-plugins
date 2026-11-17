@@ -185,7 +185,7 @@ describe("filters", () => {
     expect(screen.getByText(/Fine done/)).toBeTruthy();
   });
 
-  test("a settled card is hidden in active and attention but shown in done", async () => {
+  test("settled cards are hidden in every sidebar group", async () => {
     await mount(snapshotOf([
       card({ title: "Settled active", stageId: "s-active", settledAt: 1 }),
       card({ title: "Open active", stageId: "s-active" }),
@@ -198,7 +198,7 @@ describe("filters", () => {
     expect(screen.queryByText(/Settled review/)).toBeNull();
     expect(screen.getByText(/Open active/)).toBeTruthy();
     expect(screen.getByText(/Open review/)).toBeTruthy();
-    expect(screen.getByText(/Settled done/)).toBeTruthy();
+    expect(screen.queryByText(/Settled done/)).toBeNull();
     expect(screen.getByText(/Unsettled done/)).toBeTruthy();
   });
 
@@ -211,19 +211,36 @@ describe("filters", () => {
     expect(screen.getByText(/Has thread/)).toBeTruthy();
   });
 
+  test("a completed group with only settled cards is hidden", async () => {
+    await mount(snapshotOf([
+      card({ title: "Settled completion", stageId: "s-done", settledAt: 1 }),
+      card({ title: "Visible active", stageId: "s-active" }),
+    ]));
+    expect(screen.getByText(/Visible active/)).toBeTruthy();
+    expect(screen.queryByText(/Settled completion/)).toBeNull();
+    expect(screen.queryByRole("heading", { level: 4, name: "Completed" })).toBeNull();
+  });
+
   test("done lists the 10 newest cards, read or not", async () => {
     const done = Array.from({ length: 12 }, (_, index) => card({
       title: `Done ${index}`,
       stageId: "s-done",
-      settledAt: index % 2 === 0 ? 1 : null,
+      readAt: index % 2 === 0 ? 1 : null,
       updatedAt: NOW - (index + 1) * MINUTE,
     }));
-    await mount(snapshotOf([...done].reverse()));
+    const settled = Array.from({ length: 11 }, (_, index) => card({
+      title: `Settled ${index}`,
+      stageId: "s-done",
+      settledAt: 1,
+      updatedAt: NOW + (index + 1) * MINUTE,
+    }));
+    await mount(snapshotOf([...done].reverse().concat(settled)));
     const texts = rowTexts("Completed");
     expect(texts).toHaveLength(10);
     for (let index = 0; index < 10; index += 1) expect(texts[index]).toContain(`Done ${index}`);
     expect(screen.queryByText(/Done 10/)).toBeNull();
     expect(screen.queryByText(/Done 11/)).toBeNull();
+    expect(screen.queryByText(/Settled/)).toBeNull();
   });
 
   test("active and attention are not capped at 10", async () => {
@@ -318,6 +335,21 @@ describe("status dot", () => {
 });
 
 describe("realtime", () => {
+  test("a settled completion disappears after a fresh snapshot", async () => {
+    const done = card({ title: "Fresh completion", stageId: "s-done" });
+    const snapshot = snapshotOf([done]);
+    const view = await mount(snapshot);
+    expect(screen.getByText(/Fresh completion/)).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 4, name: "Completed" })).toBeTruthy();
+
+    snapshot.tasks = [{ ...done, settledAt: 1 }];
+    const before = view.rpcCalls.length;
+    await view.emitRealtime("triage", { at: 910_004 });
+    await waitFor(() => expect(view.rpcCalls.length).toBeGreaterThan(before));
+    await waitFor(() => expect(screen.queryByText(/Fresh completion/)).toBeNull());
+    expect(screen.queryByRole("heading", { level: 4, name: "Completed" })).toBeNull();
+  });
+
   test("a fresh stamp refreshes the snapshot and the same stamp does not repeat it", async () => {
     const view = await mount(snapshotOf([card({ stageId: "s-active" })]));
     const before = view.rpcCalls.length;
