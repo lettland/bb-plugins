@@ -10,6 +10,7 @@ import {
   type ReviewContext,
 } from "./context.js";
 import { captureSinceSeq, tryCaptureSinceSeq } from "./detect.js";
+import { agentApprovedPlanSince, onlyReviewWakesSince } from "./detect-events.js";
 import { passesThreadGate, planGateServes } from "./gate.js";
 import { approvePlan, planHash, reapproveSamePlan } from "./plan-approve.js";
 import { answerPlanHoldQuestion } from "./plan-hold-answer.js";
@@ -186,10 +187,17 @@ async function markReviewDelivered(ctx: ReviewContext, threadId: string): Promis
  * it for the user only when the project opted in AND everything shows the
  * review cycle completed — the skill was loaded, the review was delivered, the
  * arm is fresh, and the agent completed a tool call of its own after delivery
- * (which is when a steered message reaches the model) with no turn ending
- * since, so a stale arm from a review turn that never re-presented through the
- * gate cannot approve a later plan. Anything less leaves the plan with the
- * user, exactly as with the option off.
+ * (which is when a steered message reaches the model). A stale arm from a
+ * review turn that never re-presented through the gate must not approve a
+ * later plan, so the review also needs a freshness proof: no turn ended since
+ * the delivery, or, since the plan was held, only reviewer wake-ups and
+ * auto-review's own messages reached the agent (`onlyReviewWakesSince`: a
+ * review that spans turns, because child-thread reviewers end the turn and bb
+ * wakes the agent once per reviewer). Either way the agent must not have
+ * approved a plan by itself after the delivery (`agentApprovedPlanSince`). A
+ * failed turn-end read no longer withholds the approval by itself: the
+ * wake-up check then decides, with reads of its own. Anything less leaves the
+ * plan with the user, exactly as with the option off.
  *
  * The redo is decided from `state` before the gate's keys are cleared, which
  * would erase `planReviewRedone`. An expired arm is never checked or redone:
@@ -219,8 +227,8 @@ async function releaseReviewedPlan(
   );
   const { planReviewDeliveredSeq } = state;
   // The baseline accepts a review that spans turns: child-thread reviewers end
-  // the turn and bb wakes the agent later. Auto-approve still needs the
-  // same-turn proof.
+  // the turn and bb wakes the agent later. Auto-approve accepts it only when
+  // nothing but those wake-ups reached the agent (or no turn ended at all).
   const reviewWorked =
     check === "loaded" &&
     planReviewDeliveredSeq !== undefined &&
@@ -229,7 +237,10 @@ async function releaseReviewedPlan(
   const reviewRan =
     reviewWorked &&
     planReviewDeliveredSeq !== undefined &&
-    (await reviewRanSince(bb, thread.id, planReviewDeliveredSeq, NATIVE_GATE_TOOLS, false, false));
+    !(await agentApprovedPlanSince(bb, thread.id, planReviewDeliveredSeq)) &&
+    ((await reviewRanSince(bb, thread.id, planReviewDeliveredSeq, NATIVE_GATE_TOOLS, false, false)) ||
+      (state.planReviewArmedSeq !== undefined &&
+        (await onlyReviewWakesSince(bb, thread.id, state.planReviewArmedSeq))));
   await settlePlanBaseline(bb, thread.id, approval.planFilePath, reviewWorked);
   if (reviewRan && config.autoApprovePlans && approval.canApprove && (await approvePlan(ctx, thread, approval))) {
     await clearPlanBaseline(bb, thread.id, approval.planFilePath);

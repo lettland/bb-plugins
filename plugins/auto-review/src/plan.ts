@@ -239,7 +239,7 @@ export async function reviewRanSince(
     return reviewReachedAgent(events, gateTools, countSubagentCalls, turnEnded);
   } catch (error) {
     bb.log.warn(
-      `auto-review: could not read events to check the plan review ran in ${threadId}; leaving the plan for the user: ${
+      `auto-review: could not read events to check the plan review ran in ${threadId}: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );

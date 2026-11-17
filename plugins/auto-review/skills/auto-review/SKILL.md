@@ -245,13 +245,20 @@ What counts as a completed review cycle:
   queue, or sent straight into the turn), the arm is within the 2-hour continuation cap
   (delivered reviews are bounded by that, not by the 30-minute stale window), and
   the agent completed at least one tool call of its own (not ExitPlanMode, EnterPlanMode or
-  AskUserQuestion, and not a subagent's call) after the delivery with no turn ending since —
-  a steered message reaches the model only after a tool result, so that is the proof the
-  review was in front of it. Whether a turn ended comes from the event log: bb emits
-  `turn/completed` only when a turn really ends, never when it steers a queued message into
-  a running one, and (where the *review-code check* above applies) the agent loaded
-  `review-code`. The plan is then resolved `allow_once` (reason `plan-approved`, also
-  logged).
+  AskUserQuestion, and not a subagent's call) after the delivery — a steered message reaches
+  the model only after a tool result, so that is the proof the review was in front of it.
+  A turn that ended since the delivery voids that evidence (`turn/completed` is read from the
+  event log: bb emits it only when a turn really ends, never when it steers a queued message
+  into a running one), unless, since the plan was held, only reviewer wake-ups and
+  auto-review's own messages reached the agent: child-thread reviewers end the turn and bb
+  wakes the agent once per reviewer, so a review that spans turns still counts. A user, plugin
+  or agent message (including a result a stuck reviewer relays through `bb thread tell`), a
+  manual stop of the thread, or a stopped reviewer leaves the plan with the user. Either way
+  the agent must not have approved a plan by itself after the delivery: an `ExitPlanMode` call
+  of its own that completed (the gate's own deny is a failed call) blocks the auto-approve,
+  because an agent that left plan mode on its own used up the arm and its next plan is a later
+  one. Where the *review-code check* above applies, the agent also loaded `review-code`. The
+  plan is then resolved `allow_once` (reason `plan-approved`, also logged).
 - `PresentPlan`: the agent loaded `review-code` (where the *review-code check* applies), a
   tool call (other than the gate's own) completed between the first and
   second call, and the second call then returns an explicit "approved automatically" result
@@ -264,8 +271,9 @@ What counts as a completed review cycle:
 Everything else still goes to the user, as with the option off: no proof the review ran
 (including an events read that failed), a plan whose review `review-code` check came back
 missing or unknown (reasons `plan-review-incomplete`, `plan-review-unverified`), a turn that ended since the review was delivered
+with anything but reviewer wake-ups after it on the native gate, or at all on `PresentPlan`
 (a stale arm must never approve a later plan; this holds even when the idle event was
-missed), `plan-hold-expired`, a provider that offers no `allow_once`,
+missed), an `ExitPlanMode` the agent approved by itself after the delivery, `plan-hold-expired`, a provider that offers no `allow_once`,
 or a failed approval (reason `plan-reviewed`).
 
 The prompt only shapes wording; the gate's decision at release time wins. If auto-approve is

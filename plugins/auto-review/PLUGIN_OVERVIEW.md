@@ -204,8 +204,19 @@ one provider-neutral implementation driven by bb's `thread.idle` event.
   anything the gate cannot show was reviewed still goes to the user. The CLI validates the
   project and refuses `on` from inside a bb thread (an accident guard keyed off the
   thread context, not a security boundary); the agent mentions that the approval may have
-  come from auto-review rather than from the user. A turn that ended since the review was
-  delivered (a `turn/completed` event) voids the evidence. Within the same turn (no turn end
+  come from auto-review rather than from the user. On the native path a turn that ended since
+  the review was delivered (a `turn/completed` event) voids the evidence, unless, since the
+  plan was held, only reviewer wake-ups (bb waking the agent for a child-thread reviewer that
+  completed, failed or needs attention) and auto-review's own messages reached the agent
+  (`onlyReviewWakesSince`): child-thread reviewers end the turn and bb wakes the agent once per
+  reviewer, so a review that spans turns is still auto-approved. A user, plugin or agent
+  message (including a reviewer's result relayed through `bb thread tell` when its parent
+  notifications are stuck), a manual stop of the thread, or a stopped reviewer
+  (`child-interrupted`, or an interrupted outcome in a batch) leaves the plan with the user. On
+  both native arms, an `ExitPlanMode` the agent approved by itself after the delivery
+  (`agentApprovedPlanSince`, a completed call of the agent's own; the gate's own deny is a
+  failed one) blocks the auto-approve, and a read that fails counts as an approval. `PresentPlan`
+  keeps the same-turn rule. Within the same turn (no turn end
   and no delivered message since), a plan that the gate left with the user, that was approved,
   and that is re-presented byte-identically is approved once more instead of being held for
   another review round (reason `plan-already-approved`).

@@ -2,10 +2,12 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { describe, expect, it } from "vitest";
 import { AUTO_REVIEW_MARKER, CODE_REVIEW_OPENING } from "./prompt.js";
 import {
+  agentApprovedPlanSince,
   endedTurn,
   EVENT_PAGE_MAX,
   firstUserTurnSince,
   NoTurnCompletedError,
+  onlyReviewWakesSince,
   planLatestDecisionApproves,
   quietSincePark,
   tryCaptureSinceSeq,
@@ -34,7 +36,7 @@ function logOf(
   const list = async (args: { afterSeq?: string; types?: string[]; limit?: string }) => {
     const page = rows
       .filter((row) => row.seq > Number(args.afterSeq ?? 0) && args.types?.includes(row.type) === true)
-      .slice(0, Number(args.limit));
+      .slice(0, args.limit === undefined ? undefined : Number(args.limit));
     pageSizes.push(page.length);
     return page;
   };
@@ -857,5 +859,202 @@ describe("detect-events coverage of failure shapes", () => {
     expect(failure).toBeInstanceOf(UnreadTurnError);
     expect((failure as UnreadTurnError).completedSeq).toBe(5);
     expect((failure as Error).message).toBe("kaboom");
+  });
+});
+
+/** `logOf` whose read of one event type fails with `failure` (an Error or a raw value). */
+function logFailingOn(rows: readonly Row[], type: string, failure: unknown) {
+  const log = logOf(rows);
+  const events = (log.bb as unknown as { sdk: { threads: { events: { list: (args: { types?: string[] }) => Promise<unknown> } } } }).sdk
+    .threads.events;
+  const inner = events.list;
+  events.list = async (args) => {
+    if (args.types?.includes(type) === true) {
+      throw failure;
+    }
+    return inner(args);
+  };
+  return log;
+}
+
+describe("onlyReviewWakesSince", () => {
+  const ARMED = 100;
+  const MARKER_TEXT = `${AUTO_REVIEW_MARKER} Plan reviewed.`;
+  /** A turn request after the arm, with the given initiator, label, subject and text, and the input a turn accepted for it. */
+  const requested = (
+    seq: number,
+    initiator: string,
+    extra: { kind?: string; subject?: unknown; text?: string } = {},
+  ): Row[] => [
+    {
+      seq,
+      type: "client/turn/requested",
+      scope: { kind: "thread" },
+      data: {
+        requestId: `creq-${seq}`,
+        initiator,
+        target: { kind: "new-turn" },
+        input: [{ type: "text", text: extra.text ?? "[bb system] review: security completed" }],
+        ...(extra.kind === undefined ? {} : { systemMessageKind: extra.kind }),
+        ...(extra.subject === undefined ? {} : { systemMessageSubject: extra.subject }),
+      },
+    },
+    accepted(seq + 1, `turn-${seq}`, `creq-${seq}`),
+  ];
+  const batch = (...statuses: string[]) => ({
+    kind: "thread-batch",
+    count: statuses.length,
+    outcomes: statuses.map((status, index) => ({ threadId: `child-${index}`, status })),
+  });
+  const stop = (seq: number, reason: string): Row => ({
+    seq,
+    type: "system/thread/interrupted",
+    scope: { kind: "thread" },
+    data: { reason },
+  });
+
+  it.each([
+    ["a completed reviewer", requested(110, "system", { kind: "child-completed" })],
+    ["a failed reviewer", requested(110, "system", { kind: "child-failed" })],
+    ["a reviewer that needs attention", requested(110, "system", { kind: "child-needs-attention" })],
+    ["a batch of completed and failed reviewers", requested(110, "system", { kind: "child-outcome-batch", subject: batch("completed", "failed") })],
+    ["auto-review's own message", requested(110, "user", { text: MARKER_TEXT })],
+    ["a stop that was not the user's", [...requested(110, "system", { kind: "child-completed" }), stop(120, "host-daemon-restarted")]],
+    ["nothing at all", []],
+    ["a request before the arm, which is not read", requested(90, "user", { text: "before the hold" }).slice(0, 1)],
+  ])("holds for %s", async (_label, rows) => {
+    const { bb, warnings } = logOf(rows);
+    expect(await onlyReviewWakesSince(bb, "thr", ARMED)).toBe(true);
+    expect(warnings).toEqual([]);
+  });
+
+  it.each([
+    ["a user message", requested(110, "user", { text: "wait" })],
+    ["a plugin's message without the marker", requested(110, "user", { text: "[bb some-plugin] note" })],
+    ["a message whose marker is not at the start", requested(110, "user", { text: `note: ${MARKER_TEXT}` })],
+    ["an agent's tell", requested(110, "agent", { kind: "child-completed" })],
+    ["the marker on an agent's tell", requested(110, "agent", { text: MARKER_TEXT })],
+    ["a stopped reviewer", requested(110, "system", { kind: "child-interrupted" })],
+    ["an unlabeled system message", requested(110, "system", { kind: "unlabeled" })],
+    ["another system kind", requested(110, "system", { kind: "ownership-assigned" })],
+    ["a system message with no kind", requested(110, "system")],
+    ["a batch holding a stopped reviewer", requested(110, "system", { kind: "child-outcome-batch", subject: batch("completed", "interrupted") })],
+    ["a batch without outcomes", requested(110, "system", { kind: "child-outcome-batch", subject: { kind: "thread-batch", count: 2 } })],
+    ["a batch about another subject", requested(110, "system", { kind: "child-outcome-batch", subject: { kind: "directory", path: "/w" } })],
+    ["a batch without a subject", requested(110, "system", { kind: "child-outcome-batch" })],
+    ["a batch with a null subject", requested(110, "system", { kind: "child-outcome-batch", subject: null })],
+    [
+      "a wake-up, then a user message",
+      [...requested(110, "system", { kind: "child-completed" }), ...requested(120, "user", { text: "and also" })],
+    ],
+    ["an input accepted for a request before the arm", [accepted(110, "turn-90", "creq-90")]],
+    [
+      "an input accepted for a request that is not among the wake-ups",
+      [...requested(110, "system", { kind: "child-completed" }), accepted(130, "turn-130", "creq-unknown")],
+    ],
+    [
+      "a manual stop",
+      [...requested(110, "system", { kind: "child-completed" }), stop(120, "manual-stop")],
+    ],
+  ])("does not hold for %s", async (_label, rows) => {
+    const { bb, warnings } = logOf(rows);
+    expect(await onlyReviewWakesSince(bb, "thr", ARMED)).toBe(false);
+    expect(warnings).toEqual([]);
+  });
+
+  it.each([
+    ["the requests", "client/turn/requested"],
+    ["the accepted inputs", "turn/input/accepted"],
+    ["the stops", "system/thread/interrupted"],
+  ])("fails closed and says so when reading %s fails", async (_label, type) => {
+    for (const failure of [new Error("boom"), "kaboom"]) {
+      const { bb, warnings } = logFailingOn(requested(110, "system", { kind: "child-completed" }), type, failure);
+      expect(await onlyReviewWakesSince(bb, "thr", ARMED)).toBe(false);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("only reviewer wake-ups followed the plan hold");
+      expect(warnings[0]).toContain(failure instanceof Error ? "boom" : "kaboom");
+    }
+  });
+
+  it("fails closed at the page cap on a long run of wake-ups", async () => {
+    const rows: Row[] = [];
+    for (let seq = 101; seq <= 100 + 50 * EVENT_PAGE_MAX + 1; seq += 1) {
+      rows.push(...requested(seq * 2, "system", { kind: "child-completed" }).slice(0, 1));
+    }
+    const { bb, warnings } = logOf(rows);
+    expect(await onlyReviewWakesSince(bb, "thr", ARMED)).toBe(false);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("more than");
+  });
+});
+
+describe("agentApprovedPlanSince", () => {
+  const DELIVERED = 100;
+  const exitPlanMode = (seq: number, over: Record<string, unknown> = {}): Row => ({
+    seq,
+    type: "item/completed",
+    scope: { kind: "turn", turnId: "turn-1" },
+    data: { item: { type: "toolCall", tool: "ExitPlanMode", status: "completed", ...over } },
+  });
+  const read = (seq: number): Row => ({
+    seq,
+    type: "item/completed",
+    scope: { kind: "turn", turnId: "turn-1" },
+    data: { item: { type: "toolCall", tool: "Read", status: "completed" } },
+  });
+  const message = (seq: number): Row => ({
+    seq,
+    type: "item/completed",
+    scope: { kind: "turn", turnId: "turn-1" },
+    data: { item: { type: "agentMessage" } },
+  });
+
+  it("is true for the agent's own completed ExitPlanMode after the cursor", async () => {
+    const { bb, warnings } = logOf([read(101), exitPlanMode(102)]);
+    expect(await agentApprovedPlanSince(bb, "thr", DELIVERED)).toBe(true);
+    expect(warnings).toEqual([]);
+  });
+
+  it.each([
+    ["no rows", []],
+    ["other tools and messages", [read(101), message(102)]],
+    ["the gate's own denied call", [exitPlanMode(101, { status: "failed" })]],
+    ["a call with no status", [exitPlanMode(101, { status: undefined })]],
+    ["a subagent's call", [exitPlanMode(101, { parentToolCallId: "toolu-agent" })]],
+    ["a call before the cursor", [exitPlanMode(90)]],
+  ])("is false for %s", async (_label, rows) => {
+    const { bb, warnings } = logOf(rows);
+    expect(await agentApprovedPlanSince(bb, "thr", DELIVERED)).toBe(false);
+    expect(warnings).toEqual([]);
+  });
+
+  it("finds a call on a later page", async () => {
+    const rows: Row[] = [];
+    for (let seq = 101; seq <= 100 + EVENT_PAGE_MAX; seq += 1) {
+      rows.push(read(seq));
+    }
+    rows.push(exitPlanMode(100 + EVENT_PAGE_MAX + 1));
+    const { bb } = logOf(rows);
+    expect(await agentApprovedPlanSince(bb, "thr", DELIVERED)).toBe(true);
+  });
+
+  it("counts a failed read as approved, and says so, whatever the error", async () => {
+    for (const failure of [new Error("boom"), "kaboom"]) {
+      const { bb, warnings } = logFailingOn([read(101)], "item/completed", failure);
+      expect(await agentApprovedPlanSince(bb, "thr", DELIVERED)).toBe(true);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("approved no plan by itself");
+      expect(warnings[0]).toContain(failure instanceof Error ? "boom" : "kaboom");
+    }
+  });
+
+  it("counts the page cap as approved", async () => {
+    const rows: Row[] = [];
+    for (let seq = 101; seq <= 100 + 50 * EVENT_PAGE_MAX + 1; seq += 1) {
+      rows.push(read(seq));
+    }
+    const { bb, warnings } = logOf(rows);
+    expect(await agentApprovedPlanSince(bb, "thr", DELIVERED)).toBe(true);
+    expect(warnings[0]).toContain("more than");
   });
 });

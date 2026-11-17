@@ -90,6 +90,8 @@ interface HostOptions {
   completedEventsThrow?: boolean;
   /** Listing `turn/completed` events fails, so no turn boundary can be read. */
   turnEventsThrow?: boolean;
+  /** Listing `system/thread/interrupted` events fails, so no manual stop can be read. */
+  interruptsThrow?: boolean;
   /** Listing `client/turn/requested` events fails, so no user turn can be read. */
   turnRequestsThrow?: boolean;
   /** The turn a send starts is still running: no `turn/completed` is logged for it. The plan gate reads such an end as the boundary of the review turn, so plan tests leave it running. */
@@ -129,6 +131,10 @@ interface TurnRequest {
   seq: number;
   initiator: "user" | "agent" | "system";
   text: string;
+  /** The kind bb labels a `system` request with (`child-completed` for a reviewer's wake-up). */
+  systemMessageKind?: string;
+  /** What a labelled system request is about, as bb logs it (a batch lists its `outcomes`). */
+  systemMessageSubject?: unknown;
   /** The request joins the turn already running instead of starting one. */
   steer?: boolean;
   /** An `auto` request that expects a running turn: it steers that turn if active, else starts one. */
@@ -312,6 +318,7 @@ function createHost(options: HostOptions = {}) {
   let timelineThrows = false;
   let timelineReadsLeft: number | undefined;
   let turnEndReadsLeft: number | undefined;
+  let completedReadsLeft: number | undefined;
   let statusThrows = false;
   let onStatusRead: (() => void) | undefined;
   let queuedRows = options.queuedRows ?? [];
@@ -433,6 +440,9 @@ function createHost(options: HostOptions = {}) {
           const after = Number(args.afterSeq ?? -1);
           const rows: unknown[] = [];
           if (args.types?.includes("system/thread/interrupted") === true) {
+            if (options.interruptsThrow === true) {
+              throw new Error("interrupts unavailable");
+            }
             rows.push(
               ...(interrupts[args.threadId] ?? [])
                 .filter((event) => event.seq > after)
@@ -481,6 +491,10 @@ function createHost(options: HostOptions = {}) {
             if (options.completedEventsThrow === true) {
               throw new Error("events unavailable");
             }
+            if (completedReadsLeft !== undefined && (completedReadsLeft -= 1) === 0) {
+              completedReadsLeft = undefined;
+              throw new Error("events unavailable");
+            }
             rows.push(
               ...(completedEvents[args.threadId] ?? [])
                 .filter((event) => event.seq > after)
@@ -521,6 +535,8 @@ function createHost(options: HostOptions = {}) {
                         : request.auto === true
                           ? { kind: "auto", expectedTurnId: request.expectedTurnId ?? "turn-1" }
                           : { kind: "new-turn" },
+                    ...(request.systemMessageKind === undefined ? {} : { systemMessageKind: request.systemMessageKind }),
+                    ...(request.systemMessageSubject === undefined ? {} : { systemMessageSubject: request.systemMessageSubject }),
                     input: [{ type: "text", text: request.text, mentions: [] }],
                   },
                 })),
@@ -827,6 +843,10 @@ function createHost(options: HostOptions = {}) {
     /** Record a `turn/completed` event: the turn really ended (steering a message in emits none). */
     completeTurn: (seq: number, threadId: string = THREAD_ID) => {
       turnEnds = { ...turnEnds, [threadId]: [...(turnEnds[threadId] ?? []), { seq }] };
+    },
+    /** The `read`th listing of `item/completed` events from now on fails, once; the others succeed. */
+    failCompletedRead: (read: number) => {
+      completedReadsLeft = read;
     },
     /** The `read`th listing of `turn/completed` events from now on fails, once; the others succeed. */
     failTurnEndRead: (read: number) => {
@@ -4704,6 +4724,8 @@ describe("auto-review plugin", () => {
         host.completeItem({ seq, item: READ });
       }
       host.completeTurn(101 + EVENT_PAGE_MAX + 10);
+      // The user wrote after the turn ended, so no wake-ups-only proof stands in for the turn end.
+      host.requestTurn({ seq: 101 + EVENT_PAGE_MAX + 11, initiator: "user", text: "one more thing" });
       await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
       expect(host.resolutions).toEqual([DENY]);
       expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
@@ -4722,13 +4744,31 @@ describe("auto-review plugin", () => {
     });
 
     it("leaves the plan for the user when the turn boundary cannot be read", async () => {
-      const host = await hostWith({ turnEventsThrow: true });
+      // The wake-up check cannot stand in for the unreadable turn end either: its own request read fails too.
+      const host = await hostWith({ turnEventsThrow: true, turnRequestsThrow: true });
       await holdAndDispatch(host);
       host.completeItem({ seq: 101, item: READ });
       await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
       expect(host.resolutions).toEqual([DENY]);
       expect(warnings(host).some((message) => message.includes("check the plan review ran"))).toBe(true);
       expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+      await host.harness.dispose();
+    });
+
+    it("approves when the turn boundary cannot be read but only reviewer wake-ups followed the hold", async () => {
+      const host = await hostWith({ turnEventsThrow: true });
+      await holdAndDispatch(host);
+      host.completeItem({ seq: 101, item: READ });
+      host.requestTurn({
+        seq: 102,
+        initiator: "system",
+        systemMessageKind: "child-completed",
+        text: "[bb system] review: security completed",
+      });
+      await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+      // The failed turn-end read is logged and no longer withholds the approval by itself.
+      expect(warnings(host).some((message) => message.includes("check the plan review ran"))).toBe(true);
+      expect(host.resolutions).toEqual([DENY, APPROVE]);
       await host.harness.dispose();
     });
 
@@ -4758,6 +4798,8 @@ describe("auto-review plugin", () => {
       // self-approved ExitPlanMode outside plan mode); the arm stays. No idle
       // event is emitted: the event log alone says the turn is over.
       host.completeTurn(102);
+      // What the comment above says happened: the agent's own completed ExitPlanMode.
+      host.completeItem({ seq: 103, item: { type: "toolCall", tool: "ExitPlanMode", status: "completed" } });
       expect(typeof host.metadata.planReviewArmedAt).toBe("number");
 
       await emitPlan(host, planInteraction("# A later plan", "pint-2"));
@@ -4769,6 +4811,20 @@ describe("auto-review plugin", () => {
       await emitPlan(host, planInteraction("# The next plan", "pint-3"));
       expect(host.sends).toHaveLength(2);
       expect(host.resolutions.map((r) => r.interactionId)).toEqual(["pint-1", "pint-3"]);
+      await host.harness.dispose();
+    });
+
+    it("never approves a later plan once the user wrote after the review turn ended", async () => {
+      const host = await hostWith();
+      await holdAndDispatch(host);
+      host.completeItem({ seq: 101, item: READ });
+      host.completeTurn(102);
+      host.requestTurn({ seq: 103, initiator: "user", text: "now do something else" });
+
+      await emitPlan(host, planInteraction("# A later plan", "pint-2"));
+      expect(host.resolutions).toEqual([DENY]);
+      expect(host.metadata.planReviewArmedAt).toBeUndefined();
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
       await host.harness.dispose();
     });
 
@@ -4800,6 +4856,225 @@ describe("auto-review plugin", () => {
       await emitPlan(own, planInteraction("# Plan v2", "pint-2"));
       expect(own.resolutions).toEqual([DENY, APPROVE]);
       await own.harness.dispose();
+    });
+
+    describe("a review that spans turns: wake-ups after the turn end", () => {
+      const wake = (seq: number, systemMessageKind = "child-completed"): TurnRequest => ({
+        seq,
+        initiator: "system",
+        systemMessageKind,
+        text: "[bb system] review: security completed",
+      });
+      const batch = (seq: number, statuses: string[]): TurnRequest => ({
+        ...wake(seq, "child-outcome-batch"),
+        systemMessageSubject: {
+          kind: "thread-batch",
+          count: statuses.length,
+          outcomes: statuses.map((status, index) => ({ threadId: `child-${index}`, status })),
+        },
+      });
+      const EXIT_PLAN = { type: "toolCall", tool: "ExitPlanMode" };
+      const HOLD_WARNING = "only reviewer wake-ups followed";
+
+      /** The review is dispatched, the agent worked, its turn ended on the reviewers; `after` logs what followed, then the revised plan comes back. */
+      async function reviewedAfter(after: (host: Host) => void, options: HostOptions = {}) {
+        const host = await hostWith(options);
+        await holdAndDispatch(host);
+        host.completeItem({ seq: 101, item: READ });
+        host.completeTurn(102);
+        after(host);
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        return host;
+      }
+
+      async function expectLeftWithUser(host: Host) {
+        expect(host.resolutions).toEqual([DENY]);
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+        await host.harness.dispose();
+      }
+
+      const ALLOWED: Array<[string, TurnRequest[]]> = [
+        ["a reviewer that completed", [wake(103)]],
+        ["a reviewer that failed", [wake(103, "child-failed")]],
+        ["a reviewer that needs attention", [wake(103, "child-needs-attention")]],
+        ["a batch of completed and failed reviewers", [batch(103, ["completed", "failed"])]],
+        [
+          "auto-review's own message",
+          [{ seq: 103, initiator: "user", text: `${AUTO_REVIEW_MARKER} Plan reviewed.` }],
+        ],
+        ["several reviewers, one after the other", [wake(103), wake(105), wake(107, "child-failed")]],
+      ];
+      it.each(ALLOWED)("approves when only %s followed the turn end", async (_label, requests) => {
+        const host = await reviewedAfter((target) => requests.forEach((request) => target.requestTurn(request)));
+        expect(host.resolutions).toEqual([DENY, APPROVE]);
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "fired", reason: "plan-approved" });
+        await host.harness.dispose();
+      });
+
+      const INTERVENTIONS: Array<[string, TurnRequest[]]> = [
+        ["a user message", [{ seq: 103, initiator: "user", text: "wait, one more thing" }]],
+        ["a plugin's message (user-initiated, no marker)", [{ seq: 103, initiator: "user", text: "[bb some-plugin] a note" }]],
+        ["an agent's tell", [{ seq: 103, initiator: "agent", text: "tell: reviewer result" }]],
+        [
+          "the marker text on an agent's tell",
+          [{ seq: 103, initiator: "agent", text: `${AUTO_REVIEW_MARKER} Plan reviewed.` }],
+        ],
+        ["an unlabeled system message", [wake(103, "unlabeled")]],
+        ["an ownership assignment", [wake(103, "ownership-assigned")]],
+        ["a stopped reviewer", [wake(103, "child-interrupted")]],
+        ["a system message with no kind", [{ seq: 103, initiator: "system", text: "[bb system] something" }]],
+        ["a batch holding a stopped reviewer", [batch(103, ["completed", "interrupted"])]],
+        ["a batch without outcomes", [{ ...wake(103, "child-outcome-batch"), systemMessageSubject: { kind: "thread-batch", count: 2 } }]],
+        ["a batch without a subject", [wake(103, "child-outcome-batch")]],
+        [
+          "a batch about something else",
+          [{ ...wake(103, "child-outcome-batch"), systemMessageSubject: { kind: "directory", path: "/w" } }],
+        ],
+        ["a user message after reviewer wake-ups", [wake(103), { seq: 105, initiator: "user", text: "and another thing" }]],
+      ];
+      it.each(INTERVENTIONS)("leaves the plan with the user when %s followed the turn end", async (_label, requests) => {
+        const host = await reviewedAfter((target) => requests.forEach((request) => target.requestTurn(request)));
+        await expectLeftWithUser(host);
+      });
+
+      it("never approves when a request logged before the hold was accepted after the delivery", async () => {
+        const host = await hostWith();
+        // Logged before the hold, so before the arm cursor (100): its own row is out of range.
+        host.requestTurn({ seq: 90, initiator: "user", text: "queued before the plan", queued: true });
+        await emitPlan(host);
+        host.setMaxSeq(110);
+        await dispatchQueued(host);
+        expect(host.metadata.planReviewArmedSeq).toBe(100);
+        expect(host.metadata.planReviewDeliveredSeq).toBe(110);
+        host.startQueuedTurn(90, 120);
+        host.completeItem({ seq: 111, item: READ });
+        host.completeTurn(112);
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        await expectLeftWithUser(host);
+      });
+
+      it("never approves when a request logged before the hold was accepted between the arm and the delivery", async () => {
+        const host = await hostWith();
+        host.requestTurn({ seq: 90, initiator: "user", text: "queued before the plan", queued: true });
+        await emitPlan(host);
+        host.startQueuedTurn(90, 105);
+        host.setMaxSeq(110);
+        await dispatchQueued(host);
+        host.completeItem({ seq: 111, item: READ });
+        host.completeTurn(112);
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        await expectLeftWithUser(host);
+      });
+
+      it("still allows a reviewer wake-up between the arm and the delivery", async () => {
+        const host = await hostWith();
+        await emitPlan(host);
+        host.requestTurn(wake(103));
+        host.setMaxSeq(110);
+        await dispatchQueued(host);
+        host.completeItem({ seq: 111, item: READ });
+        host.completeTurn(112);
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions).toEqual([DENY, APPROVE]);
+        await host.harness.dispose();
+      });
+
+      it("never approves after the user stopped the thread during the hold, but not after another stop", async () => {
+        const stopped = await reviewedAfter((host) => {
+          host.requestTurn(wake(103));
+          host.interrupt({ seq: 104, reason: "manual-stop" });
+        });
+        await expectLeftWithUser(stopped);
+
+        const restarted = await reviewedAfter((host) => {
+          host.requestTurn(wake(103));
+          host.interrupt({ seq: 104, reason: "host-daemon-restarted" });
+        });
+        expect(restarted.resolutions).toEqual([DENY, APPROVE]);
+        await restarted.harness.dispose();
+      });
+
+      it("never approves a plan the agent approved by itself after the delivery, with or without a turn end", async () => {
+        const turnEnded = await reviewedAfter((host) => {
+          host.requestTurn(wake(103));
+          host.completeItem({ seq: 104, item: { ...EXIT_PLAN, status: "completed" } });
+        });
+        await expectLeftWithUser(turnEnded);
+
+        // The same-turn arm too: the agent left plan mode on its own, no turn ended.
+        const sameTurn = await hostWith();
+        await holdAndDispatch(sameTurn);
+        sameTurn.completeItem({ seq: 101, item: READ });
+        sameTurn.completeItem({ seq: 102, item: { ...EXIT_PLAN, status: "completed" } });
+        await emitPlan(sameTurn, planInteraction("# Plan v2", "pint-2"));
+        await expectLeftWithUser(sameTurn);
+      });
+
+      it("approves despite the gate's own denied ExitPlanMode and a subagent's", async () => {
+        const host = await reviewedAfter((target) => {
+          target.requestTurn(wake(103));
+          target.completeItem({ seq: 104, item: { ...EXIT_PLAN, status: "failed" } });
+          target.completeItem({ seq: 105, item: { ...EXIT_PLAN, status: "completed", parentToolCallId: "toolu-agent" } });
+        });
+        expect(host.resolutions).toEqual([DENY, APPROVE]);
+        await host.harness.dispose();
+      });
+
+      it("leaves the plan with the user when a read the wake-up check needs fails, and says so", async () => {
+        const reads: Array<[string, HostOptions]> = [
+          ["the requests", { turnRequestsThrow: true }],
+          ["the accepted inputs", { turnInputsThrow: true }],
+          ["the stops", { interruptsThrow: true }],
+        ];
+        for (const [label, options] of reads) {
+          const host = await hostWith(options);
+          await holdAndDispatch(host);
+          host.completeItem({ seq: 101, item: READ });
+          host.completeTurn(102);
+          host.requestTurn(wake(103));
+          await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+          expect(host.resolutions, label).toEqual([DENY]);
+          expect(warnings(host).some((message) => message.includes(HOLD_WARNING)), label).toBe(true);
+          expect(await lastFireOf(host), label).toMatchObject({ outcome: "stood-down", reason: "plan-reviewed" });
+          await host.harness.dispose();
+        }
+      });
+
+      it("leaves the plan with the user when the agent's own approvals cannot be read, and says so", async () => {
+        const host = await hostWith();
+        await holdAndDispatch(host);
+        host.completeItem({ seq: 101, item: READ });
+        host.completeTurn(102);
+        host.requestTurn(wake(103));
+        // The first read of completed items is the review's evidence; the second is the agent's approvals.
+        host.failCompletedRead(2);
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(warnings(host).some((message) => message.includes("approved no plan by itself"))).toBe(true);
+        await expectLeftWithUser(host);
+      });
+
+      it("never approves on an expired arm, whatever followed it", async () => {
+        const host = await hostWith();
+        await holdAndDispatch(host);
+        host.completeItem({ seq: 101, item: READ });
+        host.completeTurn(102);
+        host.requestTurn(wake(103));
+        host.metadata.planReviewArmedAt = Date.now() - REVIEW_CONTINUATION_CAP_MS - 1_000;
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        expect(host.resolutions.map(({ resolution }) => (resolution as { decision: string }).decision)).not.toContain("allow_once");
+        await host.harness.dispose();
+      });
+
+      it("never approves without a recorded arm cursor", async () => {
+        const host = await hostWith();
+        await holdAndDispatch(host);
+        host.completeItem({ seq: 101, item: READ });
+        host.completeTurn(102);
+        host.requestTurn(wake(103));
+        delete host.metadata.planReviewArmedSeq;
+        await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
+        await expectLeftWithUser(host);
+      });
     });
 
     describe("a new review cycle after an expired arm", () => {
@@ -5284,6 +5559,8 @@ describe("auto-review plugin", () => {
         // Review child threads ran; bb woke the agent in a later turn to re-present.
         host.completeItem({ seq: 101, item: LOAD });
         host.completeTurn(102);
+        // The user wrote in that later turn, so it is not just the review's wake-ups.
+        host.requestTurn({ seq: 103, initiator: "user", text: "re-present it, but shorter" });
         await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
         expect(host.resolutions).toEqual([DENY]);
         expect(host.sends).toHaveLength(1);
@@ -5339,7 +5616,8 @@ describe("auto-review plugin", () => {
       });
 
       it("only withholds the auto-approve when the turn events cannot be read, not the redo", async () => {
-        const host = await devkitHost({ turnEventsThrow: true });
+        // The turn requests fail too, so the wake-up check cannot stand in for the turn end.
+        const host = await devkitHost({ turnEventsThrow: true, turnRequestsThrow: true });
         await holdAndDispatch(host);
         host.completeItem({ seq: 101, item: LOAD });
         await emitPlan(host, planInteraction("# Plan v2", "pint-2"));
@@ -6785,12 +7063,35 @@ describe("auto-review plugin: review baselines", () => {
       await host.harness.dispose();
     });
 
-    it("leaves a turn-spanning review's plan with the user under auto-approve, but still promotes the baseline", async () => {
+    it("auto-approves a turn-spanning review's plan when only reviewer wake-ups followed, and clears the baseline", async () => {
+      const host = await nativeHost({}, true);
+      await emitPlan(host, planInteraction(V1, "pint-1"));
+      await host.harness.behavior.emitThreadEvent("message.dispatched", { entry: queueEntry() });
+      host.completeItem({ seq: 101, item: READ });
+      // The review's child threads ended the turn; bb woke the agent once for a reviewer, in a later turn.
+      host.completeTurn(102);
+      host.requestTurn({
+        seq: 103,
+        initiator: "system",
+        systemMessageKind: "child-completed",
+        text: "[bb system] review: security completed",
+      });
+      await emitPlan(host, planInteraction(`${V1}\nreviewed\n`, "pint-2"));
+      expect(host.resolutions.at(-1)).toMatchObject({
+        interactionId: "pint-2",
+        resolution: { decision: "allow_once" },
+      });
+      expect(await planRecord(host)).toBeNull();
+      await host.harness.dispose();
+    });
+
+    it("leaves a turn-spanning review's plan with the user when the user wrote, but still promotes the baseline", async () => {
       const host = await nativeHost({}, true);
       await emitPlan(host, planInteraction(V1, "pint-1"));
       await host.harness.behavior.emitThreadEvent("message.dispatched", { entry: queueEntry() });
       host.completeItem({ seq: 101, item: READ });
       host.completeTurn(102);
+      host.requestTurn({ seq: 103, initiator: "user", text: "wait, one more thing" });
       await emitPlan(host, planInteraction(`${V1}\nreviewed\n`, "pint-2"));
       expect(host.resolutions.at(-1)).toMatchObject({
         interactionId: "pint-1",

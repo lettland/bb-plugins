@@ -100,6 +100,132 @@ export function isUserRequest(data: TurnRequestData): boolean {
   );
 }
 
+/** The system wake-ups that say a reviewer child thread ended without being stopped. */
+const REVIEW_WAKE_KINDS: ReadonlySet<string> = new Set([
+  "child-completed",
+  "child-failed",
+  "child-needs-attention",
+]);
+
+/** The outcomes of a batched wake-up that leave the review intact: a stopped reviewer (`interrupted`) cut it short. */
+const REVIEW_WAKE_OUTCOMES: ReadonlySet<string> = new Set(["completed", "failed"]);
+
+/**
+ * Whether a turn request is one the plan review itself causes: bb waking the
+ * agent because a reviewer child thread ended, or auto-review's own message.
+ * `child-failed` and `child-needs-attention` are allowed on purpose: the
+ * review skill falls a failed or stuck lens through to another tier and the
+ * review still completes. A stopped reviewer (`child-interrupted`, or an
+ * interrupted outcome in a batch) is not: the review was cut short.
+ *
+ * Auto-review's own messages are recognised by the marker text on a
+ * user-initiated request, as `isUserRequest` does. An agent that can write a
+ * user-initiated row with that prefix can already fake the whole review, so
+ * relying on the text grants nothing new. Everything else is an intervention: a
+ * user message, a plugin's message (user-initiated, no marker), an agent's tell
+ * (a stuck reviewer's result relayed by `bb thread tell` lands here), and any
+ * other or missing system kind.
+ */
+function isReviewWake(data: TurnRequestData): boolean {
+  if (data.initiator === "user") {
+    return !isUserRequest(data);
+  }
+  if (data.initiator !== "system" || data.systemMessageKind === undefined) {
+    return false;
+  }
+  if (REVIEW_WAKE_KINDS.has(data.systemMessageKind)) {
+    return true;
+  }
+  if (data.systemMessageKind !== "child-outcome-batch") {
+    return false;
+  }
+  const subject = data.systemMessageSubject;
+  return (
+    subject?.kind === "thread-batch" &&
+    subject.outcomes?.every(({ status }) => REVIEW_WAKE_OUTCOMES.has(status)) === true
+  );
+}
+
+/**
+ * Whether, since the cursor `armReview` captured before the plan review was
+ * sent, nothing but the review's own causes reached the agent: every turn
+ * request is a reviewer wake-up or auto-review's own message (`isReviewWake`),
+ * every input a turn accepted belongs to one of those requests, and the user
+ * did not stop the thread. An input accepted here whose request is not among
+ * them is a request logged before the cursor and queued into the hold (a user
+ * message the agent now sees), so it is an intervention whether it was
+ * accepted before or after the review's delivery.
+ *
+ * This is what a turn end stood in for when a turn-spanning review is the
+ * question: the agent is woken once per reviewer, so turns end, yet the plan it
+ * re-presents is still the reviewed one. A read failure, or the page cap on a
+ * long run of requests, is not proof: it is logged and answers false.
+ */
+export async function onlyReviewWakesSince(
+  bb: BbPluginApi,
+  threadId: string,
+  armedSeq: number,
+): Promise<boolean> {
+  try {
+    const requestIds = new Set<string>();
+    for await (const event of eventsSince(bb, threadId, armedSeq, "client/turn/requested")) {
+      if (!isReviewWake(event.data)) {
+        return false;
+      }
+      requestIds.add(event.data.requestId);
+    }
+    for await (const event of eventsSince(bb, threadId, armedSeq, "turn/input/accepted")) {
+      if (!requestIds.has(event.data.clientRequestId)) {
+        return false;
+      }
+    }
+    return !(await stoppedByUser(bb, threadId, armedSeq));
+  } catch (error) {
+    bb.log.warn(
+      `auto-review: could not read events to check only reviewer wake-ups followed the plan hold in ${threadId}; leaving the plan for the user: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return false;
+  }
+}
+
+/**
+ * Whether the agent approved a plan by itself after the cursor: a completed
+ * `ExitPlanMode` call of its own (no `parentToolCallId`). The gate's own deny
+ * of a plan is a failed call and does not count. An agent that left plan mode on
+ * its own used up the review's arm, so the next plan presented is a later one,
+ * not the reviewed plan coming back. A read failure, or the page cap, counts
+ * as approved: it is logged and answers true, so the caller fails closed.
+ */
+export async function agentApprovedPlanSince(
+  bb: BbPluginApi,
+  threadId: string,
+  deliveredSeq: number,
+): Promise<boolean> {
+  try {
+    for await (const event of eventsSince(bb, threadId, deliveredSeq, "item/completed")) {
+      const { item } = event.data;
+      if (
+        item.type === "toolCall" &&
+        item.tool === "ExitPlanMode" &&
+        item.parentToolCallId === undefined &&
+        item.status === "completed"
+      ) {
+        return true;
+      }
+    }
+    return false;
+  } catch (error) {
+    bb.log.warn(
+      `auto-review: could not read events to check the agent approved no plan by itself in ${threadId}; leaving the plan for the user: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return true;
+  }
+}
+
 /** Whether a request steered: it names an expected turn and landed in that turn, which is read from the turn that accepted it. */
 export function steersTurn(target: TurnRequestData["target"], turnId: string): boolean {
   return "expectedTurnId" in target && target.expectedTurnId === turnId;
