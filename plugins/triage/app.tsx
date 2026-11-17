@@ -408,6 +408,7 @@ export default definePluginApp((app) => {
     group: experimental_THREAD_INFO_SECTION_GROUPS.related,
     order: 20,
     component: TriageThreadsSection,
+    experimental_newThreadComponent: TriageThreadsSection,
   });
   app.slots.navPanel({
     id: "triage-board",

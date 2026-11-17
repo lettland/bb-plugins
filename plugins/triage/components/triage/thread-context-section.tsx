@@ -3,7 +3,6 @@ import {
   experimental_ThreadContextCardRow as ThreadContextCardRow,
   useBbNavigate,
   useRealtime,
-  type ExperimentalThreadContextCardProps,
 } from "@get-bb/plugin-sdk/app";
 
 import { StatusDot } from "@/components/ui/status-dot";
@@ -24,7 +23,7 @@ const GROUP_ROLES = ["active", "attention", "done"] as const;
 const DONE_LIMIT = 10;
 const ROW_LIMIT = 3;
 
-export function TriageThreadsSection(_props: ExperimentalThreadContextCardProps) {
+export function TriageThreadsSection() {
   const { snapshot, refresh } = useTriage();
   const navigate = useBbNavigate();
   useRealtime("triage", (payload) => {
