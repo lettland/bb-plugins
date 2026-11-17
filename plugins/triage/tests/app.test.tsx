@@ -517,6 +517,23 @@ describe("card actions", () => {
     }));
   });
 
+  test.each([
+    { stage: "stage-progress", name: "In Progress", state: "working" },
+    { stage: "stage-attention", name: "Human Review", state: "idle" },
+  ])("settle keeps the detected $name card visible after refresh", async ({ stage, name, state }) => {
+    let refreshed = false;
+    const card = task({ number: 20, title: "Detected card", threadId: "thr-detected", stageId: "stage-attention", runState: "idle" });
+    const snapshot = vi.fn(() => ({ ...cloneSnapshot(), tasks: [{ ...card, ...(refreshed ? { stageId: stage, runState: state, settledAt: null } : {}) }] }));
+    renderBoard({
+      snapshot,
+      setTaskSettled: () => { refreshed = true; return { ...card, stageId: stage, runState: state, settledAt: null }; },
+    });
+    await screen.findByText("Detected card");
+    fireEvent.click(screen.getByRole("button", { name: "Mark Triage #20 settled" }));
+    await waitFor(() => expect(snapshot.mock.calls.length).toBeGreaterThan(1));
+    await waitFor(() => expect(within(columnOf(name)).getByText("Detected card")).toBeTruthy());
+  });
+
   test("the card menu runs, stops, retags reads, toggles the sidebar, and moves", async () => {
     const view = renderBoard({ runTask: () => ({ ok: true }), stopTask: () => ({ ok: true }) });
     await screen.findByText("Live task");

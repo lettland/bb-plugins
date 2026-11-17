@@ -1695,6 +1695,66 @@ export default async function plugin(bb: BbPluginApi) {
       moveTask(number, stageId, "user", summary, false),
     async setTaskSettled({ number, settled }) {
       let task = getTaskRow(number);
+      if (settled && task.thread_id && task.run_state !== "failed" && task.run_state !== "stopped") {
+        const threadId = task.thread_id;
+        const childEvents = childEventCount;
+        const placement = db.prepare("SELECT rowid, created_at FROM triage_events WHERE task_id = ? AND event LIKE 'moved to %' ORDER BY rowid DESC LIMIT 1").get(task.id) as { rowid: number; created_at: number } | undefined;
+        const check = { valid: true };
+        const checks = responseChecks.get(threadId) ?? new Set();
+        checks.add(check);
+        responseChecks.set(threadId, checks);
+        const wanted = () => check.valid && !disposed && childEventCount === childEvents && pendingChildHandlers === 0;
+        try {
+          let decision: { role: "attention" | "active" | "done"; stage: StageRow; working: boolean };
+          try {
+            if (!wanted()) return toTask(getTaskRow(number));
+            const thread = await bb.sdk.threads.get({ threadId });
+            if (!thread || thread.status === "error" || thread.archivedAt !== null || thread.deletedAt !== null) return toTask(getTaskRow(number));
+            const live = await liveRoots();
+            const interactions = await bb.sdk.threads.interactions.list({ threadId });
+            if (!wanted() || !live) return toTask(getTaskRow(number));
+            let role: "attention" | "active" | "done";
+            if (interactions.length > 0) role = "attention";
+            else if (thread.status === "active" || thread.status === "starting" || live.has(threadId)) role = "active";
+            else if (thread.status === "idle") {
+              role = "done";
+              if (getStageRow(task.stage_id).system_role === "attention" && placement) {
+                const scan = await hasUserResponse(bb, threadId, placement.created_at, wanted);
+                if (scan.kind === "cancelled" || scan.kind === "incomplete") return toTask(getTaskRow(number));
+                if (scan.kind !== "found") role = "attention";
+              }
+            } else return toTask(getTaskRow(number));
+            const latestThread = await bb.sdk.threads.get({ threadId });
+            const latestInteractions = await bb.sdk.threads.interactions.list({ threadId });
+            const current = getTaskRow(number);
+            const latestPlacement = db.prepare("SELECT rowid FROM triage_events WHERE task_id = ? AND event LIKE 'moved to %' ORDER BY rowid DESC LIMIT 1").get(task.id) as { rowid: number } | undefined;
+            if (!wanted() || !sameReadTarget(task, current) || latestPlacement?.rowid !== placement?.rowid || !latestThread || latestThread.archivedAt !== null || latestThread.deletedAt !== null || latestThread.status !== thread.status || latestThread.latestAttentionAt !== thread.latestAttentionAt || (latestInteractions.length > 0) !== (interactions.length > 0)) return toTask(current);
+            decision = { role, stage: getSystemStage(role), working: thread.status === "active" || thread.status === "starting" || live.has(threadId) };
+          } catch (error) {
+            bb.log.warn(`Triage could not detect session ${threadId}: ${errorMessage(error)}`);
+            return toTask(getTaskRow(number));
+          }
+          const { role, stage, working } = decision;
+          const now = Date.now();
+          const changed = db.transaction(() => {
+            const updated = db.prepare("UPDATE triage_tasks SET stage_id = ?, run_state = ?, attention_reason = CASE WHEN ? = 'attention' THEN attention_reason ELSE NULL END, settled_at = ?, updated_at = ? WHERE id = ? AND thread_id IS ? AND stage_id = ? AND run_state = ? AND updated_at = ? AND read_at IS ? AND settled_at IS ?")
+              .run(stage.id, role === "done" ? "completed" : working ? "working" : "idle", role, role === "done" ? now : null, now, task.id, task.thread_id, task.stage_id, task.run_state, task.updated_at, task.read_at, task.settled_at);
+            if (updated.changes === 0) return false;
+            if (stage.id !== task.stage_id) addEvent(task.id, "bb", `moved to ${stage.name}`);
+            if (role === "done") {
+              addEvent(task.id, "bb", "turn completed");
+              addEvent(task.id, "user", "marked settled");
+            }
+            return true;
+          })();
+          if (!changed) return toTask(getTaskRow(number));
+          publish();
+          return toTask(getTaskRow(number));
+        } finally {
+          checks.delete(check);
+          if (checks.size === 0) responseChecks.delete(threadId);
+        }
+      }
       const reopenRead = !settled && task.read_at !== null && getStageRow(task.stage_id).system_role === "done";
       if (reopenRead && task.thread_id) {
         await bb.sdk.threads.markUnread({ threadId: task.thread_id });

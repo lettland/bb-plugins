@@ -516,6 +516,269 @@ test("a native unread snapshot clears a read marker when lastReadAt becomes null
   expect(cardOf(thread.id)).toMatchObject({ read_at: null, settled_at: null });
 });
 
+// User report, 2026-11-17: settle must re-detect the linked thread's stage.
+test.each([
+  { status: "active", stage: "stage-progress", state: "working", settled: false },
+  { status: "idle", stage: "stage-completed", state: "completed", settled: true },
+])("settle re-detects a linked $status thread", async ({ status, stage, state, settled }) => {
+  const { db, mirror, rpc, cardOf, harness } = await start();
+  const card = await mirror(thr(`settle-${status}`, { status }));
+  db.prepare("UPDATE triage_tasks SET stage_id = 'stage-attention', run_state = 'idle' WHERE id = ?").run(card.id);
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(cardOf(`settle-${status}`)).toMatchObject({ stage_id: stage, run_state: state, settled_at: settled ? expect.any(Number) : null });
+  expect(harness.inspection.sdk.callsTo("threads.markRead")).toHaveLength(0);
+});
+
+test.each([
+  { name: "pending interaction", pending: true, answer: false, expected: "stage-attention" },
+  { name: "unanswered handoff", pending: false, answer: false, expected: "stage-attention" },
+  { name: "answered handoff", pending: false, answer: true, expected: "stage-completed" },
+])("settle detects $name", async ({ name, pending, answer, expected }) => {
+  const { mirror, rpc, cardOf, harness } = await start();
+  const card = await mirror(thr(name, { status: "idle" }));
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  harness.inspection.sdk.stub("threads.interactions.list", async () => pending ? [{ id: "question" }] : []);
+  harness.inspection.sdk.stub("threads.events.list", async () => answer ? [{ seq: 1, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "user", originPluginId: null, senderThreadId: null } }] : []);
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(cardOf(name)).toMatchObject({ stage_id: expected, settled_at: expected === "stage-completed" ? expect.any(Number) : null });
+});
+
+test("settle leaves the card unchanged when liveness lookup fails", async () => {
+  const { mirror, rpc, cardOf, harness } = await start();
+  const card = await mirror(thr("settle-lookup-failure", { status: "idle" }));
+  harness.inspection.sdk.stub("threads.listRunning", async () => { throw new Error("unavailable"); });
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(cardOf("settle-lookup-failure")).toStrictEqual(card);
+});
+
+test("settle detects a running descendant", async () => {
+  const context = await startQuiet();
+  const root = thr("settle-root", { status: "idle" });
+  const child = kid("settle-child", root.id);
+  const card = await context.mirror(root);
+  context.known.set(child.id, child);
+  context.ctx.list = worldOf([root, child]).handler;
+  running(context, child.id);
+  await context.rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+});
+
+test("pending input takes priority while a root is running", async () => {
+  const { mirror, rpc, cardOf, harness } = await startQuiet();
+  const card = await mirror(thr("settle-running-question", { status: "active" }));
+  harness.inspection.sdk.stub("threads.interactions.list", async () => [{ id: "question" }]);
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(cardOf("settle-running-question")).toMatchObject({ stage_id: "stage-attention", run_state: "working", settled_at: null });
+});
+
+test("a later reply lets child activity reopen an explicitly settled completion", async () => {
+  const { mirror, rpc, cardOf, known, emit, db } = await startQuiet();
+  const root = thr("settle-later-root", { status: "idle", latestAttentionAt: 100 });
+  const card = await mirror(root);
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  const event = db.prepare("SELECT created_at FROM triage_events WHERE task_id = ? AND event = 'marked settled'").get(card.id) as { created_at: number };
+  known.set(root.id, thr(root.id, { status: "idle", latestAttentionAt: event.created_at + 1 }));
+  await emit("thread.active", { thread: kid("settle-later-child", root.id) });
+  expect(cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+});
+
+test.each(["error", "stopped"])("settle preserves %s terminal state", async (state) => {
+  const { db, mirror, rpc, cardOf } = await startQuiet();
+  const card = await mirror(thr(`settle-terminal-${state}`, { status: state === "error" ? "error" : "idle" }));
+  db.prepare("UPDATE triage_tasks SET run_state = ?, stage_id = 'stage-attention' WHERE id = ?").run(state === "error" ? "failed" : "stopped", card.id);
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(cardOf(`settle-terminal-${state}`)).toMatchObject({ stage_id: "stage-attention", run_state: state === "error" ? "failed" : "stopped", settled_at: expect.any(Number) });
+});
+
+test.each(["pending", "stopping", "missing", "archived", "deleted"])("settle leaves %s threads unchanged", async (state) => {
+  const { mirror, rpc, cardOf, known } = await startQuiet();
+  const card = await mirror(thr(`settle-${state}`, { status: "idle" }));
+  if (state === "missing") known.delete(`settle-${state}`);
+  else known.set(`settle-${state}`, thr(`settle-${state}`, { status: state === "pending" || state === "stopping" ? state : "idle", archivedAt: state === "archived" ? 1 : null, deletedAt: state === "deleted" ? 1 : null }));
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(cardOf(`settle-${state}`)).toStrictEqual(card);
+});
+
+test.each(["move", "interaction", "child"])("settle does not overwrite a concurrent %s", async (change) => {
+  const context = await startQuiet();
+  const { mirror, rpc, cardOf, ctx, emit, known } = context;
+  const root = thr(`settle-race-${change}`, { status: "idle" });
+  const card = await mirror(root);
+  const gate = deferred<unknown[]>();
+  let asked = false;
+  ctx.running = () => { asked = true; return gate.promise; };
+  const settling = rpc("setTaskSettled", { number: card.number, settled: true });
+  await until(() => asked);
+  if (change === "move") await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  else if (change === "interaction") await emit("interaction.pending", { thread: root });
+  else {
+    const child = kid("settle-race-child", root.id);
+    known.set(child.id, child);
+    await emit("thread.active", { thread: child });
+  }
+  const before = { ...cardOf(root.id) };
+  gate.resolve([]);
+  await settling;
+  expect(cardOf(root.id)).toStrictEqual(before);
+});
+
+test("a late interaction prevents a no-human-input completion", async () => {
+  const { mirror, rpc, cardOf, harness } = await startQuiet();
+  const card = await mirror(thr("settle-late-interaction", { status: "idle" }));
+  let calls = 0;
+  harness.inspection.sdk.stub("threads.interactions.list", async () => ++calls === 1 ? [] : [{ id: "late" }]);
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(cardOf("settle-late-interaction")).toStrictEqual(card);
+});
+
+test("settle leaves an incomplete handoff response scan unchanged", async () => {
+  const { mirror, rpc, cardOf, harness } = await startQuiet();
+  const card = await mirror(thr("settle-incomplete", { status: "idle" }));
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  const before = { ...cardOf("settle-incomplete") };
+  harness.inspection.sdk.stub("threads.events.list", async () => Array.from({ length: 100 }, (_, i) => ({ seq: 1000 - i, createdAt: Date.now() + 1000, type: "client/turn/requested", data: { initiator: "agent" } })));
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(cardOf("settle-incomplete")).toStrictEqual(before);
+});
+
+test("native unread synchronization preserves explicit settlement", async () => {
+  const { mirror, rpc, cardOf, ctx, db } = await startQuiet();
+  const thread = thr("settle-native-unread", { status: "idle", latestAttentionAt: 100, lastReadAt: 0 });
+  const card = await mirror(thread);
+  db.prepare("UPDATE triage_tasks SET read_at = 101 WHERE id = ?").run(card.id);
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  const settledAt = cardOf(thread.id).settled_at;
+  ctx.list = () => [thread];
+  await rpc("snapshot");
+  expect(cardOf(thread.id)).toMatchObject({ stage_id: "stage-completed", run_state: "completed", read_at: 101, settled_at: settledAt });
+  expect(settledAt).not.toBeNull();
+});
+
+test("settle does not treat an earlier Human Review placement as the latest handoff", async () => {
+  const { mirror, rpc, cardOf } = await startQuiet();
+  const card = await mirror(thr("settle-old-handoff", { status: "idle" }));
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  await rpc("moveTask", { number: card.number, stageId: "stage-progress" });
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(cardOf("settle-old-handoff")).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: expect.any(Number) });
+});
+
+test("an unanswered handoff survives a Human Review stage rename", async () => {
+  const { mirror, rpc, cardOf } = await startQuiet();
+  const card = await mirror(thr("settle-renamed-handoff", { status: "idle" }));
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  await rpc("renameStage", { id: "stage-attention", name: "Review renamed" });
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(cardOf("settle-renamed-handoff")).toMatchObject({ stage_id: "stage-attention", settled_at: null });
+  const snapshot = await rpc("snapshot");
+  expect(snapshot.stages).toContainEqual(expect.objectContaining({ id: "stage-attention", name: "Review renamed" }));
+  expect(snapshot.tasks).toContainEqual(expect.objectContaining({ number: card.number, stageId: "stage-attention", settledAt: null }));
+});
+
+test.each(["threads.get", "threads.interactions.list", "threads.events.list"])("settle leaves the card unchanged when %s fails", async (method) => {
+  const { mirror, rpc, cardOf, harness } = await startQuiet();
+  const card = await mirror(thr(`settle-failure-${method}`, { status: "idle" }));
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  const before = { ...cardOf(`settle-failure-${method}`) };
+  harness.inspection.sdk.stub(method, async () => { throw new Error("unavailable"); });
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(cardOf(`settle-failure-${method}`)).toStrictEqual(before);
+});
+
+test("settle leaves a native error unchanged when the card is not failed", async () => {
+  const { mirror, rpc, cardOf, known } = await startQuiet();
+  const card = await mirror(thr("settle-native-error", { status: "idle" }));
+  known.set("settle-native-error", thr("settle-native-error", { status: "error" }));
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(cardOf("settle-native-error")).toStrictEqual(card);
+});
+
+test("a rejected settlement update does not add transition events", async () => {
+  const { mirror, rpc, cardOf, db, eventsOf } = await startQuiet();
+  const card = await mirror(thr("settle-cas", { status: "idle" }));
+  const before = eventsOf(card.id);
+  db.exec("CREATE TRIGGER reject_settlement BEFORE UPDATE ON triage_tasks WHEN NEW.stage_id = 'stage-completed' BEGIN SELECT RAISE(IGNORE); END");
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(cardOf("settle-cas")).toStrictEqual(card);
+  expect(eventsOf(card.id)).toStrictEqual(before);
+});
+
+test("a failed settlement update rejects without changing the card", async () => {
+  const { mirror, rpc, cardOf, db, eventsOf, harness } = await startQuiet();
+  const card = await mirror(thr("settle-update-failure", { status: "idle" }));
+  const history = eventsOf(card.id);
+  const signals = harness.realtimeSignals.length;
+  db.exec("CREATE TRIGGER fail_settlement BEFORE UPDATE ON triage_tasks WHEN NEW.stage_id = 'stage-completed' BEGIN SELECT RAISE(ABORT, 'update failure'); END");
+  await expect(rpc("setTaskSettled", { number: card.number, settled: true })).rejects.toThrow("update failure");
+  expect(cardOf("settle-update-failure")).toStrictEqual(card);
+  expect(eventsOf(card.id)).toStrictEqual(history);
+  expect(harness.realtimeSignals.length).toBe(signals);
+});
+
+test.each([
+  { status: "active", event: "moved to In Progress" },
+  { status: "idle", event: "turn completed" },
+])("settle rolls back when $event history fails", async ({ status, event }) => {
+  const { mirror, rpc, cardOf, db, harness } = await startQuiet();
+  const thread = thr(`settle-history-${status}`, { status });
+  const card = await mirror(thread);
+  if (status === "active") db.prepare("UPDATE triage_tasks SET stage_id = 'stage-attention', run_state = 'idle' WHERE id = ?").run(card.id);
+  const before = { ...cardOf(thread.id) };
+  const history = db.prepare("SELECT * FROM triage_events WHERE task_id = ? ORDER BY rowid").all(card.id);
+  const signals = harness.realtimeSignals.length;
+  db.exec(`CREATE TRIGGER reject_history BEFORE INSERT ON triage_events WHEN NEW.event = '${event}' BEGIN SELECT RAISE(ABORT, 'history failure'); END`);
+  const result = await Promise.allSettled([rpc("setTaskSettled", { number: card.number, settled: true })]);
+  expect(result[0]).toMatchObject({ status: "rejected", reason: expect.objectContaining({ message: expect.stringContaining("history failure") }) });
+  expect(cardOf(thread.id)).toStrictEqual(before);
+  expect(db.prepare("SELECT * FROM triage_events WHERE task_id = ? ORDER BY rowid").all(card.id)).toStrictEqual(history);
+  expect(harness.realtimeSignals.length).toBe(signals);
+});
+
+test.each(["threads.get", "threads.interactions.list"])("a move during the final %s read wins over settle", async (method) => {
+  const { mirror, rpc, cardOf, harness, eventsOf } = await startQuiet();
+  const thread = thr(`settle-final-${method}`, { status: "idle" });
+  const card = await mirror(thread);
+  const gate = deferred<unknown>();
+  let calls = 0;
+  harness.inspection.sdk.stub(method, async () => ++calls === 2 ? gate.promise : method === "threads.get" ? thread : []);
+  const settling = rpc("setTaskSettled", { number: card.number, settled: true });
+  await until(() => calls === 2);
+  await rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  const moved = { ...cardOf(thread.id) };
+  const history = eventsOf(card.id);
+  gate.resolve(method === "threads.get" ? thread : []);
+  await settling;
+  expect(cardOf(thread.id)).toStrictEqual(moved);
+  expect(eventsOf(card.id)).toStrictEqual(history);
+});
+
+test("overlapping settle checks preserve the newer result", async () => {
+  const { mirror, rpc, cardOf, harness } = await startQuiet();
+  const thread = thr("settle-overlap", { status: "idle" });
+  const card = await mirror(thread);
+  const gate = deferred<unknown>();
+  let calls = 0;
+  harness.inspection.sdk.stub("threads.get", async () => ++calls === 1 ? gate.promise : thread);
+  const first = rpc("setTaskSettled", { number: card.number, settled: true });
+  await until(() => calls === 1);
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  const completed = { ...cardOf(thread.id) };
+  gate.resolve(thread);
+  await first;
+  expect(completed).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: expect.any(Number) });
+  expect(cardOf(thread.id)).toStrictEqual(completed);
+});
+
+test.each([false, true])("settle leaves a card unchanged when root activity changes during lookup, pending=%s", async (pending) => {
+  const { mirror, rpc, cardOf, harness } = await startQuiet();
+  const card = await mirror(thr(`settle-root-race-${pending}`, { status: "idle" }));
+  let calls = 0;
+  harness.inspection.sdk.stub("threads.get", async () => thr(`settle-root-race-${pending}`, { status: ++calls === 1 ? "idle" : "active" }));
+  harness.inspection.sdk.stub("threads.interactions.list", async () => pending ? [{ id: "question" }] : []);
+  await rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(cardOf(`settle-root-race-${pending}`)).toStrictEqual(card);
+});
+
 test("reopening a read completed card marks the native thread unread", async () => {
   const { db, mirror, rpc, cardOf, harness } = await start();
   const card = await mirror(thr("reopen-read", { status: "idle" }));
@@ -743,13 +1006,22 @@ test("a failed native lookup cannot acknowledge a completed reply", async () => 
   expect(cardOf("idle-lookup-fails")).toMatchObject({ stage_id: "stage-completed", read_at: null, settled_at: null });
 });
 
-test("completion retains a prior manual settlement", async () => {
+test("settling a running thread leaves it open for completion", async () => {
   const { mirror, rpc, emit, cardOf } = await startQuiet();
   const card = await mirror(thr("prior-settlement", { status: "active" }));
   await rpc("setTaskSettled", { number: card.number, settled: true });
   const settledAt = cardOf("prior-settlement").settled_at;
   await emit("thread.idle", { thread: thr("prior-settlement", { status: "idle" }) });
-  expect(cardOf("prior-settlement")).toMatchObject({ stage_id: "stage-progress", run_state: "idle", settled_at: settledAt });
+  expect(settledAt).toBeNull();
+  expect(cardOf("prior-settlement")).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: null });
+});
+
+test("completion retains a legacy settlement on a running card", async () => {
+  const { mirror, emit, cardOf, db } = await startQuiet();
+  const card = await mirror(thr("legacy-prior-settlement", { status: "active" }));
+  db.prepare("UPDATE triage_tasks SET settled_at = 42 WHERE id = ?").run(card.id);
+  await emit("thread.idle", { thread: thr("legacy-prior-settlement", { status: "idle" }) });
+  expect(cardOf("legacy-prior-settlement")).toMatchObject({ stage_id: "stage-progress", run_state: "idle", settled_at: 42 });
 });
 
 test("completion leaves a concurrent Human Review read intact", async () => {
@@ -1609,9 +1881,9 @@ test("backfill protects acknowledged and ineligible legacy cards", async () => {
   }
   await context.rpc("setTaskSettled", { number: context.cardOf("legacy-settled").number, settled: true });
   await context.rpc("moveTask", { number: context.cardOf("legacy-moved").number, stageId: "stage-progress" });
-  await context.rpc("setTaskSettled", { number: context.cardOf("legacy-reopened").number, settled: true });
-  await context.rpc("setTaskSettled", { number: context.cardOf("legacy-reopened").number, settled: false });
-  context.db.prepare("UPDATE triage_tasks SET settled_at = 42 WHERE thread_id = 'legacy-reopened'").run();
+  const reopened = context.cardOf("legacy-reopened");
+  context.db.prepare("INSERT INTO triage_events (id, task_id, actor, event, created_at) VALUES (?, ?, 'user', 'marked settled', ?), (?, ?, 'user', 'reopened', ?)")
+    .run("legacy-settle-event", reopened.id, Date.now(), "legacy-reopen-event", reopened.id, Date.now());
   context.db.prepare("UPDATE triage_tasks SET stage_id = 'stage-attention' WHERE thread_id = 'legacy-attention'").run();
   const stage = await context.rpc("createStage", { name: "Holding" });
   context.db.prepare("UPDATE triage_tasks SET stage_id = ? WHERE thread_id = 'legacy-custom'").run(stage.id);
@@ -2192,9 +2464,10 @@ test("a done or stopped top-level card is not reopened by a running sub-thread",
 
 test("a child cannot reopen explicit settlement for the current reply", async () => {
   const context = await startQuiet();
-  const { cardOf, db, emit, known, mirror, rpc } = context;
+  const { cardOf, db, emit, known, mirror } = context;
   const card = await mirror(thr("settled-root", { status: "active" }));
-  await rpc("setTaskSettled", { number: card.number, settled: true });
+  db.prepare("UPDATE triage_tasks SET settled_at = ? WHERE id = ?").run(Date.now(), card.id);
+  db.prepare("INSERT INTO triage_events (id, task_id, actor, event, created_at) VALUES (?, ?, 'user', 'marked settled', ?)").run("settled-root-event", card.id, Date.now());
   const settledEvent = db.prepare("SELECT created_at FROM triage_events WHERE task_id = ? AND event = 'marked settled'").get(card.id) as { created_at: number };
   known.set("settled-root", thr("settled-root", { status: "idle", latestAttentionAt: settledEvent.created_at - 1 }));
   const before = { ...cardOf("settled-root") };
@@ -2208,7 +2481,7 @@ test("a child cannot reopen explicit settlement for the current reply", async ()
   expect(cardOf("settled-root")).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
 });
 
-test("child activity preserves settlement made while its root lookup is pending", async () => {
+test("child activity wins when settlement starts during its root lookup", async () => {
   const context = await startQuiet();
   const { cardOf, emit, harness, known, mirror, rpc } = context;
   const root = thr("settlement-race-root", { status: "idle" });
@@ -2222,7 +2495,8 @@ test("child activity preserves settlement made while its root lookup is pending"
   const settledAt = cardOf(root.id).settled_at;
   gate.resolve(known.get(root.id));
   await active;
-  expect(cardOf(root.id)).toMatchObject({ stage_id: "stage-todo", run_state: "idle", settled_at: settledAt });
+  expect(settledAt).toBeNull();
+  expect(cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
 });
 
 test("a user reply returns Human Review to In Progress on activity", async () => {
@@ -3033,7 +3307,8 @@ test("completion preserves a concurrent read and respects concurrent settlement"
     const card = await mirror(thr(id, { status: "active" }));
     const gate = deferred<unknown[]>();
     let asked = false;
-    ctx.running = () => { asked = true; return gate.promise; };
+    let calls = 0;
+    ctx.running = () => { calls += 1; asked = true; return calls === 1 ? gate.promise : []; };
     const idle = emit("thread.idle", { thread: thr(id, { status: "idle", latestAttentionAt: Date.now() - 1000, lastReadAt: 0 }) });
     await until(() => asked);
     if (action === "read") await rpc("setTaskRead", { number: card.number, read: true });
@@ -3044,7 +3319,7 @@ test("completion preserves a concurrent read and respects concurrent settlement"
     if (action === "read") expect(cardOf(id)).toMatchObject({ stage_id: "stage-completed", run_state: "completed", read_at: readAt, settled_at: expect.any(Number) });
     else {
       expect(cardOf(id)).toMatchObject({ stage_id: "stage-progress", run_state: "working" });
-      expect(cardOf(id).settled_at).not.toBeNull();
+      expect(cardOf(id).settled_at).toBeNull();
     }
   }
 });
