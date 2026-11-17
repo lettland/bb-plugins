@@ -1726,9 +1726,10 @@ export default async function plugin(bb: BbPluginApi) {
             } else return toTask(getTaskRow(number));
             const latestThread = await bb.sdk.threads.get({ threadId });
             const latestInteractions = await bb.sdk.threads.interactions.list({ threadId });
+            const latestLive = await liveRoots();
             const current = getTaskRow(number);
             const latestPlacement = db.prepare("SELECT rowid FROM triage_events WHERE task_id = ? AND event LIKE 'moved to %' ORDER BY rowid DESC LIMIT 1").get(task.id) as { rowid: number } | undefined;
-            if (!wanted() || !sameReadTarget(task, current) || latestPlacement?.rowid !== placement?.rowid || !latestThread || latestThread.archivedAt !== null || latestThread.deletedAt !== null || latestThread.status !== thread.status || latestThread.latestAttentionAt !== thread.latestAttentionAt || (latestInteractions.length > 0) !== (interactions.length > 0)) return toTask(current);
+            if (!wanted() || !sameReadTarget(task, current) || latestPlacement?.rowid !== placement?.rowid || !latestThread || latestThread.archivedAt !== null || latestThread.deletedAt !== null || latestThread.status !== thread.status || latestThread.latestAttentionAt !== thread.latestAttentionAt || (latestInteractions.length > 0) !== (interactions.length > 0) || !latestLive || latestLive.has(threadId) !== live.has(threadId)) return toTask(current);
             decision = { role, stage: getSystemStage(role), working: thread.status === "active" || thread.status === "starting" || live.has(threadId) };
           } catch (error) {
             bb.log.warn(`Triage could not detect session ${threadId}: ${errorMessage(error)}`);

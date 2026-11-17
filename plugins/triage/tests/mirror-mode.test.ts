@@ -563,6 +563,71 @@ test("settle detects a running descendant", async () => {
   expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
 });
 
+test.each([false, true])("settle preserves the card when descendant liveness changes from %s during the final read", async (initiallyLive) => {
+  const context = await startQuiet();
+  const root = thr(`settle-liveness-${initiallyLive}`, { status: "idle" });
+  const child = kid(`settle-liveness-child-${initiallyLive}`, root.id);
+  const card = await context.mirror(root);
+  context.known.set(child.id, child);
+  context.ctx.list = worldOf([root, child]).handler;
+  running(context, ...(initiallyLive ? [child.id] : []));
+  const gate = deferred<unknown>();
+  let calls = 0;
+  context.harness.inspection.sdk.stub("threads.get", async () => ++calls === 2 ? gate.promise : root);
+  const before = { ...context.cardOf(root.id) };
+  const history = context.eventsOf(card.id);
+  const settling = context.rpc("setTaskSettled", { number: card.number, settled: true });
+  await until(() => calls === 2);
+  running(context, ...(initiallyLive ? [] : [child.id]));
+  gate.resolve(root);
+  await settling;
+  expect(context.cardOf(root.id)).toStrictEqual(before);
+  expect(context.eventsOf(card.id)).toStrictEqual(history);
+});
+
+test("settle preserves the card when the final liveness lookup fails", async () => {
+  const context = await startQuiet();
+  const card = await context.mirror(thr("settle-final-liveness-fails", { status: "idle" }));
+  const before = { ...context.cardOf("settle-final-liveness-fails") };
+  const history = context.eventsOf(card.id);
+  let calls = 0;
+  context.ctx.running = () => { if (++calls === 2) throw new Error("unavailable"); return []; };
+  await context.rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(context.cardOf("settle-final-liveness-fails")).toStrictEqual(before);
+  expect(context.eventsOf(card.id)).toStrictEqual(history);
+});
+
+test.each(["move", "child"])("settle preserves a concurrent %s during final liveness lookup", async (change) => {
+  const context = await startQuiet();
+  const root = thr(`settle-final-live-${change}`, { status: "idle" });
+  const card = await context.mirror(root);
+  const gate = deferred<unknown[]>();
+  let calls = 0;
+  context.ctx.running = () => ++calls === 2 ? gate.promise : [];
+  const settling = context.rpc("setTaskSettled", { number: card.number, settled: true });
+  await until(() => calls === 2);
+  if (change === "move") await context.rpc("moveTask", { number: card.number, stageId: "stage-attention" });
+  else await context.emit("thread.active", { thread: kid("settle-final-live-child", root.id) });
+  const before = { ...context.cardOf(root.id) };
+  const history = context.eventsOf(card.id);
+  gate.resolve([]);
+  await settling;
+  expect(context.cardOf(root.id)).toStrictEqual(before);
+  expect(context.eventsOf(card.id)).toStrictEqual(history);
+});
+
+test("an unrelated running root does not prevent settlement", async () => {
+  const context = await startQuiet();
+  const root = thr("settle-unrelated-root", { status: "idle" });
+  const other = thr("settle-unrelated-other", { status: "active" });
+  const card = await context.mirror(root);
+  context.ctx.list = worldOf([root, other]).handler;
+  let calls = 0;
+  context.ctx.running = () => ++calls === 1 ? [] : [{ id: other.id, hostId: null }];
+  await context.rpc("setTaskSettled", { number: card.number, settled: true });
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: expect.any(Number) });
+});
+
 test("pending input takes priority while a root is running", async () => {
   const { mirror, rpc, cardOf, harness } = await startQuiet();
   const card = await mirror(thr("settle-running-question", { status: "active" }));
