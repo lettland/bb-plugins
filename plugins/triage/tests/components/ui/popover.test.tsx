@@ -110,6 +110,21 @@ describe("Popover on desktop", () => {
 
 // popover tests.
 describe("Popover on a compact viewport", () => {
+  it("names a persistent drawer Options when no mobile title is supplied", () => {
+    render(
+      <OverlayHarness compact={true}>
+        {({ open, setOpen }) => (
+          <Popover open={open} onOpenChange={setOpen} persistentDrawer={true}>
+            <PopoverTrigger>Open popover</PopoverTrigger>
+            <PopoverContent>Popover body</PopoverContent>
+          </Popover>
+        )}
+      </OverlayHarness>,
+    );
+    fireEvent.click(screen.getByText("Open popover"));
+    expect(screen.getByRole("dialog", { name: "Options" })).toBeTruthy();
+  });
+
   it("opens as a drawer with the default sr label and strips Radix-only props", () => {
     render(<PopoverScene compact={true} />);
     expect(screen.queryByText("Popover body")).toBeNull();

@@ -8,6 +8,8 @@ import {
   useResponsiveRoot,
   MobileTrigger,
   ResponsiveDrawerShell,
+  PersistentResponsiveDrawerShell,
+  useResponsiveDrawerRealization,
   stripRadixContentProps,
 } from "./responsive-overlay.js";
 import {
@@ -27,6 +29,7 @@ const ResponsivePopoverContext =
     /* v8 ignore next -- @preserve the default context pins isCompactViewport to false, so parts rendered without a provider always take the desktop branch and throw outside a Radix root before onOpenChange can run. */
     onOpenChange: () => {},
   });
+const PersistentPopoverDrawerContext = React.createContext(false);
 
 function useResponsivePopover() {
   return React.useContext(ResponsivePopoverContext);
@@ -41,8 +44,9 @@ function Popover({
   open: controlledOpen,
   onOpenChange: controlledOnChange,
   defaultOpen,
+  persistentDrawer = false,
   ...props
-}: React.ComponentProps<typeof PopoverPrimitive.Root>) {
+}: React.ComponentProps<typeof PopoverPrimitive.Root> & { persistentDrawer?: boolean }) {
   const ctx = useResponsiveRoot(
     controlledOpen,
     controlledOnChange,
@@ -52,7 +56,7 @@ function Popover({
   if (ctx.isCompactViewport) {
     return (
       <ResponsivePopoverContext.Provider value={ctx}>
-        {children}
+        <PersistentPopoverDrawerContext.Provider value={persistentDrawer}>{children}</PersistentPopoverDrawerContext.Provider>
       </ResponsivePopoverContext.Provider>
     );
   }
@@ -141,6 +145,8 @@ const PopoverContent = React.forwardRef<
     ref,
   ) => {
     const { isCompactViewport, open, onOpenChange } = useResponsivePopover();
+    const persistentDrawer = React.useContext(PersistentPopoverDrawerContext);
+    const { isContentRealized } = useResponsiveDrawerRealization({ open, enabled: isCompactViewport && persistentDrawer });
     // Unconditional (rules of hooks — the compact branch returns early); the
     // compact drawer path is covered by DrawerContent's own stamp.
     const scopeProps = usePortalScopeProps();
@@ -149,6 +155,15 @@ const PopoverContent = React.forwardRef<
       // Forward DOM-level props (event handlers, data-*, aria-*) but strip
       // Radix positioning/behavior props that are meaningless for a Drawer.
       const domProps = stripRadixContentProps(props);
+
+      if (persistentDrawer) {
+        if (!open && !isContentRealized) return null;
+        return (
+          <PersistentResponsiveDrawerShell open={open} onOpenChange={onOpenChange} srLabel={mobileTitle ?? "Options"} contentClassName={mobileClassName}>
+            {isContentRealized ? <div ref={ref} className={cn("overflow-y-auto px-4 pt-2 pb-[max(1rem,env(safe-area-inset-bottom))]", className)} {...domProps}>{children}</div> : <div aria-hidden="true" className="min-h-32" />}
+          </PersistentResponsiveDrawerShell>
+        );
+      }
 
       return (
         <ResponsiveDrawerShell

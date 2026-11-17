@@ -20,6 +20,8 @@ import { TriageHeaderActions } from "@/components/triage/header-actions";
 import { ThreadTriageAction } from "@/components/triage/thread-triage-action";
 import { TaskCard } from "@/components/triage/task-card";
 import { TriageThreadsSection } from "@/components/triage/thread-context-section";
+import { NewThreadContextOverlay } from "@/components/triage/new-thread-context";
+import { mountNewThreadAnchors } from "@/lib/new-thread-context";
 import {
   isTaskRunning,
   keepsFailedCardVisible,
@@ -402,17 +404,15 @@ export default definePluginApp((app) => {
     title: "Triage",
     component: ThreadTriageAction,
   });
-  const threadContextSection: Parameters<typeof app.slots.experimental_threadContextCardSection>[0] & {
-    experimental_newThreadComponent: typeof TriageThreadsSection;
-  } = {
+  app.contentScripts.register({ id: "triage-new-thread-context", mount: ({ signal }) => mountNewThreadAnchors(signal) });
+  app.slots.experimental_appOverlay({ id: "triage-new-thread-overlay", component: NewThreadContextOverlay });
+  app.slots.experimental_threadContextCardSection({
     id: "triage-threads",
     title: "Triage",
     group: experimental_THREAD_INFO_SECTION_GROUPS.related,
     order: 20,
     component: TriageThreadsSection,
-    experimental_newThreadComponent: TriageThreadsSection,
-  };
-  app.slots.experimental_threadContextCardSection(threadContextSection);
+  });
   app.slots.navPanel({
     id: "triage-board",
     title: "Triage",
