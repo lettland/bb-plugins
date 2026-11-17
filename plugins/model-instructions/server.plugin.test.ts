@@ -654,7 +654,7 @@ describe("the project and provider caches", () => {
   it("skips providers that are not available and does not ask them for models", async () => {
     const models = vi.fn(async () => ({ models: [{ id: "m", model: "m" }], modelLoadError: null }));
     const { harness } = await load({
-      config: rules({ instructions: x(5000) }).replace("5000", "5000"),
+      config: rules({ instructions: x(5000) }),
       sdk: {
         providers: {
           list: async () => [
