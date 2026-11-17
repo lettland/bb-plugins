@@ -1525,10 +1525,21 @@ test("agent configuration: mirror and manual cards get the stage tool", async ()
   expect(JSON.stringify(manual)).toContain("You own Triage #");
   for (const config of [mirrored, manual]) {
     expect(JSON.stringify(config)).toContain("Do not call triage_move_task to move the card to Completed.");
+    expect(JSON.stringify(config)).toContain("Do not call triage_move_task to move the card to Human Review.");
+    expect(JSON.stringify(config)).toContain("Use a plan approval interaction when a plan needs approval.");
+    expect(JSON.stringify(config)).toContain("Use a question interaction when you need a user answer.");
+    expect(JSON.stringify(config)).toContain("A final response alone does not require Human Review.");
+    expect(JSON.stringify(config)).toContain("Otherwise, keep the current stage.");
+    expect(JSON.stringify(config)).not.toContain("approve, decide, provide access");
+    expect(JSON.stringify(config)).not.toContain("otherwise use Human Review");
     expect(JSON.stringify(config)).not.toContain("Before your final response, call triage_move_task");
   }
   const tool = harness.inspection.registrations.agentTools.find((entry) => entry.name === "triage_move_task");
   expect(tool?.instructions).toContain("Do not call this tool to mark work completed.");
+  expect(tool?.instructions).toContain("Do not call this tool to move work to the attention stage.");
+  expect(tool?.instructions).toContain("Use a plan approval interaction when a plan needs approval.");
+  expect(tool?.instructions).toContain("Use a question interaction when you need a user answer.");
+  expect(tool?.instructions).not.toContain("Move work requiring user input to the attention stage");
   expect(tool?.instructions).not.toContain("move completed work to the completion stage");
 });
 

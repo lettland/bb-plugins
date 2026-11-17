@@ -184,13 +184,21 @@ test("agent instructions explain completion and attention using current stage na
   const { harness, thread, importThread } = await setup();
   try {
     await importThread();
+    await harness.behavior.callRpc("renameStage", { id: "stage-attention", name: "Needs input" });
     await harness.behavior.callRpc("renameStage", { id: "stage-completed", name: "Shipped" });
     const config = await harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: thread.id } }));
     const instructions = JSON.stringify(config);
     expect(instructions).toContain("Do not call triage_move_task to move the card to Shipped.");
+    expect(instructions).toContain("Do not call triage_move_task to move the card to Needs input.");
+    expect(instructions).toContain("Use a plan approval interaction when a plan needs approval.");
+    expect(instructions).toContain("Use a question interaction when you need a user answer.");
+    expect(instructions).toContain("A final response alone does not require Needs input.");
+    expect(instructions).toContain("Otherwise, keep the current stage.");
+    expect(instructions).toContain("use In Progress while working, including when resuming a completed task for new requests.");
     expect(instructions).not.toContain("Before your final response, call triage_move_task");
     expect(instructions).not.toContain("Do not leave finished work");
-    expect(instructions).toMatch(/approve, decide, provide access/);
+    expect(instructions).not.toContain("approve, decide, provide access");
+    expect(instructions).not.toContain("otherwise use Needs input");
   } finally { await harness.lifecycle.dispose(); }
 });
 

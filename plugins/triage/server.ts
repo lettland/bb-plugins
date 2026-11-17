@@ -918,8 +918,8 @@ export default async function plugin(bb: BbPluginApi) {
     return `Available stages: ${listStages().map((stage) => stage.name).join(", ")}. ` +
       `Keep the card's stage accurate using triage_move_task. ${intake} means work has not started; use ${active} while working, including when resuming a completed task for new requests. ` +
       `Do not call triage_move_task to move the card to ${done}. ` +
-      `Use ${attention} when a person must approve, decide, provide access, or interpret incomplete verification. Explain what is needed in the summary. ` +
-      `A turn ending does not by itself mean the task is complete. For a user-created stage, use it only when its name unambiguously matches the work state; otherwise use ${attention} and explain why.`;
+      `Do not call triage_move_task to move the card to ${attention}. Use a plan approval interaction when a plan needs approval. Use a question interaction when you need a user answer. A final response alone does not require ${attention}. ` +
+      `A turn ending does not by itself mean the task is complete. For a user-created stage, use it only when its name unambiguously matches the work state. Otherwise, keep the current stage.`;
   };
 
   const dispatchTask = async (number: number, throwOnFailure: boolean) => {
@@ -2037,7 +2037,7 @@ export default async function plugin(bb: BbPluginApi) {
     description:
       "Move the Triage card assigned to this BB thread into another workflow stage and leave a concise handoff summary.",
     instructions:
-      "Keep the assigned card accurate when work starts or resumes. Move work requiring user input to the attention stage with a concise summary. Do not call this tool to mark work completed.",
+      "Keep the assigned card accurate when work starts or resumes. Do not call this tool to move work to the attention stage. Use a plan approval interaction when a plan needs approval. Use a question interaction when you need a user answer. Do not call this tool to mark work completed.",
     presentation: {
       label: {
         pending: "Updating the Triage card",
