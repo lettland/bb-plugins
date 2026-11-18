@@ -52,7 +52,7 @@ test("shows the read view for a running task with a thread", () => {
       title: "Ship the release",
       description: "Cut the notes.",
       runState: "working",
-      attentionReason: "The agent hit a failing test.",
+      attentionReason: "Can you approve the release?",
       scheduledAt: Date.UTC(2026, 4, 4, 9, 0),
       threadId: "thr-1",
     },
@@ -61,9 +61,9 @@ test("shows the read view for a running task with a thread", () => {
 
   expect(screen.getByText("Triage #12")).toBeTruthy();
   expect(screen.getByText("Ship the release")).toBeTruthy();
-  expect(screen.getByText("Working")).toBeTruthy();
+  expect(screen.getByText("Waiting for you")).toBeTruthy();
   expect(screen.getByText("Needs attention")).toBeTruthy();
-  expect(screen.getByText("The agent hit a failing test.")).toBeTruthy();
+  expect(screen.getByText("Can you approve the release?")).toBeTruthy();
   expect(screen.getByText("Cut the notes.")).toBeTruthy();
   expect(screen.getByText("synthetic-project")).toBeTruthy();
   expect(screen.getByText("synthetic/branch")).toBeTruthy();

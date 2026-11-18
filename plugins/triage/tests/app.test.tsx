@@ -683,15 +683,16 @@ describe("sidebar drafts", () => {
         expect(within(card).getByText("Failed")).toBeTruthy();
         expect(within(card).getByText(reason)).toBeTruthy();
       }
-      expect(within(columnOf("To Do")).getByText("Ordinary draft")).toBeTruthy();
-      for (const title of ["Ordinary failure", "Settled failure", "Unknown failure"]) expect(screen.queryByText(title)).toBeNull();
-      expect(screen.getByRole("button", { name: "All3" })).toBeTruthy();
+      expect(within(columnOf("In Progress")).getByText("Ordinary draft")).toBeTruthy();
+      expect(within(columnOf("In Progress")).getByText("Ordinary failure")).toBeTruthy();
+      for (const title of ["Settled failure", "Unknown failure"]) expect(screen.queryByText(title)).toBeNull();
+      expect(screen.getByRole("button", { name: "All4" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "Running0" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Unread3" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Unread4" })).toBeTruthy();
       expect(screen.getByRole("button", { name: "Settled0" })).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Running0" }));
       expect(screen.queryByText("Review failure")).toBeNull();
-      fireEvent.click(screen.getByRole("button", { name: "Unread3" }));
+      fireEvent.click(screen.getByRole("button", { name: "Unread4" }));
       expect(screen.getByText("Review failure")).toBeTruthy();
       expect(screen.getByText("Custom failure")).toBeTruthy();
       fireEvent.click(screen.getByRole("button", { name: "Settled0" }));
@@ -813,10 +814,11 @@ describe("sidebar drafts", () => {
     renderBoard({ snapshot: snapshotOf(tasks) }, undefined, drafted(["thr-d1", "thr-d2", "thr-d3", "thr-d4"]));
     await screen.findByText("Working card");
     const todo = within(columnOf("To Do"));
-    for (const title of ["Settled active", "Settled intake", "Failed card", "Settled done"]) {
+    for (const title of ["Settled active", "Settled intake", "Settled done"]) {
       expect(todo.getByText(title)).toBeTruthy();
     }
     expect(within(columnOf("In Progress")).getByText("Working card")).toBeTruthy();
+    expect(within(columnOf("In Progress")).getByText("Failed card")).toBeTruthy();
     expect(within(columnOf("In Progress")).queryByText("Settled active")).toBe(null);
     expect(within(columnOf("Completed")).queryByText("Settled done")).toBe(null);
     expect(screen.getByRole("button", { name: "All5" })).toBeTruthy();
@@ -843,7 +845,7 @@ describe("sidebar drafts", () => {
   test("dragging a drafted card out of To Do moves it, even to its stored stage, and reopens a settled one", async () => {
     const tasks = [
       mirrorCard({ number: 10, title: "Settled draft", threadId: "thr-d1", settledAt: 500, readAt: 5 }),
-      mirrorCard({ number: 11, title: "Failed draft card", threadId: "thr-d2", runState: "failed", readAt: 5 }),
+      mirrorCard({ number: 11, title: "Failed draft card", threadId: "thr-d2", stageId: "stage-todo", runState: "failed", readAt: 5 }),
     ];
     const view = renderBoard({ snapshot: snapshotOf(tasks), moveTask: () => ({ ok: true }), setTaskSettled: () => ({ ok: true }) }, undefined, drafted(["thr-d1", "thr-d2"]));
     await screen.findByText("Settled draft");

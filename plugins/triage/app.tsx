@@ -106,7 +106,7 @@ function useDraftRootIds(): ReadonlySet<string> {
 
 /**
  * A card with an unsent draft shows in To Do when the board would otherwise hide it.
- * Unsettled failed cards in Human Review or custom stages remain in their stored column.
+ * Unsettled failed cards in In Progress, Human Review or custom stages remain in their stored column.
  */
 function isDraftedCard(task: Task, draftRoots: ReadonlySet<string>, stages: readonly Stage[]): boolean {
   return (

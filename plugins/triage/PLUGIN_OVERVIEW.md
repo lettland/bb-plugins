@@ -13,11 +13,11 @@ Each card opens its linked conversation.
 - See In Progress, Human Review, and recently Completed sessions in the thread context card.
 - Optionally show linked sessions in the sidebar.
 
-Agents in automatically mirrored sessions and assigned tasks receive
-`triage_move_task` when BB next starts their agent session. They use it for
-active work and work that needs your input. Agents do not call it to mark work
-Completed. Automatically mirrored sessions move to Completed through BB's
-existing lifecycle.
+Triage follows session activity and pending questions/approvals/forms; active
+work or running children is In Progress; pending input is Human Review; idle
+turns with no pending input or work are Completed. Custom columns retain user
+placement, while pending-input indicators follow actual input. Linked sessions
+do not receive a stage-management tool or stage instructions.
 Use `bb triage list`, `bb triage show`, and `bb triage move` from the CLI.
 
 ## Requirements

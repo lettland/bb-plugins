@@ -146,7 +146,7 @@ test("buildAttention: leaves legacy failed attention history out of the human-re
 });
 
 test("buildAttention: non-attention or unmatchable notifications are not absorbed", () => {
-  const tasks = [task({ number: 1, runState: "idle" })];
+  const tasks = [task({ number: 1, runState: "idle", attentionReason: "Choose an option" })];
   const { absorbed } = buildAttention(tasks, [
     notification({ id: "info", taskNumber: 1, action: "Agent started", level: "info", createdAt: 100 }),
     notification({ id: "orphan", taskNumber: 2, action: "Needs attention", level: "attention", createdAt: 200 }),
@@ -155,16 +155,22 @@ test("buildAttention: non-attention or unmatchable notifications are not absorbe
 });
 
 test("buildAttention: a card with no attention notifications has no delete target", () => {
-  const tasks = [task({ number: 1, runState: "idle" })];
+  const tasks = [task({ number: 1, runState: "idle", attentionReason: "Choose an option" })];
   const { rows } = buildAttention(tasks, []);
   expect(rows.length).toBe(1);
   expect(rows[0].notificationIds).toStrictEqual([]);
   expect(rows[0].events).toBe(0);
 });
 
+test("buildAttention: a custom idle answer does not require a response", () => {
+  const idle = task({ number: 1, stageId: "custom", runState: "idle", attentionReason: null });
+  expect(buildAttention([idle], []).rows).toStrictEqual([]);
+  expect(LENSES.attention.match(idle)).toBe(false);
+});
+
 test("buildAttention: excludes failed cards even when their old stage was attention", () => {
   const tasks = [
-    task({ number: 2, runState: "idle" }),
+    task({ number: 2, runState: "idle", attentionReason: "Choose an option" }),
     task({ number: 1, stageId: "stage-attention", runState: "failed", attentionReason: "err", settledAt: 10 }),
   ];
   const { rows } = buildAttention(tasks, []);
@@ -300,16 +306,16 @@ test("attentionRank orders stated human requests before idle cards", () => {
   expect(attentionRank(task({ number: 1, runState: "idle" }))).toBe(1);
 });
 
-test("buildAttention: an idle card takes its reason from the notification body", () => {
+test("buildAttention: a pending card keeps its current reason", () => {
   const { rows, absorbed } = buildAttention(
-    [task({ number: 1, runState: "idle" })],
+    [task({ number: 1, runState: "idle", attentionReason: "Choose an option" })],
     [
       notification({ id: "a", taskNumber: 1, action: "Needs attention", level: "attention", body: "cannot reach the host", readAt: 10, createdAt: 100 }),
       notification({ id: "b", taskNumber: 1, action: "Needs attention", level: "attention", body: "second", readAt: null, createdAt: 200 }),
     ],
   );
   expect(rows.length).toBe(1);
-  expect(rows[0].reason).toBe("cannot reach the host");
+  expect(rows[0].reason).toBe("Choose an option");
   expect(rows[0].unread).toBe(true);
   expect(rows[0].events).toBe(2);
   expect([...absorbed]).toStrictEqual(["a", "b"]);
@@ -317,7 +323,7 @@ test("buildAttention: an idle card takes its reason from the notification body",
 
 test("buildAttention: fully read history keeps the card row unread-free", () => {
   const { rows, absorbed } = buildAttention(
-    [task({ number: 1, runState: "idle" })],
+    [task({ number: 1, runState: "idle", attentionReason: "Choose an option" })],
     [notification({ id: "a", taskNumber: 1, action: "Needs attention", level: "attention", readAt: 10, createdAt: 100 })],
   );
   expect(rows[0].unread).toBe(false);
@@ -326,8 +332,8 @@ test("buildAttention: fully read history keeps the card row unread-free", () => 
 
 test("buildAttention: cards of equal rank sort newest first", () => {
   const { rows } = buildAttention([
-    task({ number: 1, runState: "idle", updatedAt: 100 }),
-    task({ number: 2, runState: "idle", updatedAt: 900 }),
+    task({ number: 1, runState: "idle", attentionReason: "Choose an option", updatedAt: 100 }),
+    task({ number: 2, runState: "idle", attentionReason: "Choose an option", updatedAt: 900 }),
   ], []);
   expect(rows.map((row) => row.task.number)).toStrictEqual([2, 1]);
 });

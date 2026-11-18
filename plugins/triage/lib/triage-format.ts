@@ -65,11 +65,10 @@ export interface RunPresentation {
 }
 
 /**
- * One place that turns a run state into what the board shows. "Idle" is
- * deliberately never surfaced as a label — an idle agent means the card is
- * waiting on a person, and that is what the card should say.
+ * One place that turns a run state into what the board shows.
  */
 export function presentRunState(task: Task): RunPresentation {
+  if (needsAttention(task)) return { tone: "unread", label: "Waiting for you", live: false };
   switch (task.runState) {
     case "dispatching":
       return { tone: "ongoing", label: "Dispatching", live: true };
@@ -78,7 +77,7 @@ export function presentRunState(task: Task): RunPresentation {
     case "working":
       return { tone: "ongoing", label: "Working", live: true };
     case "idle":
-      return { tone: "unread", label: "Waiting for you", live: false };
+      return { tone: "neutral", label: "Idle", live: false };
     case "scheduled":
       return { tone: "scheduled", label: "Scheduled", live: false };
     case "queued":
@@ -103,11 +102,8 @@ export function isTaskRunning(task: Task): boolean {
 
 /** Cards a person still owes something to. Drives the "Needs you" filter. */
 export function needsAttention(task: Task): boolean {
-  if (task.settledAt !== null || task.runState === "failed") return false;
-  return (
-    task.runState === "idle" ||
-    task.attentionReason !== null
-  );
+  if (task.settledAt !== null || task.runState === "failed" || task.runState === "stopped" || task.runState === "completed") return false;
+  return task.attentionReason !== null;
 }
 
 export function isPending(task: Task): boolean {
@@ -208,7 +204,7 @@ export function runStateLabel(state: RunState): string {
     dispatching: "Dispatching",
     starting: "Starting",
     working: "Working",
-    idle: "Waiting for you",
+    idle: "Idle",
     failed: "Failed",
     completed: "Completed",
     stopped: "Stopped",
@@ -251,5 +247,5 @@ export function localDateAt(hour: number, minute: number, dayOffset: number): nu
 export function keepsFailedCardVisible(task: Task, stages: readonly Stage[]): boolean {
   if (task.runState !== "failed" || task.settledAt !== null) return false;
   const role = stages.find((stage) => stage.id === task.stageId)?.systemRole;
-  return role === "attention" || role === null;
+  return role === "attention" || role === "active" || role === null;
 }

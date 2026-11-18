@@ -329,10 +329,11 @@ test("running a card dispatches once with a normalized prompt and announces the 
       { type: "text", text: "Do the work" },
       { type: "text", text: "Untouched" },
     ]);
-    const instruction = spawnArgs.input.at(-1);
-    expect(instruction.visibility).toBe("agent-only");
-    expect(instruction.text).toContain(`You are assigned to Triage #${task.number}.`);
-    expect(instruction.text).toContain("triage_move_task");
+    expect(spawnArgs.input).toStrictEqual([
+      { type: "text", text: "Keep private", visibility: "agent-only" },
+      { type: "text", text: "Do the work" },
+      { type: "text", text: "Untouched" },
+    ]);
     // The read marker survives the dispatch; an idle turn clears it instead.
     expect(started.readAt).toBeGreaterThan(0);
     const startedSignal = lastSignal(harness);
@@ -658,41 +659,10 @@ test("notification read and delete calls act on the stored rows", async () => {
   } finally { await harness.lifecycle.dispose(); }
 });
 
-test("the agent tool moves only its own card and explains unknown stages", async () => {
-  const { harness, rpc, createTask } = await setup();
+test("the agent stage tool is not registered", async () => {
+  const { harness } = await setup();
   try {
-    const task = await createTask();
-    const started = await rpc("runTask", { number: task.number });
-    const owner = started.threadId;
-    await expect(harness.behavior.callAgentTool("triage_move_task", {
-      number: task.number, stage: "Nowhere", summary: "Done",
-    }, { threadId: owner })).rejects.toThrow(/Unknown stage “Nowhere”. Available stages: To Do, In Progress, Human Review, Completed/);
-    await expect(harness.behavior.callAgentTool("triage_move_task", {
-      number: task.number, stage: "Completed", summary: "Done",
-    }, { threadId: "someone-else" })).rejects.toThrow(/not assigned to this thread/);
-    await rpc("setTaskRead", { number: task.number, read: true });
-    const result = await harness.behavior.callAgentTool("triage_move_task", {
-      number: task.number, stage: "completed", summary: "Verified and finished",
-    }, { threadId: owner });
-    expect(result).toBe(`Moved Triage #${task.number} to Completed.`);
-    const snapshot = await rpc("snapshot");
-    expect(snapshot.tasks[0].stageId).toBe("stage-completed");
-    expect(snapshot.tasks[0].runState).toBe("completed");
-    // The agent's move clears the card's read marker.
-    expect(snapshot.tasks[0].readAt).toBe(null);
-    const movedSignal = lastSignal(harness);
-    expect(movedSignal.payload.notification).toMatchObject({
-      action: "Moved to Completed", body: "Verified and finished", level: "success",
-    });
-    // The attention stage notifies at the attention level instead.
-    const blocked = await createTask({ title: "Blocked" });
-    const blockedStart = await rpc("runTask", { number: blocked.number });
-    await harness.behavior.callAgentTool("triage_move_task", {
-      number: blocked.number, stage: "Human Review", summary: "Need credentials",
-    }, { threadId: blockedStart.threadId });
-    const attentionSignal = lastSignal(harness);
-    expect(attentionSignal.payload.notification.level).toBe("attention");
-    expect(attentionSignal.payload.notification.body).toBe("Need credentials");
+    expect(harness.inspection.registrations.agentTools.some((entry) => entry.name === "triage_move_task")).toBe(false);
   } finally { await harness.lifecycle.dispose(); }
 });
 
@@ -741,76 +711,40 @@ test("agent configuration is empty for threads without a card", async () => {
   } finally { await harness.lifecycle.dispose(); }
 });
 
-test("thread events move cards through the board", async () => {
-  const { harness, thread, rpc, createTask } = await setup();
+test("thread events follow native state and completion is neutral", async () => {
+  const { harness, rpc, createTask } = await setup();
   try {
+    let native = makeThreadResponse({ id: "spawned-1", status: "active" });
+    harness.inspection.sdk.stub("threads.get", async () => native);
+    harness.inspection.sdk.stub("threads.listRunning", async () => []);
+    harness.inspection.sdk.stub("threads.interactions.list", async () => []);
     const task = await createTask();
     await rpc("runTask", { number: task.number });
-    await harness.behavior.emitThreadEvent("thread.active", { thread: makeThreadResponse({ id: "unknown-thread" }) });
-    // Idle and failure turns for unlinked threads are ignored too.
-    await harness.behavior.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "unknown-thread" }), lastAssistantText: "Done" });
-    await harness.behavior.emitThreadEvent("thread.failed", { thread: makeThreadResponse({ id: "unknown-thread" }), error: "no card" });
-    await harness.behavior.emitThreadEvent("thread.active", { thread: makeThreadResponse({ id: "spawned-1" }) });
-    let snapshot = await rpc("snapshot");
-    expect(snapshot.tasks[0].runState).toBe("working");
-    expect(snapshot.tasks[0].stageId).toBe("stage-progress");
-    // Going idle in the active stage asks for a person and clears the read mark.
-    await rpc("setTaskRead", { number: task.number, read: true });
-    await harness.behavior.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "spawned-1" }), lastAssistantText: "Done" });
-    snapshot = await rpc("snapshot");
-    expect(snapshot.tasks[0].runState).toBe("idle");
-    expect(snapshot.tasks[0].readAt).toBe(null);
-    expect(snapshot.tasks[0].settledAt).toBe(null);
-    const waiting = lastSignal(harness);
-    expect(waiting.payload.notification.action).toBe("Waiting for you");
-    // An idle card in a user stage stays quiet.
-    const custom = await rpc("createStage", { name: "Holding" });
-    await rpc("moveTask", { number: task.number, stageId: custom.id });
-    const quietSignals = harness.realtimeSignals.length;
-    await harness.behavior.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "spawned-1" }), lastAssistantText: "Done" });
-    snapshot = await rpc("snapshot");
-    expect(snapshot.tasks[0].runState).toBe("idle");
-    expect(harness.realtimeSignals.length).toBe(quietSignals + 1);
-    expect(lastSignal(harness).payload.notification).toBeUndefined();
-    // A stopped card ignores idle turns; bring the card back to working first.
-    await harness.behavior.emitThreadEvent("thread.active", { thread: makeThreadResponse({ id: "spawned-1" }) });
-    await rpc("stopTask", { number: task.number });
-    const stoppedSignals = harness.realtimeSignals.length;
-    await harness.behavior.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "spawned-1" }), lastAssistantText: "Done" });
-    expect(harness.realtimeSignals.length).toBe(stoppedSignals + 1);
-    expect(lastSignal(harness).payload.notification).toBeUndefined();
-    // A finished card ignores idle turns as well.
-    await rpc("moveTask", { number: task.number, stageId: "stage-completed" });
-    const finishedSignals = harness.realtimeSignals.length;
-    await harness.behavior.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: "spawned-1" }), lastAssistantText: "Done" });
-    expect(harness.realtimeSignals.length).toBe(finishedSignals + 1);
-    expect(lastSignal(harness).payload.notification).toBeUndefined();
-    // Failures retain the current stage and preserve their reason without a notice.
-    await harness.behavior.emitThreadEvent("thread.failed", { thread: makeThreadResponse({ id: "spawned-1" }), error: "  Provider crashed  " });
-    snapshot = await rpc("snapshot");
-    expect(snapshot.tasks[0].stageId).toBe("stage-completed");
-    expect(snapshot.tasks[0].runState).toBe("failed");
-    expect(snapshot.tasks[0].attentionReason).toBe("Provider crashed");
-    expect(snapshot.tasks[0].settledAt).toBe(null);
-    expect(lastSignal(harness).payload.notification).toBeUndefined();
-    // Deleting the linked thread detaches the card and keeps it on the board.
-    await harness.behavior.emitThreadEvent("thread.deleted", { thread: makeThreadResponse({ id: "unrelated" }) });
-    await harness.behavior.emitThreadEvent("thread.deleted", { thread: makeThreadResponse({ id: "spawned-1" }) });
-    snapshot = await rpc("snapshot");
-    expect(snapshot.tasks[0].threadId).toBe(null);
-    expect(snapshot.tasks[0].runState).toBe("stopped");
-    expect(snapshot.tasks[0].attentionReason).toContain("deleted");
+    await harness.behavior.emitThreadEvent("thread.active", { thread: native });
+    expect((await rpc("snapshot")).tasks[0]).toMatchObject({ stageId: "stage-progress", runState: "working" });
+    native = makeThreadResponse({ id: "spawned-1", status: "idle" });
+    await harness.behavior.emitThreadEvent("thread.idle", { thread: native, lastAssistantText: "Done" });
+    expect((await rpc("snapshot")).tasks[0]).toMatchObject({ stageId: "stage-completed", runState: "completed", attentionReason: null });
+    expect(lastSignal(harness).payload.notification.action).toBe("Update ready");
+    native = makeThreadResponse({ id: "spawned-1", status: "error" });
+    await harness.behavior.emitThreadEvent("thread.failed", { thread: native, error: "  Provider crashed  " });
+    expect((await rpc("snapshot")).tasks[0]).toMatchObject({ stageId: "stage-progress", runState: "failed", attentionReason: "Provider crashed" });
+    await harness.behavior.emitThreadEvent("thread.deleted", { thread: native });
+    expect((await rpc("snapshot")).tasks[0]).toMatchObject({ threadId: null, runState: "stopped" });
   } finally { await harness.lifecycle.dispose(); }
 });
 
 test("a failed turn without a reason still explains itself", async () => {
   const { harness, rpc, createTask } = await setup();
   try {
+    const native = makeThreadResponse({ id: "spawned-1", status: "error" });
+    harness.inspection.sdk.stub("threads.get", async () => native);
+    harness.inspection.sdk.stub("threads.listRunning", async () => []);
+    harness.inspection.sdk.stub("threads.interactions.list", async () => []);
     const task = await createTask();
     await rpc("runTask", { number: task.number });
-    await harness.behavior.emitThreadEvent("thread.failed", { thread: makeThreadResponse({ id: "spawned-1" }), error: "   " });
-    const snapshot = await rpc("snapshot");
-    expect(snapshot.tasks[0].attentionReason).toBe("The assigned BB thread failed.");
+    await harness.behavior.emitThreadEvent("thread.failed", { thread: native, error: "   " });
+    expect((await rpc("snapshot")).tasks[0].attentionReason).toBe("The assigned BB thread failed.");
   } finally { await harness.lifecycle.dispose(); }
 });
 
@@ -1091,7 +1025,7 @@ test("a missing system stage fails loudly when a dispatch needs it", async () =>
     });
     harness.inspection.sdk.stub("threads.spawn", async () => { throw new Error("Provider offline"); });
     await expect(harness.behavior.callRpc("createTask", createTaskInput({ runNow: true })))
-      .rejects.toThrow(/attention stage is not configured/);
+      .rejects.toThrow(/Provider offline/);
   } finally { await harness.lifecycle.dispose(); }
 });
 

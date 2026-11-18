@@ -88,9 +88,10 @@ bb triage stages
 ## Sessions and the sidebar
 
 Visible top-level sessions appear on the board automatically as mirrored
-cards. Their agents receive the same stage tool and instructions as agents
-assigned to Triage tasks. Agents can move work that needs your input to Human
-Review. Hidden sessions and child sessions stay out of automatic mirroring.
+cards. Triage follows session activity and pending questions/approvals/forms;
+active work or running children is In Progress; pending input is Human Review;
+idle turns with no pending input or work are Completed. Hidden sessions and
+child sessions stay out of automatic mirroring.
 Mirror cards do not change sidebar visibility, and deleting a session removes
 its card.
 
@@ -103,11 +104,9 @@ read through the regular sidebar. No manual settlement is required. Read cards
 remain available in the Settled view. Marking a completed card unread returns
 it to Completed.
 
-A new turn moves the card to In Progress. A running child keeps the top-level
-card working until the work stops. Reading a working card, a Human Review card,
-or a card in a custom column does not hide it. Cards in Human Review or a custom
-column keep their placement. Failed or archived sessions retain their existing
-handling.
+Custom columns retain user placement, while pending-input indicators follow
+actual input. Reading a working card, a Human Review card, or a card in a custom
+column does not hide it. Failed or archived sessions retain their existing handling.
 
 Unread replies hidden by the earlier automatic-settlement behavior return to
 Completed. Already-read completed cards leave Completed when Triage loads. Turn
@@ -130,10 +129,8 @@ settled and live under the Settled view.
   list. It defaults to **off**. Changing it applies to all linked sessions;
   individual show/hide actions override it until the next setting change.
 
-All linked sessions, including automatically mirrored sessions, receive the
-Triage agent tool and instructions when BB next starts their agent session.
-A card still being created becomes eligible after its row exists. Importing a
-session does not interrupt a running turn.
+Linked sessions do not receive a stage-management tool or stage instructions.
+Importing a session does not interrupt a running turn.
 
 ## Board controls
 
@@ -154,10 +151,8 @@ Requires BB 0.42+ and Plugin SDK 0.6.104 or newer. This repository's GitHub
 Actions workflow runs `npm run test:coverage` (`tsc --noEmit` plus the test
 suite with 100% coverage thresholds) on every push and pull request.
 
-New cards start in To Do. Agent execution moves them to In Progress; agents are
-instructed to explicitly report completion or a need for attention. Ending a turn
-alone does not mark work complete. Scheduled tasks require BB and Triage to be
-running; overdue work is picked up when the scheduler resumes.
+New cards start in To Do. Scheduled tasks require BB and Triage to be running;
+overdue work is picked up when the scheduler resumes.
 
 ## License
 

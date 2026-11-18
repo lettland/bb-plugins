@@ -125,7 +125,7 @@ describe("run and stage presentation", () => {
       dispatching: { tone: "ongoing", label: "Dispatching", live: true },
       starting: { tone: "ongoing", label: "Starting", live: true },
       working: { tone: "ongoing", label: "Working", live: true },
-      idle: { tone: "unread", label: "Waiting for you", live: false },
+      idle: { tone: "neutral", label: "Idle", live: false },
       scheduled: { tone: "scheduled", label: "Scheduled", live: false },
       queued: { tone: "pending", label: "Ready to run", live: false },
       failed: { tone: "danger", label: "Failed", live: false },
@@ -151,10 +151,14 @@ describe("run and stage presentation", () => {
   });
 
   test("needsAttention excludes failed and settled cards while retaining genuine requests", () => {
-    expect(needsAttention(task({ runState: "idle" }))).toBe(true);
+    expect(needsAttention(task({ runState: "idle" }))).toBe(false);
     expect(needsAttention(task({ runState: "failed", attentionReason: "Provider failed" }))).toBe(false);
+    expect(needsAttention(task({ runState: "stopped", attentionReason: "The linked BB thread was deleted." }))).toBe(false);
+    expect(presentRunState(task({ runState: "stopped", attentionReason: "The linked BB thread was deleted." })).label).toBe("Stopped");
+    expect(needsAttention(task({ runState: "completed", attentionReason: "Provider failed" }))).toBe(false);
     expect(needsAttention(task({ runState: "idle", settledAt: 10 }))).toBe(false);
     expect(needsAttention(task({ runState: "working", attentionReason: "needs access" }))).toBe(true);
+    expect(presentRunState(task({ runState: "working", attentionReason: "needs access" })).label).toBe("Waiting for you");
     expect(needsAttention(task({ runState: "working" }))).toBe(false);
   });
 
@@ -226,7 +230,7 @@ describe("labels", () => {
     expect(formatReasoningLevel("constructor")).toBe("constructor");
     expect(formatReasoningLevel("__proto__")).toBe("__proto__");
     expect(runStateLabel("queued")).toBe("Ready");
-    expect(runStateLabel("idle")).toBe("Waiting for you");
+    expect(runStateLabel("idle")).toBe("Idle");
     expect(runStateLabel("stopped")).toBe("Stopped");
   });
 
@@ -288,8 +292,8 @@ describe("keepsFailedCardVisible", () => {
     expect(keepsFailedCardVisible(failed(null), stages)).toBe(true);
   });
 
-  test("an unsettled failed card is hidden in an active stage", () => {
-    expect(keepsFailedCardVisible(failed("active"), stages)).toBe(false);
+  test("an unsettled failed card stays visible in an active stage", () => {
+    expect(keepsFailedCardVisible(failed("active"), stages)).toBe(true);
   });
 
   test("an unsettled failed card is hidden in a done stage", () => {

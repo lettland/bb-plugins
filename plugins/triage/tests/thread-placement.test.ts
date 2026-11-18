@@ -11,6 +11,8 @@ async function setup(options: { failUpdate?: boolean; archived?: boolean } = {})
       subscribe: () => () => {},
       threads: {
         get: async () => thread,
+        listRunning: async () => [],
+        interactions: { list: async () => [] },
         // The snapshot reads carded sessions through batched list calls; the
         // backfill's unfiltered pass finds nothing so it never mirrors the fixture.
         list: async (args: { threadIds?: readonly string[]; archived?: boolean } = {}) =>
@@ -27,7 +29,7 @@ async function setup(options: { failUpdate?: boolean; archived?: boolean } = {})
     },
   });
   await plugin(bb);
-  const importThread = () => harness.behavior.callRpc("importThread", { threadId: thread.id }) as Promise<{ number: number; threadId: string; title: string }>;
+  const importThread = () => harness.behavior.callRpc("importThread", { threadId: thread.id }) as Promise<{ number: number; threadId: string; title: string; stageId: string; runState: string }>;
   return { harness, thread, importThread };
 }
 
@@ -42,7 +44,7 @@ test("import preserves the existing session and concurrent retries create one ca
     expect(harness.inspection.sdk.callsTo("threads.spawn").length).toBe(0);
     expect(harness.inspection.sdk.callsTo("threads.send").length).toBe(0);
     const config = await harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: thread.id } }));
-    expect(JSON.stringify(config).includes("triage_move_task")).toBeTruthy();
+    expect(JSON.stringify(config)).not.toContain("triage_move_task");
     await harness.behavior.callRpc("setThreadSidebar", { number: first.number, visible: true });
     expect(thread.visibility).toBe("visible");
     await harness.behavior.callRpc("setThreadSidebar", { number: first.number, visible: false });
@@ -173,32 +175,20 @@ test("title renaming synchronizes the thread without changing workflow state", a
     const task = await importThread();
     const renamed = await harness.behavior.callRpc("renameTask", { number: task.number, title: "  Revised title  " }) as any;
     expect(renamed.title).toBe("Revised title");
-    expect(renamed.stageId).toBe("stage-todo");
-    expect(renamed.runState).toBe("idle");
+    expect(renamed.stageId).toBe(task.stageId);
+    expect(renamed.runState).toBe(task.runState);
     expect(harness.inspection.sdk.callsTo("threads.update").some((call) => JSON.stringify(call).includes("Triage #1: Revised title"))).toBeTruthy();
     await expect(harness.behavior.callRpc("renameTask", { number: task.number, title: " " })).rejects.toBeDefined();
   } finally { await harness.lifecycle.dispose(); }
 });
 
-test("agent instructions explain completion and attention using current stage names", async () => {
+test("agents receive no stage management configuration", async () => {
   const { harness, thread, importThread } = await setup();
   try {
     await importThread();
-    await harness.behavior.callRpc("renameStage", { id: "stage-attention", name: "Needs input" });
-    await harness.behavior.callRpc("renameStage", { id: "stage-completed", name: "Shipped" });
     const config = await harness.behavior.resolveAgentConfiguration(makePluginAgentConfigurationContext({ thread: { id: thread.id } }));
-    const instructions = JSON.stringify(config);
-    expect(instructions).toContain("Do not call triage_move_task to move the card to Shipped.");
-    expect(instructions).toContain("Do not call triage_move_task to move the card to Needs input.");
-    expect(instructions).toContain("Use a plan approval interaction when a plan needs approval.");
-    expect(instructions).toContain("Use a question interaction when you need a user answer.");
-    expect(instructions).toContain("A final response alone does not require Needs input.");
-    expect(instructions).toContain("Otherwise, keep the current stage.");
-    expect(instructions).toContain("use In Progress while working, including when resuming a completed task for new requests.");
-    expect(instructions).not.toContain("Before your final response, call triage_move_task");
-    expect(instructions).not.toContain("Do not leave finished work");
-    expect(instructions).not.toContain("approve, decide, provide access");
-    expect(instructions).not.toContain("otherwise use Needs input");
+    expect(JSON.stringify(config)).not.toContain("triage_move_task");
+    expect(harness.inspection.registrations.agentTools.some((entry) => entry.name === "triage_move_task")).toBe(false);
   } finally { await harness.lifecycle.dispose(); }
 });
 
@@ -206,8 +196,9 @@ test("idle preserves completion and new work returns to In Progress", async () =
   const { harness, thread, importThread } = await setup();
   try {
     const task = await importThread();
+    thread.status = "active";
     await harness.behavior.emitThreadEvent("thread.active", { thread });
-    await harness.behavior.callRpc("moveTask", { number: task.number, stageId: "stage-completed" });
+    thread.status = "idle";
     await harness.behavior.emitThreadEvent("thread.idle", { thread, lastAssistantText: "Done" });
     harness.inspection.sdk.stub("projects.list", async () => []);
     harness.inspection.sdk.stub("hosts.list", async () => []);
@@ -215,6 +206,7 @@ test("idle preserves completion and new work returns to In Progress", async () =
     const completed = await read();
     expect(completed.stageId).toBe("stage-completed");
     expect(completed.runState).toBe("completed");
+    thread.status = "active";
     await harness.behavior.emitThreadEvent("thread.active", { thread });
     const resumed = await read();
     expect(resumed.stageId).toBe("stage-progress");
@@ -232,25 +224,6 @@ test("snapshot displays the linked environment's actual branch", async () => {
     harness.inspection.sdk.stub("environments.get", async () => ({ branchName: "feature/notifications", isGitRepo: true }));
     const snapshot = await harness.behavior.callRpc("snapshot", null) as { tasks: { branchName: string }[] };
     expect(snapshot.tasks[0]?.branchName).toBe("feature/notifications");
-  } finally { await harness.lifecycle.dispose(); }
-});
-
-test("stage tool rejects another thread and preserves the owner's card", async () => {
-  const { harness, thread, importThread } = await setup();
-  try {
-    const task = await importThread();
-    await expect(harness.behavior.callAgentTool("triage_move_task", {
-      number: task.number, stage: "Completed", summary: "Done",
-    }, { threadId: "unrelated-thread" })).rejects.toThrow(/not assigned/);
-    await harness.behavior.callAgentTool("triage_move_task", {
-      number: task.number, stage: "Completed", summary: "Verified and complete",
-    }, { threadId: thread.id });
-    await harness.behavior.emitThreadEvent("thread.idle", { thread, lastAssistantText: "Done" });
-    harness.inspection.sdk.stub("projects.list", async () => []);
-    harness.inspection.sdk.stub("hosts.list", async () => []);
-    const snapshot = await harness.behavior.callRpc("snapshot", null) as { tasks: { stageId: string; runState: string }[] };
-    expect(snapshot.tasks[0]?.stageId).toBe("stage-completed");
-    expect(snapshot.tasks[0]?.runState).toBe("completed");
   } finally { await harness.lifecycle.dispose(); }
 });
 

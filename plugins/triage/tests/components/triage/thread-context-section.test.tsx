@@ -157,14 +157,14 @@ describe("groups", () => {
 });
 
 describe("filters", () => {
-  test("a failed card is hidden in the active stage and shown in the attention stage", async () => {
+  test("a failed card is visible in the active and attention stages", async () => {
     await mount(snapshotOf([
       card({ title: "Failed active", stageId: "s-active", runState: "failed" }),
       card({ title: "Failed review", stageId: "s-attention", runState: "failed" }),
     ]));
-    expect(screen.queryByText(/Failed active/)).toBeNull();
+    expect(screen.getByText(/Failed active/)).toBeTruthy();
     expect(screen.getByText(/Failed review/)).toBeTruthy();
-    expect(headings()).toStrictEqual(["Human Review"]);
+    expect(headings()).toStrictEqual(["In Progress", "Human Review"]);
   });
 
   test("a failed card that is settled is hidden in the attention stage", async () => {
