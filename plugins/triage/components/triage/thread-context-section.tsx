@@ -20,8 +20,6 @@ import type { Stage, Task } from "@/lib/triage-types";
 type ThreadTask = Task & { threadId: string };
 
 const GROUP_ROLES = ["active", "attention", "done"] as const;
-const DONE_LIMIT = 10;
-const ROW_LIMIT = 3;
 
 export function TriageThreadsSection() {
   const { snapshot, refresh } = useTriage();
@@ -39,8 +37,7 @@ export function TriageThreadsSection() {
       .filter((task) => task.runState !== "failed" || keepsFailedCardVisible(task, snapshot.stages))
       .filter((task) => task.settledAt === null)
       .sort((a, b) => b.updatedAt - a.updatedAt);
-    const shown = role === "done" ? rows.slice(0, DONE_LIMIT) : rows;
-    return shown.length === 0 ? [] : [{ stage, rows: shown }];
+    return rows.length === 0 ? [] : [{ stage, rows }];
   });
   if (groups.length === 0) return null;
 
@@ -65,7 +62,7 @@ export function TriageThreadsSection() {
       {groups.map(({ stage, rows }) => (
         <div key={stage.id}>
           <h4 className="px-2 text-[11px] font-medium text-muted-foreground">{stage.name}</h4>
-          <InfoList items={rows} getKey={(task) => task.id} limit={ROW_LIMIT} renderItem={renderRow(stage)} />
+          <InfoList items={rows} getKey={(task) => task.id} limit={rows.length} renderItem={renderRow(stage)} />
         </div>
       ))}
     </>

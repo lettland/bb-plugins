@@ -221,7 +221,7 @@ describe("filters", () => {
     expect(screen.queryByRole("heading", { level: 4, name: "Completed" })).toBeNull();
   });
 
-  test("done lists the 10 newest cards, read or not", async () => {
+  test("done lists all eligible cards newest first, read or not", async () => {
     const done = Array.from({ length: 12 }, (_, index) => card({
       title: `Done ${index}`,
       stageId: "s-done",
@@ -236,23 +236,9 @@ describe("filters", () => {
     }));
     await mount(snapshotOf([...done].reverse().concat(settled)));
     const texts = rowTexts("Completed");
-    expect(texts).toHaveLength(10);
-    for (let index = 0; index < 10; index += 1) expect(texts[index]).toContain(`Done ${index}`);
-    expect(screen.queryByText(/Done 10/)).toBeNull();
-    expect(screen.queryByText(/Done 11/)).toBeNull();
+    expect(texts).toHaveLength(12);
+    for (let index = 0; index < 12; index += 1) expect(texts[index]).toContain(`Done ${index}`);
     expect(screen.queryByText(/Settled/)).toBeNull();
-  });
-
-  test("active and attention are not capped at 10", async () => {
-    const active = Array.from({ length: 12 }, (_, index) => card({ title: `Active ${index}`, stageId: "s-active" }));
-    await mount(snapshotOf(active));
-    expect(rowTexts("In Progress")).toHaveLength(12);
-  });
-
-  test("done with exactly 10 cards lists all of them", async () => {
-    const done = Array.from({ length: 10 }, (_, index) => card({ title: `Edge ${index}`, stageId: "s-done" }));
-    await mount(snapshotOf(done));
-    expect(rowTexts("Completed")).toHaveLength(10);
   });
 });
 
@@ -269,16 +255,17 @@ describe("rows", () => {
     expect(texts[2]).toContain("Oldest");
   });
 
-  test("are list items in lists that collapse after 3 rows", async () => {
+  test("show every task in each category without collapsing", async () => {
     await mount(snapshotOf([
-      card({ stageId: "s-active" }),
-      card({ stageId: "s-attention" }),
-      card({ stageId: "s-done" }),
+      ...Array.from({ length: 6 }, () => card({ stageId: "s-active" })),
+      ...Array.from({ length: 6 }, () => card({ stageId: "s-attention" })),
+      ...Array.from({ length: 12 }, () => card({ stageId: "s-done" })),
     ]));
-    expect(screen.getAllByRole("listitem")).toHaveLength(3);
-    const lists = screen.getAllByRole("list");
-    expect(lists).toHaveLength(3);
-    for (const list of lists) expect(list.getAttribute("data-limit")).toBe("3");
+    for (const [name, count] of [["In Progress", 6], ["Human Review", 6], ["Completed", 12]] as const) {
+      const list = within(group(name)).getByRole("list");
+      expect(within(list).getAllByRole("listitem")).toHaveLength(count);
+      expect(list.getAttribute("data-limit")).toBe(String(count));
+    }
   });
 
   test("show the number, title, tooltip with the project, and the short age", async () => {

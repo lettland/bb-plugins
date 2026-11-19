@@ -37,7 +37,7 @@ function NewThreadPane({ target }: { target: HTMLElement }) {
     <div {...scope} className="triage-new-thread-control" onPointerDownCapture={focusPane} onFocusCapture={focusPane}>
       <Popover open={open} onOpenChange={setOpen} persistentDrawer>
         <PopoverTrigger asChild><Button variant="ghost" size="icon" aria-label="Triage"><Icon name="ListTodo" /></Button></PopoverTrigger>
-        <PopoverContent align="end" mobileTitle="Triage" onClick={(event) => {
+        <PopoverContent align="end" mobileTitle="Triage" className="max-h-[var(--radix-popover-content-available-height)] overflow-y-auto" onClick={(event) => {
           if (event.target instanceof Element && event.target.closest("button[data-thread-context-card-row]")) setOpen(false);
         }}>{content}</PopoverContent>
       </Popover>

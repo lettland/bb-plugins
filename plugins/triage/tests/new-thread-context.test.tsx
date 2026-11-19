@@ -99,6 +99,9 @@ test("renders the real Triage list in wide and compact panes and navigates", asy
   act(() => resize.get(getNewThreadAnchors()[0]!.target)?.());
   fireEvent.click(screen.getByRole("button", { name: "Triage" }));
   expect(await screen.findByRole("region", { name: "Triage" })).toBeTruthy();
+  const dialog = screen.getByRole("dialog");
+  expect(dialog.classList.contains("max-h-[var(--radix-popover-content-available-height)]")).toBe(true);
+  expect(dialog.classList.contains("overflow-y-auto")).toBe(true);
   expect(root.hasAttribute("inert")).toBe(false);
   expect(root.getAttribute("aria-hidden")).not.toBe("true");
   fireEvent.click(within(screen.getByRole("region", { name: "Triage" })).getByRole("heading", { name: "Triage" }));
