@@ -268,13 +268,14 @@ describe("rows", () => {
     }
   });
 
-  test("show the number, title, tooltip with the project, and the short age", async () => {
+  test("shows the project and task title in the row and tooltip", async () => {
     const target = card({ title: "Wire the card", stageId: "s-active", projectName: "Acme", updatedAt: NOW - 5 * MINUTE });
     await mount(snapshotOf([target]));
     const row = screen.getByTestId("bb-thread-context-card-row");
-    expect(row.textContent).toContain(`#${target.number} Wire the card`);
+    expect(row.textContent).toContain("Acme · Wire the card");
+    expect(row.textContent).not.toContain(`#${target.number}`);
     expect(row.textContent).toContain("5m");
-    expect(row.getAttribute("title")).toBe(`#${target.number} Wire the card · Acme`);
+    expect(row.getAttribute("title")).toBe("Acme · Wire the card");
   });
 
   test("render titles as plain text", async () => {
@@ -286,10 +287,10 @@ describe("rows", () => {
 
   test("a click opens that card's thread", async () => {
     const first = card({ title: "First", stageId: "s-active", updatedAt: NOW - 1 * MINUTE });
-    const second = card({ title: "Second", stageId: "s-active", updatedAt: NOW - 9 * MINUTE });
+    const second = card({ title: "Second", projectName: "Project Two", stageId: "s-active", updatedAt: NOW - 9 * MINUTE });
     const view = await mount(snapshotOf([first, second]));
     expect(view.navigateCalls).toStrictEqual([]);
-    fireEvent.click(screen.getByRole("button", { name: new RegExp(`#${second.number} Second`) }));
+    fireEvent.click(screen.getByRole("button", { name: /Project Two · Second/ }));
     expect(view.navigateCalls).toStrictEqual([{ method: "toThread", threadId: second.threadId }]);
   });
 });

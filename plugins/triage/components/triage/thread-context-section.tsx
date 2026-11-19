@@ -44,12 +44,13 @@ export function TriageThreadsSection() {
   const renderRow = (stage: Stage) => (task: ThreadTask) => {
     const running = isTaskRunning(task);
     const announced = running || task.runState === "failed";
+    const label = `${task.projectName} · ${task.title}`;
     return (
       <li className="list-none">
         <ThreadContextCardRow
           leading={<StatusDot tone={stageTone(stage)} pulse={running} label={announced ? runStateLabel(task.runState) : undefined} />}
-          label={`#${task.number} ${task.title}`}
-          title={`#${task.number} ${task.title} · ${task.projectName}`}
+          label={label}
+          title={label}
           trailing={formatShortWhen(task.updatedAt)}
           onClick={() => navigate.toThread(task.threadId)}
         />

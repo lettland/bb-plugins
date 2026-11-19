@@ -90,10 +90,10 @@ test("renders the real Triage list in wide and compact panes and navigates", asy
     tasks: [{ id: "task", number: 1, title: "Fixture", projectName: "Fixture project", stageId: "active", threadId: "thr-fixture", runState: "idle", settledAt: null, updatedAt: Date.now() }],
     projects: [], machines: [], notifications: [], unreadCount: 0,
   }) } });
-  expect(await screen.findByRole("button", { name: /#1 Fixture/ })).toBeTruthy();
-  fireEvent.pointerDown(screen.getByRole("button", { name: /#1 Fixture/ }));
+  expect(await screen.findByRole("button", { name: /Fixture project · Fixture/ })).toBeTruthy();
+  fireEvent.pointerDown(screen.getByRole("button", { name: /Fixture project · Fixture/ }));
   expect(root.dataset.focused).toBe("true");
-  fireEvent.click(screen.getByRole("button", { name: /#1 Fixture/ }));
+  fireEvent.click(screen.getByRole("button", { name: /Fixture project · Fixture/ }));
   expect(view.navigateCalls).toContainEqual({ method: "toThread", threadId: "thr-fixture" });
   width = 900;
   act(() => resize.get(getNewThreadAnchors()[0]!.target)?.());
@@ -106,7 +106,7 @@ test("renders the real Triage list in wide and compact panes and navigates", asy
   expect(root.getAttribute("aria-hidden")).not.toBe("true");
   fireEvent.click(within(screen.getByRole("region", { name: "Triage" })).getByRole("heading", { name: "Triage" }));
   expect(screen.getByRole("region", { name: "Triage" })).toBeTruthy();
-  const row = within(screen.getByRole("region", { name: "Triage" })).getByRole("button", { name: /#1 Fixture/ });
+  const row = within(screen.getByRole("region", { name: "Triage" })).getByRole("button", { name: /Fixture project · Fixture/ });
   row.setAttribute("data-thread-context-card-row", "");
   fireEvent.click(row);
   expect(view.navigateCalls).toHaveLength(2);
