@@ -172,7 +172,7 @@ A failure moves only that lens to the next tier. Do not start omitted lenses as 
 
 - **bb child threads**, when `BB_THREAD_ID` is set and `bb thread show "$BB_THREAD_ID" --json`
   reports `.thread.canSpawnChild: true`. That one call also gives you `.thread.{projectId,
-  providerId}` and `.execution.nextTurn.{model, reasoningLevel, permissionMode}`.
+  providerId}` and `.execution.nextTurn.{model, reasoningLevel}`.
 
   **Plan mode**: this tier is allowed in plan mode, and you must try it there. Plan mode keeps
   the *project* read-only; the review's run dir (outside the checkout) and its child threads
@@ -181,23 +181,9 @@ A failure moves only that lens to the next tier. Do not start omitted lenses as 
   change nothing in the project. A "don't run non-readonly tools" reminder is no reason to skip
   this tier — only an actual failed or denied call is.
 
-  **Permission mode**: read the provider's supported modes once, before the first spawn: the
-  entry whose `id` is `<providerId>` in `bb provider list --json`, field
-  `.capabilities.permissionModes`. Three cases:
-  - The list contains `auto`: request `auto`. If the spawn is still rejected for an unsupported
-    mode (HTTP 400), retry once with the parent's own mode (omit the flag only if that is `null`).
-  - The list is a non-empty array without `auto` (some providers accept only
-    `accept-edits`/`full`): request the parent's own mode on the first spawn (omit the flag only
-    if that is `null`), with no `auto` attempt and no permission-mode retry.
-  - The command fails, the provider has no entry, or the field is missing, `null`, empty, or not
-    an array: request `auto` and keep the one retry with the parent's own mode on an HTTP 400 —
-    missing data never skips `auto`.
-
-  On a provider without `auto` the reviewer runs at the parent's mode, possibly `full` — the tree
-  guard below is then the only backstop. With a parent at `accept-edits` there, the reviewer can
-  stall at its first shell approval on Claude Code; still spawn it, and if it stalls the lens
-  falls through as usual. Never map `full` to `accept-edits`: on Claude Code that stalls at the
-  first shell approval, which drops the lens straight to subagents.
+  **Permission mode**: Omit `--permission-mode` from the first spawn and every retry.
+  BB inherits the parent's permission mode and applies provider support and the host permission ceiling.
+  Use this rule even if the provider does not support `auto` or its capability data is unavailable.
 
   **Reasoning level**: this skill sets no default level. Use the level your thread's rules give
   reviewer threads (project, plugin or user instructions) when it is one lowercase word such as
@@ -211,8 +197,8 @@ A failure moves only that lens to the next tier. Do not start omitted lenses as 
   template BSD/macOS `mktemp -u` prints whenever its run of placeholder letters isn't the very end
   of the string (a trailing file extension breaks it)). Write each lens's brief at
   `<run dir>/<lens>.md` with your file tool, not the shell, and never into the checkout; delete it
-  once no further spawn attempt will read it — after a successful spawn, or once every
-  retry (permission mode, level) has also failed. The tree guard below keeps its config snapshot in
+  once no further spawn attempt will read it — after a successful spawn, or after the last failed attempt.
+  The tree guard below keeps its config snapshot in
   the run dir too.
   On every tier, not just here, at the end of the review (after §5's closure review) run
   `rm -f "<run dir>"/*` then `rmdir "<run dir>"` — never a recursive remove. Each round snapshot
@@ -223,7 +209,7 @@ A failure moves only that lens to the next tier. Do not start omitted lenses as 
   ```sh
   bb thread spawn --parent-self --lifecycle-owner-thread "$BB_THREAD_ID" \
     --project <projectId> --environment "$BB_ENVIRONMENT_ID" --provider <providerId> \
-    --model <model> --reasoning-level <level> --permission-mode <mode> \
+    --model <model> --reasoning-level <level> \
     --title "review: <reviewer>" --json --prompt-file <brief-file>
   ```
 

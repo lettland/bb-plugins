@@ -661,8 +661,7 @@ describe("review-code content", () => {
     expect(normalized).not.toContain("--timeout 8m");
   });
 
-  it("retries the spawn at the parent's own permission mode, hashes metadata before any other git command, and disables fsmonitor", () => {
-    expect(normalized).toContain("retry once with the parent's own mode");
+  it("hashes metadata before any other git command and disables fsmonitor", () => {
     expect(normalized).toContain("before any other git command");
     expect(normalized).toContain("core.fsmonitor=false");
     expect(normalized).toContain("bb thread stop");
@@ -733,32 +732,14 @@ describe("review-code content", () => {
     expect(normalized).toContain("bb thread delete --yes");
   });
 
-  it("picks the permission mode from provider capabilities, never skips auto on missing data, and never falls back to accept-edits", () => {
-    expect(normalized).toContain(
-      "the entry whose `id` is `<providerId>` in `bb provider list --json`, field `.capabilities.permissionModes`",
-    );
-    // Each case's rule is asserted on that case's own bullet, so rules cannot swap between cases.
-    const casesStart = normalized.indexOf("Three cases:");
-    const casesEnd = normalized.indexOf("On a provider without `auto`");
-    expect(casesStart).toBeGreaterThan(-1);
-    expect(casesEnd).toBeGreaterThan(casesStart);
-    const bullets = normalized.slice(casesStart, casesEnd).split(" - ");
-    expect(bullets).toHaveLength(4);
-    const [, hasAuto, noAuto, noData] = bullets;
-    expect(hasAuto).toContain("The list contains `auto`: request `auto`");
-    expect(hasAuto).toContain("retry once with the parent's own mode");
-    expect(noAuto).toContain("The list is a non-empty array without `auto`");
-    expect(noAuto).toContain("request the parent's own mode on the first spawn");
-    expect(noAuto).toContain("no `auto` attempt and no permission-mode retry");
+  it("omits the permission mode override so reviewers inherit the parent mode", () => {
+    expect(normalized).toContain("Omit `--permission-mode` from the first spawn and every retry.");
     // Regression (learned 2026-11-05): a Claude Code-family provider whose bb capabilities list
     // only accept-edits/full returned HTTP 400 for `--permission-mode auto` on every reviewer spawn.
-    expect(noAuto).toContain("some providers accept only `accept-edits`/`full`");
-    expect(noData).toContain("missing, `null`, empty, or not an array: request `auto`");
-    expect(noData).toContain("keep the one retry with the parent's own mode on an HTTP 400");
-    expect(noData).toContain("missing data never skips `auto`");
-    expect(normalized).not.toContain("always request `auto`");
-    expect(normalized).toContain("Never map `full` to `accept-edits`");
-    expect(normalized).toContain("--permission-mode <mode>");
+    expect(normalized).toContain("Use this rule even if the provider does not support `auto` or its capability data is unavailable.");
+    const example = content.match(/bb thread spawn --parent-self[\s\S]*?```/);
+    expect(example).not.toBeNull();
+    expect(example?.[0]).not.toContain("--permission-mode");
   });
 
   it("documents that bb thread interactions list returns only pending interactions", () => {
