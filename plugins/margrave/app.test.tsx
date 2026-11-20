@@ -109,6 +109,17 @@ it("clamps a refreshed page and keeps applicable filters", () => {
   expect(screen.getByText("3 skills")).toBeTruthy();
 });
 
+it("makes populated skill results keyboard focusable", () => {
+  // Safari can skip scroll containers without focusable descendants: https://bugs.webkit.org/show_bug.cgi?id=277290
+  show();
+  const results = screen.getByRole("region", { name: "Skill results" });
+  expect(results.tabIndex).toBe(0);
+  fireEvent.change(screen.getByLabelText("Search skills"), {
+    target: { value: "no match" },
+  });
+  expect(results.hasAttribute("tabindex")).toBe(false);
+});
+
 it("keeps paging above the scrollable list and resets scroll on page changes", () => {
   show();
   const list = screen.getByRole("list");
