@@ -529,11 +529,13 @@ test.each([false, true])("review 6: final liveness reflects a descendant startin
     if (args.threadId === second.id && !delayed) { delayed = true; return gate.promise; }
     return [];
   });
+  const before = runningCalls(context);
   const snapshot = rpc("snapshot");
-  await until(() => delayed && cardOf(first.id).run_state === "completed");
+  await until(() => delayed && runningCalls(context) > before);
   if (childStarts) running(context, child.id);
   gate.resolve([]);
   await snapshot;
+  expect(cardOf(first.id).run_state).toBe("completed");
   expect(cardOf(second.id).run_state).toBe(childStarts ? "working" : "completed");
   expect(cardOf(second.id).settled_at).toBeNull();
 });
@@ -1756,19 +1758,23 @@ test("a read event invalidates native metadata captured by an in-flight snapshot
 });
 
 test.each(["read", "settle", "failure", "activity"])("a stale snapshot preserves later %s", async (action) => {
-  const { db, mirror, rpc, cardOf, ctx, emit } = await start();
+  const { db, mirror, rpc, cardOf, ctx, known, emitNative } = await start();
   const thread = thr(`stale-${action}`, { latestAttentionAt: 100, lastReadAt: 101 });
   const card = await mirror(thread);
   db.prepare("UPDATE triage_tasks SET stage_id = 'stage-completed', run_state = 'completed' WHERE id = ?").run(card.id);
   const gate = deferred<unknown[]>();
   let asked = false;
-  ctx.list = () => { if (!asked) { asked = true; return gate.promise; } return [thread]; };
+  ctx.list = (args) => { if (!asked) { asked = true; return gate.promise; } return args.archived ? [] : [...known.values()]; };
   const pending = rpc("snapshot");
   await until(() => asked);
   if (action === "read") await rpc("setTaskRead", { number: card.number, read: true });
   else if (action === "settle") await rpc("setTaskSettled", { number: card.number, settled: true });
-  else if (action === "failure") await emit("thread.failed", { thread: thr(thread.id, { status: "error" }), error: "failed" });
-  else await emit("thread.active", { thread: thr(thread.id, { status: "active" }) });
+  else if (action === "failure") await emitNative("thread.failed", { thread: thr(thread.id, { status: "error" }), error: "failed" });
+  else await emitNative("thread.active", { thread: thr(thread.id, { status: "active" }) });
+  if (action === "failure" || action === "activity") {
+    await until(() => cardOf(thread.id).run_state === (action === "failure" ? "failed" : "working"));
+    expect(cardOf(thread.id)).toMatchObject({ stage_id: "stage-progress", run_state: action === "failure" ? "failed" : "working" });
+  }
   const later = { ...cardOf(thread.id) };
   gate.resolve([thread]);
   const result = await pending;
@@ -3432,6 +3438,47 @@ test("background work starting overtakes a completion check", async () => {
   await until(() => context.cardOf(root.id).run_state === "working");
   expect(context.eventsOf(card.id).filter((event) => event.event === "turn completed")).toHaveLength(completedBefore);
   expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+});
+
+test("snapshot shares a final liveness read after every card reaches it or returns", async () => {
+  const context = await startQuiet();
+  const roots = ["batch-fast", "batch-slow", "batch-early"].map((id) => thr(id, { status: "idle" }));
+  for (const root of roots) await context.mirror(root);
+  const early = { ...context.cardOf("batch-early") };
+  const world = worldOf(roots);
+  context.ctx.list = world.handler;
+  const gate = deferred<void>();
+  const interactionReads = new Map<string, number>();
+  const treeReads: { ids: string[]; slowReady: boolean }[] = [];
+  let slowWaiting = false;
+  let slowReady = false;
+  context.harness.inspection.sdk.stub("threads.interactions.list", async ({ threadId }: { threadId: string }) => {
+    const count = (interactionReads.get(threadId) ?? 0) + 1;
+    interactionReads.set(threadId, count);
+    if (threadId === "batch-early") throw new Error("preflight failed");
+    if (threadId === "batch-slow" && count === 2) {
+      slowWaiting = true;
+      await gate.promise;
+      slowReady = true;
+    }
+    return [];
+  });
+  context.harness.inspection.sdk.stub("threads.experimental_listDescendants", async ({ threadIds }: DescendantArgs) => {
+    treeReads.push({ ids: [...threadIds], slowReady });
+    return { threads: threadIds.map((threadId) => ({ threadId, descendantIds: [] })) };
+  });
+  const pending = context.rpc("snapshot");
+  await until(() => slowWaiting);
+  await flush();
+  gate.resolve();
+  await pending;
+  expect(treeReads).toEqual([
+    { ids: ["batch-fast", "batch-slow", "batch-early"], slowReady: false },
+    { ids: ["batch-fast", "batch-slow"], slowReady: true },
+  ]);
+  expect(context.cardOf("batch-fast").run_state).toBe("completed");
+  expect(context.cardOf("batch-slow").run_state).toBe("completed");
+  expect(context.cardOf("batch-early")).toStrictEqual(early);
 });
 
 test("background work uses a fresh tree read after the batched snapshot read", async () => {

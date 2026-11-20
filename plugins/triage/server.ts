@@ -1385,9 +1385,31 @@ export default async function plugin(bb: BbPluginApi) {
       return !thread || (thread.archivedAt === null && thread.deletedAt === null && (row.origin !== "mirror" || isMirrorable(thread)) && ["active", "starting", "idle", "error"].includes(thread.status));
     });
     if (rows.length === 0) return;
-    const liveness: [ReturnType<typeof liveRoots>, (id: string) => ReturnType<typeof liveRoots>] = [initialLive ? Promise.resolve(initialLive) : liveRoots(rows.map((row) => row.thread_id!)), (id) => liveRoots([id])];
+    const initial = initialLive ? Promise.resolve(initialLive) : liveRoots(rows.map((row) => row.thread_id!));
     for (let start = 0; start < rows.length; start += 8) {
-      await Promise.all(rows.slice(start, start + 8).map(({ thread_id }) => reconcileNative(thread_id!, false, liveness, false, targets?.get(thread_id!), threads?.get(thread_id!))));
+      const group = rows.slice(start, start + 8);
+      const ids = new Set<string>();
+      let remaining = group.length;
+      let resolveFinal!: (value: Awaited<ReturnType<typeof liveRoots>> | ReturnType<typeof liveRoots>) => void;
+      const final = new Promise<Awaited<ReturnType<typeof liveRoots>>>((resolve) => { resolveFinal = resolve; });
+      await Promise.all(group.map(async ({ thread_id }) => {
+        let signaled = false;
+        const signal = () => {
+          if (signaled) return;
+          signaled = true;
+          if (--remaining === 0) resolveFinal(ids.size ? liveRoots([...ids]) : undefined);
+        };
+        const liveness: [ReturnType<typeof liveRoots>, (id: string) => ReturnType<typeof liveRoots>] = [initial, (id) => {
+          ids.add(id);
+          signal();
+          return final;
+        }];
+        try {
+          await reconcileNative(thread_id!, false, liveness, false, targets?.get(thread_id!), threads?.get(thread_id!));
+        } finally {
+          signal();
+        }
+      }));
     }
   };
 
