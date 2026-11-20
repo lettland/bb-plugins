@@ -16,6 +16,7 @@ The root [`.bb/plugins.json`](.bb/plugins.json) collection manifest indexes them
 | [Auto review](plugins/auto-review) | `auto-review` |
 | [devkit](plugins/devkit) | `devkit` |
 | [GitHub (fork)](plugins/github-fork) | `github-fork` |
+| [Margrave](plugins/margrave/skills/margrave/SKILL.md) | `margrave` |
 | [Model instructions](plugins/model-instructions) | `model-instructions` |
 | [Project queue](plugins/project-queue) | `project-queue` |
 | [Provider queue](plugins/provider-queue) | `provider-queue` |

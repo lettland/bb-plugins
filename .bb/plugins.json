@@ -8,6 +8,7 @@
     { "name": "auto-review", "source": "./plugins/auto-review" },
     { "name": "devkit", "source": "./plugins/devkit" },
     { "name": "github-fork", "source": "./plugins/github-fork" },
+    { "name": "margrave", "source": "./plugins/margrave" },
     { "name": "model-instructions", "source": "./plugins/model-instructions" },
     { "name": "project-queue", "source": "./plugins/project-queue" },
     { "name": "provider-queue", "source": "./plugins/provider-queue" },

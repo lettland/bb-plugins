@@ -1,0 +1,51 @@
+{
+  "name": "@lettland/bb-plugin-margrave",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browse the skills installed in Margrave.",
+  "license": "MIT",
+  "engines": {
+    "bb": ">=0.49.0",
+    "bbPluginSdk": ">=0.6.141"
+  },
+  "bb": {
+    "name": "Margrave",
+    "description": "Browse the skills installed in Margrave.",
+    "branding": {
+      "icon": "ListView"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx",
+    "skills": [
+      "skills"
+    ]
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.config.ts --coverage",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^4.3.6",
+    "@get-bb/plugin-sdk": "0.6.141"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^22.20.4",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitest/coverage-v8": "^4.1.11",
+    "jsdom": "^27.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

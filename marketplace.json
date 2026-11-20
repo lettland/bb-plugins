@@ -101,6 +101,25 @@
       }
     },
     {
+      "id": "margrave",
+      "displayName": "Margrave",
+      "description": "Browse the skills installed in Margrave.",
+      "icon": "ListView",
+      "author": {
+        "name": "Lettland",
+        "github": "lettland",
+        "url": "https://github.com/lettland"
+      },
+      "source": {
+        "git": {
+          "url": "https://github.com/lettland/bb-plugins.git",
+          "subdir": "plugins/margrave",
+          "range": "0.x",
+          "tagPrefix": "margrave/"
+        }
+      }
+    },
+    {
       "id": "model-instructions",
       "displayName": "Model instructions",
       "description": "Custom instructions and skills per directory, project, provider and model, optionally only for top-level or only for child threads, plus a Claude Code profile per directory. A save that would push any known thread past bb's 4096-character limit is rejected.",
