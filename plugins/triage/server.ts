@@ -275,6 +275,48 @@ const memoize = <T>(cache: Map<string, Promise<T>> | undefined, key: string, loa
 
 // threads.list takes at most 200 thread ids per call and 200 rows per page.
 const THREAD_LIST_BATCH = 200;
+
+const hasBackgroundWork = (thread: ThreadListItem) =>
+  thread.archivedAt === null && thread.deletedAt === null &&
+  (thread.activity.activeBackgroundCommandCount > 0 || thread.activity.activeBackgroundAgentCount > 0);
+
+const listBackgroundRoots = async (
+  threads: BbPluginApi["sdk"]["threads"],
+  requested: string[],
+  getThread: (threadId: string) => Promise<RootThread>,
+) => {
+  const descendants = await Promise.all(Array.from(
+    { length: Math.ceil(requested.length / THREAD_LIST_BATCH) },
+    (_, index) => threads.experimental_listDescendants({
+      threadIds: requested.slice(index * THREAD_LIST_BATCH, (index + 1) * THREAD_LIST_BATCH),
+      includeHidden: true,
+    }),
+  ));
+  const trees = new Map(descendants.flatMap((result) =>
+    result.threads.map((row) => [row.threadId, [row.threadId, ...row.descendantIds]] as const),
+  ));
+  for (const id of requested) {
+    if (!trees.has(id)) trees.set(id, [id]);
+  }
+  const ids = [...new Set([...trees.values()].flat())];
+  const batches = await Promise.all(Array.from(
+    { length: Math.ceil(ids.length / THREAD_LIST_BATCH) },
+    (_, index) => threads.list({
+      threadIds: ids.slice(index * THREAD_LIST_BATCH, (index + 1) * THREAD_LIST_BATCH),
+      includeHidden: true,
+      limit: THREAD_LIST_BATCH,
+    }),
+  ));
+  const rows = new Map(batches.flat().map((row) => [row.id, row]));
+  const active = new Set([...rows.values()].filter(hasBackgroundWork).map((row) => row.id));
+  const live = new Map<string, RootThread>();
+  for (const [id, tree] of trees) {
+    if (tree.some((member) => active.has(member))) {
+      live.set(id, rows.get(id) ?? await getThread(id));
+    }
+  }
+  return live;
+};
 /** Only visible top-level sessions get board cards: sub-threads and hidden workers never do. */
 const isMirrorable = (thread: Pick<CardThread, "parentThreadId" | "visibility">) =>
   thread.parentThreadId === null && thread.visibility === "visible";
@@ -687,6 +729,15 @@ export default async function plugin(bb: BbPluginApi) {
   let broadReadGeneration = 0;
   const threadReadGeneration = new Map<string, number>();
   const unsubscribeReadState = bb.sdk.subscribe({ event: "thread:changed", callback: (event) => {
+    if (event.metadata?.backgroundActivityChanged || event.metadata?.eventTypes?.some((type) => type === "item/backgroundTask/progress" || type === "item/backgroundTask/completed")) {
+      if (event.id) {
+        invalidateResponseChecks(event.id);
+        void trackChildHandler(childChanged(event.id, true));
+      } else {
+        stampChildEvent("");
+        void reconcileAll();
+      }
+    }
     if (event.changes.includes("interactions-changed")) {
       if (event.id) { invalidateResponseChecks(event.id); void reconcileNative(event.id); }
       else {
@@ -1119,15 +1170,17 @@ export default async function plugin(bb: BbPluginApi) {
    * visited set ends a walk through a parent cycle at the last thread reached;
    * that thread still has a parent, so it is never mirrorable.
    */
-  const topLevelOf = async (thread: RootThread, getThread: (threadId: string) => Promise<RootThread>) => {
+  const ancestorsOf = async (thread: RootThread, getThread: (threadId: string) => Promise<RootThread>) => {
     const seen = new Set([thread.id]);
+    const ancestors = [thread];
     let current = thread;
     while (current.parentThreadId !== null) {
       if (seen.has(current.parentThreadId)) break;
       seen.add(current.parentThreadId);
       current = await getThread(current.parentThreadId);
+      ancestors.push(current);
     }
-    return current;
+    return ancestors;
   };
   /** A threads.get that memoizes per walk; an absent answer is a failed lookup. */
   const parentLookup = () => {
@@ -1140,39 +1193,59 @@ export default async function plugin(bb: BbPluginApi) {
       });
   };
 
-  /**
-   * Top-level threads that are running or have a running descendant, by id.
-   * `undefined` when any lookup fails: callers then leave cards unchanged.
-   * threads.listRunning returns only threads in `starting` or `active`
-   * (SDK bundled-types ThreadsArea.listRunning), so it needs no paging; its ids
-   * are resolved with the same batched threads.list calls as snapshot
-   * (archived is a selector, so each chunk needs the archived companion call).
-   */
-  const liveRoots = async () => {
+  // listRunning returns starting and active turns only. Resolve both archive halves.
+  const listRunningRoots = async (getThread: (id: string) => Promise<RootThread>) => {
+    const running = await bb.sdk.threads.listRunning();
+    const threadIds = [...new Set(running.map((entry) => entry.id))];
+    const batches: Promise<ThreadListItem[]>[] = [];
+    for (let from = 0; from < threadIds.length; from += THREAD_LIST_BATCH) {
+      const chunk = threadIds.slice(from, from + THREAD_LIST_BATCH);
+      batches.push(bb.sdk.threads.list({ threadIds: chunk, includeHidden: true, limit: THREAD_LIST_BATCH }));
+      batches.push(bb.sdk.threads.list({ threadIds: chunk, archived: true, includeHidden: true, limit: THREAD_LIST_BATCH }));
+    }
+    const listed = new Map<string, RootThread>();
+    for (const batch of await Promise.all(batches)) {
+      for (const thread of batch) listed.set(thread.id, thread);
+    }
+    const lookup = async (id: string) => listed.get(id) ?? getThread(id);
+    const roots = new Map<string, RootThread>();
+    for (const id of threadIds) {
+      const thread = listed.get(id);
+      if (!thread || (thread.status !== "active" && thread.status !== "starting")) continue;
+      for (const ancestor of await ancestorsOf(thread, lookup)) {
+        roots.set(ancestor.id, ancestor);
+      }
+    }
+    return roots;
+  };
+
+  const collectedBackgroundRoots = async (
+    collected: Map<string, ThreadListItem>,
+    requested: string[],
+    getThread: (id: string) => Promise<RootThread>,
+  ) => {
+    const wanted = new Set(requested);
+    const roots = new Map<string, RootThread>();
+    for (const thread of collected.values()) {
+      if (!hasBackgroundWork(thread)) continue;
+      for (const ancestor of await ancestorsOf(thread, getThread)) {
+        if (wanted.has(ancestor.id)) roots.set(ancestor.id, ancestor);
+      }
+    }
+    return roots;
+  };
+
+  // A failed lookup leaves every card unchanged.
+  const liveRoots = async (requested: string[] = [], collected?: Map<string, ThreadListItem>) => {
     try {
-      const running = await bb.sdk.threads.listRunning();
-      const threadIds = [...new Set(running.map((entry) => entry.id))];
-      const batches: Promise<ThreadListItem[]>[] = [];
-      for (let from = 0; from < threadIds.length; from += THREAD_LIST_BATCH) {
-        const chunk = threadIds.slice(from, from + THREAD_LIST_BATCH);
-        batches.push(bb.sdk.threads.list({ threadIds: chunk, includeHidden: true, limit: THREAD_LIST_BATCH }));
-        batches.push(bb.sdk.threads.list({ threadIds: chunk, archived: true, includeHidden: true, limit: THREAD_LIST_BATCH }));
-      }
-      const listed = new Map<string, RootThread>();
-      for (const batch of await Promise.all(batches)) {
-        for (const thread of batch) listed.set(thread.id, thread);
-      }
       const lookup = parentLookup();
-      const getThread = async (threadId: string) => listed.get(threadId) ?? lookup(threadId);
-      const roots = new Map<string, RootThread>();
-      for (const threadId of threadIds) {
-        // A thread that was deleted since listRunning answered is not listed, and one that stopped is no longer
-        // `active` or `starting`: neither is live.
-        const thread = listed.get(threadId);
-        if (!thread || (thread.status !== "active" && thread.status !== "starting")) continue;
-        const root = await topLevelOf(thread, getThread);
-        roots.set(root.id, root);
-      }
+      const getThread = async (id: string) => collected?.get(id) ?? lookup(id);
+      const roots = await listRunningRoots(getThread);
+      const wanted = requested.filter((id) => !roots.has(id));
+      const background = collected
+        ? await collectedBackgroundRoots(collected, wanted, getThread)
+        : await listBackgroundRoots(bb.sdk.threads, wanted, getThread);
+      for (const [id, thread] of background) roots.set(id, thread);
       return roots;
     } catch (error) {
       bb.log.warn(`Triage could not look up running sessions: ${errorMessage(error)}`);
@@ -1189,7 +1262,7 @@ export default async function plugin(bb: BbPluginApi) {
     return childEventCount;
   };
 
-  const reconcileNative = async (threadId: string, settle = false, liveness?: [ReturnType<typeof liveRoots>, () => ReturnType<typeof liveRoots>], freshInput = false, expected?: ReturnType<typeof captureTarget>, initialThread?: RootThread, retryGeneration?: number) => {
+  const reconcileNative = async (threadId: string, settle = false, liveness?: [ReturnType<typeof liveRoots>, (id: string) => ReturnType<typeof liveRoots>], freshInput = false, expected?: ReturnType<typeof captureTarget>, initialThread?: RootThread, retryGeneration?: number) => {
     if (disposed) return;
     if (retryGeneration !== undefined && retryGeneration !== mirroringGeneration) return;
     const task = getTaskByThread(threadId);
@@ -1227,13 +1300,13 @@ export default async function plugin(bb: BbPluginApi) {
       if (!["active", "starting", "idle", "error"].includes(thread.status)) return;
       const interactions = await bb.sdk.threads.interactions.list({ threadId });
       if (!wanted()) return;
-      const live = await (liveness?.[0] ?? liveRoots());
+      const live = await (liveness?.[0] ?? liveRoots([threadId]));
       if (!live || !wanted()) return;
       const latestThread = await bb.sdk.threads.get({ threadId });
       if (!wanted()) return;
       const latestInteractions = await bb.sdk.threads.interactions.list({ threadId });
       if (!wanted()) return;
-      const latestLive = await (liveness?.[1]() ?? liveRoots());
+      const latestLive = await (liveness?.[1](threadId) ?? liveRoots([threadId]));
       if (!wanted()) return;
       const current = getTaskByThread(threadId);
       const latestPlacement = db.prepare("SELECT rowid FROM triage_events WHERE task_id = ? ORDER BY rowid DESC LIMIT 1").get(task.id) as { rowid: number } | undefined;
@@ -1312,19 +1385,24 @@ export default async function plugin(bb: BbPluginApi) {
       return !thread || (thread.archivedAt === null && thread.deletedAt === null && (row.origin !== "mirror" || isMirrorable(thread)) && ["active", "starting", "idle", "error"].includes(thread.status));
     });
     if (rows.length === 0) return;
-    const liveness: [ReturnType<typeof liveRoots>, () => ReturnType<typeof liveRoots>] = [initialLive ? Promise.resolve(initialLive) : liveRoots(), () => liveRoots()];
+    const liveness: [ReturnType<typeof liveRoots>, (id: string) => ReturnType<typeof liveRoots>] = [initialLive ? Promise.resolve(initialLive) : liveRoots(rows.map((row) => row.thread_id!)), (id) => liveRoots([id])];
     for (let start = 0; start < rows.length; start += 8) {
       await Promise.all(rows.slice(start, start + 8).map(({ thread_id }) => reconcileNative(thread_id!, false, liveness, false, targets?.get(thread_id!), threads?.get(thread_id!))));
     }
   };
 
-  const childChanged = async (child: RootThread, create = false) => {
-    const stamp = stampChildEvent(child.id);
+  const childChanged = async (threadOrId: RootThread | string, create = false) => {
+    const childId = typeof threadOrId === "string" ? threadOrId : threadOrId.id;
+    const stamp = stampChildEvent(childId);
     try {
-      const root = await topLevelOf(child, parentLookup());
+      const lookup = parentLookup();
+      const child = typeof threadOrId === "string" ? await lookup(childId) : threadOrId;
+      const ancestors = await ancestorsOf(child, lookup);
+      const root = ancestors[ancestors.length - 1];
+      for (const ancestor of ancestors) if (ancestor.id !== root.id && getTaskByThread(ancestor.id)) childRetries.add({ threadId: ancestor.id });
       const creating = pendingMirror.get(root.id);
       if (creating) await creating;
-      if (disposed || childEventSeq.get(child.id) !== stamp) return;
+      if (disposed || childEventSeq.get(childId) !== stamp) return;
       if (create && !getTaskByThread(root.id) && shouldMirror(root)) {
         try {
           await ensureCardForThread(root, "mirror");
@@ -1334,7 +1412,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
       return root.id;
     } catch (error) {
-      bb.log.warn(`Triage could not find the top-level session of ${child.id}: ${errorMessage(error)}`);
+      bb.log.warn(`Triage could not find the top-level session of ${childId}: ${errorMessage(error)}`);
     }
   };
 
@@ -1456,7 +1534,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (completed && passWanted()) {
         await reconcileMirrorHousekeeping(passRows, targets);
         const childEvents = childEventCount;
-        const live = pendingChildHandlers === 0 && passWanted() ? await liveRoots() : undefined;
+        const live = pendingChildHandlers === 0 && passWanted() ? await liveRoots([...targets.keys()], collected) : undefined;
         if (childEvents !== childEventCount || pendingChildHandlers > 0) retryBackfill = true;
         else if (live && passWanted()) {
           for (const root of live.values()) {

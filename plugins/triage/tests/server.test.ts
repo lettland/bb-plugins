@@ -46,6 +46,7 @@ async function setup() {
         markUnread: async () => thread,
         get: async () => thread,
         list: async () => [],
+        experimental_listDescendants: async ({ threadIds }: { threadIds: readonly string[] }) => ({ threads: threadIds.map((threadId) => ({ threadId, descendantIds: [] })) }),
         spawn: async () => makeThreadResponse({ id: `spawned-${(spawnCount += 1)}` }),
         update: async () => thread,
         stop: async () => ({}),

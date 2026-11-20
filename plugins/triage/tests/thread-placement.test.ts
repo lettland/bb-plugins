@@ -12,11 +12,12 @@ async function setup(options: { failUpdate?: boolean; archived?: boolean } = {})
       threads: {
         get: async () => thread,
         listRunning: async () => [],
+        experimental_listDescendants: async ({ threadIds }: { threadIds: readonly string[] }) => ({ threads: threadIds.map((threadId) => ({ threadId, descendantIds: [] })) }),
         interactions: { list: async () => [] },
         // The snapshot reads carded sessions through batched list calls; the
         // backfill's unfiltered pass finds nothing so it never mirrors the fixture.
         list: async (args: { threadIds?: readonly string[]; archived?: boolean } = {}) =>
-          args.threadIds && !args.archived ? [thread] : [],
+          args.threadIds && !args.archived ? [{ ...thread, activity: { activeBackgroundCommandCount: 0, activeBackgroundAgentCount: 0, activeGoalCount: 0, activePlanModeCount: 0, activeWorkflowCount: 0 } }] : [],
         defaultExecutionOptions: async () => null,
         update: async (args) => {
           if (failUpdate) { failUpdate = false; throw new Error("Host disconnected"); }

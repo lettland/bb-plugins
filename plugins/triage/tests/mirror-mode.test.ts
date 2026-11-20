@@ -14,9 +14,11 @@ import plugin from "../server.ts";
 
 type ListArgs = { threadIds?: readonly string[]; archived?: boolean; includeHidden?: boolean; limit?: number; offset?: number };
 type ListHandler = (args: ListArgs) => unknown;
+type ChangeEvent = { id?: string; changes: string[]; metadata?: { backgroundActivityChanged?: boolean; eventTypes?: string[] } };
+type DescendantArgs = { threadIds: readonly string[] };
 
 const thr = (id: string, overrides: Record<string, unknown> = {}) =>
-  makeThreadResponse({ id, projectId: "project-1", title: `Session ${id}`, ...overrides });
+  ({ ...makeThreadResponse({ id, projectId: "project-1", title: `Session ${id}`, ...overrides }), ...overrides, activity: { activeBackgroundCommandCount: 0, activeBackgroundAgentCount: 0, activeGoalCount: 0, activePlanModeCount: 0, activeWorkflowCount: 0, ...(overrides.activity as object | undefined) } });
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -42,7 +44,7 @@ async function setup(options: { settings?: Record<string, boolean>; list?: ListH
     // threads.listRunning: only threads in starting or active (SDK bundled-types ThreadsArea.listRunning).
     running: ((): unknown => []) as () => unknown,
     events: ((): unknown => []) as (args: any) => unknown,
-    readChanged: ((_event: { id?: string; changes: string[] }) => {}) as (event: { id?: string; changes: string[] }) => void,
+    readChanged: ((_event: ChangeEvent) => {}) as (event: ChangeEvent) => void,
     unsubscribed: false,
   };
   const { bb, harness } = createFakePluginHost({
@@ -66,6 +68,7 @@ async function setup(options: { settings?: Record<string, boolean>; list?: ListH
         },
         get: async (args: { threadId: string }) => known.get(args.threadId),
         list: async (args: ListArgs = {}) => ctx.list(args) as any,
+        experimental_listDescendants: async ({ threadIds }: { threadIds: readonly string[] }) => ({ threads: threadIds.map((threadId) => ({ threadId, descendantIds: [] })) }),
         listRunning: async () => ctx.running() as any,
         events: { list: async (args: any) => ctx.events(args) as any },
         interactions: { list: async () => [] },
@@ -1759,7 +1762,7 @@ test.each(["read", "settle", "failure", "activity"])("a stale snapshot preserves
   db.prepare("UPDATE triage_tasks SET stage_id = 'stage-completed', run_state = 'completed' WHERE id = ?").run(card.id);
   const gate = deferred<unknown[]>();
   let asked = false;
-  ctx.list = () => { asked = true; return gate.promise; };
+  ctx.list = () => { if (!asked) { asked = true; return gate.promise; } return [thread]; };
   const pending = rpc("snapshot");
   await until(() => asked);
   if (action === "read") await rpc("setTaskRead", { number: card.number, read: true });
@@ -2086,7 +2089,7 @@ test("the backfill cards every session oldest-first, settles dormant history, an
   // Every list call asks for the unarchived half and includes hidden sessions
   // (SDK ThreadListArgs: includeHidden is required or plugin-spawned workers are
   // left out; archived:false selects the unarchived half).
-  const calls = harness.inspection.sdk.callsTo("threads.list").slice(listCallsBefore) as [ListArgs][];
+  const calls = (harness.inspection.sdk.callsTo("threads.list").slice(listCallsBefore) as [ListArgs][]).filter(([args]) => !args.threadIds);
   expect(calls.map(([args]) => args.offset)).toStrictEqual([0, 150, 300]);
   for (const [args] of calls) expect(args).toMatchObject({ archived: false, includeHidden: true, limit: 200 });
   // Numbers follow createdAt ascending whatever the page order was; the manual
@@ -3264,6 +3267,234 @@ const startQuiet = async (options?: Parameters<typeof setup>[0]) => {
 const running = (context: Setup, ...ids: string[]) => {
   context.ctx.running = () => ids.map((id) => ({ id, hostId: null }));
 };
+
+// BB 0.50.1 / Triage 0.6.2 card #3251: listRunning only returns active or
+// starting turns; threads.list activity counts also include background work.
+test("background work keeps an idle root command in progress", async () => {
+  const context = await startQuiet();
+  const root = thr("background-command", { status: "idle", activity: { activeBackgroundCommandCount: 1, activeBackgroundAgentCount: 0 } });
+  await context.mirror(root);
+  context.ctx.list = worldOf([root]).handler;
+  context.harness.inspection.sdk.stub("threads.experimental_listDescendants", async ({ threadIds }: DescendantArgs) => ({ threads: threadIds.map((threadId) => ({ threadId, descendantIds: [] })) }));
+  await context.rpc("snapshot");
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+});
+
+test("background work on a hidden idle descendant lasts until the last job finishes", async () => {
+  const context = await startQuiet();
+  const root = thr("background-root", { status: "idle" });
+  const child = thr("background-child", { parentThreadId: root.id, status: "idle", visibility: "hidden", activity: { activeBackgroundCommandCount: 1, activeBackgroundAgentCount: 1 } });
+  await context.mirror(root);
+  context.known.set(child.id, child);
+  const world = worldOf([root, child]);
+  context.ctx.list = world.handler;
+  context.harness.inspection.sdk.stub("threads.experimental_listDescendants", async ({ threadIds }: DescendantArgs) => ({ threads: threadIds.map((threadId) => ({ threadId, descendantIds: threadId === root.id ? [child.id] : [] })) }));
+  const changed = (type: string) => context.ctx.readChanged({ id: child.id, changes: [], metadata: { eventTypes: [type] } });
+  await context.rpc("snapshot");
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working" });
+  world.map.set(child.id, { ...child, activity: { activeBackgroundCommandCount: 0, activeBackgroundAgentCount: 1 } });
+  changed("item/backgroundTask/completed");
+  await flush();
+  expect(context.cardOf(root.id).run_state).toBe("working");
+  world.map.set(child.id, { ...child, activity: { activeBackgroundCommandCount: 0, activeBackgroundAgentCount: 0 } });
+  changed("item/backgroundTask/completed");
+  await until(() => context.cardOf(root.id).run_state === "completed");
+});
+
+test.each(["archivedAt", "deletedAt"])("background work ignores a %s descendant", async (field) => {
+  const context = await startQuiet();
+  const root = thr(`background-ignore-${field}`, { status: "idle" });
+  const child = thr(`background-ignore-child-${field}`, { parentThreadId: root.id, status: "idle", [field]: 1, activity: { activeBackgroundCommandCount: 1, activeBackgroundAgentCount: 0 } });
+  await context.mirror(root);
+  context.ctx.list = worldOf([root, child]).handler;
+  context.harness.inspection.sdk.stub("threads.experimental_listDescendants", async ({ threadIds }: DescendantArgs) => ({ threads: threadIds.map((threadId) => ({ threadId, descendantIds: [child.id] })) }));
+  await context.rpc("snapshot");
+  expect(context.cardOf(root.id).run_state).toBe("completed");
+});
+
+test("background work below an archived intermediate keeps its root active", async () => {
+  const context = await startQuiet();
+  const root = thr("background-archived-parent-root", { status: "idle" });
+  const parent = thr("background-archived-parent", { parentThreadId: root.id, status: "idle", archivedAt: 1 });
+  const child = thr("background-archived-parent-child", { parentThreadId: parent.id, status: "idle", visibility: "hidden", activity: { activeBackgroundCommandCount: 0, activeBackgroundAgentCount: 1 } });
+  await context.mirror(root);
+  context.known.set(parent.id, parent);
+  context.known.set(child.id, child);
+  context.ctx.list = worldOf([root, parent, child]).handler;
+  context.harness.inspection.sdk.stub("threads.experimental_listDescendants", async ({ threadIds }: DescendantArgs) => ({ threads: threadIds.map((threadId) => ({ threadId, descendantIds: [child.id] })) }));
+  await context.rpc("snapshot");
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working" });
+});
+
+test("background work events reconcile a manual intermediate card", async () => {
+  const context = await startQuiet({ settings: { autoCardThreads: false } });
+  const root = thr("background-manual-root", { status: "idle" });
+  const parent = thr("background-manual-parent", { parentThreadId: root.id, status: "idle" });
+  const child = thr("background-manual-child", { parentThreadId: parent.id, status: "idle", visibility: "hidden", activity: { activeBackgroundCommandCount: 1, activeBackgroundAgentCount: 0 } });
+  context.known.set(root.id, root);
+  context.known.set(child.id, child);
+  await context.importManual(parent);
+  context.ctx.list = worldOf([root, parent, child]).handler;
+  context.harness.inspection.sdk.stub("threads.experimental_listDescendants", async ({ threadIds }: DescendantArgs) => ({ threads: threadIds.map((threadId) => ({ threadId, descendantIds: [child.id] })) }));
+  context.ctx.readChanged({ id: child.id, changes: [], metadata: { backgroundActivityChanged: true, eventTypes: ["item/started"] } });
+  await until(() => context.cardOf(parent.id)?.run_state === "working");
+  expect(context.cardOf(root.id)).toBeUndefined();
+});
+
+test("background work completes the parent when the last active child is deleted", async () => {
+  const context = await startQuiet();
+  const root = thr("background-delete-root", { status: "idle" });
+  const child = thr("background-delete-child", { parentThreadId: root.id, status: "active" });
+  await context.mirror(root);
+  context.known.set(child.id, child);
+  const world = worldOf([root, child]);
+  context.ctx.list = world.handler;
+  running(context, child.id);
+  await context.rpc("snapshot");
+  expect(context.cardOf(root.id).run_state).toBe("working");
+  context.known.delete(child.id);
+  world.map.delete(child.id);
+  running(context);
+  await context.emit("thread.deleted", { thread: child });
+  await until(() => context.cardOf(root.id).run_state === "completed");
+});
+
+test("background work reopens an automatically settled card on refresh", async () => {
+  const context = await startQuiet();
+  const root = thr("background-reopen", { status: "idle", activity: { activeBackgroundCommandCount: 1, activeBackgroundAgentCount: 0 } });
+  const card = await context.mirror(root);
+  context.db.prepare("UPDATE triage_tasks SET stage_id = 'stage-completed', run_state = 'completed', settled_at = 1 WHERE id = ?").run(card.id);
+  context.ctx.list = worldOf([root]).handler;
+  context.harness.inspection.sdk.stub("threads.experimental_listDescendants", async ({ threadIds }: DescendantArgs) => ({ threads: threadIds.map((threadId) => ({ threadId, descendantIds: [] })) }));
+  await context.rpc("snapshot");
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+});
+
+test("background work is found by startup backfill", async () => {
+  const context = await startQuiet({ settings: { autoCardThreads: false } });
+  const root = thr("background-backfill", { status: "idle", activity: { activeBackgroundCommandCount: 1, activeBackgroundAgentCount: 0 } });
+  context.known.set(root.id, root);
+  context.ctx.list = worldOf([root]).handler;
+  await context.harness.behavior.setSettings({ autoCardThreads: true });
+  await until(() => context.cardOf(root.id)?.run_state === "working");
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", settled_at: null });
+});
+
+test("background work read failure preserves the card", async () => {
+  const context = await startQuiet();
+  const root = thr("background-failure", { status: "active" });
+  await context.mirror(root);
+  const idle = { ...root, status: "idle" };
+  context.known.set(root.id, idle);
+  context.harness.inspection.sdk.stub("threads.experimental_listDescendants", async () => { throw new Error("activity unavailable"); });
+  await context.emit("thread.idle", { thread: idle });
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working" });
+});
+
+test("background work starts on the SDK activity flag with item/started", async () => {
+  const context = await startQuiet();
+  const root = thr("background-started", { status: "idle" });
+  await context.mirror(root);
+  const world = worldOf([root]);
+  context.ctx.list = world.handler;
+  context.harness.inspection.sdk.stub("threads.experimental_listDescendants", async ({ threadIds }: DescendantArgs) => ({ threads: threadIds.map((threadId) => ({ threadId, descendantIds: [] })) }));
+  await context.rpc("snapshot");
+  world.map.set(root.id, { ...root, activity: { activeBackgroundCommandCount: 1, activeBackgroundAgentCount: 0 } });
+  context.ctx.readChanged({ id: root.id, changes: [], metadata: { backgroundActivityChanged: true, eventTypes: ["item/started"] } });
+  await until(() => context.cardOf(root.id).run_state === "working");
+});
+
+test("background work starting overtakes a completion check", async () => {
+  const context = await startQuiet();
+  const root = thr("background-overtake", { status: "active" });
+  const card = await context.mirror(root);
+  const idle = { ...root, status: "idle" };
+  context.known.set(root.id, idle);
+  const world = worldOf([idle]);
+  const gate = deferred<ReturnType<typeof thr>[]>();
+  let reads = 0;
+  let stale: ReturnType<typeof thr>[] = [];
+  context.ctx.list = (args) => {
+    const rows = world.handler(args) as ReturnType<typeof thr>[];
+    if (args.threadIds && !args.archived && ++reads === 2) { stale = rows; return gate.promise; }
+    return rows;
+  };
+  context.harness.inspection.sdk.stub("threads.experimental_listDescendants", async ({ threadIds }: DescendantArgs) => ({ threads: threadIds.map((threadId) => ({ threadId, descendantIds: [] })) }));
+  const completedBefore = context.eventsOf(card.id).filter((event) => event.event === "turn completed").length;
+  context.ctx.readChanged({ id: root.id, changes: [], metadata: { eventTypes: ["item/backgroundTask/completed"] } });
+  await until(() => reads >= 2);
+  expect(stale[0].activity.activeBackgroundAgentCount).toBe(0);
+  world.map.set(root.id, { ...idle, activity: { ...idle.activity, activeBackgroundAgentCount: 1 } });
+  context.ctx.readChanged({ id: root.id, changes: [], metadata: { backgroundActivityChanged: true, eventTypes: ["item/started"] } });
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+  gate.resolve(stale);
+  await until(() => reads >= 4);
+  await until(() => context.cardOf(root.id).run_state === "working");
+  expect(context.eventsOf(card.id).filter((event) => event.event === "turn completed")).toHaveLength(completedBefore);
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+});
+
+test("background work uses a fresh tree read after the batched snapshot read", async () => {
+  const context = await startQuiet();
+  const root = thr("background-bulk-fresh", { status: "active" });
+  await context.mirror(root);
+  const idle = { ...root, status: "idle" };
+  context.known.set(root.id, idle);
+  const world = worldOf([idle]);
+  let treeReads = 0;
+  let changed = false;
+  context.harness.inspection.sdk.stub("threads.experimental_listDescendants", async ({ threadIds }: DescendantArgs) => {
+    treeReads++;
+    return { threads: threadIds.map((threadId) => ({ threadId, descendantIds: [] })) };
+  });
+  context.ctx.list = (args) => {
+    const rows = world.handler(args);
+    if (!changed && treeReads === 1 && args.threadIds && !args.archived) {
+      changed = true;
+      world.map.set(root.id, { ...idle, activity: { ...idle.activity, activeBackgroundCommandCount: 1 } });
+    }
+    return rows;
+  };
+  await context.rpc("snapshot");
+  expect(treeReads).toBeGreaterThanOrEqual(2);
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+  await context.rpc("snapshot");
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+});
+
+test.each([[false, false], [true, false], [false, true], [true, true]])("background work starting during a stale check (descendant=%s, settlement=%s)", async (descendant, settle) => {
+  const context = await startQuiet();
+  const root = thr(`background-race-${descendant}`, { status: "active" });
+  const child = thr(`background-race-child-${descendant}`, { parentThreadId: root.id, status: "idle", visibility: "hidden" });
+  const card = await context.mirror(root);
+  const idle = { ...root, status: "idle" };
+  context.known.set(root.id, idle);
+  context.known.set(child.id, child);
+  const world = worldOf([idle, child]);
+  const gate = deferred<ReturnType<typeof thr>[]>();
+  let reads = 0;
+  let stale: ReturnType<typeof thr>[] = [];
+  context.ctx.list = (args) => {
+    const rows = world.handler(args) as ReturnType<typeof thr>[];
+    if (args.threadIds && !args.archived && ++reads === 2) { stale = rows; return gate.promise; }
+    return rows;
+  };
+  context.harness.inspection.sdk.stub("threads.experimental_listDescendants", async ({ threadIds }: DescendantArgs) => ({ threads: threadIds.map((threadId) => ({ threadId, descendantIds: descendant ? [child.id] : [] })) }));
+  const completedBefore = context.eventsOf(card.id).filter((event) => event.event === "turn completed").length;
+  const completion = settle ? context.rpc("setTaskSettled", { number: card.number, settled: true }) : context.emit("thread.idle", { thread: idle });
+  await until(() => reads >= 2);
+  expect(stale.every((row) => row.activity.activeBackgroundCommandCount === 0)).toBe(true);
+  const source = descendant ? child : idle;
+  world.map.set(source.id, { ...source, activity: { ...source.activity, activeBackgroundCommandCount: 1 } });
+  context.ctx.readChanged({ id: source.id, changes: [], metadata: { eventTypes: ["item/backgroundTask/progress"] } });
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+  gate.resolve(stale);
+  await completion;
+  await until(() => reads >= 4);
+  await until(() => context.cardOf(root.id).run_state === "working");
+  expect(context.eventsOf(card.id).filter((event) => event.event === "turn completed")).toHaveLength(completedBefore);
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+});
 const kid = (id: string, parentThreadId: string, overrides: Record<string, unknown> = {}) =>
   thr(id, { parentThreadId, status: "active", ...overrides });
 const runningCalls = (context: Setup) => context.harness.inspection.sdk.callsTo("threads.listRunning").length;
@@ -3989,6 +4220,7 @@ test("a failed running-threads lookup leaves child and root cards unchanged", as
   const before = { ...cardOf("q-root") };
   await emit("thread.idle", { thread: known.get("q-kid") });
   expect(cardOf("q-root")).toStrictEqual(before);
+  await until(() => warned(context, "could not look up running sessions: listRunning down"));
   expect(warned(context, "could not look up running sessions: listRunning down")).toBe(true);
   await emit("thread.idle", { thread: thr("q-own") });
   expect(cardOf("q-own")).toMatchObject({ run_state: "working", settled_at: null });
@@ -4011,7 +4243,7 @@ test("running threads resolve in chunks of 200 with both halves and hidden threa
   await emit("thread.idle", { thread: known.get("chunk-kid") });
   await until(() => cardOf("chunk-root").run_state === "completed");
   // threads.list takes at most 200 ids per call and archived is a selector (SDK ThreadListArgs).
-  const lookups = idLookups(context);
+  const lookups = idLookups(context).filter((args) => args.threadIds!.every((id) => id.startsWith("run-"))).slice(-8);
   expect(lookups.map((args) => args.threadIds!.length).sort((left, right) => left - right)).toStrictEqual([1, 1, 1, 1, 200, 200, 200, 200]);
   expect(lookups.filter((args) => args.archived === true).length).toBe(4);
   for (const args of lookups) expect(args).toMatchObject({ includeHidden: true, limit: 200 });
