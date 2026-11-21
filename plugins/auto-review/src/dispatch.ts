@@ -21,22 +21,21 @@ import {
 import { parkedFire } from "./detect-park.js";
 import { readFindings, recordUnreported } from "./findings-store.js";
 import { openFindingsForPrompt } from "./findings.js";
-import { refreshIdleSnapshot } from "./last-idle.js";
+import { lastIdleFloor, refreshIdleSnapshot } from "./last-idle.js";
 import { buildReviewPrompt, renderScope } from "./prompt.js";
 import { withProviderLock } from "./provider-lock.js";
 import { deliveredPatch } from "./review-outcome.js";
 import { addReview, removeReview } from "./reviews.js";
 import { resetToIdlePatch, writeState, type ThreadState } from "./state.js";
 import { userTurnQueued, userTurnRunning } from "./user-turn.js";
-import { lastIdleFloor } from "./last-idle.js";
 
 const sendErrorSchema = z.object({
   status: z.number(),
   code: z.string(),
-  body: z.object({ error: z.object({ details: z.object({
+  body: z.object({ details: z.object({
     reason: z.string().optional(),
     waitingOn: z.object({ kind: z.string() }).optional(),
-  }) }) }),
+  }) }),
 });
 
 type DispatchOutcome = { kind: "done" } | { kind: "carry"; busy: boolean } | { kind: "wait" };
@@ -44,7 +43,7 @@ type DispatchOutcome = { kind: "done" } | { kind: "carry"; busy: boolean } | { k
 function classifySendError(error: unknown): "active" | "queued" | "wait" | "failed" {
   const parsed = sendErrorSchema.safeParse(error);
   if (!parsed.success || parsed.data.status !== 409) return "failed";
-  const { code, body: { error: { details } } } = parsed.data;
+  const { code, body: { details } } = parsed.data;
   if (code === "thread_user_work_pending" && (details.reason === "active" || details.reason === "queued")) return details.reason;
   if (code === "thread_not_writable" && details.reason === "already_active") return "active";
   if (code === "thread_send_not_ready" && details.waitingOn !== undefined) return "wait";
@@ -180,12 +179,35 @@ async function codeBaselineFor(
   });
 }
 
+async function activityAfterRefusal(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  state: ThreadState,
+  refusal: "active" | "queued",
+  sendCursor?: number,
+): Promise<DispatchOutcome> {
+  let current: Awaited<ReturnType<typeof userTurnQueued>>;
+  try {
+    current = await userTurnQueued(ctx, thread.id);
+  } catch {
+    return { kind: "carry", busy: true };
+  }
+  if (refusal === "active") {
+    if (current.busy && !current.userQueued && !(await userTurnRunning(ctx, thread.id, lastIdleFloor(state)))) {
+      return { kind: "wait" };
+    }
+  }
+  const finishedUser = refusal === "queued" && !current.busy &&
+    (sendCursor === undefined || await userTurnRunning(ctx, thread.id, sendCursor));
+  return { kind: "carry", busy: refusal === "active" || current.busy || finishedUser };
+}
+
 async function handleSendError(
   ctx: ReviewContext,
-  input: { thread: GateThreadLike; state: ThreadState; extra: FireExtra; dispatchedAt: number; error: unknown },
+  input: { thread: GateThreadLike; state: ThreadState; extra: FireExtra; dispatchedAt: number; sendCursor?: number; error: unknown },
 ): Promise<DispatchOutcome> {
   const { bb } = ctx;
-  const { thread, state, extra, dispatchedAt, error } = input;
+  const { thread, state, extra, dispatchedAt, sendCursor, error } = input;
   const refusal = classifySendError(error);
   if (refusal !== "failed") {
     await writeState(bb, thread.id, {
@@ -194,13 +216,7 @@ async function handleSendError(
     }, ["dispatchedAt", "reviewSkillRequired", ...(state.lastCodeReviewSeq === undefined ? ["lastCodeReviewSeq"] : [])]);
     await removeReview(bb, thread.id);
     if (refusal === "wait") return { kind: "wait" };
-    if (refusal === "active") {
-      const current = await userTurnQueued(ctx, thread.id);
-      if (current.busy && !current.userQueued && !(await userTurnRunning(ctx, thread.id, lastIdleFloor(state)))) {
-        return { kind: "wait" };
-      }
-    }
-    return { kind: "carry", busy: refusal === "active" };
+    return activityAfterRefusal(ctx, thread, state, refusal, sendCursor);
   }
   bb.log.warn(
     `auto-review: failed to send the review turn for ${thread.id}: ${
@@ -256,7 +272,7 @@ async function sendReview(
     };
     result = await bb.sdk.threads.send(args);
   } catch (error) {
-    return handleSendError(ctx, { thread, state, extra, dispatchedAt, error });
+    return handleSendError(ctx, { thread, state, extra, dispatchedAt, sendCursor: cursor.lastCodeReviewSeq, error });
   }
   await removeDeferral(bb, thread.id);
   await writeState(bb, thread.id, {}, ["dispatchWaitSince"]);

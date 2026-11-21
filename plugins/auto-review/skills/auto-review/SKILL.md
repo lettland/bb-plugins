@@ -504,17 +504,17 @@ errored, archived or deleted). A queued review (`pending-dispatch`) older than 3
 a thread that is no longer running counts as a lost idle, not a review, so it never blocks. A
 delivered review (`awaiting-review`) counts for up to 2 hours after delivery.
 
-`bb auto-review status` shows a parked turn as phase `deferred`, with how long it has
-waited and what will release it — the blocking review, or the children still holding it
-(also `heldBy` in `--json`: the held child ids as of the last check, `null` when parked
-behind a provider review instead). `bb auto-review reset <thread-id>` refuses a deferred
+`bb auto-review status` shows a parked turn as phase `deferred` and shows how long it has waited.
+The last outcome reason distinguishes a server dispatch wait from a provider or child wait.
+For a `dispatch-not-ready` result, use that reason to identify the wait. The plain-text CLI can
+still show the provider-wait label. `bb auto-review reset <thread-id>` refuses a deferred
 thread, so the turn's review and commit are never dropped by it.
 
 ## `reason` values in `status`
 
 - `fired` — a review was injected.
-- `dispatch-not-ready` — The server could not start the review. Auto-review retries with a fresh scope until the thread is ready or the wait expires.
-- `dispatch-wait-expired` — Auto-review stopped retrying after the dispatch wait expired.
+- `dispatch-not-ready` — The server could not start the review. Auto-review checks readiness on the deferral sweep and rebuilds the review scope when it retries.
+- `dispatch-wait-expired` — The dispatch wait reached 15 minutes without starting the review. Auto-review clears the parked review and its saved turn cursor.
 - `sibling-active` — another thread on the same provider (in any project) has its
   auto-review running. Paired with outcome `deferred`, this turn is parked and is reviewed
   as soon as that review ends, unless a question of the user's lands first (then the work is

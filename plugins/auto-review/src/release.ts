@@ -20,12 +20,17 @@ export async function resolveAndEvaluate(
   ctx: ReviewContext,
   threadId: string,
   onUnusable: (why: string) => Promise<void>,
+  retainTransient = false,
 ): Promise<boolean> {
   const { bb } = ctx;
   let candidate: Awaited<ReturnType<typeof bb.sdk.threads.get>>;
   try {
     candidate = await bb.sdk.threads.get({ threadId });
   } catch (error) {
+    if (retainTransient && !isThreadNotFound(error)) {
+      bb.log.warn(`auto-review: could not retry deferred thread ${threadId}: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
     await onUnusable(error instanceof Error ? error.message : String(error));
     return false;
   }
@@ -116,7 +121,7 @@ export async function sweepDeferrals(ctx: ReviewContext): Promise<void> {
       const { set, remove } = resetToIdlePatch();
       await writeState(bb, entry.threadId, set, remove);
       await removeDeferral(bb, entry.threadId);
-    });
+    }, state.dispatchWaitSince !== undefined);
   }
 }
 

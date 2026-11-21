@@ -81,6 +81,22 @@ async function carryOver(
   await recordFire(ctx, thread.projectId, thread.id, "deferred", reason, extra);
 }
 
+async function stopExpiredDispatchWait(
+  ctx: ReviewContext,
+  thread: GateThreadLike,
+  state: ThreadState,
+  turnStart: TurnStart,
+): Promise<boolean> {
+  try {
+    const userTurn = await firstUserTurnSince(ctx.bb, thread.id, state.lastIdle?.sinceSeq ?? turnStart.sinceSeq);
+    if (userTurn !== null) return false;
+  } catch {
+    return true;
+  }
+  await standDown(ctx, thread, state, "dispatch-wait-expired");
+  return true;
+}
+
 /**
  * The turn's start cursor when this idle may go on to review. A stand-down or a
  * carry-over ends the turn here and yields null.
@@ -108,20 +124,19 @@ async function eligibleTurnStart(
     await standDown(ctx, thread, state, "user-stopped");
     return null;
   }
-  if (state.dispatchWaitSince !== undefined && Date.now() - state.dispatchWaitSince >= STALE_PARK_MS) {
-    await standDown(ctx, thread, state, "dispatch-wait-expired");
-    return null;
-  }
+  const expired = state.dispatchWaitSince !== undefined && Date.now() - state.dispatchWaitSince >= STALE_PARK_MS;
   // Any running turn carries here; the re-check before dispatch in
   // evaluate() carries a running turn only when it is the user's.
   const { busy, queued, userQueued } = await userTurnQueued(ctx, thread.id);
   if (queued) {
     if (state.dispatchWaitSince !== undefined && busy && !userQueued && !(await userTurnRunning(ctx, thread.id, lastIdleFloor(state)))) {
+      if (!expired) return null;
+    } else {
+      await carryOver(ctx, thread, state, busy);
       return null;
     }
-    await carryOver(ctx, thread, state, busy);
-    return null;
   }
+  if (expired && await stopExpiredDispatchWait(ctx, thread, state, state.turnStart)) return null;
   return state.turnStart;
 }
 
