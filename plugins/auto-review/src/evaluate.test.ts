@@ -35,7 +35,7 @@ vi.mock("./user-turn.js", async (original) => ({
   ...(await original<typeof import("./user-turn.js")>()),
   ...turns,
 }));
-const dispatch = vi.hoisted(() => ({ dispatchReview: vi.fn() }));
+const dispatch = vi.hoisted(() => ({ dispatchReview: vi.fn().mockResolvedValue({ kind: "done" }) }));
 vi.mock("./dispatch.js", async (original) => ({
   ...(await original<typeof import("./dispatch.js")>()),
   dispatchReview: dispatch.dispatchReview,

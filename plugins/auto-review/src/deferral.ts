@@ -20,6 +20,7 @@ export interface DeferTurnOptions {
   /** The running children holding the turn; absent waits on a provider review instead. */
   heldBy?: string[];
   extra?: FireExtra;
+  dispatchWaitSince?: number;
 }
 
 /**
@@ -36,7 +37,7 @@ export async function deferTurn(
   options: DeferTurnOptions,
 ): Promise<void> {
   const { bb } = ctx;
-  const { reason, heldBy, extra = {} } = options;
+  const { reason, heldBy, extra = {}, dispatchWaitSince } = options;
   // Index first, state second. The sweep enumerates the index and prunes an
   // entry whose thread is not actually deferred, so an interruption between
   // these two writes leaves a harmless orphan the next sweep cleans up. The
@@ -51,6 +52,7 @@ export async function deferTurn(
   const deferredPatch = {
     phase: "deferred" as const,
     deferredSince: state.deferredSince ?? Date.now(),
+    ...(dispatchWaitSince === undefined ? {} : { dispatchWaitSince }),
   };
   if (heldBy === undefined) {
     await writeState(bb, thread.id, deferredPatch, ["heldBy"]);

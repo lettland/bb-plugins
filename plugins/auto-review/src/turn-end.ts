@@ -38,6 +38,7 @@ export async function keepCursor(ctx: ReviewContext, thread: GateThreadLike, sta
   const { bb } = ctx;
   await writeState(bb, thread.id, { phase: "idle" }, [
     "deferredSince",
+    "dispatchWaitSince",
     "turnDecided",
     "heldBy",
   ]);

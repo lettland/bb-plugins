@@ -48,6 +48,7 @@ import {
   readState,
   resetToIdlePatch,
   REVIEW_IN_FLIGHT_PHASES,
+  STALE_PARK_MS,
   writeState,
   type ThreadState,
   type TurnStart,
@@ -107,10 +108,17 @@ async function eligibleTurnStart(
     await standDown(ctx, thread, state, "user-stopped");
     return null;
   }
+  if (state.dispatchWaitSince !== undefined && Date.now() - state.dispatchWaitSince >= STALE_PARK_MS) {
+    await standDown(ctx, thread, state, "dispatch-wait-expired");
+    return null;
+  }
   // Any running turn carries here; the re-check before dispatch in
   // evaluate() carries a running turn only when it is the user's.
-  const { busy, queued } = await userTurnQueued(ctx, thread.id);
+  const { busy, queued, userQueued } = await userTurnQueued(ctx, thread.id);
   if (queued) {
+    if (state.dispatchWaitSince !== undefined && busy && !userQueued && !(await userTurnRunning(ctx, thread.id, lastIdleFloor(state)))) {
+      return null;
+    }
     await carryOver(ctx, thread, state, busy);
     return null;
   }
@@ -125,7 +133,9 @@ async function branchWorkspace(
 ): Promise<AvailableWorkspace | null> {
   const workspace = await fetchWorkspace(ctx.bb, environmentId);
   if (workspace === null) {
-    await standDown(ctx, thread, state, "status-unavailable");
+    if (state.dispatchWaitSince === undefined) {
+      await standDown(ctx, thread, state, "status-unavailable");
+    }
     return null;
   }
   if (!isBranchCheckout(workspace)) {
@@ -356,15 +366,14 @@ export async function evaluate(
   // Detection can take minutes; a user turn that started or was queued
   // meanwhile still carries the review, as at the start of the idle. A
   // wake-up that started meanwhile carries only what the user queued
-  // behind it; with none of theirs, it dispatches as before. A message
-  // sent after this check, while dispatchReview prepares the send, can
-  // still land beside the review.
+  // behind it. Dispatch checks again after prompt preparation, and updated
+  // hosts check the condition atomically in the send transaction.
   const { busy, userQueued } = await userTurnQueued(ctx, thread.id);
   if (userQueued || (busy && (await userTurnRunning(ctx, thread.id, lastIdleFloor(state))))) {
     await carryOver(ctx, thread, state, busy);
     return;
   }
-  await dispatchReview(ctx, {
+  const outcome = await dispatchReview(ctx, {
     thread,
     state,
     environmentId,
@@ -374,6 +383,9 @@ export async function evaluate(
     ...reviewed,
     ...(reviewed.turn.unclaimed.length === 0 ? {} : { unclaimedCount: reviewed.turn.unclaimed.length }),
   });
+  if (outcome.kind === "carry") {
+    await carryOver(ctx, thread, state, outcome.busy);
+  }
 }
 
 export async function handleIdle(ctx: ReviewContext, thread: GateThreadLike): Promise<void> {

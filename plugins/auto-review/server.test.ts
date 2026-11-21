@@ -29,6 +29,7 @@ import {
   PLAN_DENY_ANSWER_WINDOW_MS,
   REVIEW_CONTINUATION_CAP_MS,
   STALE_WINDOW_MS,
+  STALE_PARK_MS,
 } from "./src/state.js";
 
 const THREAD_ID = "thread-1";
@@ -66,6 +67,8 @@ interface QueuedRow {
 interface HostOptions {
   sendDelivery?: "sent" | "queued";
   sendThrows?: boolean;
+  onSend?: (args: { threadId: string; mode: string; input: unknown; experimental_requireIdleUserQueue?: true }) => void;
+  onPluginsList?: () => void;
   authoredRows?: unknown[];
   workingTreeFiles?: TreeFile[];
   worktree?: boolean;
@@ -340,6 +343,7 @@ function createHost(options: HostOptions = {}) {
     },
     plugins: {
       list: async () => {
+        options.onPluginsList?.();
         if (options.plugins === "throws") {
           throw new Error("plugin list unavailable");
         }
@@ -636,7 +640,8 @@ function createHost(options: HostOptions = {}) {
           ? rows
           : rows.filter((row) => row.parentThreadId === args.parentThreadId);
       },
-      send: async (args: { threadId: string; mode: string; input: unknown }) => {
+      send: async (args: { threadId: string; mode: string; input: unknown; experimental_requireIdleUserQueue?: true }) => {
+        options.onSend?.(args);
         if (options.sendThrows === true) {
           throw new Error("send failed");
         }
@@ -1140,7 +1145,7 @@ describe("auto-review plugin", () => {
     const idle = await emitIdle(host);
     expect(idle.errors).toEqual([]);
     expect(host.sends).toHaveLength(1);
-    expect(host.sends[0]?.mode).toBe("auto");
+    expect(host.sends[0]?.mode).toBe("start");
     expect(host.metadata.phase).toBe("awaiting-review");
 
     const secondIdle = await emitIdle(host);
@@ -7494,6 +7499,276 @@ describe("auto-review plugin: no new work", () => {
     return host;
   }
 
+  it("carries the review when it loses admission to user work", async () => {
+    let attempted: { threadId: string; mode: string; input: unknown; experimental_requireIdleUserQueue?: true } | undefined;
+    const options: HostOptions = {};
+    const host = createHost(options);
+    await plugin(host.bb);
+    await emitActive(host);
+    const turnStart = host.metadata.turnStart;
+    // Incident thr_msu7eh8x54, events 1250 to 1255: the follow-up wins after the queue check.
+    options.onSend = (args) => {
+      attempted = { ...args };
+      host.requestTurn({ seq: 161, initiator: "user", text: "follow-up", running: true });
+      throw Object.assign(new Error("user work pending"), {
+        status: 409,
+        code: "thread_user_work_pending",
+        body: { error: { details: { reason: "active" } } },
+      });
+    };
+    host.setMaxSeq(160);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    const requests = await host.bb.sdk.threads.events.list({ threadId: THREAD_ID, types: ["client/turn/requested"], afterSeq: "160" });
+    expect(requests).toEqual(expect.arrayContaining([expect.objectContaining({ seq: 161 })]));
+    expect(host.metadata.turnStart).toEqual(turnStart);
+    expect(host.metadata.turnDecided).toBeUndefined();
+    expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+    const status = JSON.parse((await host.harness.runCli(["status", THREAD_ID, "--json"])).stdout);
+    expect(status.reviewResult?.status).not.toBe("unavailable");
+    expect(attempted).toEqual(expect.objectContaining({
+      mode: "start",
+      experimental_requireIdleUserQueue: true,
+    }));
+    await host.harness.dispose();
+  });
+
+  it("restores the previous review cursor when admission is refused", async () => {
+    const options: HostOptions = {};
+    const host = createHost(options);
+    await plugin(host.bb);
+    await emitActive(host);
+    host.metadata.lastCodeReviewSeq = 1;
+    host.requestTurn({ seq: 2, initiator: "user", text: "edit" });
+    options.onSend = () => {
+      throw Object.assign(new Error("queued"), {
+        status: 409, code: "thread_user_work_pending", body: { error: { details: { reason: "queued" } } },
+      });
+    };
+    await emitIdle(host);
+    expect(host.metadata.lastCodeReviewSeq).toBe(1);
+    expect(await lastFire(host)).toMatchObject({ reason: "user-queued" });
+    await host.harness.dispose();
+  });
+
+  it.each(["non-user", "user", "queued-user"])("handles active admission conflict with %s work", async (kind) => {
+    const options: HostOptions = {};
+    const host = createHost(options);
+    await plugin(host.bb);
+    await emitActive(host);
+    options.onSend = () => {
+      host.setEnvThreads([{ id: THREAD_ID, status: "active" }]);
+      host.requestTurn({ seq: 161, initiator: kind === "user" ? "user" : "system", text: "follow-up", running: true });
+      if (kind === "queued-user") host.setQueuedRows([userMessage()]);
+      throw Object.assign(new Error("active"), {
+        status: 409, code: "thread_user_work_pending", body: { error: { details: { reason: "active" } } },
+      });
+    };
+    host.setMaxSeq(160);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ reason: kind === "non-user" ? "dispatch-not-ready" : "user-queued" });
+    await host.harness.dispose();
+  });
+
+  it.each([
+    ["thread_user_work_pending", "queued"],
+    ["thread_not_writable", "already_active"],
+  ])("carries admission conflict %s %s through a question and an edit", async (code, reason) => {
+    const options: HostOptions = {};
+    const host = createHost(options);
+    await plugin(host.bb);
+    await emitActive(host);
+    const start = host.metadata.turnStart;
+    options.onSend = () => {
+      options.onSend = undefined;
+      if (reason === "already_active") {
+        host.requestTurn({ seq: 161, initiator: "user", text: "follow-up", running: true });
+      }
+      throw Object.assign(new Error("conflict"), { status: 409, code, body: { error: { details: { reason } } } });
+    };
+    host.setMaxSeq(160);
+    await emitIdle(host);
+    expect(host.metadata.turnStart).toEqual(start);
+    expect(host.metadata.turnDecided).toBeUndefined();
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+    await userTurn(host, 170);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ reason: "no-new-work" });
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 200)]);
+    host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
+    await userTurn(host, 190, "edit another file");
+    host.setMaxSeq(210);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts", "src/c.ts"] });
+    const status = JSON.parse((await host.harness.runCli(["status", THREAD_ID, "--json"])).stdout);
+    expect(status.reviewResult?.status).not.toBe("unavailable");
+    await host.harness.dispose();
+  });
+
+  it.each([
+    ["other", { reason: "active" }],
+    ["thread_send_not_ready", { waitingOn: "host-offline" }],
+    ["thread_send_not_ready", { waitingOn: {} }],
+  ])("keeps unrelated or malformed %s conflicts on the send-failed path", async (code, details) => {
+    const host = createHost({ onSend: () => {
+      throw Object.assign(new Error("other conflict"), { status: 409, code, body: { error: { details } } });
+    } });
+    await plugin(host.bb);
+    await emitActive(host);
+    await emitIdle(host);
+    expect(await lastFire(host)).toMatchObject({ outcome: "stood-down", reason: "send-failed" });
+    expect(host.metadata.turnStart).toBeUndefined();
+    const status = JSON.parse((await host.harness.runCli(["status", THREAD_ID, "--json"])).stdout);
+    expect(status.reviewResult?.status).toBe("unavailable");
+    await host.harness.dispose();
+  });
+
+  it("carries a ready user row arriving during prompt preparation", async () => {
+    const options: HostOptions = {};
+    const host = createHost(options);
+    await plugin(host.bb);
+    await emitActive(host);
+    options.onPluginsList = () => {
+      options.onPluginsList = undefined;
+      host.setQueuedRows([userMessage()]);
+    };
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+    await host.harness.dispose();
+  });
+
+  it("retries an earned review after a non-user turn starts during preparation", async () => {
+    const options: HostOptions = {};
+    const host = createHost(options);
+    await plugin(host.bb);
+    await emitActive(host);
+    options.onPluginsList = () => {
+      options.onPluginsList = undefined;
+      host.requestTurn({ seq: 161, initiator: "system", text: "wake", running: true });
+      host.setEnvThreads([{ id: THREAD_ID, status: "active" }]);
+    };
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "dispatch-not-ready" });
+    await host.harness.runSchedule("sweep-deferrals");
+    expect(host.sends).toHaveLength(0);
+    expect(host.metadata.phase).toBe("deferred");
+    host.setEnvThreads([{ id: THREAD_ID, status: "idle" }]);
+    await host.harness.runSchedule("sweep-deferrals");
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts"] });
+    await host.harness.dispose();
+  });
+
+  it("retains an operational park while the workspace is unavailable", async () => {
+    const options: HostOptions = {};
+    const host = createHost(options);
+    await plugin(host.bb);
+    await emitActive(host);
+    const start = host.metadata.turnStart;
+    options.onSend = () => {
+      options.onSend = undefined;
+      throw Object.assign(new Error("offline"), {
+        status: 409, code: "thread_send_not_ready", body: { error: { details: { waitingOn: { kind: "host-offline", hostName: "test" } } } },
+      });
+    };
+    await emitIdle(host);
+    const since = host.metadata.dispatchWaitSince;
+    options.statusUnavailable = true;
+    await host.harness.runSchedule("sweep-deferrals");
+    expect(host.metadata).toMatchObject({ phase: "deferred", turnStart: start, dispatchWaitSince: since });
+    expect(await host.bb.storage.kv.list("deferral:")).toEqual([`deferral:${THREAD_ID}`]);
+    expect(host.sends).toHaveLength(0);
+    options.statusUnavailable = false;
+    await host.harness.runSchedule("sweep-deferrals");
+    expect(host.sends).toHaveLength(1);
+    expect(host.metadata.dispatchWaitSince).toBeUndefined();
+    await host.harness.dispose();
+  });
+
+  it("keeps parked work through a read-only user turn", async () => {
+    const options: HostOptions = {};
+    const host = createHost(options);
+    await plugin(host.bb);
+    await emitActive(host);
+    options.onSend = () => {
+      options.onSend = undefined;
+      throw Object.assign(new Error("not ready"), {
+        status: 409, code: "thread_send_not_ready", body: { error: { details: { waitingOn: { kind: "host-offline", hostName: "test" } } } },
+      });
+    };
+    host.setMaxSeq(160);
+    await emitIdle(host);
+    expect(host.metadata.phase).toBe("deferred");
+    await userTurn(host, 170);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ reason: "no-new-work" });
+    host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 200)]);
+    host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
+    await userTurn(host, 190, "edit another file");
+    host.setMaxSeq(210);
+    await emitIdle(host);
+    expect(host.sends).toHaveLength(1);
+    expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts", "src/c.ts"] });
+    await host.harness.dispose();
+  });
+
+  it.each(["recovery", "expiry", "stop"])("retains the operational wait until %s", async (end) => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(100_000);
+    const options: HostOptions = {};
+    const host = createHost(options);
+    try {
+      await plugin(host.bb);
+      await emitActive(host);
+      let attempts = 0;
+      options.onSend = () => {
+        attempts += 1;
+        throw Object.assign(new Error("not ready"), {
+          status: 409, code: "thread_send_not_ready", body: { error: { details: { waitingOn: { kind: "host-offline", hostName: "test" } } } },
+        });
+      };
+      await emitIdle(host);
+      expect(host.metadata.dispatchWaitSince).toBe(100_000);
+      expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "dispatch-not-ready" });
+      clock.mockReturnValue(110_000);
+      await host.harness.runSchedule("sweep-deferrals");
+      expect(attempts).toBe(2);
+      expect(host.metadata.dispatchWaitSince).toBe(100_000);
+      if (end === "recovery") {
+        options.onSend = undefined;
+        host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 150)]);
+        host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
+      } else if (end === "expiry") {
+        clock.mockReturnValue(100_000 + STALE_PARK_MS);
+      } else {
+        host.setMaxSeq(160);
+        host.interrupt({ seq: 150, reason: "manual-stop" });
+      }
+      await host.harness.runSchedule("sweep-deferrals");
+      expect(host.metadata.dispatchWaitSince).toBeUndefined();
+      expect(await host.bb.storage.kv.list("deferral:")).toEqual([]);
+      if (end === "recovery") {
+        expect(host.sends).toHaveLength(1);
+        expect(await lastFire(host)).toMatchObject({ outcome: "fired", scopePaths: ["src/a.ts", "src/c.ts"] });
+      } else {
+        expect(host.sends).toHaveLength(0);
+        expect(attempts).toBe(2);
+        expect(await lastFire(host)).toMatchObject({ reason: end === "stop" ? "user-stopped" : "dispatch-wait-expired" });
+        await host.harness.runSchedule("sweep-deferrals");
+        expect(attempts).toBe(2);
+      }
+    } finally {
+      clock.mockRestore();
+      await host.harness.dispose();
+    }
+  });
+
   it("stands down on a turn that only pushes and reads CI status after wake-ups committed the work", async () => {
     const host = await carriedAfterReview();
     host.setSiblingRows(THREAD_ID, [fileChangeRow("src/b.ts", 115), shellRow("git push && gh run list")]);
@@ -7668,20 +7943,23 @@ describe("auto-review plugin: no new work", () => {
     await host.harness.dispose();
   });
 
-  it("dispatches as before when a wake-up starts mid-detection with nothing of the user's queued", async () => {
+  it("parks when a wake-up starts mid-detection and retries after it ends", async () => {
     const host = await carriedBehindQueue();
     host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/c.ts", 220)]);
     host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/c.ts" }]);
     host.setMaxSeq(230);
     await emitActive(host);
-    // The wake-up is readable and not the user's, and none of their messages
-    // queue behind it: the idle dispatches as before the re-check existed.
+    // A start-only send waits for the wake-up instead of joining it.
     host.onNextStatusRead(() => {
       host.setEnvThreads(busyThread);
       host.requestTurn({ seq: 240, initiator: "system", text: "child-1 finished" });
       host.setMaxSeq(250);
     });
     await emitIdle(host);
+    expect(host.sends).toHaveLength(0);
+    expect(await lastFire(host)).toMatchObject({ outcome: "deferred", reason: "dispatch-not-ready" });
+    host.setEnvThreads([{ id: THREAD_ID, status: "idle" }]);
+    await host.harness.runSchedule("sweep-deferrals");
     expect(host.sends).toHaveLength(1);
     expect(await lastFire(host)).toMatchObject({ outcome: "fired" });
     await host.harness.dispose();

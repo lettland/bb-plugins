@@ -18,6 +18,8 @@ export const FIRE_REASONS = [
   "no-turn-start",
   "user-stopped",
   "user-queued",
+  "dispatch-not-ready",
+  "dispatch-wait-expired",
   "disabled",
   "skipped",
   "sibling-active",

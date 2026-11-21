@@ -125,6 +125,7 @@ describe("resetToIdlePatch", () => {
       "pendingEntryId",
       "dispatchedAt",
       "deferredSince",
+      "dispatchWaitSince",
       "turnDecided",
       "lastIdle",
       "heldBy",

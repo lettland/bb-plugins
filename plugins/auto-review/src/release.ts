@@ -64,7 +64,7 @@ export async function releaseDeferred(ctx: ReviewContext, providerId: string): P
     // A child-held turn is not waiting on a provider review; releasing it
     // here on an unrelated same-provider idle could beat bb's wake-up
     // message. Only the sweep re-evaluates it.
-    if (state.heldBy !== undefined) {
+    if (state.heldBy !== undefined || state.dispatchWaitSince !== undefined) {
       continue;
     }
     await resolveAndEvaluate(ctx, entry.threadId, async (why) => {
@@ -101,7 +101,7 @@ export async function sweepDeferrals(ctx: ReviewContext): Promise<void> {
     // reports as unusable.
     const providerId = await deferralProviderId(ctx, entry);
     if (
-      providerId !== null &&
+      state.dispatchWaitSince === undefined && providerId !== null &&
       (await providerReviewInFlight(ctx, providerId, entry.threadId))
     ) {
       continue;

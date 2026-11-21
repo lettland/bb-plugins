@@ -1,4 +1,5 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { z } from "zod";
 import { prepareCodeBaseline } from "./baseline-store.js";
 import { reviewSize } from "./change-size.js";
 import {
@@ -26,6 +27,29 @@ import { withProviderLock } from "./provider-lock.js";
 import { deliveredPatch } from "./review-outcome.js";
 import { addReview, removeReview } from "./reviews.js";
 import { resetToIdlePatch, writeState, type ThreadState } from "./state.js";
+import { userTurnQueued, userTurnRunning } from "./user-turn.js";
+import { lastIdleFloor } from "./last-idle.js";
+
+const sendErrorSchema = z.object({
+  status: z.number(),
+  code: z.string(),
+  body: z.object({ error: z.object({ details: z.object({
+    reason: z.string().optional(),
+    waitingOn: z.object({ kind: z.string() }).optional(),
+  }) }) }),
+});
+
+type DispatchOutcome = { kind: "done" } | { kind: "carry"; busy: boolean } | { kind: "wait" };
+
+function classifySendError(error: unknown): "active" | "queued" | "wait" | "failed" {
+  const parsed = sendErrorSchema.safeParse(error);
+  if (!parsed.success || parsed.data.status !== 409) return "failed";
+  const { code, body: { error: { details } } } = parsed.data;
+  if (code === "thread_user_work_pending" && (details.reason === "active" || details.reason === "queued")) return details.reason;
+  if (code === "thread_not_writable" && details.reason === "already_active") return "active";
+  if (code === "thread_send_not_ready" && details.waitingOn !== undefined) return "wait";
+  return "failed";
+}
 
 /**
  * Whether a running plugin serves the `bb <command>` CLI command, or null when
@@ -156,13 +180,59 @@ async function codeBaselineFor(
   });
 }
 
+async function handleSendError(
+  ctx: ReviewContext,
+  input: { thread: GateThreadLike; state: ThreadState; extra: FireExtra; dispatchedAt: number; error: unknown },
+): Promise<DispatchOutcome> {
+  const { bb } = ctx;
+  const { thread, state, extra, dispatchedAt, error } = input;
+  const refusal = classifySendError(error);
+  if (refusal !== "failed") {
+    await writeState(bb, thread.id, {
+      phase: state.phase,
+      ...(state.lastCodeReviewSeq === undefined ? {} : { lastCodeReviewSeq: state.lastCodeReviewSeq }),
+    }, ["dispatchedAt", "reviewSkillRequired", ...(state.lastCodeReviewSeq === undefined ? ["lastCodeReviewSeq"] : [])]);
+    await removeReview(bb, thread.id);
+    if (refusal === "wait") return { kind: "wait" };
+    if (refusal === "active") {
+      const current = await userTurnQueued(ctx, thread.id);
+      if (current.busy && !current.userQueued && !(await userTurnRunning(ctx, thread.id, lastIdleFloor(state)))) {
+        return { kind: "wait" };
+      }
+    }
+    return { kind: "carry", busy: refusal === "active" };
+  }
+  bb.log.warn(
+    `auto-review: failed to send the review turn for ${thread.id}: ${
+      error instanceof Error ? error.message : String(error)
+    }`,
+  );
+  const { set, remove } = resetToIdlePatch();
+  // A review that never reached the agent does not count against the next one.
+  await writeState(bb, thread.id, set, [...remove, "lastCodeReviewSeq"]);
+  await removeReview(bb, thread.id);
+  await recordUnreported(bb, thread.id, {
+    reviewId: dispatchedAt,
+    outcome: "unavailable",
+    summary: "The review could not be sent to the agent.",
+    incident: {
+      kind: "send-failed",
+      detail: error instanceof Error ? error.message : String(error),
+    },
+  });
+  await recordFire(ctx, thread.projectId, thread.id, "stood-down", "send-failed", extra);
+  await removeDeferral(bb, thread.id);
+  return { kind: "done" };
+}
+
 async function sendReview(
   ctx: ReviewContext,
   thread: GateThreadLike,
   prompt: string,
   extra: FireExtra,
   reviewSkillRequired: boolean,
-): Promise<void> {
+  state: ThreadState,
+): Promise<DispatchOutcome> {
   const { bb } = ctx;
   const dispatchedAt = Date.now();
   const cursor = await codeReviewCursor(bb, thread.id);
@@ -176,36 +246,20 @@ async function sendReview(
     ["pendingEntryId", "deferredSince", "heldBy", ...skillLatch.remove],
   );
   await addReview(bb, { threadId: thread.id, providerId: thread.providerId });
-  await removeDeferral(bb, thread.id);
   let result: Awaited<ReturnType<typeof bb.sdk.threads.send>>;
   try {
-    result = await bb.sdk.threads.send({
+    const args: Parameters<typeof bb.sdk.threads.send>[0] & { experimental_requireIdleUserQueue: true } = {
       threadId: thread.id,
-      mode: "auto",
+      mode: "start",
+      experimental_requireIdleUserQueue: true,
       input: [{ type: "text", text: prompt, mentions: [] }],
-    });
+    };
+    result = await bb.sdk.threads.send(args);
   } catch (error) {
-    bb.log.warn(
-      `auto-review: failed to send the review turn for ${thread.id}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-    const { set, remove } = resetToIdlePatch();
-    // A review that never reached the agent does not count against the next one.
-    await writeState(bb, thread.id, set, [...remove, "lastCodeReviewSeq"]);
-    await removeReview(bb, thread.id);
-    await recordUnreported(bb, thread.id, {
-      reviewId: dispatchedAt,
-      outcome: "unavailable",
-      summary: "The review could not be sent to the agent.",
-      incident: {
-        kind: "send-failed",
-        detail: error instanceof Error ? error.message : String(error),
-      },
-    });
-    await recordFire(ctx, thread.projectId, thread.id, "stood-down", "send-failed", extra);
-    return;
+    return handleSendError(ctx, { thread, state, extra, dispatchedAt, error });
   }
+  await removeDeferral(bb, thread.id);
+  await writeState(bb, thread.id, {}, ["dispatchWaitSince"]);
   if (result.delivery === "queued") {
     await writeState(bb, thread.id, {
       phase: "pending-dispatch",
@@ -215,13 +269,45 @@ async function sendReview(
     await writeState(bb, thread.id, await deliveredPatch(bb, thread.id));
   }
   await recordFire(ctx, thread.projectId, thread.id, "fired", "fired", extra);
+  return { kind: "done" };
+}
+
+async function prepareReviewPrompt(
+  ctx: ReviewContext,
+  input: DispatchInput,
+  workspace: AvailableWorkspace | null,
+  changeSize: Awaited<ReturnType<typeof reviewSize>>,
+): Promise<{ prompt: string; reviewSkillRequired: boolean }> {
+  const { thread, state, environmentId, config, decision, scope, turn } = input;
+  const prior = openFindingsForPrompt(await readFindings(ctx.bb, thread.id), Date.now());
+  const rendered = renderScope(scope);
+  const reviewSkillRequired =
+    config.reviewMode === "devkit" ||
+    (config.reviewMode === "auto" && (await devkitRunning(ctx.bb)) === "running");
+  const prompt = buildReviewPrompt({
+    decision,
+    reviewMode: config.reviewMode,
+    scope: rendered,
+    codeBaseline: await codeBaselineFor(ctx.bb, thread.id, environmentId, rendered, workspace),
+    changeSize,
+    committedSince: committedSinceHead(turn, state),
+    commitScanFrom: commitScanHead(turn, state),
+    foreignCommits: turn.foreignCommits.map(({ sha }) => sha),
+    upstreamCommits: turn.upstreamCommits,
+    parkedCommits: turn.parkedCommits,
+    ownCommits: turn.commits,
+    aislopScan: await aislopScanAvailable(ctx.bb),
+    priorFindings: prior.findings,
+    priorFindingsOmitted: prior.omitted,
+  });
+  return { prompt, reviewSkillRequired };
 }
 
 export async function dispatchReview(
   ctx: ReviewContext,
   input: DispatchInput,
-): Promise<void> {
-  const { thread, state, environmentId, config, decision, base, isWorktree, scope, turn, unclaimedCount } = input;
+): Promise<DispatchOutcome> {
+  const { thread, state, environmentId, decision, base, isWorktree, scope, turn, unclaimedCount } = input;
   const extra: FireExtra = {
     commit: decision.commit,
     merge: decision.merge,
@@ -240,39 +326,32 @@ export async function dispatchReview(
         reason: "sibling-active",
         extra,
       });
-      return true;
+      return { kind: "provider-deferred" as const };
     }
 
-    const prior = openFindingsForPrompt(await readFindings(ctx.bb, thread.id), Date.now());
-    const rendered = renderScope(scope);
-    // Whether this review's prompt requires devkit's `review-code` — the rule
-    // `planSkillCheck` applies to plans, decided from the dispatch-time config
-    // alone; absent and unknown devkit are lenient. Latched for `ReportReview`.
-    const reviewSkillRequired =
-      config.reviewMode === "devkit" ||
-      (config.reviewMode === "auto" && (await devkitRunning(ctx.bb)) === "running");
-    const prompt = buildReviewPrompt({
-      decision,
-      reviewMode: config.reviewMode,
-      scope: rendered,
-      codeBaseline: await codeBaselineFor(ctx.bb, thread.id, environmentId, rendered, workspace),
-      changeSize,
-      committedSince: committedSinceHead(turn, state),
-      commitScanFrom: commitScanHead(turn, state),
-      foreignCommits: turn.foreignCommits.map(({ sha }) => sha),
-      upstreamCommits: turn.upstreamCommits,
-      parkedCommits: turn.parkedCommits,
-      ownCommits: turn.commits,
-      aislopScan: await aislopScanAvailable(ctx.bb),
-      priorFindings: prior.findings,
-      priorFindingsOmitted: prior.omitted,
-    });
+    const { prompt, reviewSkillRequired } = await prepareReviewPrompt(ctx, input, workspace, changeSize);
     // A re-park records no parked fields: it reviewed nothing, and the next evaluation decides again.
-    await sendReview(ctx, thread, prompt, { ...extra, ...parkedFire(turn) }, reviewSkillRequired);
-    return false;
+    const { busy, userQueued } = await userTurnQueued(ctx, thread.id);
+    if (userQueued || (busy && await userTurnRunning(ctx, thread.id, lastIdleFloor(state)))) {
+      return { kind: "carry" as const, busy };
+    }
+    if (busy) {
+      return { kind: "wait" as const };
+    }
+    return sendReview(ctx, thread, prompt, { ...extra, ...parkedFire(turn) }, reviewSkillRequired, state);
   });
   // Hashing the tree stays out of the provider lock so it does not serialise other dispatches. It is read afresh, after the snapshot's start time, for `withoutParked`.
-  if (deferred) {
+  if (deferred.kind === "provider-deferred") {
+    await refreshIdleSnapshot(ctx.bb, thread, state);
+    return { kind: "done" };
+  }
+  if (deferred.kind === "wait") {
+    await deferTurn(ctx, thread, state, environmentId, {
+      reason: "dispatch-not-ready",
+      extra,
+      dispatchWaitSince: state.dispatchWaitSince ?? Date.now(),
+    });
     await refreshIdleSnapshot(ctx.bb, thread, state);
   }
+  return deferred;
 }

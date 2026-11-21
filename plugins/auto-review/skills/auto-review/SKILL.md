@@ -513,6 +513,8 @@ thread, so the turn's review and commit are never dropped by it.
 ## `reason` values in `status`
 
 - `fired` — a review was injected.
+- `dispatch-not-ready` — The server could not start the review. Auto-review retries with a fresh scope until the thread is ready or the wait expires.
+- `dispatch-wait-expired` — Auto-review stopped retrying after the dispatch wait expired.
 - `sibling-active` — another thread on the same provider (in any project) has its
   auto-review running. Paired with outcome `deferred`, this turn is parked and is reviewed
   as soon as that review ends, unless a question of the user's lands first (then the work is

@@ -86,6 +86,8 @@ async function withDispatch(
       },
     },
     threads: {
+      get: async () => ({ status: "idle" }),
+      queuedMessages: { list: async () => [] },
       timeline: async () => {
         if (options.timelineThrows === true) {
           throw new Error("timeline down");
@@ -678,6 +680,8 @@ describe("dispatchReview with a foreign commit", () => {
     const sdk = {
       plugins: { list: async () => ({ plugins: [] }) },
       threads: {
+        get: async () => ({ status: "idle" }),
+        queuedMessages: { list: async () => [] },
         timeline: async () => ({ rows: [], maxSeq: 500 }),
         updatePluginMetadata: async (args: { set?: Record<string, unknown>; remove?: string[] }) => {
           calls.push(args);

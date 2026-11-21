@@ -65,6 +65,7 @@ export const threadStateSchema = z.object({
   pendingEntryId: z.string().optional(),
   dispatchedAt: z.number().optional(),
   deferredSince: z.number().optional(),
+  dispatchWaitSince: z.number().optional(),
   /** Spawned children holding this turn parked; absent means a provider review instead. */
   heldBy: z.array(z.string()).optional(),
   /**
@@ -278,6 +279,7 @@ export const LATCH_KEYS: readonly string[] = [
   "pendingEntryId",
   "dispatchedAt",
   "deferredSince",
+  "dispatchWaitSince",
   "turnDecided",
   "lastIdle",
   "heldBy",
