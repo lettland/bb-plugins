@@ -46,6 +46,11 @@
 .triage-new-thread-empty { display: none; padding: 0.375rem 0.5rem; color: var(--muted-foreground); font-size: 0.75rem; }
 .triage-new-thread-list:empty + .triage-new-thread-empty { display: block; }
 
+.triage-current-thread {
+  border-radius: 0.375rem;
+  background: var(--accent);
+}
+
 /* ---------------------------------------------------------------------------
    Shell and toolbar
    ------------------------------------------------------------------------ */

@@ -60,7 +60,7 @@ function snapshotOf(tasks: Task[], stages: Stage[] = STAGES): Snapshot {
   return { stages, tasks, projects: [], machines: [], notifications: [], unreadCount: 0 } as Snapshot;
 }
 
-const THREAD_PROPS = { threadId: "thr-host", projectId: "p1", environment: null } as never;
+const THREAD_PROPS = { threadId: "thr-host", projectId: "p1", environment: null };
 
 async function mount(snapshot: Snapshot) {
   const view = renderSlot({ component: TriageThreadsSection } as never, THREAD_PROPS, {
@@ -243,6 +243,24 @@ describe("filters", () => {
 });
 
 describe("rows", () => {
+  test("marks only the current thread as the pane changes", async () => {
+    const first = card({ title: "First", threadId: THREAD_PROPS.threadId });
+    const second = card({ title: "Second", threadId: "thr-second" });
+    const view = await mount(snapshotOf([first, second]));
+    expect(within(screen.getByRole("listitem", { current: true })).getByRole("button", { name: /First/ })).toBeTruthy();
+
+    view.rerender(<TriageThreadsSection threadId="thr-second" />);
+    expect(within(screen.getByRole("listitem", { current: true })).getByRole("button", { name: /Second/ })).toBeTruthy();
+
+    view.rerender(<TriageThreadsSection threadId="thr-unlisted" />);
+    expect(screen.queryByRole("listitem", { current: true })).toBeNull();
+
+    view.rerender(<TriageThreadsSection threadId="thr-second" />);
+    expect(within(screen.getByRole("listitem", { current: true })).getByRole("button", { name: /Second/ })).toBeTruthy();
+    view.rerender(<TriageThreadsSection />);
+    expect(screen.queryByRole("listitem", { current: true })).toBeNull();
+  });
+
   test("sort by updatedAt, newest first, within each group", async () => {
     await mount(snapshotOf([
       card({ title: "Middle", stageId: "s-active", updatedAt: NOW - 20 * MINUTE }),

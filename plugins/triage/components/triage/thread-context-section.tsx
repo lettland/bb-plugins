@@ -21,7 +21,7 @@ type ThreadTask = Task & { threadId: string };
 
 const GROUP_ROLES = ["active", "attention", "done"] as const;
 
-export function TriageThreadsSection() {
+export function TriageThreadsSection({ threadId }: { threadId?: string }) {
   const { snapshot, refresh } = useTriage();
   const navigate = useBbNavigate();
   useRealtime("triage", (payload) => {
@@ -45,8 +45,12 @@ export function TriageThreadsSection() {
     const running = isTaskRunning(task);
     const announced = running || task.runState === "failed";
     const label = `${task.projectName} · ${task.title}`;
+    const isCurrent = threadId === task.threadId;
     return (
-      <li className="list-none">
+      <li
+        className={isCurrent ? "list-none triage-current-thread" : "list-none"}
+        aria-current={isCurrent ? "true" : undefined}
+      >
         <ThreadContextCardRow
           leading={<StatusDot tone={stageTone(stage)} pulse={running} label={announced ? runStateLabel(task.runState) : undefined} />}
           label={label}
