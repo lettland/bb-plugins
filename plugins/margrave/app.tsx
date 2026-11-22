@@ -79,7 +79,7 @@ function SkillResults({
         className="min-h-0 flex-1 overflow-y-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring focus-visible:-outline-offset-2"
       >
         {skills.length === 0 ? (
-          <p className="mt-4 text-sm">No skills installed in Margrave.</p>
+          <p className="mt-4 text-sm">No skills in the Margrave catalog.</p>
         ) : matches.length === 0 ? (
           <p className="mt-4 text-sm">No skills match your filters.</p>
         ) : (

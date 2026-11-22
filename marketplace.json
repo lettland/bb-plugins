@@ -103,7 +103,7 @@
     {
       "id": "margrave",
       "displayName": "Margrave",
-      "description": "Browse the skills installed in Margrave.",
+      "description": "Browse the hosted Margrave skill catalog.",
       "icon": "ListView",
       "author": {
         "name": "Lettland",

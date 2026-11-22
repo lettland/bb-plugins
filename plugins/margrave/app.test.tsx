@@ -72,10 +72,10 @@ it("shows loading, empty and actionable errors", () => {
     isFetching: false,
   };
   view.rerender(React.createElement(state.component as React.ComponentType));
-  expect(screen.getByText("No skills installed in Margrave.")).toBeTruthy();
-  state.query = { ...state.query, data: { ok: false, error: "missing" } };
+  expect(screen.getByText("No skills in the Margrave catalog.")).toBeTruthy();
+  state.query = { ...state.query, data: { ok: false, error: "failed" } };
   view.rerender(React.createElement(state.component as React.ComponentType));
-  expect(screen.getByRole("alert").textContent).toContain("server PATH");
+  expect(screen.getByRole("alert").textContent).toContain("Could not read the hosted Margrave skill catalog.");
   fireEvent.click(screen.getByText("Try again"));
   expect(refetch).toHaveBeenCalledOnce();
 });

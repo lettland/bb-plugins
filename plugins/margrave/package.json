@@ -2,7 +2,7 @@
   "name": "@lettland/bb-plugin-margrave",
   "version": "0.2.0",
   "type": "module",
-  "description": "Browse the skills installed in Margrave.",
+  "description": "Browse the hosted Margrave skill catalog.",
   "license": "BSD-2-Clause",
   "engines": {
     "bb": ">=0.49.0",
@@ -10,7 +10,7 @@
   },
   "bb": {
     "name": "Margrave",
-    "description": "Browse the skills installed in Margrave.",
+    "description": "Browse the hosted Margrave skill catalog.",
     "branding": {
       "icon": "ListView"
     },
@@ -33,7 +33,8 @@
   },
   "dependencies": {
     "zod": "^4.3.6",
-    "@get-bb/plugin-sdk": "0.6.141"
+    "@get-bb/plugin-sdk": "0.6.141",
+    "@modelcontextprotocol/sdk": "1.32.2"
   },
   "devDependencies": {
     "@testing-library/dom": "^10.4.2",
