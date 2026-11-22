@@ -46,7 +46,7 @@ function skillId(uri: string): { id: string; source: string } {
         !part ||
         part === "." ||
         part === ".." ||
-        /[/\\?#\x00-\x1f\x7f]/.test(part),
+        /[/\\?#\x00-\x1f\x7f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(part),
     )
   )
     return invalid();
@@ -72,9 +72,17 @@ function bounded(output: string): string {
   return output;
 }
 
-function boundedFetch(signal: AbortSignal, controller: AbortController) {
+const postOnly = new Error("This MCP client uses POST responses only.");
+
+function boundedFetch(
+  signal: AbortSignal,
+  controller: AbortController,
+  postReaders: Set<() => void>,
+) {
   let bytes = 0;
   return async (url: string | URL | Request, init?: RequestInit) => {
+    // The hosted endpoint delivers responses through POST, not standalone SSE GET.
+    if (init?.method === "GET") throw postOnly;
     const response = await fetch(url, { ...init, redirect: "error", signal });
     if (!response.body) return response;
     if (signal.aborted) {
@@ -83,8 +91,11 @@ function boundedFetch(signal: AbortSignal, controller: AbortController) {
     }
     const reader = response.body.getReader();
     const cancel = () => {
+      postReaders.delete(cancel);
+      signal.removeEventListener("abort", cancel);
       void reader.cancel().catch(() => {});
     };
+    if (init?.method === "POST") postReaders.add(cancel);
     signal.addEventListener("abort", cancel, { once: true });
     const body = new ReadableStream<Uint8Array>({
       async pull(stream) {
@@ -93,6 +104,7 @@ function boundedFetch(signal: AbortSignal, controller: AbortController) {
           if (signal.aborted) throw new Error(catalogErrors.failed);
           if (result.done) {
             signal.removeEventListener("abort", cancel);
+            postReaders.delete(cancel);
             stream.close();
             return;
           }
@@ -104,11 +116,13 @@ function boundedFetch(signal: AbortSignal, controller: AbortController) {
           stream.enqueue(result.value);
         } catch (error) {
           signal.removeEventListener("abort", cancel);
+          postReaders.delete(cancel);
           stream.error(error);
         }
       },
       cancel() {
         signal.removeEventListener("abort", cancel);
+        postReaders.delete(cancel);
         return reader.cancel();
       },
     });
@@ -144,12 +158,17 @@ async function readCatalog(callerSignal?: AbortSignal) {
     : controller.signal;
   const timer = setTimeout(() => controller.abort(), 30_000);
   const client = new Client({ name: "bb-margrave", version: "1.0.0" });
+  const postReaders = new Set<() => void>();
   const transport = new StreamableHTTPClientTransport(
     new URL("https://margrave.valksor.tools/mcp"),
-    { fetch: boundedFetch(signal, controller) },
+    { fetch: boundedFetch(signal, controller, postReaders) },
   );
+  transport.onerror = (error) => {
+    if (error !== postOnly) controller.abort();
+  };
   try {
     await client.connect(transport, { signal });
+    postReaders.forEach((cancel) => cancel());
     const skills: Skill[] = [];
     const counts = new Map<string, number>();
     const cursors = new Set<string>();
@@ -158,11 +177,12 @@ async function readCatalog(callerSignal?: AbortSignal) {
       const value = await client.request(
         {
           method: "skills/list",
-          params: cursor === undefined ? {} : { cursor },
+          params: { cursor },
         },
         z.unknown(),
         { signal },
       );
+      postReaders.forEach((cancel) => cancel());
       const page = pageSchema.safeParse(value);
       if (!page.success) invalid();
       appendSkills(page.data.skills, skills, counts);

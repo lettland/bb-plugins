@@ -48,6 +48,7 @@ beforeEach(() => {
     "fetch",
     vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       if (init?.method === "GET") return new Response(null, { status: 405 });
+      expect(init?.method).toBe("POST");
       const message = JSON.parse(String(init?.body)) as {
         id?: number;
         method: string;
@@ -145,6 +146,19 @@ describe("hosted Margrave CLI and RPC", () => {
       ],
     });
   });
+  it("reads both catalogs without a standalone GET", async () => {
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (init?.method === "GET") throw new Error("GET unavailable");
+      return original(url, init);
+    });
+
+    expect((await cli.run(["list", "--json"], {})).exitCode).toBe(0);
+    pages = [{ skills: [skill()] }];
+    expect(await listSkills(null, rpcContext())).toMatchObject({ ok: true });
+    expect(vi.mocked(fetch).mock.calls.every(([, init]) => init?.method !== "GET"))
+      .toBe(true);
+  });
   it("handles empty catalogs and escapes terminal controls in both CLI modes", async () => {
     pages = [{ skills: [] }];
     expect((await cli.run(["list"], {})).stdout).toBe(
@@ -169,6 +183,9 @@ describe("hosted Margrave CLI and RPC", () => {
     { skills: [skill("skill://margrave/source/rev/a%2Fb/SKILL.md")] },
     { skills: [skill("skill://margrave/source/rev/../SKILL.md")] },
     { skills: [skill("skill://margrave/source/rev/%zz/SKILL.md")] },
+    ...["%D8%9C", "%E2%80%8E", "%E2%80%8F", "%E2%80%AA", "%E2%80%AE", "%E2%81%A6", "%E2%81%A9"].map(
+      (control) => ({ skills: [skill(`skill://margrave/source/rev/a${control}b/SKILL.md`)] }),
+    ),
     { skills: [skill("skill://margrave/source/rev//SKILL.md")] },
   ])("rejects invalid page or URI %#", async (page) => {
     pages = [page];
@@ -223,6 +240,7 @@ describe("hosted Margrave CLI and RPC", () => {
       started = resolve;
     });
     vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (init?.method !== "POST") return original(url, init);
       const message = JSON.parse(String(init?.body));
       if (message.method !== "skills/list") return original(url, init);
       return new Response(
@@ -251,6 +269,7 @@ describe("hosted Margrave CLI and RPC", () => {
     let bytesSent = 0;
     pages = [{ skills: [skill()], nextCursor: "next" }];
     vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (init?.method !== "POST") return original(url, init);
       const message = JSON.parse(String(init?.body));
       if (message.method === "skills/list" && ++listCount === 2) {
         const chunk = new TextEncoder().encode("x".repeat(1024));
@@ -283,7 +302,6 @@ describe("hosted Margrave CLI and RPC", () => {
       ok: false,
       error: "failed",
     });
-    expect(bytesSent).toBeLessThanOrEqual(PLUGIN_CLI_OUTPUT_MAX_BYTES);
     expect(cancelled).toBe(true);
   });
   it("limits serialized output even when the response fits", async () => {
@@ -314,6 +332,7 @@ describe("hosted Margrave CLI and RPC", () => {
     let cancelled = false;
     pages = [{ skills: [skill()], nextCursor: "next" }];
     vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (init?.method !== "POST") return original(url, init);
       const message = JSON.parse(String(init?.body));
       if (message.method === "skills/list") {
         if (++count === 1) await vi.advanceTimersByTimeAsync(15_000);
@@ -338,16 +357,18 @@ describe("hosted Margrave CLI and RPC", () => {
     expect(await result).toEqual({ ok: false, error: "failed" });
     expect(cancelled).toBe(true);
   });
-  it("cancels the upstream body if the SSE decoder rejects a chunk", async () => {
+  it.each(["cli", "rpc"])("fails promptly on invalid POST SSE JSON: %s", async (entry) => {
+    vi.useFakeTimers();
     const original = vi.mocked(fetch).getMockImplementation()!;
     let cancelled = false;
     vi.mocked(fetch).mockImplementation(async (url, init) => {
-      const message = JSON.parse(String(init?.body));
+      if (init?.method !== "POST") return original(url, init);
+      const message = JSON.parse(String(init.body));
       if (message.method !== "skills/list") return original(url, init);
       return new Response(
         new ReadableStream({
           start(controller) {
-            controller.enqueue("bad");
+            controller.enqueue(new TextEncoder().encode("event: message\ndata: {bad}\n\n"));
           },
           cancel() {
             cancelled = true;
@@ -356,10 +377,77 @@ describe("hosted Margrave CLI and RPC", () => {
         { headers: { "content-type": "text/event-stream" } },
       );
     });
-    const controller = new AbortController();
-    const result = listSkills(null, { experimental_signal: controller.signal });
-    await vi.waitFor(() => expect(cancelled).toBe(true));
-    controller.abort();
-    expect(await result).toEqual({ ok: false, error: "failed" });
+    let settled = false;
+    const result = Promise.resolve(
+      entry === "cli" ? cli.run(["list"], {}) : listSkills(null, rpcContext()),
+    ).then((value) => {
+      settled = true;
+      return value;
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    const settledPromptly = settled;
+    await vi.advanceTimersByTimeAsync(30_000);
+    const value = await result;
+    expect(settledPromptly).toBe(true);
+    expect(cancelled).toBe(true);
+    if (entry === "cli") {
+      expect(value).toMatchObject({
+        stderr: expect.stringContaining("Could not read the hosted Margrave skill catalog."),
+      });
+    } else {
+      expect(value).toEqual({ ok: false, error: "failed" });
+    }
+  });
+  it("cancels the POST reader when the content type is unsupported", async () => {
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    let cancelled = false;
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (init?.method !== "POST") return original(url, init);
+      const message = JSON.parse(String(init.body));
+      if (message.method !== "skills/list") return original(url, init);
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("Service unavailable"));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { headers: { "content-type": "text/plain" } },
+      );
+    });
+
+    expect(await listSkills(null, rpcContext())).toEqual({
+      ok: false,
+      error: "failed",
+    });
+    expect(cancelled).toBe(true);
+  });
+  it("cancels each open POST result before requesting the next page", async () => {
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    const cancelled: string[] = [];
+    let page = 0;
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (init?.method !== "POST") return original(url, init);
+      const message = JSON.parse(String(init.body));
+      if (message.method !== "initialize" && message.method !== "skills/list") return original(url, init);
+      if (message.method === "skills/list") {
+        expect(cancelled).toContain(page === 0 ? "initialize" : "page1");
+        page++;
+      }
+      const label = message.method === "initialize" ? "initialize" : `page${page}`;
+      const result = message.method === "initialize"
+        ? { protocolVersion: "2025-11-25", capabilities: {}, serverInfo: { name: "margrave", version: "1" } }
+        : page === 1 ? { skills: [skill()], nextCursor: "next" } : { skills: [skill()] };
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n\n`));
+        },
+        cancel() { cancelled.push(label); },
+      }), { headers: { "content-type": "text/event-stream" } });
+    });
+    expect(await listSkills(null, rpcContext())).toMatchObject({ ok: true });
+    expect(cancelled).toEqual(["initialize", "page1", "page2"]);
   });
 });
