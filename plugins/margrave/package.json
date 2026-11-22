@@ -1,6 +1,6 @@
 {
   "name": "@lettland/bb-plugin-margrave",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "Browse the hosted Margrave skill catalog.",
   "license": "BSD-2-Clause",
