@@ -1,3 +1,4 @@
+import { REMINDER_STAGE_ID } from "@/lib/triage-types";
 import * as React from "react";
 import { RenameTaskDialog } from "./rename-task-dialog";
 
@@ -180,7 +181,7 @@ function TaskCard({
                   </DropdownMenuSubTrigger>
                   <DropdownMenuSubContent>
                     <DropdownMenuRadioGroup value={task.stageId} onValueChange={onMove}>
-                      {stages.map((stage) => (
+                      {stages.filter((stage) => task.threadId !== null || stage.id !== REMINDER_STAGE_ID).map((stage) => (
                         <DropdownMenuRadioItem key={stage.id} value={stage.id}>
                           {stage.name}
                         </DropdownMenuRadioItem>

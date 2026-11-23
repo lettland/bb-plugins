@@ -1,5 +1,7 @@
 import type { NewThreadRequest } from "@get-bb/plugin-sdk/app";
 
+export const REMINDER_STAGE_ID = "stage-reminder";
+
 /** Shapes mirrored from the plugin server's RPC contract. */
 
 export type StageRole = "intake" | "active" | "attention" | "done";

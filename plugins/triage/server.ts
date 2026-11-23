@@ -1,5 +1,6 @@
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { REMINDER_STAGE_ID } from "./lib/triage-types";
 
 const stageSchema = z.object({
   id: z.string(),
@@ -451,6 +452,13 @@ const migrations = [
   )`,
   // Mirror cards from before the idle/failed settle fix stayed unsettled; settle them once.
   `UPDATE triage_tasks SET settled_at = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE origin = 'mirror' AND settled_at IS NULL AND run_state IN ('idle','failed')`,
+  `INSERT INTO triage_stages (id, name, position, system_role)
+   WITH RECURSIVE names(n, name) AS (
+     VALUES (0, 'Reminder')
+     UNION ALL SELECT n + 1, CASE WHEN n = 0 THEN 'Reminder (Triage)' ELSE 'Reminder (Triage ' || (n + 1) || ')' END FROM names
+   )
+   SELECT 'stage-reminder', name, (SELECT COALESCE(MAX(position), 0) + 100 FROM triage_stages), NULL
+   FROM names WHERE NOT EXISTS (SELECT 1 FROM triage_stages WHERE triage_stages.name = names.name COLLATE NOCASE) LIMIT 1`,
 ];
 
 function toStage(row: StageRow) {
@@ -800,14 +808,33 @@ export default async function plugin(bb: BbPluginApi) {
     });
   };
 
-  const moveTask = (
+  const requireReminderThread = async (threadId: string | null) => {
+    if (!threadId) throw new Error("Only unarchived threads can move to Reminder");
+    let thread;
+    try {
+      thread = await bb.sdk.threads.get({ threadId });
+    } catch {
+      throw new Error("Only unarchived threads can move to Reminder");
+    }
+    if (!thread || thread.archivedAt !== null || thread.deletedAt !== null) {
+      throw new Error("Only unarchived threads can move to Reminder");
+    }
+  };
+
+  const moveTask = async (
     number: number,
     stageId: string,
     actor: string,
     summary?: string,
   ) => {
-    const task = getTaskRow(number);
+    let task = getTaskRow(number);
     const stage = getStageRow(stageId);
+    if (stageId === REMINDER_STAGE_ID) {
+      const threadId = task.thread_id;
+      await requireReminderThread(threadId);
+      task = getTaskRow(number);
+      if (task.thread_id !== threadId) throw new Error("Only unarchived threads can move to Reminder");
+    }
     const now = Date.now();
     const nextRunState = stage.system_role === "done" ? "completed" : task.run_state;
     db.prepare(
@@ -1050,6 +1077,10 @@ export default async function plugin(bb: BbPluginApi) {
       return current ? toTask(current) : null;
     }).filter((task): task is NonNullable<typeof task> => task !== null);
     const visibleCards = synchronizedCards.filter((task) => {
+      if (task.stageId === REMINDER_STAGE_ID) {
+        const thread = task.threadId ? threadsById.get(task.threadId) : undefined;
+        return thread !== undefined && thread.archivedAt === null && thread.deletedAt === null;
+      }
       if (!task.threadId) return true;
       const thread = threadsById.get(task.threadId);
       return thread === undefined || thread.archivedAt === null;
@@ -1637,6 +1668,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
     async createTask(input) {
       getStageRow(input.stageId);
+      if (input.stageId === REMINDER_STAGE_ID) throw new Error("Only unarchived threads can move to Reminder");
       const project = await bb.sdk.projects.get({ projectId: input.request.projectId });
       const machine = await resolveMachine(input.request.environment);
       const allocateNumber = db.transaction(() => {
@@ -1720,8 +1752,14 @@ export default async function plugin(bb: BbPluginApi) {
       return toTask(getTaskRow(number));
     },
     async updateTask(input) {
-      const task = getTaskRow(input.number);
+      let task = getTaskRow(input.number);
       const stage = getStageRow(input.stageId);
+      if (input.stageId === REMINDER_STAGE_ID && task.stage_id !== input.stageId) {
+        const threadId = task.thread_id;
+        await requireReminderThread(threadId);
+        task = getTaskRow(input.number);
+        if (task.thread_id !== threadId) throw new Error("Only unarchived threads can move to Reminder");
+      }
       if (input.scheduledAt !== null && input.scheduledAt <= Date.now()) {
         throw new Error("Choose a future date and time");
       }
@@ -1929,7 +1967,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
     deleteStage({ id }) {
       const stage = getStageRow(id);
-      if (stage.system_role) throw new Error("Core workflow stages can be renamed but not removed");
+      if (stage.system_role || id === REMINDER_STAGE_ID) throw new Error("Core workflow stages can be renamed but not removed");
       const count = (
         db.prepare("SELECT COUNT(*) AS count FROM triage_tasks WHERE stage_id = ?").get(id) as {
           count: number;
@@ -2055,6 +2093,8 @@ export default async function plugin(bb: BbPluginApi) {
         "UPDATE triage_tasks SET settled_at = ?, run_state = CASE WHEN run_state = 'working' THEN 'idle' ELSE run_state END, updated_at = ? WHERE id = ?",
       ).run(Date.now(), Date.now(), task.id);
       publishSoon();
+    } else if (task?.stage_id === REMINDER_STAGE_ID) {
+      publishSoon();
     }
   });
 
@@ -2092,8 +2132,8 @@ export default async function plugin(bb: BbPluginApi) {
       return;
     }
     db.prepare(
-      "UPDATE triage_tasks SET thread_id = NULL, run_state = 'stopped', attention_reason = 'The linked BB thread was deleted.', updated_at = ? WHERE id = ?",
-    ).run(Date.now(), task.id);
+      "UPDATE triage_tasks SET thread_id = NULL, stage_id = CASE WHEN stage_id = ? THEN ? ELSE stage_id END, run_state = 'stopped', attention_reason = 'The linked BB thread was deleted.', updated_at = ? WHERE id = ?",
+    ).run(REMINDER_STAGE_ID, getSystemStage("intake").id, Date.now(), task.id);
     notify({
       taskNumber: task.number,
       action: "Lost its thread",
@@ -2168,7 +2208,7 @@ export default async function plugin(bb: BbPluginApi) {
             .prepare("SELECT id, name, position, system_role FROM triage_stages WHERE name = ? COLLATE NOCASE")
             .get(stageName) as StageRow | undefined;
           if (!stage) throw new Error(`Unknown stage “${stageName}”`);
-          const task = moveTask(number, stage.id, "cli", summary);
+          const task = await moveTask(number, stage.id, "cli", summary);
           return {
             exitCode: 0,
             stdout: json ? JSON.stringify({ task }) : `Moved Triage #${number} to ${stage.name}.`,

@@ -30,7 +30,7 @@ import {
 } from "@/lib/triage-format";
 import { claimTriageRefresh } from "@/lib/triage-mounts";
 import { patchTaskRead, patchTaskStage, useOpenTaskRequests, useTriage } from "@/lib/triage-store";
-import type { NotificationLevel, Stage, Task } from "@/lib/triage-types";
+import { REMINDER_STAGE_ID, type NotificationLevel, type Stage, type Task } from "@/lib/triage-types";
 import "./app.css";
 
 interface RealtimePayload {
@@ -110,6 +110,7 @@ function useDraftRootIds(): ReadonlySet<string> {
  */
 function isDraftedCard(task: Task, draftRoots: ReadonlySet<string>, stages: readonly Stage[]): boolean {
   return (
+    task.stageId !== REMINDER_STAGE_ID &&
     task.threadId !== null &&
     draftRoots.has(task.threadId) &&
     !isTaskRunning(task) &&
@@ -118,7 +119,7 @@ function isDraftedCard(task: Task, draftRoots: ReadonlySet<string>, stages: read
 }
 
 function matchesFilter(task: Task, filter: TaskFilter, drafted: boolean, stages: readonly Stage[]): boolean {
-  if (task.runState === "failed" && !drafted && !keepsFailedCardVisible(task, stages)) return false;
+  if (task.runState === "failed" && !drafted && task.stageId !== REMINDER_STAGE_ID && !keepsFailedCardVisible(task, stages)) return false;
   const open = drafted || task.settledAt === null;
   switch (filter) {
     case "live":
@@ -128,7 +129,7 @@ function matchesFilter(task: Task, filter: TaskFilter, drafted: boolean, stages:
     case "settled":
       return !open;
     default:
-      return open;
+      return open || task.stageId === REMINDER_STAGE_ID;
   }
 }
 
@@ -207,21 +208,24 @@ function TriageBoard() {
   /**
    * A drafted card shows in To Do while its stored stage says otherwise, so a move
    * to another column always writes, even to the stored stage, and also reopens a
-   * settled card; a move to To Do changes nothing the user can see. Once open, the
-   * card renders in its stored (new) column. A failed drafted card stays failed after
-   * any move except to the done stage, so it would land back in To Do with its
-   * failure reason cleared; that move is refused with a toast instead.
+   * settled card unless it moves to Reminder; a move to To Do changes nothing the
+   * user can see. A failed drafted card can move to Completed or Reminder; other
+   * moves are refused while the draft remains.
    */
   const move = async (task: Task, stageId: string, drafted = false, intakeId = "") => {
     if (drafted ? stageId === intakeId : task.stageId === stageId) return;
-    if (drafted && task.runState === "failed" && snapshot?.stages.find((stage) => stage.id === stageId)?.systemRole !== "done") {
-      toast.error("This failed card stays in To Do while its session has an unsent draft. Move it to Completed, or send or clear the draft first.");
+    if (stageId === REMINDER_STAGE_ID && !task.threadId) {
+      toast.error("Only unarchived threads can move to Reminder");
+      return;
+    }
+    if (drafted && stageId !== REMINDER_STAGE_ID && task.runState === "failed" && snapshot?.stages.find((stage) => stage.id === stageId)?.systemRole !== "done") {
+      toast.error("Send or clear the draft before moving this failed card to that column.");
       return;
     }
     patchTaskStage(task.number, stageId);
     try {
       await rpc.call("moveTask", { number: task.number, stageId });
-      if (drafted && task.settledAt !== null) await rpc.call("setTaskSettled", { number: task.number, settled: false });
+      if (drafted && stageId !== REMINDER_STAGE_ID && task.settledAt !== null) await rpc.call("setTaskSettled", { number: task.number, settled: false });
       await refresh();
     } catch (moveError) {
       toast.error(moveError instanceof Error ? moveError.message : String(moveError));

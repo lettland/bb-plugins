@@ -122,7 +122,7 @@ test("snapshot shapes projects, machines, stages, and the notification list", as
     expect(snapshot.notifications).toStrictEqual([]);
     expect(snapshot.unreadCount).toBe(0);
     expect(snapshot.stages.map((stage: any) => stage.name)).toStrictEqual([
-      "To Do", "In Progress", "Human Review", "Completed",
+      "To Do", "In Progress", "Human Review", "Completed", "Reminder",
     ]);
   } finally { await harness.lifecycle.dispose(); }
 });
@@ -598,14 +598,14 @@ test("stage administration creates, renames, reorders, and deletes user stages",
     const created = await rpc("createStage", { name: "  In Review  " });
     expect(created.name).toBe("In Review");
     expect(created.systemRole).toBe(null);
-    expect(created.position).toBe(500);
+    expect(created.position).toBe(600);
     const renamed = await rpc("renameStage", { id: created.id, name: "In Review by humans" });
     expect(renamed.name).toBe("In Review by humans");
     await expect(rpc("renameStage", { id: "stage-missing", name: "X" })).rejects.toThrow(/Stage was not found/);
     const idList = async () => (await rpc("snapshot")).stages.map((stage: any) => stage.id);
     const before = await idList();
     const moved = await rpc("reorderStage", { id: created.id, direction: "left" });
-    expect(moved.stages.map((stage: any) => stage.id)).toStrictEqual([...before.slice(0, 3), created.id, before[3]]);
+    expect(moved.stages.map((stage: any) => stage.id)).toStrictEqual([...before.slice(0, -2), created.id, before[before.length - 2]]);
     const restored = await rpc("reorderStage", { id: created.id, direction: "right" });
     expect(restored.stages.map((stage: any) => stage.id)).toStrictEqual(before);
     // Reordering off either edge of the board leaves the order alone.
@@ -761,8 +761,8 @@ test("the CLI answers help, listings, and card commands", async () => {
     expect(listing.stdout).toContain(`Triage #${task.number}\tTo Do\tNew task`);
     expect(JSON.parse((await harness.behavior.runCli(["list", "--json"])).stdout).tasks.length).toBe(1);
     const stages = await harness.behavior.runCli(["stages"]);
-    expect(stages.stdout).toBe("To Do\nIn Progress\nHuman Review\nCompleted");
-    expect(JSON.parse((await harness.behavior.runCli(["stages", "--json"])).stdout).stages.length).toBe(4);
+    expect(stages.stdout).toBe("To Do\nIn Progress\nHuman Review\nCompleted\nReminder");
+    expect(JSON.parse((await harness.behavior.runCli(["stages", "--json"])).stdout).stages.length).toBe(5);
     expect((await harness.behavior.runCli(["show"])).stderr).toContain("Provide a positive Triage number");
     expect((await harness.behavior.runCli(["show", "0"])).stderr).toContain("Provide a positive Triage number");
     expect((await harness.behavior.runCli(["show", "abc"])).stderr).toContain("Provide a positive Triage number");
@@ -776,6 +776,7 @@ test("the CLI answers help, listings, and card commands", async () => {
     expect(moved.stdout).toBe(`Moved Triage #${task.number} to In Progress.`);
     const movedJson = JSON.parse((await harness.behavior.runCli(["move", String(task.number), "To Do", "--json"])).stdout);
     expect(movedJson.task.stageId).toBe("stage-todo");
+    expect((await harness.behavior.runCli(["move", String(task.number), "Reminder"])).stderr).toContain("Only unarchived threads can move to Reminder");
     expect((await harness.behavior.runCli(["move", String(task.number), "Nowhere"])).stderr).toContain("Unknown stage");
     expect((await harness.behavior.runCli(["frobnicate", "5"])).stderr).toContain("Unknown command");
     expect((await harness.behavior.runCli(["run", "999"])).stderr).toContain("was not found");
@@ -991,7 +992,7 @@ test("the settle-piled-up-mirror-cards migration settles idle and failed mirror 
       insert.run("m-completed", 906, "completed mirror", "t-completed", "completed", "mirror", null);
       insert.run("m-stopped", 907, "stopped mirror", "t-stopped", "stopped", "mirror", null);
       // Rewind to the state before the migration ran: its ledger row is absent.
-      db.prepare("DELETE FROM _bb_migrations WHERE id = (SELECT MAX(id) FROM _bb_migrations)").run();
+      db.prepare("DELETE FROM _bb_migrations WHERE id = 15").run();
     });
     const settled = new Map<string, number | null>();
     harness = await withRawDatabase(harness, (db) => {
@@ -1038,3 +1039,45 @@ async function waitForCondition(predicate: () => Promise<boolean>, timeoutMs = 2
   }
   throw new Error("condition not met in time");
 }
+
+test("Reminder accepts only linked unarchived threads through create, move and edit", async () => {
+  const { harness, rpc, createTask, thread } = await setup();
+  try {
+    const error = "Only unarchived threads can move to Reminder";
+    await expect(createTask({ stageId: "stage-reminder" })).rejects.toThrow(error);
+    const task = await createTask();
+    const edit = { number: task.number, title: task.title, description: "Do work", stageId: "stage-reminder", scheduledAt: null };
+    await expect(rpc("moveTask", { number: task.number, stageId: "stage-reminder" })).rejects.toThrow(error);
+    await expect(rpc("updateTask", edit)).rejects.toThrow(error);
+    const linked = await rpc("runTask", { number: task.number });
+    harness.inspection.sdk.stub("threads.get", async () => ({ ...thread, archivedAt: 1 }));
+    await expect(rpc("moveTask", { number: linked.number, stageId: "stage-reminder" })).rejects.toThrow(error);
+    await expect(rpc("updateTask", { ...edit, number: linked.number })).rejects.toThrow(error);
+    harness.inspection.sdk.stub("threads.get", async () => { throw new Error("missing"); });
+    await expect(rpc("moveTask", { number: linked.number, stageId: "stage-reminder" })).rejects.toThrow(error);
+    harness.inspection.sdk.stub("threads.get", async () => ({ ...thread, deletedAt: 1 }));
+    await expect(rpc("moveTask", { number: linked.number, stageId: "stage-reminder" })).rejects.toThrow(error);
+    harness.inspection.sdk.stub("threads.get", async () => thread);
+    expect((await rpc("moveTask", { number: linked.number, stageId: "stage-reminder" })).stageId).toBe("stage-reminder");
+    harness.inspection.sdk.stub("threads.get", async () => ({ ...thread, archivedAt: 1 }));
+    await expect(rpc("moveTask", { number: linked.number, stageId: "stage-reminder" })).rejects.toThrow(error);
+    harness.inspection.sdk.stub("threads.get", async () => thread);
+    expect((await rpc("moveTask", { number: linked.number, stageId: "stage-todo" })).stageId).toBe("stage-todo");
+    expect((await rpc("updateTask", { ...edit, number: linked.number })).stageId).toBe("stage-reminder");
+    await expect(rpc("deleteStage", { id: "stage-reminder" })).rejects.toThrow("Core workflow stages can be renamed but not removed");
+  } finally { await harness.lifecycle.dispose(); }
+});
+
+test("Reminder migration preserves custom stages and chooses the first free name", async () => {
+  let harness: any = (await setup()).harness;
+  try {
+    harness = await withRawDatabase(harness, (db) => {
+      db.prepare("DELETE FROM triage_stages WHERE id = 'stage-reminder'").run();
+      db.prepare("DELETE FROM _bb_migrations WHERE id = 16").run();
+      db.prepare("INSERT INTO triage_stages VALUES ('custom-1', 'reminder', 650, NULL), ('custom-2', 'REMINDER (TRIAGE)', 700, NULL)").run();
+    });
+    const stages = (await harness.behavior.callRpc("snapshot", null) as any).stages;
+    expect(stages.find((stage: any) => stage.id === "stage-reminder")).toMatchObject({ name: "Reminder (Triage 2)", position: 800, systemRole: null });
+    expect(stages.find((stage: any) => stage.id === "custom-1")).toMatchObject({ name: "reminder", position: 650 });
+  } finally { await harness.lifecycle.dispose(); }
+});

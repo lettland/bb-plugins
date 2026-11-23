@@ -376,3 +376,12 @@ describe("realtime", () => {
     await waitFor(() => expect(view.rpcCalls.length).toBeGreaterThan(claimed));
   });
 });
+
+test("Reminder shows settled failed rows and opens their thread", async () => {
+  const reminder = { id: "stage-reminder", name: "Later", position: 600, systemRole: null } as Stage;
+  const task = card({ title: "Remember this", stageId: reminder.id, runState: "failed", settledAt: 42 });
+  const view = await mount(snapshotOf([task], [...STAGES, reminder]));
+  expect(headings()).toStrictEqual(["Later"]);
+  fireEvent.click(screen.getByText(/Remember this/));
+  expect(view.navigateCalls).toContainEqual({ method: "toThread", threadId: task.threadId });
+});

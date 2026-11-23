@@ -863,7 +863,7 @@ describe("sidebar drafts", () => {
     fireEvent.drop(columnOf("Human Review"), { dataTransfer: dragTransfer() });
     await flushBoard();
     expect(rpcMethods(view, "moveTask")).toHaveLength(1);
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("stays in To Do while its session has an unsent draft"));
+    expect(errorSpy).toHaveBeenCalledWith("Send or clear the draft before moving this failed card to that column.");
     expect(within(columnOf("To Do")).getByText("Failed draft card")).toBeTruthy();
     expect(within(columnOf("Human Review")).queryByText("Failed draft card")).toBe(null);
     errorSpy.mockRestore();
@@ -950,3 +950,60 @@ describe("sidebar drafts", () => {
 });
 
 const flushBoard = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+
+test("Reminder displays a settled failed card with a draft in its own column", async () => {
+  const snapshot = cloneSnapshot();
+  snapshot.stages.push({ id: "stage-reminder", name: "Reminder", position: 600, systemRole: null });
+  snapshot.tasks = [task({ number: 99, title: "Remember failure", stageId: "stage-reminder", threadId: "thr-reminder", runState: "failed", settledAt: 42, readAt: 10 })];
+  renderBoard({ snapshot: () => snapshot }, undefined, { sidebarDraftThreadIds: ["thr-reminder"] });
+  await screen.findByText("Remember failure");
+  expect(within(columnOf("Reminder")).getByText("Remember failure")).toBeTruthy();
+});
+
+test("dropping an unlinked card on Reminder keeps it in place", async () => {
+  const snapshot = cloneSnapshot();
+  snapshot.stages.push({ id: "stage-reminder", name: "Reminder", position: 600, systemRole: null });
+  const view = renderBoard({ snapshot: () => snapshot });
+  await screen.findByText("Queued card");
+  fireEvent.dragStart(cardElement("Queued card"), { dataTransfer: dragTransfer() });
+  fireEvent.drop(columnOf("Reminder"), { dataTransfer: dragTransfer() });
+  expect(view.inspection.rpcCalls.filter((call) => call.method === "moveTask")).toHaveLength(0);
+  expect(within(columnOf("To Do")).getByText("Queued card")).toBeTruthy();
+});
+
+test("a settled failed draft can move to Reminder without reopening", async () => {
+  const snapshot = cloneSnapshot();
+  snapshot.stages.push({ id: "stage-reminder", name: "Reminder", position: 600, systemRole: null });
+  snapshot.tasks = [task({ number: 99, title: "Failed draft", stageId: "stage-todo", threadId: "thr-draft", runState: "failed", settledAt: 42 })];
+  const view = renderBoard({ snapshot: () => snapshot, moveTask: () => ({ ok: true }) }, undefined, { sidebarDraftThreadIds: ["thr-draft"] });
+  await screen.findByText("Failed draft");
+  fireEvent.dragStart(cardElement("Failed draft"), { dataTransfer: dragTransfer() });
+  fireEvent.drop(columnOf("Reminder"), { dataTransfer: dragTransfer() });
+  await waitFor(() => expect(view.inspection.rpcCalls).toContainEqual({ method: "moveTask", input: { number: 99, stageId: "stage-reminder" } }));
+  expect(view.inspection.rpcCalls.filter((call) => call.method === "setTaskSettled")).toHaveLength(0);
+});
+
+test("a linked settled card can move to Reminder from the Settled view", async () => {
+  const snapshot = cloneSnapshot();
+  snapshot.stages.push({ id: "stage-reminder", name: "Reminder", position: 600, systemRole: null });
+  const view = renderBoard({ snapshot: () => snapshot, moveTask: () => ({ ok: true }) });
+  await screen.findByText("Live task");
+  fireEvent.click(screen.getByRole("button", { name: /^Settled\s*1$/ }));
+  await screen.findByText("Settled card");
+  await openCardMenu(4);
+  fireEvent.pointerMove(screen.getByRole("menuitem", { name: "Move to" }), { pointerType: "mouse" });
+  fireEvent.click(await screen.findByRole("menuitemradio", { name: "Reminder" }));
+  await waitFor(() => expect(view.inspection.rpcCalls).toContainEqual({ method: "moveTask", input: { number: 4, stageId: "stage-reminder" } }));
+  expect(view.inspection.rpcCalls.filter((call) => call.method === "setTaskSettled")).toHaveLength(0);
+});
+
+test("the move menu omits Reminder for an unlinked card", async () => {
+  const snapshot = cloneSnapshot();
+  snapshot.stages.push({ id: "stage-reminder", name: "Reminder", position: 600, systemRole: null });
+  renderBoard({ snapshot: () => snapshot });
+  await screen.findByText("Queued card");
+  await openCardMenu(3);
+  fireEvent.pointerMove(screen.getByRole("menuitem", { name: "Move to" }), { pointerType: "mouse" });
+  await screen.findByRole("menuitemradio", { name: "In Progress" });
+  expect(screen.queryByRole("menuitemradio", { name: "Reminder" })).toBeNull();
+});

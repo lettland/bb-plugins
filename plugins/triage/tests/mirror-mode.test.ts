@@ -4459,3 +4459,98 @@ test.each(["move", "delete"])("reconcile skips a %s card's removed stage and sti
   else expect(cardOf("stale-reconcile")).toBeUndefined();
   expect(cardOf("later-reconcile")).toMatchObject({ stage_id: "stage-completed", run_state: "completed", settled_at: null });
 });
+
+test.each(["manual", "mirror"] as const)("Reminder preserves %s placement across lifecycle and archive", async (origin) => {
+  const { mirror, importManual, rpc, cardOf, cards, ctx, known, emit, emitNative } = await startQuiet();
+  const thread = thr(`reminder-${origin}`, { status: "idle" });
+  const card = origin === "manual" ? await importManual(thread) : await mirror(thread);
+  ctx.list = worldOf([thread]).handler;
+  await emitNative("thread.idle", { thread });
+  expect(cardOf(thread.id).stage_id).not.toBe("stage-reminder");
+  await rpc("moveTask", { number: card.number, stageId: "stage-reminder" });
+  await emitNative("thread.idle", { thread });
+  expect(cardOf(thread.id).stage_id).toBe("stage-reminder");
+  expect((await rpc("snapshot")).tasks.some((task: any) => task.number === card.number)).toBe(true);
+  const archived = { ...thread, archivedAt: 1 };
+  known.set(thread.id, archived);
+  ctx.list = worldOf([archived]).handler;
+  await emit("thread.archived", { thread: archived });
+  expect((await rpc("snapshot")).tasks.some((task: any) => task.number === card.number)).toBe(false);
+  known.set(thread.id, thread);
+  ctx.list = worldOf([thread]).handler;
+  await emitNative("thread.unarchived", { thread });
+  expect((await rpc("snapshot")).tasks.find((task: any) => task.number === card.number)?.stageId).toBe("stage-reminder");
+  await emit("thread.deleted", { thread: { ...thread, deletedAt: 1 } });
+  if (origin === "manual") expect(cards().find((row: any) => row.id === card.id)).toMatchObject({ thread_id: null, stage_id: "stage-todo", run_state: "stopped" });
+  else expect(cards().find((row: any) => row.id === card.id)).toBeUndefined();
+});
+
+test("Reminder snapshot excludes unlinked and unknown threads", async () => {
+  const { db, importManual, rpc, ctx } = await startQuiet();
+  const thread = thr("missing-reminder");
+  const card = await importManual(thread);
+  await rpc("moveTask", { number: card.number, stageId: "stage-reminder" });
+  ctx.list = worldOf([]).handler;
+  expect((await rpc("snapshot")).tasks.some((task: any) => task.id === card.id)).toBe(false);
+  db.prepare("UPDATE triage_tasks SET thread_id = NULL WHERE id = ?").run(card.id);
+  expect((await rpc("snapshot")).tasks.some((task: any) => task.id === card.id)).toBe(false);
+});
+
+test.each(["moveTask", "updateTask"])("Reminder %s rejects a thread unlinked during lookup", async (method) => {
+  const { db, harness, importManual, rpc } = await startQuiet();
+  const thread = thr("reminder-race");
+  const card = await importManual(thread);
+  const gate = deferred<any>();
+  let lookupStarted = false;
+  harness.inspection.sdk.stub("threads.get", async () => { lookupStarted = true; return gate.promise; });
+  const before = db.prepare("SELECT stage_id FROM triage_tasks WHERE id = ?").get(card.id) as { stage_id: string };
+  const pending = rpc(method, method === "moveTask"
+    ? { number: card.number, stageId: "stage-reminder" }
+    : { number: card.number, stageId: "stage-reminder", title: card.title, description: card.description, scheduledAt: null });
+  await until(() => lookupStarted);
+  db.prepare("UPDATE triage_tasks SET thread_id = NULL WHERE id = ?").run(card.id);
+  gate.resolve(thread);
+  await expect(pending).rejects.toThrow("Only unarchived threads can move to Reminder");
+  expect(db.prepare("SELECT stage_id FROM triage_tasks WHERE id = ?").get(card.id)).toEqual(before);
+});
+
+test("a no-ID background event updates Reminder when the descendant response omits the root", async () => {
+  const context = await startQuiet();
+  const root = thr("reminder-background-missing-tree", { status: "idle" });
+  const card = await context.importManual(root);
+  await context.rpc("moveTask", { number: card.number, stageId: "stage-reminder" });
+  const active = { ...root, activity: { ...root.activity, activeBackgroundCommandCount: 1 } };
+  context.known.set(root.id, active);
+  context.ctx.list = worldOf([active]).handler;
+  context.harness.inspection.sdk.stub("threads.experimental_listDescendants", async () => ({ threads: [] }));
+  context.ctx.readChanged({ changes: [], metadata: { backgroundActivityChanged: true } });
+  await until(() => context.cardOf(root.id).run_state === "working");
+  expect(context.cardOf(root.id).stage_id).toBe("stage-reminder");
+});
+
+test("background descendant keeps Reminder active when the root is absent from list", async () => {
+  const context = await startQuiet();
+  const root = thr("reminder-background-unlisted-root", { status: "idle" });
+  const child = thr("reminder-background-unlisted-child", { status: "idle", parentThreadId: root.id, activity: { activeBackgroundCommandCount: 1, activeBackgroundAgentCount: 0 } });
+  const card = await context.importManual(root);
+  await context.rpc("moveTask", { number: card.number, stageId: "stage-reminder" });
+  context.known.set(child.id, child);
+  context.ctx.list = worldOf([child]).handler;
+  context.harness.inspection.sdk.stub("threads.experimental_listDescendants", async ({ threadIds }: DescendantArgs) => ({ threads: threadIds.map((threadId) => ({ threadId, descendantIds: [child.id] })) }));
+  await context.emit("thread.idle", { thread: root });
+  expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-reminder", run_state: "working" });
+});
+
+test("backfill keeps a Reminder child active without marking its untracked ancestor", async () => {
+  const context = await startQuiet({ settings: { autoCardThreads: false } });
+  const root = thr("reminder-untracked-parent", { status: "idle" });
+  const child = thr("reminder-tracked-child", { status: "idle", parentThreadId: root.id, activity: { activeBackgroundCommandCount: 1, activeBackgroundAgentCount: 0 } });
+  context.known.set(root.id, root);
+  const card = await context.importManual(child);
+  await context.rpc("moveTask", { number: card.number, stageId: "stage-reminder" });
+  context.ctx.list = worldOf([child]).handler;
+  await context.harness.behavior.setSettings({ autoCardThreads: true });
+  await until(() => context.cardOf(child.id).run_state === "working");
+  expect(context.cardOf(child.id)).toMatchObject({ stage_id: "stage-reminder", run_state: "working" });
+  expect(context.cardOf(root.id)).toBeUndefined();
+});

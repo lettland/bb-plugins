@@ -15,7 +15,7 @@ import {
 } from "@/lib/triage-format";
 import { claimTriageRefresh } from "@/lib/triage-mounts";
 import { useTriage } from "@/lib/triage-store";
-import type { Stage, Task } from "@/lib/triage-types";
+import { REMINDER_STAGE_ID, type Stage, type Task } from "@/lib/triage-types";
 
 type ThreadTask = Task & { threadId: string };
 
@@ -29,13 +29,13 @@ export function TriageThreadsSection({ threadId }: { threadId?: string }) {
   });
   if (!snapshot) return null;
 
-  const groups = GROUP_ROLES.flatMap((role) => {
-    const stage = snapshot.stages.find((candidate) => candidate.systemRole === role);
+  const groups = [...GROUP_ROLES, REMINDER_STAGE_ID].flatMap((role) => {
+    const stage = snapshot.stages.find((candidate) => role === REMINDER_STAGE_ID ? candidate.id === role : candidate.systemRole === role);
     if (!stage) return [];
     const rows = snapshot.tasks
       .filter((task): task is ThreadTask => task.stageId === stage.id && task.threadId !== null)
-      .filter((task) => task.runState !== "failed" || keepsFailedCardVisible(task, snapshot.stages))
-      .filter((task) => task.settledAt === null)
+      .filter((task) => stage.id === REMINDER_STAGE_ID || task.runState !== "failed" || keepsFailedCardVisible(task, snapshot.stages))
+      .filter((task) => stage.id === REMINDER_STAGE_ID || task.settledAt === null)
       .sort((a, b) => b.updatedAt - a.updatedAt);
     return rows.length === 0 ? [] : [{ stage, rows }];
   });

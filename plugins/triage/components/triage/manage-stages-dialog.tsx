@@ -1,3 +1,4 @@
+import { REMINDER_STAGE_ID } from "@/lib/triage-types";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -138,7 +139,7 @@ function ManageStagesDialog({ stages, rpc, onChanged }: ManageStagesDialogProps)
                 aria-label={`Stage name ${stage.name}`}
               />
               <div className="flex shrink-0 items-center">
-                {!stage.systemRole ? (
+                {!stage.systemRole && stage.id !== REMINDER_STAGE_ID ? (
                   <AlertDialog>
                     <AlertDialogTrigger asChild>
                       <Button
