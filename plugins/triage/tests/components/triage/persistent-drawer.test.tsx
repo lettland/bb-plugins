@@ -412,7 +412,7 @@ describe("PersistentResponsiveDrawerShell", () => {
     requestAnimationFrame.mockRestore();
   });
 
-  it("closes when the handle moves past the drag threshold", () => {
+  it("closes past the drag threshold even when the move shares the start timestamp", () => {
     mockPointerCoarse(true);
     const onOpenChange = vi.fn();
     render(
@@ -438,6 +438,7 @@ describe("PersistentResponsiveDrawerShell", () => {
     });
     handle.setPointerCapture = vi.fn();
 
+    vi.spyOn(Date, "now").mockReturnValue(100);
     fireEvent.pointerDown(handle, {
       button: 0,
       clientY: 200,

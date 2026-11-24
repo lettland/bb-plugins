@@ -3286,6 +3286,29 @@ test("background work keeps an idle root command in progress", async () => {
   expect(context.cardOf(root.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
 });
 
+// BB 0.50.1 / Triage 0.8.0 card #3426: an idle Claude thread reported one
+// active workflow and zero background commands or agents in threads.list.
+test("a background workflow keeps its idle thread in progress until completion", async () => {
+  const context = await startQuiet();
+  const active = thr("background-workflow", { status: "active" });
+  const idle = thr(active.id, { status: "idle", activity: { activeWorkflowCount: 1 } });
+  const world = worldOf([active]);
+  context.ctx.list = world.handler;
+  await context.mirror(active);
+  expect(context.cardOf(active.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working" });
+
+  world.map.set(idle.id, idle);
+  await context.emitNative("thread.idle", { thread: idle });
+  expect(context.cardOf(idle.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+  await context.rpc("snapshot");
+  expect(context.cardOf(idle.id)).toMatchObject({ stage_id: "stage-progress", run_state: "working", settled_at: null });
+
+  world.map.set(idle.id, thr(idle.id, { status: "idle" }));
+  context.ctx.readChanged({ id: idle.id, changes: [], metadata: { eventTypes: ["item/backgroundTask/completed"] } });
+  await until(() => context.cardOf(idle.id).run_state === "completed");
+  expect(context.cardOf(idle.id)).toMatchObject({ stage_id: "stage-completed", run_state: "completed" });
+});
+
 test("background work on a hidden idle descendant lasts until the last job finishes", async () => {
   const context = await startQuiet();
   const root = thr("background-root", { status: "idle" });

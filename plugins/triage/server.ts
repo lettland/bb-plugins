@@ -279,7 +279,9 @@ const THREAD_LIST_BATCH = 200;
 
 const hasBackgroundWork = (thread: ThreadListItem) =>
   thread.archivedAt === null && thread.deletedAt === null &&
-  (thread.activity.activeBackgroundCommandCount > 0 || thread.activity.activeBackgroundAgentCount > 0);
+  (thread.activity.activeBackgroundCommandCount > 0 ||
+    thread.activity.activeBackgroundAgentCount > 0 ||
+    thread.activity.activeWorkflowCount > 0);
 
 const listBackgroundRoots = async (
   threads: BbPluginApi["sdk"]["threads"],
