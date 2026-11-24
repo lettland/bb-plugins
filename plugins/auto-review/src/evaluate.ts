@@ -1,6 +1,7 @@
-import { effectiveConfig, readProjectConfig, type FireReason } from "./config.js";
+import type { FireReason } from "./config.js";
 import {
   queuedRowExists,
+  readThreadConfig,
   recordFire,
   type EffectiveConfig,
   type FireExtra,
@@ -299,8 +300,7 @@ export async function evaluate(
   if (state.turnDecided !== true) {
     await writeState(bb, thread.id, { turnDecided: true });
   }
-  const project = await readProjectConfig(bb, thread.projectId);
-  const config = effectiveConfig(ctx.globals, project);
+  const config = await readThreadConfig(ctx, thread.projectId, thread.id);
 
   const turnStart = await eligibleTurnStart(ctx, thread, state, config);
   if (turnStart === null) {

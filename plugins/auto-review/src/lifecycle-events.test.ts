@@ -70,7 +70,7 @@ function fakeBb(metadata: Record<string, Record<string, unknown>> = {}) {
 }
 
 const ctx = (bb: BbPluginApi) =>
-  ({ bb, settings: {}, globals: { enabled: true, mergeEligibleMainlines: ["master"], reviewMode: "auto" } }) as unknown as ReviewContext;
+  ({ bb, settings: {}, threadOptOuts: new Set<string>(), globals: { enabled: true, mergeEligibleMainlines: ["master"], reviewMode: "auto" } }) as unknown as ReviewContext;
 
 describe("unlatch", () => {
   it("clears the latch, the deferral and the review record", async () => {
@@ -93,11 +93,21 @@ describe("unlatch", () => {
   });
 
   it("a deleted thread loses its findings and baselines too", async () => {
-    const { bb, deletedKeys } = fakeBb();
-    await unlatch(ctx(bb), "thread-1", true);
+    const { bb, deletedKeys, store } = fakeBb();
+    const review = ctx(bb);
+    review.threadOptOuts.add("thread-1");
+    store.set("thread-review-opt-out:thread-1", true);
+    await unlatch(review, "thread-1");
+    expect(store.get("thread-review-opt-out:thread-1")).toBe(true);
+    await unlatch(review, "thread-1", true);
     expect(deletedKeys).toEqual(
-      expect.arrayContaining([expect.stringContaining("finding"), expect.stringContaining("baseline")]),
+      expect.arrayContaining([
+        expect.stringContaining("finding"),
+        expect.stringContaining("baseline"),
+        "thread-review-opt-out:thread-1",
+      ]),
     );
+    expect(review.threadOptOuts.has("thread-1")).toBe(false);
   });
 });
 

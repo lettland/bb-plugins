@@ -3,6 +3,7 @@ import type { RefObject } from "react";
 import {
   Markdown,
   definePluginApp,
+  useComposer,
   useRealtime,
   useRealtimeConnectionState,
   useRpc,
@@ -280,6 +281,90 @@ function statusColor(status: ReviewStatus): string {
 // without pulling in the server's dependencies.
 function reviewChannel(threadId: string): string {
   return `auto-review:thread:${threadId}`;
+}
+
+function ThreadReviewPreference({ threadId }: { threadId: string }) {
+  const rpc = useRpc<AutoReviewRpcContract>();
+  const connection = useRealtimeConnectionState();
+  const [preference, setPreference] = useState<boolean | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const revision = useRef(0);
+  const savingRef = useRef(false);
+  const reloadRef = useRef(false);
+  const previousConnection = useRef(connection);
+
+  const load = useCallback(async (preserveError = false) => {
+    if (savingRef.current) {
+      reloadRef.current = true;
+      return;
+    }
+    const current = ++revision.current;
+    try {
+      const result = await rpc.call("getThreadReviewPreference", { threadId });
+      if (current !== revision.current) return;
+      setPreference(result?.skipAutoReview ?? null);
+      if (!preserveError) setError(null);
+    } catch (err) {
+      if (current !== revision.current) return;
+      setError(describeError(err));
+    } finally {
+      if (current === revision.current) setLoading(false);
+    }
+  }, [rpc, threadId]);
+
+  useEffect(() => {
+    void load();
+    return () => { revision.current++; };
+  }, [load]);
+  useRealtime(reviewChannel(threadId), () => void load());
+  useEffect(() => {
+    const previous = previousConnection.current;
+    previousConnection.current = connection;
+    if (connection === "connected" && previous !== "connected") void load();
+  }, [connection, load]);
+
+  const save = async (skipAutoReview: boolean) => {
+    savingRef.current = true;
+    const current = ++revision.current;
+    setSaving(true);
+    setError(null);
+    let saved = false;
+    try {
+      const result = await rpc.call("setThreadReviewPreference", { threadId, skipAutoReview });
+      if (current !== revision.current) return;
+      setPreference(result.skipAutoReview);
+      saved = true;
+    } catch (err) {
+      if (current !== revision.current) return;
+      setError(describeError(err));
+    } finally {
+      if (current === revision.current) {
+        savingRef.current = false;
+        setSaving(false);
+        if (saved || reloadRef.current) void load(!saved);
+        reloadRef.current = false;
+      }
+    }
+  };
+
+  if (!loading && preference === null && error === null) return null;
+  return (
+    <div style={{ fontSize: 12, color: SOFT_INK }}>
+      <label>
+        <input type="checkbox" checked={preference ?? false} disabled={loading || saving || preference === null}
+          onChange={(event) => void save(event.target.checked)} />{" "}
+        Skip auto-review for this thread
+      </label>
+      {error === null ? null : <span role="alert" style={{ color: "var(--destructive-text)" }}> {error}</span>}
+    </div>
+  );
+}
+
+function ThreadReviewPreferenceBanner() {
+  const { scope } = useComposer();
+  return scope.kind === "thread" ? <ThreadReviewPreference key={scope.threadId} threadId={scope.threadId} /> : null;
 }
 
 function relativeTime(at: number, now: number): string {
@@ -653,6 +738,11 @@ function PlanApproval(props: PluginPendingInteractionProps) {
 }
 
 export default definePluginApp((app) => {
+  app.composer.customize({
+    id: "thread-review-preference",
+    scopes: ["thread"],
+    banners: [{ id: "thread-review-preference", chrome: "bare", component: ThreadReviewPreferenceBanner }],
+  });
   app.slots.settingsSection({
     id: "project-auto-approve",
     title: "Per-project settings",

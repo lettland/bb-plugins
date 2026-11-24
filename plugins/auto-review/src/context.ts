@@ -3,6 +3,7 @@ import {
   defineAutoReviewSettings,
   effectiveConfig,
   globalDefaultsFrom,
+  readProjectConfig,
   writeLastFire,
   type FireReason,
   type GlobalDefaults,
@@ -19,11 +20,15 @@ export type FireExtra = Partial<Omit<LastFire, "at" | "outcome" | "reason" | "pl
 
 export type EffectiveConfig = ReturnType<typeof effectiveConfig>;
 
+const THREAD_OPT_OUT_PREFIX = "thread-review-opt-out:";
+
 /** Per-plugin-instance state shared by the auto-review handlers; `globals` follows the settings. */
 export interface ReviewContext {
   bb: BbPluginApi;
   settings: ReturnType<typeof defineAutoReviewSettings>;
   globals: GlobalDefaults;
+  // Private KV keys, separate from thread metadata that the agent can write.
+  threadOptOuts: Set<string>;
 }
 
 export async function createReviewContext(bb: BbPluginApi): Promise<ReviewContext> {
@@ -32,11 +37,36 @@ export async function createReviewContext(bb: BbPluginApi): Promise<ReviewContex
     bb,
     settings,
     globals: globalDefaultsFrom(await settings.get()),
+    threadOptOuts: new Set(
+      (await bb.storage.kv.list(THREAD_OPT_OUT_PREFIX)).map((key) => key.slice(THREAD_OPT_OUT_PREFIX.length)),
+    ),
   };
   settings.onChange((next) => {
     ctx.globals = globalDefaultsFrom(next);
   });
   return ctx;
+}
+
+/** Call under the thread lock so the persisted choice and live lookup agree. */
+export async function setThreadOptOut(ctx: ReviewContext, threadId: string, skip: boolean): Promise<void> {
+  const key = THREAD_OPT_OUT_PREFIX + threadId;
+  if (skip) {
+    await ctx.bb.storage.kv.set(key, true);
+    ctx.threadOptOuts.add(threadId);
+  } else {
+    await ctx.bb.storage.kv.delete(key);
+    ctx.threadOptOuts.delete(threadId);
+  }
+}
+
+export async function readThreadConfig(
+  ctx: ReviewContext,
+  projectId: string,
+  eligibleThreadId: string | null,
+): Promise<EffectiveConfig> {
+  const project = await readProjectConfig(ctx.bb, projectId);
+  const skipAutoReview = eligibleThreadId !== null && ctx.threadOptOuts.has(eligibleThreadId);
+  return effectiveConfig(ctx.globals, project, skipAutoReview);
 }
 
 export async function recordFire(

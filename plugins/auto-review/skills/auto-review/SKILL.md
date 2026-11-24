@@ -54,6 +54,13 @@ are unchanged.
 
 It ships **enabled** (opt-out).
 
+To pause auto-review for an open top-level thread, check **Skip auto-review for
+this thread** above its composer. The setting persists for that thread. Clear
+the checkbox to follow the project's settings again. Review prompts BB already
+received can still run. Subthreads already skip their own automatic reviews
+while attached. A subthread that becomes top-level follows its own saved choice
+or the project's settings. Provider hooks still follow their own configuration.
+
 ## Plan review
 
 A plan gets reviewed before the user sees it, on every provider, through one of two paths

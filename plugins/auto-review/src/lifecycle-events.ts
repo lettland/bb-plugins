@@ -1,4 +1,4 @@
-import type { ReviewContext } from "./context.js";
+import { setThreadOptOut, type ReviewContext } from "./context.js";
 import { deleteBaselines } from "./baseline-store.js";
 import { removeDeferral } from "./deferrals.js";
 import { deleteFindings } from "./findings-store.js";
@@ -25,6 +25,9 @@ export function unlatch(
 ): Promise<void> {
   const { bb } = ctx;
   return withThreadLock(threadId, async () => {
+    if (deleted && ctx.threadOptOuts.has(threadId)) {
+      await setThreadOptOut(ctx, threadId, false);
+    }
     const state = await readState(bb, threadId);
     if (!deleted) {
       await recordUnfinishedReview(bb, threadId, state, "gone");

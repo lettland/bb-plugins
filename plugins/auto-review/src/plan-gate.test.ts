@@ -114,6 +114,7 @@ function fakeBb(seed: Record<string, unknown> = {}) {
   const ctx = {
     bb,
     settings: {},
+    threadOptOuts: new Set<string>(),
     globals: { enabled: true, mergeEligibleMainlines: ["master"], reviewMode: "self" },
   } as unknown as ReviewContext;
   const thread = {

@@ -18,10 +18,9 @@ import {
   stagePlanPending,
   writeReleasedPlan,
 } from "./baseline-store.js";
-import { effectiveConfig, readProjectConfig } from "./config.js";
 import { buildPlanApprovalPayload, planSha256Of } from "./plan-approval-payload.js";
 import { readPlanFileForForm } from "./plan-file.js";
-import { recordFire, type EffectiveConfig, type ReviewContext } from "./context.js";
+import { readThreadConfig, recordFire, type EffectiveConfig, type ReviewContext } from "./context.js";
 import { tryCaptureSinceSeq } from "./detect.js";
 import { isNativePlanGateProvider } from "./gate.js";
 import {
@@ -340,8 +339,7 @@ async function presentPlan(
   const { bb } = review;
   const outcome = await withThreadLock<PluginAgentToolResult | NeedsForm>(ctx.threadId, async () => {
     const state = await readState(bb, ctx.threadId);
-    const project = await readProjectConfig(bb, ctx.projectId);
-    const config = effectiveConfig(review.globals, project);
+    const config = await readThreadConfig(review, ctx.projectId, ctx.threadId);
     // The mode the thread's instructions were written with; the live setting only before one is stored.
     const formMode = state.presentPlanFormMode ?? config.planApprovalForm;
     if (!config.enabled && !formMode) {
@@ -398,13 +396,10 @@ async function presentPlan(
 // instruction: a child or plugin-spawned thread would stop for an approval
 // nobody reviews or may be watching. The same top-level threads get
 // `ReportReview`, with or without the global switch (see below). The
-// callback must be synchronous, so the plan-first part follows the global
-// switch only (the plan approval form's instruction variant follows its global
-// setting the same way, resolved once per thread and stored in its metadata, so
-// a toggle applies to threads started after it): a project or thread that turned
-// auto-review off still gets one of these, and its plan then goes to the
-// user unreviewed (or, on `PresentPlan`, is told review is off here — see
-// `presentPlan` above).
+// callback is synchronous, so it has the global setting and the cached thread
+// opt-outs. Project overrides are checked when a plan is presented. Keep the
+// tools available to an opted-out thread: its session may still have the old
+// instructions, or may have a review to report from before the opt-out.
 //
 // The claude-code family (`claude-code` and its `claude-code-<slug>` profile
 // providers, which share one bridge) is the only set of providers whose plan
@@ -437,13 +432,17 @@ function agentConfiguration(
   if (!review.globals.enabled) {
     return { tools: [REPORT_REVIEW_TOOL_NAME], skills: ["auto-review"] };
   }
-  return isNativePlanGateProvider(context.provider.id)
+  const configuration = isNativePlanGateProvider(context.provider.id)
     ? {
         tools: [REPORT_REVIEW_TOOL_NAME],
         skills: ["auto-review"],
         instructions: PLAN_FIRST_INSTRUCTIONS,
       }
     : presentPlanConfiguration(review, context);
+  if (review.threadOptOuts.has(context.thread.id)) {
+    return { tools: configuration.tools, skills: configuration.skills };
+  }
+  return configuration;
 }
 
 /**

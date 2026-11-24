@@ -43,7 +43,7 @@ function context(getThread: () => Promise<unknown>, kvList: string[] = []) {
       info: () => undefined,
     },
   } as unknown as BbPluginApi;
-  const ctx = { bb, settings: {}, globals: { enabled: true, mergeEligibleMainlines: ["master"], reviewMode: "auto" } } as unknown as ReviewContext;
+  const ctx = { bb, settings: {}, threadOptOuts: new Set<string>(), globals: { enabled: true, mergeEligibleMainlines: ["master"], reviewMode: "auto" } } as unknown as ReviewContext;
   return { ctx, warnings, metadata };
 }
 

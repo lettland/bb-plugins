@@ -4538,6 +4538,158 @@ describe("auto-review plugin", () => {
     await host.harness.dispose();
   });
 
+  describe("the thread composer opt-out", () => {
+    const getPreference = (host: Host, threadId = THREAD_ID) =>
+      host.harness.callRpc("getThreadReviewPreference", { threadId });
+    const setPreference = (host: Host, skipAutoReview: boolean, threadId = THREAD_ID) =>
+      host.harness.callRpc("setThreadReviewPreference", { threadId, skipAutoReview });
+
+    it("persists across reload, takes precedence over the project and restores code review when cleared", async () => {
+      const initial = createHost();
+      await plugin(initial.bb);
+      await initial.harness.runCli(["enable", "--project", "project-1"]);
+      expect(await getPreference(initial)).toEqual({ skipAutoReview: false });
+      expect(await setPreference(initial, true)).toEqual({ skipAutoReview: true });
+      expect(await setPreference(initial, true)).toEqual({ skipAutoReview: true });
+
+      const host = { ...initial, ...(await initial.harness.lifecycle.reload(plugin)) };
+      expect(await getPreference(host)).toEqual({ skipAutoReview: true });
+      expect(await getPreference(host, SIBLING_ID)).toEqual({ skipAutoReview: false });
+      const status = await host.harness.runCli(["status", THREAD_ID, "--json"]);
+      expect(JSON.parse(status.stdout)).toMatchObject({ enabled: false, planGate: false });
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.sends).toEqual([]);
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "disabled" });
+
+      expect(await setPreference(host, false)).toEqual({ skipAutoReview: false });
+      expect(await getPreference(host)).toEqual({ skipAutoReview: false });
+      await emitActive(host);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      await host.harness.dispose();
+    });
+
+    it("discards a parked review even when the checkbox is immediately cleared", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await emitActive(host);
+      Object.assign(host.metadata, { phase: "deferred", deferredSince: Date.now() });
+      await host.bb.storage.kv.set(`deferral:${THREAD_ID}`, {
+        threadId: THREAD_ID, projectId: "project-1", environmentId: ENV_ID, providerId: "claude-code",
+      });
+
+      await setPreference(host, true);
+      await setPreference(host, false);
+      expect(host.metadata).toMatchObject({ phase: "idle" });
+      expect(host.metadata.turnStart).toBeUndefined();
+      expect(await host.bb.storage.kv.list("deferral:")).toEqual([]);
+      await emitIdle(host);
+      expect(host.sends).toEqual([]);
+      await host.harness.dispose();
+    });
+
+    it("keeps the opt-out effective through a failed parked-review cleanup and retries on clear", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await emitActive(host);
+      Object.assign(host.metadata, { phase: "deferred", deferredSince: Date.now() });
+      const readMetadata = vi.fn<() => Promise<Record<string, unknown>>>()
+        .mockRejectedValueOnce(new Error("metadata unavailable"))
+        .mockRejectedValueOnce(new Error("metadata unavailable"))
+        .mockImplementation(async () => host.metadata);
+      host.harness.sdk.stub("threads.getPluginMetadata", readMetadata);
+
+      expect(await setPreference(host, true)).toEqual({ skipAutoReview: true });
+      expect(warnings(host)).toContain(`auto-review: could not clear the parked review for ${THREAD_ID}: Error: metadata unavailable`);
+      await expect(setPreference(host, false)).rejects.toThrow("metadata unavailable");
+      expect(await getPreference(host)).toEqual({ skipAutoReview: true });
+      expect(await setPreference(host, false)).toEqual({ skipAutoReview: false });
+      expect(host.metadata.phase).toBe("idle");
+      await host.harness.dispose();
+    });
+
+    it("skips the native plan gate and fresh agent instructions while opted out", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await setPreference(host, true);
+      for (const id of ["claude-code", "codex"]) {
+        const agent = await host.harness.resolveAgentConfiguration(makePluginAgentConfigurationContext({
+          thread: { id: THREAD_ID },
+          provider: { id },
+        }));
+        expect(agent.instructions).toBeNull();
+      }
+
+      await emitPlan(host);
+      expect(host.sends).toEqual([]);
+      expect(host.resolutions).toEqual([]);
+      expect(host.metadata.planReviewArmedAt).toBeUndefined();
+
+      await setPreference(host, false);
+      await emitPlan(host);
+      expect(host.sends).toHaveLength(1);
+      expect(host.resolutions).toHaveLength(1);
+      await host.harness.dispose();
+    });
+
+    it("keeps subthreads exempt at any depth and follows the project after detaching", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      const descendants = [
+        { id: "child", status: "idle", parentThreadId: THREAD_ID },
+        { id: "grandchild", status: "idle", parentThreadId: "child" },
+      ];
+      host.setEnvThreads([{ id: THREAD_ID, status: "idle" }, ...descendants]);
+
+      for (const skip of [false, true]) {
+        await setPreference(host, skip);
+        for (const { id, parentThreadId } of descendants) {
+          expect(await getPreference(host, id)).toBeNull();
+          const child = { ...thread(id), parentThreadId };
+          await host.harness.emitThreadEvent("thread.active", { thread: child });
+          await host.harness.emitThreadEvent("thread.idle", { thread: child, lastAssistantText: null });
+          await host.harness.emitThreadEvent("interaction.pending", {
+            thread: child,
+            interaction: { ...planInteraction(), threadId: id },
+          } as never);
+        }
+      }
+      expect(host.sends).toEqual([]);
+      expect(host.resolutions).toEqual([]);
+      await expect(setPreference(host, true, "child")).rejects.toThrow("eligible top-level thread");
+      host.setEnvThreads([{ id: "child", status: "idle" }]);
+      expect(await getPreference(host, "child")).toEqual({ skipAutoReview: false });
+      const detached = await host.harness.runCli(["status", "child", "--json"]);
+      expect(JSON.parse(detached.stdout)).toMatchObject({ enabled: true, planGate: true });
+
+      host.setEnvThreads([{ id: "child", status: "idle", deletedAt: 1 }]);
+      expect(await getPreference(host, "child")).toBeNull();
+      await host.harness.dispose();
+    });
+
+    it("restores a thread's own saved choice when it becomes top-level again", async () => {
+      const host = createHost();
+      await plugin(host.bb);
+      await setPreference(host, true, SIBLING_ID);
+
+      host.setEnvThreads([
+        { id: THREAD_ID, status: "idle" },
+        { id: SIBLING_ID, status: "idle", parentThreadId: THREAD_ID },
+      ]);
+      expect(await getPreference(host, SIBLING_ID)).toBeNull();
+      const attached = await host.harness.runCli(["status", SIBLING_ID, "--json"]);
+      expect(JSON.parse(attached.stdout)).toMatchObject({ enabled: true, planGate: false });
+
+      host.setEnvThreads([{ id: SIBLING_ID, status: "idle" }]);
+      expect(await getPreference(host, SIBLING_ID)).toEqual({ skipAutoReview: true });
+      const detached = await host.harness.runCli(["status", SIBLING_ID, "--json"]);
+      expect(JSON.parse(detached.stdout)).toMatchObject({ enabled: false, planGate: false });
+      expect(await getPreference(host)).toEqual({ skipAutoReview: false });
+      await host.harness.dispose();
+    });
+  });
+
   it("follows a global settings change without a reload", async () => {
     const host = createHost();
     await plugin(host.bb);
@@ -6088,10 +6240,14 @@ describe("auto-review plugin", () => {
       });
     });
 
-    it("tells the agent review is off, without touching state, when auto-review is disabled", async () => {
+    it.each(["project", "thread"])("tells the agent review is off when disabled for the %s", async (scope) => {
       const host = createHost();
       await plugin(host.bb);
-      await host.harness.runCli(["disable", "--project", "project-1"]);
+      if (scope === "project") {
+        await host.harness.runCli(["disable", "--project", "project-1"]);
+      } else {
+        await host.harness.callRpc("setThreadReviewPreference", { threadId: THREAD_ID, skipAutoReview: true });
+      }
       const result = await host.harness.callAgentTool(
         "PresentPlan",
         { planFilePath: "docs/plans/p.md" },

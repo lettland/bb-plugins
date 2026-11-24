@@ -130,7 +130,7 @@ function fakeBb(seed: Record<string, unknown> = {}) {
       info: () => undefined,
     },
   } as unknown as BbPluginApi;
-  const ctx = { bb, settings: {}, globals: { enabled: true, mergeEligibleMainlines: ["master"], reviewMode: "auto" } } as unknown as ReviewContext;
+  const ctx = { bb, settings: {}, threadOptOuts: new Set<string>(), globals: { enabled: true, mergeEligibleMainlines: ["master"], reviewMode: "auto" } } as unknown as ReviewContext;
   const thread = (environmentId: string | null) =>
     ({ id: "thr", projectId: "p", environmentId, providerId: "claude-code" }) as unknown as GateThreadLike;
   return { bb, ctx, warnings, kvWrites, metadata, thread };

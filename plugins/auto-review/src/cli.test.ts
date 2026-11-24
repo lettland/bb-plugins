@@ -82,13 +82,18 @@ function createCliHost(options: CliHostOptions = {}) {
 
   const fake = createFakePluginHost({ pluginId: "auto-review", sdk });
   const settings = defineAutoReviewSettings(fake.bb);
-  let globals: GlobalDefaults = options.globals ?? {
-    enabled: true,
-    mergeEligibleMainlines: ["master"],
-    reviewMode: "auto",
-    planApprovalForm: false,
+  const ctx = {
+    bb: fake.bb,
+    settings,
+    globals: options.globals ?? {
+      enabled: true,
+      mergeEligibleMainlines: ["master"],
+      reviewMode: "auto" as const,
+      planApprovalForm: false,
+    },
+    threadOptOuts: new Set<string>(),
   };
-  registerAutoReviewCli(fake.bb, settings, () => globals);
+  registerAutoReviewCli(ctx);
 
   return {
     ...fake,
@@ -96,7 +101,7 @@ function createCliHost(options: CliHostOptions = {}) {
     kv: fake.bb.storage.kv,
     metadataFor: known,
     setGlobals: (next: GlobalDefaults) => {
-      globals = next;
+      ctx.globals = next;
     },
     run: (argv: string[], threadId?: string) =>
       fake.harness.runCli(argv, threadId === undefined ? {} : { threadId }),

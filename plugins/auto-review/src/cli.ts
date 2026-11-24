@@ -3,7 +3,6 @@ import {
   effectiveConfig,
   readLastFire,
   readProjectConfig,
-  type GlobalDefaults,
   type LastFire,
 } from "./config.js";
 import { deleteReleasedPlans } from "./baseline-store.js";
@@ -11,9 +10,10 @@ import { setAutoApprove } from "./cli-auto-approve.js";
 import { reviewStatusView, showFindings } from "./cli-findings.js";
 import { lastParkedAtOf, lastParkedLine, providerParkReleaseText, skippedText } from "./cli-park.js";
 import { json } from "./cli-result.js";
-import { resolveProjectId, setScope, type SettingsHandle } from "./cli-scope.js";
+import { resolveProjectId, setScope } from "./cli-scope.js";
+import { readThreadConfig, type ReviewContext } from "./context.js";
 import { removeDeferral } from "./deferrals.js";
-import { isBusyStatus, planGateServes } from "./gate.js";
+import { isBusyStatus, passesThreadGate, planGateServes } from "./gate.js";
 import { recordUnfinishedReview } from "./review-outcome.js";
 import {
   activePlanHold,
@@ -114,11 +114,8 @@ function deferredWaitText(heldBy: string[] | undefined, canStandDown: boolean): 
   );
 }
 
-export function registerAutoReviewCli(
-  bb: BbPluginApi,
-  settings: SettingsHandle,
-  getGlobals: () => GlobalDefaults,
-): void {
+export function registerAutoReviewCli(ctx: ReviewContext): void {
+  const { bb, settings } = ctx;
   bb.cli.register({
     name: "auto-review",
     summary: "Inspect and control automatic post-turn review, commit, and merge",
@@ -305,8 +302,7 @@ export function registerAutoReviewCli(
         }
         const projectId = thread.projectId;
         const state = await readState(bb, threadId);
-        const project = await readProjectConfig(bb, projectId);
-        const config = effectiveConfig(getGlobals(), project);
+        const config = await readThreadConfig(ctx, projectId, passesThreadGate(thread) ? threadId : null);
         const planGate = planGateServes(thread, config);
         const lastFire = await readLastFire(bb, projectId, threadId);
         const review = await reviewStatusView(bb, threadId, state.phase);
@@ -367,7 +363,7 @@ export function registerAutoReviewCli(
             : await resolveProjectId(bb, context);
         const project =
           projectId === null ? {} : await readProjectConfig(bb, projectId);
-        const globals = getGlobals();
+        const globals = ctx.globals;
         const config = effectiveConfig(globals, project);
         const payload = {
           projectId,

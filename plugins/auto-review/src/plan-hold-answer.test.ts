@@ -68,7 +68,7 @@ function fakeBb(seed: Record<string, unknown> = {}) {  const warnings: string[] 
       info: (message: string) => infos.push(message),
     },
   } as unknown as BbPluginApi;
-  const ctx = { bb, settings: {}, globals: { enabled: true, mergeEligibleMainlines: ["master"], reviewMode: "auto" } } as unknown as ReviewContext;
+  const ctx = { bb, settings: {}, threadOptOuts: new Set<string>(), globals: { enabled: true, mergeEligibleMainlines: ["master"], reviewMode: "auto" } } as unknown as ReviewContext;
   const thread = { id: "thr", projectId: "p", environmentId: "env", providerId: "claude-code" } as unknown as GateThreadLike;
   return {
     bb,
@@ -115,9 +115,13 @@ describe("answerPlanHoldQuestion", () => {
     expect(stale.kvWrites).toEqual([]);
   });
 
-  it("leaves the question with the user when the project turned auto-review off", async () => {
+  it.each(["global", "thread"])("leaves the question with the user when auto-review is off for %s", async (scope) => {
     const off = fakeBb({ planDenied: { at: Date.now(), sinceSeq: 5 } });
-    (off.ctx as { globals: { enabled: boolean } }).globals.enabled = false;
+    if (scope === "global") {
+      off.ctx.globals.enabled = false;
+    } else {
+      off.ctx.threadOptOuts.add(off.thread.id);
+    }
     await answerPlanHoldQuestion(off.ctx, off.thread, question);
     expect(off.metadata().planDenied).toBeUndefined();
     expect(off.resolved).toEqual([]);

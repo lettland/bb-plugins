@@ -13,6 +13,6 @@ export default async function plugin(bb: BbPluginApi) {
   registerPlanGateEvents(ctx);
   registerTurnEvents(ctx);
   registerLifecycleEvents(ctx);
-  registerAutoReviewCli(bb, ctx.settings, () => ctx.globals);
+  registerAutoReviewCli(ctx);
   registerAutoReviewRpc(ctx);
 }

@@ -1,9 +1,9 @@
 import { basename } from "node:path";
 import type { PluginThreadEventPayloads } from "@get-bb/plugin-sdk";
 import { clearPlanBaseline, planScope, settlePlanBaseline, stagePlanPending } from "./baseline-store.js";
-import { effectiveConfig, readProjectConfig } from "./config.js";
 import {
   queuedRowExists,
+  readThreadConfig,
   recordFire,
   type EffectiveConfig,
   type GateThreadLike,
@@ -64,8 +64,7 @@ export async function gatePlan(
 ): Promise<void> {
   const { bb } = ctx;
   const state = await readState(bb, thread.id);
-  const project = await readProjectConfig(bb, thread.projectId);
-  const config = effectiveConfig(ctx.globals, project);
+  const config = await readThreadConfig(ctx, thread.projectId, thread.id);
   if (!planGateServes(thread, config)) {
     return;
   }

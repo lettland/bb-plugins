@@ -372,9 +372,10 @@ describe("PresentPlan with review disabled", () => {
     });
   });
 
-  it("honors a project disable and ignores auto-approval even for an armed review", async () => {
-    await withFormHost({ form: true }, async ({ host, settle, metadata, requestInput }) => {
-      await writeProjectConfig(host.bb, CTX.projectId, { enabled: false, autoApprovePlans: true });
+  it.each(["project", "thread"])("honors a %s disable even for an armed review", async (scope) => {
+    await withFormHost({ form: true }, async ({ host, review, settle, metadata, requestInput }) => {
+      await writeProjectConfig(host.bb, CTX.projectId, { enabled: scope !== "project", autoApprovePlans: true });
+      if (scope === "thread") review.threadOptOuts.add(CTX.threadId);
       expect(await settle({ approved: true })).toBe(PRESENT_PLAN_FORM_APPROVED_MESSAGE);
       expect(requestInput.mock.calls[0]?.[0]).toMatchObject({ payload: { reviewed: false } });
       expect(metadata.presentPlanArmedAt).toBeUndefined();

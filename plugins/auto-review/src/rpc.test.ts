@@ -19,7 +19,7 @@ async function withHost(body: (host: ReturnType<typeof createFakePluginHost>) =>
   try {
     const ctx = await createReviewContext(host.bb);
     registerAutoReviewRpc(ctx);
-    registerAutoReviewCli(host.bb, ctx.settings, () => ctx.globals);
+    registerAutoReviewCli(ctx);
     await body(host);
   } finally {
     await host.harness.dispose();

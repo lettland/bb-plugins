@@ -10,6 +10,7 @@ import type {
   PluginSettingsSectionRegistration,
   PluginThreadHeaderActionProps,
   PluginThreadHeaderActionRegistration,
+  ComposerCustomization,
 } from "@get-bb/plugin-sdk";
 import type { AutoReviewRpcContract, ProjectSetting, ThreadReview } from "./src/rpc-contract.js";
 
@@ -33,6 +34,7 @@ vi.mock("@get-bb/plugin-sdk/app", async (importOriginal) => {
 let approveSection: PluginSettingsSectionRegistration;
 let badgeSlot: PluginThreadHeaderActionRegistration;
 let planFormSlot: PluginPendingInteractionRegistration;
+let composerCustomization: ComposerCustomization;
 
 beforeAll(async () => {
   installTestPluginRuntime();
@@ -40,6 +42,7 @@ beforeAll(async () => {
   approveSection = app.settingsSections.find((section) => section.id === "project-auto-approve")!;
   badgeSlot = app.threadHeaderActions.find((action) => action.id === "review-status")!;
   planFormSlot = app.pendingInteractions.find((form) => form.id === "plan-approval")!;
+  composerCustomization = app.composerCustomizations.find((item) => item.id === "thread-review-preference")!;
 });
 
 // Vitest globals are off, so Testing Library does not clean up by itself.
@@ -88,8 +91,140 @@ function baseHandlers(): PluginRpcTestHandlers<AutoReviewRpcContract> {
       reviewActive: input.review !== "off",
     }),
     threadReview: () => review(),
+    getThreadReviewPreference: () => ({ skipAutoReview: false }),
+    setThreadReviewPreference: (input) => ({ skipAutoReview: input.skipAutoReview }),
   };
 }
+
+describe("Thread review preference", () => {
+  function renderPreference(handlers: Handlers = {}) {
+    return renderSlot<object, AutoReviewRpcContract>(composerCustomization.banners![0]!, {}, {
+      rpc: { ...baseHandlers(), ...handlers },
+      composer: { scope: { kind: "thread", threadId: "thr_1" } },
+    });
+  }
+  const checkbox = () => screen.getByRole("checkbox", { name: "Skip auto-review for this thread" }) as HTMLInputElement;
+
+  it("registers a bare banner only for thread composers and hides in other scopes", async () => {
+    expect(composerCustomization.scopes).toEqual(["thread"]);
+    expect(composerCustomization.banners![0]!.chrome).toBe("bare");
+    const view = renderPreference();
+    await screen.findByRole("checkbox");
+    await view.setComposerScope({ kind: "new-thread", projectId: "prj_1" });
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    await view.setComposerScope({ kind: "queued-message", threadId: "thr_1", queuedMessageId: "q1" });
+    expect(screen.queryByRole("checkbox")).toBeNull();
+  });
+
+  it("disables while loading and hides when ineligible", async () => {
+    let finish!: (value: null) => void;
+    renderPreference({ getThreadReviewPreference: () => new Promise((resolve) => { finish = resolve; }) });
+    expect(checkbox().disabled).toBe(true);
+    await act(async () => { finish(null); });
+    expect(screen.queryByRole("checkbox")).toBeNull();
+  });
+
+  it("saves, restores, and reloads the stored value", async () => {
+    let stored = false;
+    let finish!: (value: { skipAutoReview: boolean }) => void;
+    const view = renderPreference({
+      getThreadReviewPreference: () => ({ skipAutoReview: stored }),
+      setThreadReviewPreference: (input) => new Promise((resolve) => { stored = input.skipAutoReview; finish = resolve; }),
+    });
+    await waitFor(() => expect(checkbox().disabled).toBe(false));
+    fireEvent.click(checkbox());
+    expect(checkbox().disabled).toBe(true);
+    expect(view.rpcCalls).toContainEqual({ method: "setThreadReviewPreference", input: { threadId: "thr_1", skipAutoReview: true } });
+    await act(async () => { finish({ skipAutoReview: true }); });
+    await waitFor(() => expect(checkbox().checked).toBe(true));
+    fireEvent.click(checkbox());
+    await act(async () => { finish({ skipAutoReview: false }); });
+    await waitFor(() => expect(checkbox().checked).toBe(false));
+  });
+
+  it("shows load and save errors and preserves the saved value", async () => {
+    const view = renderPreference({ getThreadReviewPreference: () => { throw new Error("load failed"); } });
+    expect((await screen.findByRole("alert")).textContent).toContain("load failed");
+    expect(checkbox().disabled).toBe(true);
+    view.unmount();
+    renderPreference({ setThreadReviewPreference: () => { throw new Error("save failed"); } });
+    await waitFor(() => expect(checkbox().disabled).toBe(false));
+    fireEvent.click(checkbox());
+    expect((await screen.findByRole("alert")).textContent).toContain("save failed");
+    expect(checkbox().checked).toBe(false);
+    expect(checkbox().disabled).toBe(false);
+  });
+
+  it("reloads on realtime events and reconnects", async () => {
+    let stored = false;
+    const view = renderPreference({ getThreadReviewPreference: () => ({ skipAutoReview: stored }) });
+    await waitFor(() => expect(checkbox().disabled).toBe(false));
+    stored = true;
+    await view.emitRealtime("auto-review:thread:thr_1", null);
+    await waitFor(() => expect(checkbox().checked).toBe(true));
+    stored = false;
+    await view.setRealtimeConnectionState("reconnecting");
+    await view.setRealtimeConnectionState("connected");
+    await waitFor(() => expect(checkbox().checked).toBe(false));
+  });
+
+  it("reloads a concurrent update after a failed save while keeping the error", async () => {
+    let stored = false;
+    let reject!: (error: Error) => void;
+    const view = renderPreference({
+      getThreadReviewPreference: () => ({ skipAutoReview: stored }),
+      setThreadReviewPreference: () => new Promise((_resolve, fail) => { reject = fail; }),
+    });
+    await waitFor(() => expect(checkbox().disabled).toBe(false));
+    fireEvent.click(checkbox());
+    stored = true;
+    await view.emitRealtime("auto-review:thread:thr_1", null);
+    await act(async () => { reject(new Error("save failed")); });
+    await waitFor(() => expect(checkbox().checked).toBe(true));
+    expect(screen.getByRole("alert").textContent).toContain("save failed");
+  });
+
+  it("isolates thread changes and ignores late loads", async () => {
+    let finish!: (value: { skipAutoReview: boolean }) => void;
+    const view = renderPreference({ getThreadReviewPreference: ({ threadId }) => threadId === "thr_1"
+      ? new Promise((resolve) => { finish = resolve; }) : { skipAutoReview: true } });
+    await view.setComposerScope({ kind: "thread", threadId: "thr_2" });
+    await waitFor(() => expect(checkbox().checked).toBe(true));
+    await act(async () => { finish({ skipAutoReview: false }); });
+    expect(checkbox().checked).toBe(true);
+  });
+
+  it("ignores an older load failure after a realtime reload", async () => {
+    let reject!: (error: Error) => void;
+    let calls = 0;
+    const view = renderPreference({ getThreadReviewPreference: () => ++calls === 1
+      ? new Promise((_resolve, fail) => { reject = fail; }) : { skipAutoReview: true } });
+    await view.emitRealtime("auto-review:thread:thr_1", null);
+    await waitFor(() => expect(checkbox().checked).toBe(true));
+    await act(async () => { reject(new Error("late")); });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it.each(["resolve", "reject"])("ignores a save that %ss after changing threads", async (outcome) => {
+    let resolve!: (value: { skipAutoReview: boolean }) => void;
+    let reject!: (error: Error) => void;
+    const view = renderPreference({
+      getThreadReviewPreference: ({ threadId }) => ({ skipAutoReview: threadId === "thr_2" }),
+      setThreadReviewPreference: () => new Promise((done, fail) => { resolve = done; reject = fail; }),
+    });
+    await waitFor(() => expect(checkbox().disabled).toBe(false));
+    fireEvent.click(checkbox());
+    await view.emitRealtime("auto-review:thread:thr_1", null);
+    await view.setComposerScope({ kind: "thread", threadId: "thr_2" });
+    await waitFor(() => expect(checkbox().checked).toBe(true));
+    await act(async () => {
+      if (outcome === "resolve") resolve({ skipAutoReview: false });
+      else reject(new Error("late"));
+    });
+    expect(checkbox().checked).toBe(true);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
 
 function renderSection(handlers: Handlers = {}) {
   const options: RenderSlotOptions<AutoReviewRpcContract> = {

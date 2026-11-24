@@ -1,5 +1,4 @@
-import { effectiveConfig, readProjectConfig } from "./config.js";
-import { recordFire, type GateThreadLike, type ReviewContext } from "./context.js";
+import { readThreadConfig, recordFire, type GateThreadLike, type ReviewContext } from "./context.js";
 import { EVENT_PAGE_MAX, isImmediateReactionToDeny, type PendingUserQuestion } from "./plan.js";
 import { PLAN_HOLD_ANSWER } from "./prompt.js";
 import { planDenyFresh, readState, writeState } from "./state.js";
@@ -28,8 +27,7 @@ export async function answerPlanHoldQuestion(
   if (!planDenyFresh(state, Date.now())) {
     return;
   }
-  const project = await readProjectConfig(bb, thread.projectId);
-  const config = effectiveConfig(ctx.globals, project);
+  const config = await readThreadConfig(ctx, thread.projectId, thread.id);
   if (!config.enabled) {
     return;
   }

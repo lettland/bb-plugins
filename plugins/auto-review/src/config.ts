@@ -160,9 +160,10 @@ export function globalDefaultsFrom(values: {
 export function effectiveConfig(
   globals: GlobalDefaults,
   project: ProjectConfig,
+  skipAutoReview = false,
 ): EffectiveConfig {
   return {
-    enabled: project.enabled ?? globals.enabled,
+    enabled: !skipAutoReview && (project.enabled ?? globals.enabled),
     mergeEligibleMainlines:
       project.mergeEligibleMainlines ?? globals.mergeEligibleMainlines,
     reviewMode: project.reviewMode ?? globals.reviewMode,

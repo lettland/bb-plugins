@@ -30,6 +30,9 @@ const threadReviewSchema = z.object({
 });
 export type ThreadReview = z.infer<typeof threadReviewSchema>;
 
+const threadIdSchema = z.object({ threadId: z.string().min(1).max(128) });
+const threadReviewPreferenceSchema = z.object({ skipAutoReview: z.boolean() });
+
 export const autoReviewRpcContract = {
   listProjectSettings: {
     input: z.null(),
@@ -61,8 +64,16 @@ export const autoReviewRpcContract = {
     }),
   },
   threadReview: {
-    input: z.object({ threadId: z.string().min(1).max(128) }),
+    input: threadIdSchema,
     output: threadReviewSchema,
+  },
+  getThreadReviewPreference: {
+    input: threadIdSchema,
+    output: threadReviewPreferenceSchema.nullable(),
+  },
+  setThreadReviewPreference: {
+    input: threadIdSchema.extend(threadReviewPreferenceSchema.shape),
+    output: threadReviewPreferenceSchema,
   },
 } satisfies PluginRpcContract;
 
