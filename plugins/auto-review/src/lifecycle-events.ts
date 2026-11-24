@@ -1,4 +1,4 @@
-import { setThreadOptOut, type ReviewContext } from "./context.js";
+import { THREAD_OPT_OUT_PREFIX, type ReviewContext } from "./context.js";
 import { deleteBaselines } from "./baseline-store.js";
 import { removeDeferral } from "./deferrals.js";
 import { deleteFindings } from "./findings-store.js";
@@ -6,6 +6,7 @@ import { recordUnfinishedReview } from "./review-outcome.js";
 import { releaseDeferred, sweepDeferrals, sweepOrphanFindings } from "./release.js";
 import { removeReview } from "./reviews.js";
 import {
+  publishThreadReview,
   readState,
   resetToIdlePatch,
   withThreadLock,
@@ -26,7 +27,12 @@ export function unlatch(
   const { bb } = ctx;
   return withThreadLock(threadId, async () => {
     if (deleted && ctx.threadOptOuts.has(threadId)) {
-      await setThreadOptOut(ctx, threadId, false);
+      try {
+        await bb.storage.kv.delete(THREAD_OPT_OUT_PREFIX + threadId);
+        ctx.threadOptOuts.delete(threadId);
+      } catch (error) {
+        bb.log.warn(`auto-review: could not remove the opt-out for deleted thread ${threadId}: ${String(error)}`);
+      }
     }
     const state = await readState(bb, threadId);
     if (!deleted) {
@@ -78,4 +84,12 @@ export function registerLifecycleEvents(ctx: ReviewContext): void {
   bb.events.on("thread.failed", (payload) => onThreadGone(ctx, payload));
   bb.events.on("thread.archived", (payload) => onThreadGone(ctx, payload));
   bb.events.on("thread.deleted", (payload) => onThreadGone(ctx, payload, true));
+  try {
+    bb.events.on("experimental_thread.parentChanged", ({ thread }) => publishThreadReview(bb, thread.id));
+  } catch (error) {
+    // BB hosts before 0.46.1 reject this event during registration.
+    if (!String(error).startsWith('Error: unknown event "experimental_thread.parentChanged"')) {
+      throw error;
+    }
+  }
 }

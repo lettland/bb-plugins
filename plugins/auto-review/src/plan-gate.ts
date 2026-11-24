@@ -66,6 +66,10 @@ export async function gatePlan(
   const state = await readState(bb, thread.id);
   const config = await readThreadConfig(ctx, thread.projectId, thread.id);
   if (!planGateServes(thread, config)) {
+    if (!config.enabled && state.planReviewArmedAt !== undefined) {
+      // The user is handling this approval. A later plan needs its own review.
+      await writeState(bb, thread.id, {}, [...PLAN_GATE_KEYS]);
+    }
     return;
   }
 

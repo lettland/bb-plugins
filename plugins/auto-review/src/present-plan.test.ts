@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createFakePluginHost,
   makePluginAgentConfigurationContext,
+  makeThreadResponse,
   type CreateFakePluginHostOptions,
 } from "@get-bb/plugin-sdk/testing";
 import { reviewSize } from "./change-size.js";
@@ -53,6 +54,7 @@ async function withHost(
   let children: unknown[] = [];
   const sdk = {
     threads: {
+      get: async () => makeThreadResponse({ id: THREAD_ID }),
       getPluginMetadata: async () => ({ ...metadata }),
       updatePluginMetadata: async (args: { set?: Record<string, unknown>; remove?: string[] }) => {
         Object.assign(metadata, args.set ?? {});
@@ -251,7 +253,7 @@ async function withFormHost(
         if (options.threadLookupFails === true) {
           throw new Error("thread lookup down");
         }
-        return { environmentId: workspacePath === null ? null : "env-1" };
+        return makeThreadResponse({ id: THREAD_ID, environmentId: workspacePath === null ? null : "env-1" });
       },
       getPluginMetadata: async () => ({ ...metadata }),
       updatePluginMetadata: async (args: { set?: Json; remove?: string[] }) => {
@@ -1202,9 +1204,9 @@ describe("agentConfiguration's plan instructions", () => {
 
   it("follows the setting for non-native providers, and leaves the old instructions alone with it off", async () => {
     await withFormHost({ form: true }, async ({ host, review }) => {
-      expect((await resolve(host, "codex")).instructions).toBe(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM);
+      expect((await resolve(host, "codex")).instructions).toContain(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM);
       review.globals.planApprovalForm = false;
-      expect((await resolve(host, "codex")).instructions).toBe(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN);
+      expect((await resolve(host, "codex")).instructions).toContain(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN);
     });
   });
 
@@ -1220,11 +1222,11 @@ describe("agentConfiguration's plan instructions", () => {
 
   it("keeps the form flow for a thread started with the form after the setting is turned off and bb configures it again", async () => {
     await withFormHost({ form: true }, async ({ host, review, metadata, call, requestInput }) => {
-      expect((await resolve(host, "codex")).instructions).toBe(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM);
+      expect((await resolve(host, "codex")).instructions).toContain(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM);
       await storedMode(metadata);
       review.globals.planApprovalForm = false;
       // The next turn: bb configures the thread again with the stored mode in its snapshot.
-      expect((await resolve(host, "codex", { ...metadata })).instructions).toBe(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM);
+      expect((await resolve(host, "codex", { ...metadata })).instructions).toContain(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM);
       requestInput.mockResolvedValueOnce({ outcome: "cancelled", reason: "user" });
       expect(await call()).toBe(cancelled);
       expect(requestInput).toHaveBeenCalledTimes(1);
@@ -1233,10 +1235,10 @@ describe("agentConfiguration's plan instructions", () => {
 
   it("keeps the no-form flow for a thread started without the form after the setting is turned on and bb configures it again", async () => {
     await withFormHost({ form: false }, async ({ host, review, metadata, call, requestInput }) => {
-      expect((await resolve(host, "codex")).instructions).toBe(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN);
+      expect((await resolve(host, "codex")).instructions).toContain(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN);
       await storedMode(metadata);
       review.globals.planApprovalForm = true;
-      expect((await resolve(host, "codex", { ...metadata })).instructions).toBe(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN);
+      expect((await resolve(host, "codex", { ...metadata })).instructions).toContain(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN);
       expect(await call()).toBe(PRESENT_PLAN_REVIEWED_MESSAGE);
       expect(requestInput).not.toHaveBeenCalled();
     });
@@ -1244,7 +1246,7 @@ describe("agentConfiguration's plan instructions", () => {
 
   it("reads the live setting when no mode is stored, and writes it once", async () => {
     await withFormHost({ form: true }, async ({ host, metadata, updates }) => {
-      expect((await resolve(host, "codex")).instructions).toBe(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM);
+      expect((await resolve(host, "codex")).instructions).toContain(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM);
       await storedMode(metadata);
       expect(metadata.presentPlanFormMode).toBe(true);
       expect(updates).toEqual([{ presentPlanFormMode: true }]);
@@ -1257,7 +1259,7 @@ describe("agentConfiguration's plan instructions", () => {
   it("never overwrites a stored mode", async () => {
     await withFormHost({ form: true }, async ({ host, metadata, updates, call, requestInput }) => {
       metadata.presentPlanFormMode = false;
-      expect((await resolve(host, "codex", { ...metadata })).instructions).toBe(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN);
+      expect((await resolve(host, "codex", { ...metadata })).instructions).toContain(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN);
       await Promise.resolve();
       expect(updates).toEqual([]);
       expect(metadata.presentPlanFormMode).toBe(false);
@@ -1270,7 +1272,7 @@ describe("agentConfiguration's plan instructions", () => {
   it.each([new Error("store down"), "store down"])("logs a failed write (%s) and still returns the instructions", async (failure) => {
     await withFormHost({ form: true }, async ({ host, warns, faults }) => {
       faults.updateError = failure;
-      expect((await resolve(host, "codex")).instructions).toBe(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM);
+      expect((await resolve(host, "codex")).instructions).toContain(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM);
       await vi.waitFor(() =>
         expect(warns().some((line) => line.includes("could not store the plan approval form mode") && line.includes("store down"))).toBe(true),
       );
@@ -1279,7 +1281,7 @@ describe("agentConfiguration's plan instructions", () => {
 
   it("reads the live setting when the stored value is not a boolean", async () => {
     await withFormHost({ form: true }, async ({ host }) => {
-      expect((await resolve(host, "codex", { presentPlanFormMode: "off" })).instructions).toBe(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM);
+      expect((await resolve(host, "codex", { presentPlanFormMode: "off" })).instructions).toContain(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM);
     });
   });
 

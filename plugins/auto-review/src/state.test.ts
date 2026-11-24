@@ -132,6 +132,7 @@ describe("resetToIdlePatch", () => {
       "reviewDeliveredAt",
       "reviewDeliveredSeq",
       "userTurnStart",
+      "skipHeldTurn",
       "userTurnAuthored",
       "userStopFloorSeq",
       "handledTurnEndSeq",

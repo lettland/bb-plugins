@@ -96,6 +96,11 @@ export const threadStateSchema = z.object({
    * worked; the follow-up review of the user's own work starts there.
    */
   userTurnStart: turnStartSchema.optional(),
+  /** When re-enable cannot snapshot the current user turn, classify its end without claiming edits. */
+  skipHeldTurn: z.object({
+    sinceSeq: z.number().int().nonnegative(),
+    clearAtSeq: z.number().int().nonnegative().optional(),
+  }).optional(),
   /** A user turn during the hold changed files. Once set, it stays set until the hold ends. */
   userTurnAuthored: z.literal(true).optional(),
   /**
@@ -286,6 +291,7 @@ export const LATCH_KEYS: readonly string[] = [
   "reviewDeliveredAt",
   "reviewDeliveredSeq",
   "userTurnStart",
+  "skipHeldTurn",
   "userTurnAuthored",
   "userStopFloorSeq",
   "handledTurnEndSeq",

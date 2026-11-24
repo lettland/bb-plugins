@@ -20,7 +20,7 @@ export type FireExtra = Partial<Omit<LastFire, "at" | "outcome" | "reason" | "pl
 
 export type EffectiveConfig = ReturnType<typeof effectiveConfig>;
 
-const THREAD_OPT_OUT_PREFIX = "thread-review-opt-out:";
+export const THREAD_OPT_OUT_PREFIX = "thread-review-opt-out:";
 
 /** Per-plugin-instance state shared by the auto-review handlers; `globals` follows the settings. */
 export interface ReviewContext {
@@ -45,18 +45,6 @@ export async function createReviewContext(bb: BbPluginApi): Promise<ReviewContex
     ctx.globals = globalDefaultsFrom(next);
   });
   return ctx;
-}
-
-/** Call under the thread lock so the persisted choice and live lookup agree. */
-export async function setThreadOptOut(ctx: ReviewContext, threadId: string, skip: boolean): Promise<void> {
-  const key = THREAD_OPT_OUT_PREFIX + threadId;
-  if (skip) {
-    await ctx.bb.storage.kv.set(key, true);
-    ctx.threadOptOuts.add(threadId);
-  } else {
-    await ctx.bb.storage.kv.delete(key);
-    ctx.threadOptOuts.delete(threadId);
-  }
 }
 
 export async function readThreadConfig(

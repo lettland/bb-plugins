@@ -25,14 +25,14 @@ export const deferralSchema = z.object({
 });
 export type Deferral = z.infer<typeof deferralSchema>;
 
-const KEY_PREFIX = "deferral:";
+export const DEFERRAL_KEY_PREFIX = "deferral:";
 
 function key(threadId: string): string {
-  return `${KEY_PREFIX}${threadId}`;
+  return `${DEFERRAL_KEY_PREFIX}${threadId}`;
 }
 
 export async function readDeferrals(bb: BbPluginApi): Promise<Deferral[]> {
-  const keys = await bb.storage.kv.list(KEY_PREFIX);
+  const keys = await bb.storage.kv.list(DEFERRAL_KEY_PREFIX);
   const rows: Deferral[] = [];
   for (const entryKey of keys) {
     const parsed = deferralSchema.safeParse(

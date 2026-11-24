@@ -192,6 +192,20 @@ function countUserApprovals(
   return counted;
 }
 
+function heldTurnPatch(
+  ended: HoldTurn,
+  turnStart: TurnStart,
+  flags: { reviewTurnsOwn: boolean; startFollowUp: boolean; followUpAuthored: boolean },
+): Partial<ThreadState> {
+  return {
+    ...(ended.completedSeq === undefined ? {} : { handledTurnEndSeq: ended.completedSeq }),
+    ...(flags.reviewTurnsOwn ? { reviewTurnEndSeq: ended.completedSeq } : {}),
+    ...(flags.startFollowUp ? { userTurnStart: turnStart } : {}),
+    ...(flags.followUpAuthored ? { userTurnAuthored: true } : {}),
+    ...(ended.read && ended.users ? { userStopFloorSeq: ended.completedSeq } : {}),
+  };
+}
+
 /**
  * What the idle that just ended a turn during the hold adds to the state, for
  * each turn of the user's own that ended: where their work began, whether any
@@ -224,12 +238,15 @@ export async function noteUserTurn(
   state: ThreadState,
 ): Promise<ThreadState> {
   const { bb } = ctx;
-  const { turnStart } = state;
+  const turnStart = state.turnStart ?? state.skipHeldTurn;
   if (turnStart === undefined) {
     return state;
   }
   let held = state;
-  // Every check measures the same turnStart-to-now window, so one answer serves the whole idle.
+  let reEnabledAt = state.userTurnStart !== undefined && state.userTurnStart.sinceSeq > turnStart.sinceSeq
+    ? state.userTurnStart
+    : undefined;
+  // Every check measures the same authorship window, so one answer serves the whole idle.
   let authored: boolean | undefined;
   for (let first = true; ; first = false) {
     // Core logs a turn's `turn/completed` before it delivers that turn's `thread.idle`, so once a
@@ -238,6 +255,7 @@ export async function noteUserTurn(
     if (ended === null) {
       break;
     }
+    const reEnabledSeq = reEnabledAt?.sinceSeq;
     let byApproval = false;
     // The review turn is the first turn read that carries the code-review
     // opening: it sets the latch below, and its approvals are judged against
@@ -252,24 +270,33 @@ export async function noteUserTurn(
           bb,
           thread.id,
           held,
-          ended.approvedPlans,
+          reEnabledSeq === undefined
+            ? ended.approvedPlans
+            : ended.approvedPlans.filter((approval) => approval.seq > reEnabledSeq),
           reviewTurnsOwn ? (held.reviewDeliveredSeq ?? held.lastCodeReviewSeq) : undefined,
         ).length > 0;
     }
     const users = !ended.read || ended.users || byApproval;
-    const patch: Partial<ThreadState> = {
-      ...(ended.completedSeq === undefined ? {} : { handledTurnEndSeq: ended.completedSeq }),
-      ...(reviewTurnsOwn ? { reviewTurnEndSeq: ended.completedSeq } : {}),
-      ...(users && held.userTurnStart === undefined ? { userTurnStart: turnStart } : {}),
-      ...(users &&
-      held.userTurnAuthored !== true &&
-      (!ended.read || byApproval || (authored ??= await userTurnAuthored(ctx, thread, turnStart)))
-        ? { userTurnAuthored: true as const }
-        : {}),
-      ...(ended.read && ended.users ? { userStopFloorSeq: ended.completedSeq } : {}),
-    };
-    await writeState(bb, thread.id, patch);
+    const reviewable = users && held.skipHeldTurn === undefined &&
+      (reEnabledAt === undefined || ended.completedSeq === undefined || ended.completedSeq > reEnabledAt.sinceSeq);
+    const patch = heldTurnPatch(ended, turnStart, {
+      reviewTurnsOwn,
+      startFollowUp: reviewable && held.userTurnStart === undefined,
+      followUpAuthored: reviewable && held.userTurnAuthored !== true &&
+        (!ended.read || byApproval || (authored ??= await userTurnAuthored(ctx, thread, reEnabledAt ?? turnStart))),
+    });
+    const { completedSeq } = ended;
+    const clearAtSeq = held.skipHeldTurn?.clearAtSeq;
+    const clearSkip = clearAtSeq !== undefined && completedSeq !== undefined && completedSeq >= clearAtSeq;
+    if (clearSkip) {
+      // Another turn may have completed before this idle ran. Give it a
+      // boundary past the skipped turn even without a fresh active snapshot.
+      reEnabledAt = { sinceSeq: completedSeq };
+      patch.userTurnStart = reEnabledAt;
+    }
+    await writeState(bb, thread.id, patch, clearSkip ? ["skipHeldTurn"] : []);
     held = { ...held, ...patch };
+    if (clearSkip) delete held.skipHeldTurn;
     // Each read starts after the end just handled, so it moves on; with no end found it cannot.
     if (ended.completedSeq === undefined) {
       break;

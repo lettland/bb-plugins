@@ -8,7 +8,7 @@ import {
   useRealtimeConnectionState,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
-import type { PluginPendingInteractionProps, PluginThreadHeaderActionProps } from "@get-bb/plugin-sdk/app";
+import type { PluginPendingInteractionProps, PluginRpcClient, PluginThreadHeaderActionProps } from "@get-bb/plugin-sdk/app";
 import {
   PLAN_APPROVAL_FEEDBACK_MAX,
   PLAN_APPROVAL_RENDERER,
@@ -283,10 +283,22 @@ function reviewChannel(threadId: string): string {
   return `auto-review:thread:${threadId}`;
 }
 
-function ThreadReviewPreference({ threadId }: { threadId: string }) {
-  const rpc = useRpc<AutoReviewRpcContract>();
+const preferenceMethod = "setThreadReviewPreference";
+
+interface PreferenceClient extends PluginRpcClient<AutoReviewRpcContract> {
+  experimental_threadPreferenceApproval?: {
+    targetKey: string;
+    probe(method: typeof preferenceMethod): Promise<boolean>;
+    confirm(method: typeof preferenceMethod, input: { threadId: string; skipAutoReview: boolean }):
+      Promise<"applied" | "cancelled" | "rejected" | "unsupported">;
+  };
+}
+
+function useThreadReviewPreference(threadId: string, rpc: PreferenceClient) {
+  const approval = rpc.experimental_threadPreferenceApproval;
   const connection = useRealtimeConnectionState();
   const [preference, setPreference] = useState<boolean | null>(null);
+  const [canSave, setCanSave] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -302,9 +314,13 @@ function ThreadReviewPreference({ threadId }: { threadId: string }) {
     }
     const current = ++revision.current;
     try {
-      const result = await rpc.call("getThreadReviewPreference", { threadId });
+      const [result, supported] = await Promise.all([
+        rpc.call("getThreadReviewPreference", { threadId }),
+        approval?.probe(preferenceMethod).catch(() => false) ?? false,
+      ]);
       if (current !== revision.current) return;
       setPreference(result?.skipAutoReview ?? null);
+      setCanSave(supported);
       if (!preserveError) setError(null);
     } catch (err) {
       if (current !== revision.current) return;
@@ -312,7 +328,7 @@ function ThreadReviewPreference({ threadId }: { threadId: string }) {
     } finally {
       if (current === revision.current) setLoading(false);
     }
-  }, [rpc, threadId]);
+  }, [approval, rpc, threadId]);
 
   useEffect(() => {
     void load();
@@ -326,16 +342,25 @@ function ThreadReviewPreference({ threadId }: { threadId: string }) {
   }, [connection, load]);
 
   const save = async (skipAutoReview: boolean) => {
+    if (!canSave || approval === undefined || savingRef.current) return;
     savingRef.current = true;
     const current = ++revision.current;
     setSaving(true);
     setError(null);
     let saved = false;
     try {
-      const result = await rpc.call("setThreadReviewPreference", { threadId, skipAutoReview });
+      const result = await approval.confirm(preferenceMethod, { threadId, skipAutoReview });
       if (current !== revision.current) return;
-      setPreference(result.skipAutoReview);
-      saved = true;
+      if (result === "applied") {
+        setPreference(skipAutoReview);
+        saved = true;
+      } else if (result === "unsupported") {
+        setCanSave(false);
+        reloadRef.current = true;
+      } else if (result === "rejected") {
+        setError("BB Desktop could not save the change. Try again.");
+        reloadRef.current = true;
+      }
     } catch (err) {
       if (current !== revision.current) return;
       setError(describeError(err));
@@ -349,14 +374,23 @@ function ThreadReviewPreference({ threadId }: { threadId: string }) {
     }
   };
 
+  return { preference, canSave, loading, saving, error, save };
+}
+
+function ThreadReviewPreference({ threadId, rpc }: { threadId: string; rpc: PreferenceClient }) {
+  const { preference, canSave, loading, saving, error, save } = useThreadReviewPreference(threadId, rpc);
+  const readOnlyId = useId();
   if (!loading && preference === null && error === null) return null;
+  const readOnly = !loading && preference !== null && !canSave;
   return (
     <div style={{ fontSize: 12, color: SOFT_INK }}>
       <label>
-        <input type="checkbox" checked={preference ?? false} disabled={loading || saving || preference === null}
+        <input type="checkbox" checked={preference ?? false} disabled={loading || saving || preference === null || !canSave}
+          aria-describedby={readOnly ? readOnlyId : undefined}
           onChange={(event) => void save(event.target.checked)} />{" "}
         Skip auto-review for this thread
       </label>
+      {readOnly ? <div id={readOnlyId}>This change requires a local server started by BB Desktop.</div> : null}
       {error === null ? null : <span role="alert" style={{ color: "var(--destructive-text)" }}> {error}</span>}
     </div>
   );
@@ -364,7 +398,10 @@ function ThreadReviewPreference({ threadId }: { threadId: string }) {
 
 function ThreadReviewPreferenceBanner() {
   const { scope } = useComposer();
-  return scope.kind === "thread" ? <ThreadReviewPreference key={scope.threadId} threadId={scope.threadId} /> : null;
+  const rpc: PreferenceClient = useRpc<AutoReviewRpcContract>();
+  if (scope.kind !== "thread") return null;
+  const key = JSON.stringify([scope.threadId, rpc.experimental_threadPreferenceApproval?.targetKey]);
+  return <ThreadReviewPreference key={key} threadId={scope.threadId} rpc={rpc} />;
 }
 
 function relativeTime(at: number, now: number): string {

@@ -55,11 +55,27 @@ are unchanged.
 It ships **enabled** (opt-out).
 
 To pause auto-review for an open top-level thread, check **Skip auto-review for
-this thread** above its composer. The setting persists for that thread. Clear
-the checkbox to follow the project's settings again. Review prompts BB already
-received can still run. Subthreads already skip their own automatic reviews
-while attached. A subthread that becomes top-level follows its own saved choice
-or the project's settings. Provider hooks still follow their own configuration.
+this thread** above its composer and confirm in BB Desktop. The box starts
+unchecked and the setting persists for that thread. Checking it discards
+unsent review work. Review prompts BB already sent can finish. Clear the box
+and confirm to restore the project or global setting. If it enables review,
+edits after confirmation can be reviewed in the current turn.
+
+Change the setting on a local server started by BB Desktop. Other
+clients show the saved choice as read-only. To request Desktop confirmation
+from the CLI, run `bb plugin rpc request-confirmation auto-review
+setThreadReviewPreference --thread <thread-id> --skip-auto-review true`. Use
+`false` to clear the setting. Select **Review pending plugin request…** in BB
+Desktop to open the confirmation. Requests expire after two minutes. Select
+**Dismiss pending plugin request** to remove a request.
+
+Attached subthreads skip their own automatic reviews. A subthread that becomes
+top-level follows its own saved choice or the project setting. Provider hooks
+follow their own configuration.
+
+The checkbox takes effect immediately in BB's review gates. Codex and ACP
+sessions started before this feature can retain their original plan-first
+instructions. A fresh provider session uses the current guidance.
 
 ## Plan review
 

@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import type { ExperimentalPluginRpcHandlersWithContext, JsonValue } from "@get-bb/plugin-sdk";
 import {
   createFakePluginHost,
   makePluginAgentConfigurationContext,
@@ -24,6 +25,7 @@ import {
   PRESENT_PLAN_REVIEWED_MESSAGE,
 } from "./src/prompt.js";
 import { MAX_HASHED_FILES } from "./src/detect.js";
+import type { AutoReviewRpcContract } from "./src/rpc-contract.js";
 import { EVENT_PAGE_MAX, PLAN_EVIDENCE_PAGE_CAP } from "./src/plan.js";
 import {
   PLAN_DENY_ANSWER_WINDOW_MS,
@@ -261,10 +263,12 @@ function acceptedTurnId(requests: readonly TurnRequest[], request: TurnRequest):
  * The `turn/completed` events a thread has logged: those a test recorded, and one for every other
  * turn that took input, right after its last input, unless a request says it is still running.
  */
+type TurnEnd = { seq: number; turnId?: string; completedAt?: number };
+
 function turnEndsOf(
   requests: readonly TurnRequest[],
-  explicit: ReadonlyArray<{ seq: number; turnId?: string }>,
-): Array<{ seq: number; turnId?: string }> {
+  explicit: readonly TurnEnd[],
+): TurnEnd[] {
   const accepted = requests.filter((request) => request.queued !== true);
   const derived = [...new Set(accepted.map((request) => acceptedTurnId(requests, request)))]
     .filter(
@@ -325,12 +329,13 @@ function createHost(options: HostOptions = {}) {
   let completedReadsLeft: number | undefined;
   let statusThrows = false;
   let onStatusRead: (() => void) | undefined;
+  let onTurnRequestRead: (() => void) | undefined;
   let queuedRows = options.queuedRows ?? [];
   let interrupts: Record<string, InterruptEvent[]> = {};
   let itemEvents: Record<string, ItemStartedEvent[]> = {};
   let unhandledEvents: Record<string, UnhandledEvent[]> = {};
   let completedEvents: Record<string, ItemStartedEvent[]> = {};
-  let turnEnds: Record<string, Array<{ seq: number; turnId?: string }>> = {};
+  let turnEnds: Record<string, TurnEnd[]> = {};
   let turnRequests: Record<string, TurnRequest[]> = {};
   let lifecycleEvents: Record<string, Array<{ seq: number; turnId: string; interaction: Record<string, unknown> }>> = {};
   let lifecycleReadsLeft: number | undefined;
@@ -515,6 +520,11 @@ function createHost(options: HostOptions = {}) {
             );
           }
           if (args.types?.includes("client/turn/requested") === true) {
+            if (onTurnRequestRead !== undefined) {
+              const landing = onTurnRequestRead;
+              onTurnRequestRead = undefined;
+              landing();
+            }
             if (options.turnRequestsThrow === true) {
               throw new Error("requests unavailable");
             }
@@ -583,7 +593,7 @@ function createHost(options: HostOptions = {}) {
                   scope: end.turnId === undefined ? { kind: "thread" } : { kind: "turn", turnId: end.turnId },
                   threadId: args.threadId,
                   seq: end.seq,
-                  createdAt: 1_000,
+                  createdAt: end.completedAt ?? Date.now(),
                   type: "turn/completed",
                   data: {},
                 })),
@@ -868,14 +878,14 @@ function createHost(options: HostOptions = {}) {
       options.turnInputsThrow = next;
     },
     /** Record the `turn/completed` of the turn a request was accepted into. */
-    completeTurnOf: (requestSeq: number, seq: number, threadId: string = THREAD_ID) => {
+    completeTurnOf: (requestSeq: number, seq: number, threadId: string = THREAD_ID, completedAt = Date.now()) => {
       const requests = turnRequests[threadId] ?? [];
       const request = requests.find((entry) => entry.seq === requestSeq);
       if (request === undefined) {
         throw new Error(`no request at seq ${requestSeq}`);
       }
       const turnId = acceptedTurnId(requests, request);
-      turnEnds = { ...turnEnds, [threadId]: [...(turnEnds[threadId] ?? []), { seq, turnId }] };
+      turnEnds = { ...turnEnds, [threadId]: [...(turnEnds[threadId] ?? []), { seq, turnId, completedAt }] };
     },
     /** Record a `client/turn/requested` event: a turn someone asked the thread to start. */
     requestTurn: (request: TurnRequest, threadId: string = THREAD_ID) => {
@@ -925,6 +935,9 @@ function createHost(options: HostOptions = {}) {
     setTurnRequestsThrow: (next: boolean) => {
       options.turnRequestsThrow = next;
     },
+    onNextTurnRequestRead: (landing: () => void) => {
+      onTurnRequestRead = landing;
+    },
     /** A queued request's turn starts: the provider accepts it into that turn now (`running`: and it has not ended). */
     startQueuedTurn: (seq: number, acceptedAt: number, running = false, threadId: string = THREAD_ID) => {
       turnRequests = {
@@ -936,6 +949,13 @@ function createHost(options: HostOptions = {}) {
     },
     setQueuedRows: (next: QueuedRow[]) => {
       queuedRows = next;
+    },
+    cancelApprovedQueueEntries: (ids: readonly string[]) => {
+      const cancelled = queuedRows.filter((row) => ids.includes(row.id));
+      queuedRows = queuedRows.filter((row) => !ids.includes(row.id));
+      const cancelledIds = cancelled.map((row) => row.id);
+      deletedQueued.push(...cancelledIds);
+      return cancelledIds;
     },
     /** What `interactions.get` reads back for an interaction (default: pending, unresolved). */
     setResolvedInteraction: (interactionId: string, resolved: { status: string; resolution: unknown }) => {
@@ -986,6 +1006,55 @@ async function latchReview(
 }
 
 type Host = ReturnType<typeof createHost>;
+
+type PreferenceHandler = ExperimentalPluginRpcHandlersWithContext<AutoReviewRpcContract>["setThreadReviewPreference"];
+const preferenceHandlers = new WeakMap<Host["bb"], PreferenceHandler>();
+
+async function loadPreferencePlugin(bb: Host["bb"]): Promise<void> {
+  const register = vi.spyOn(bb.rpc, "register");
+  try {
+    await plugin(bb);
+    const handlers = register.mock.lastCall![1] as ExperimentalPluginRpcHandlersWithContext<AutoReviewRpcContract>;
+    preferenceHandlers.set(bb, handlers.setThreadReviewPreference);
+  } finally {
+    register.mockRestore();
+  }
+}
+
+// The 0.6.79 fake host does not issue approval contexts. Core tests verify the database commit.
+async function setPreference(host: Host, skipAutoReview: boolean, threadId = THREAD_ID, beforeCommit?: () => void) {
+  const handler = preferenceHandlers.get(host.bb)!;
+  const writes: Promise<unknown>[] = [];
+  const context = {
+    experimental_caller: { kind: "client" } as const,
+    experimental_threadPreferenceApproval: {
+      commit(patch: {
+        set: Record<string, JsonValue>;
+        remove: readonly string[];
+        removeDeferral: boolean;
+        cancelQueuedEntryIds?: readonly string[];
+        onQueueCancellation?: { entryId: string; set: Record<string, JsonValue>; remove: readonly string[] };
+      }) {
+        beforeCommit?.();
+        const cancelled = host.cancelApprovedQueueEntries(patch.cancelQueuedEntryIds ?? []);
+        const metadata = host.metadataFor(threadId);
+        Object.assign(metadata, patch.set);
+        for (const key of patch.remove) delete metadata[key];
+        if (patch.onQueueCancellation && cancelled.includes(patch.onQueueCancellation.entryId)) {
+          Object.assign(metadata, patch.onQueueCancellation.set);
+          for (const key of patch.onQueueCancellation.remove) delete metadata[key];
+        }
+        if (patch.removeDeferral) writes.push(host.bb.storage.kv.delete(`deferral:${threadId}`));
+        const key = `thread-review-opt-out:${threadId}`;
+        writes.push(skipAutoReview ? host.bb.storage.kv.set(key, true) : host.bb.storage.kv.delete(key));
+        return cancelled;
+      },
+    },
+  };
+  const result = await handler({ threadId, skipAutoReview }, context);
+  await Promise.all(writes);
+  return result;
+}
 
 function emitActive(host: Host, id: string = THREAD_ID) {
   return host.harness.behavior.emitThreadEvent("thread.active", {
@@ -4541,18 +4610,31 @@ describe("auto-review plugin", () => {
   describe("the thread composer opt-out", () => {
     const getPreference = (host: Host, threadId = THREAD_ID) =>
       host.harness.callRpc("getThreadReviewPreference", { threadId });
-    const setPreference = (host: Host, skipAutoReview: boolean, threadId = THREAD_ID) =>
-      host.harness.callRpc("setThreadReviewPreference", { threadId, skipAutoReview });
+
+    it("rejects generic client and plugin writes even on hosts without the protected dispatcher", async () => {
+      const host = createHost();
+      await loadPreferencePlugin(host.bb);
+      for (const caller of [{ kind: "client" }, { kind: "plugin", pluginId: "other" }] as const) {
+        await expect(host.harness.callRpc(
+          "setThreadReviewPreference",
+          { threadId: THREAD_ID, skipAutoReview: true },
+          { experimental_caller: caller },
+        )).rejects.toMatchObject({ code: "forbidden", message: "Confirm this change in BB Desktop." });
+      }
+      expect(await getPreference(host)).toEqual({ skipAutoReview: false });
+      expect(await host.bb.storage.kv.list("thread-review-opt-out:")).toEqual([]);
+      await host.harness.dispose();
+    });
 
     it("persists across reload, takes precedence over the project and restores code review when cleared", async () => {
       const initial = createHost();
-      await plugin(initial.bb);
+      await loadPreferencePlugin(initial.bb);
       await initial.harness.runCli(["enable", "--project", "project-1"]);
       expect(await getPreference(initial)).toEqual({ skipAutoReview: false });
       expect(await setPreference(initial, true)).toEqual({ skipAutoReview: true });
       expect(await setPreference(initial, true)).toEqual({ skipAutoReview: true });
 
-      const host = { ...initial, ...(await initial.harness.lifecycle.reload(plugin)) };
+      const host = { ...initial, ...(await initial.harness.lifecycle.reload(loadPreferencePlugin)) };
       expect(await getPreference(host)).toEqual({ skipAutoReview: true });
       expect(await getPreference(host, SIBLING_ID)).toEqual({ skipAutoReview: false });
       const status = await host.harness.runCli(["status", THREAD_ID, "--json"]);
@@ -4572,7 +4654,7 @@ describe("auto-review plugin", () => {
 
     it("discards a parked review even when the checkbox is immediately cleared", async () => {
       const host = createHost();
-      await plugin(host.bb);
+      await loadPreferencePlugin(host.bb);
       await emitActive(host);
       Object.assign(host.metadata, { phase: "deferred", deferredSince: Date.now() });
       await host.bb.storage.kv.set(`deferral:${THREAD_ID}`, {
@@ -4589,38 +4671,306 @@ describe("auto-review plugin", () => {
       await host.harness.dispose();
     });
 
-    it("keeps the opt-out effective through a failed parked-review cleanup and retries on clear", async () => {
-      const host = createHost();
-      await plugin(host.bb);
-      await emitActive(host);
-      Object.assign(host.metadata, { phase: "deferred", deferredSince: Date.now() });
-      const readMetadata = vi.fn<() => Promise<Record<string, unknown>>>()
-        .mockRejectedValueOnce(new Error("metadata unavailable"))
-        .mockRejectedValueOnce(new Error("metadata unavailable"))
-        .mockImplementation(async () => host.metadata);
-      host.harness.sdk.stub("threads.getPluginMetadata", readMetadata);
+    it.each([true, false])("withdraws queued plan and code prompts and preserves delivered code reviews (%s)", async (codeQueued) => {
+      const host = createHost({ queuedRows: [userRow(), { id: "plan" }, ...(codeQueued ? [{ id: "code" }] : [])] });
+      await loadPreferencePlugin(host.bb);
+      await latchReview(host.bb.storage.kv, host.metadata, THREAD_ID, Date.now());
+      Object.assign(host.metadata, {
+        phase: "pending-dispatch", pendingEntryId: "code", lastCodeReviewSeq: 100,
+        planReviewArmedAt: Date.now(), planReviewEntryId: "plan",
+      });
 
-      expect(await setPreference(host, true)).toEqual({ skipAutoReview: true });
-      expect(warnings(host)).toContain(`auto-review: could not clear the parked review for ${THREAD_ID}: Error: metadata unavailable`);
-      await expect(setPreference(host, false)).rejects.toThrow("metadata unavailable");
-      expect(await getPreference(host)).toEqual({ skipAutoReview: true });
-      expect(await setPreference(host, false)).toEqual({ skipAutoReview: false });
-      expect(host.metadata.phase).toBe("idle");
+      await setPreference(host, true);
+      expect(host.deletedQueued).toEqual(codeQueued ? ["plan", "code"] : ["plan"]);
+      expect(host.metadata.planReviewEntryId).toBeUndefined();
+      expect(host.metadata.planReviewArmedAt).toBeUndefined();
+      expect(host.metadata.phase).toBe(codeQueued ? "idle" : "pending-dispatch");
+      expect(host.metadata.pendingEntryId).toBe(codeQueued ? undefined : "code");
+      if (codeQueued) {
+        expect(await host.bb.storage.kv.get(`review:${THREAD_ID}`)).toBeUndefined();
+        expect(await lastFireOf(host)).toMatchObject({ outcome: "stood-down", reason: "disabled" });
+      }
       await host.harness.dispose();
     });
 
-    it("skips the native plan gate and fresh agent instructions while opted out", async () => {
-      const host = createHost();
-      await plugin(host.bb);
+    it("discards work carried into a queued turn and reviews only subsequent work", async () => {
+      const host = createHost({ queuedRows: [userRow()], workingTreeFiles: [] });
+      await loadPreferencePlugin(host.bb);
+      await emitActive(host);
+      host.setWorkingTree([{ path: "src/a.ts" }]);
+      host.setMaxSeq(150);
+      await emitIdle(host);
+      expect(await lastFireOf(host)).toMatchObject({ outcome: "deferred", reason: "user-queued" });
+      expect(host.metadata).toMatchObject({ phase: "idle", turnStart: { sinceSeq: 100 } });
+
       await setPreference(host, true);
-      for (const id of ["claude-code", "codex"]) {
+      await setPreference(host, false);
+      host.setQueuedRows([]);
+      host.setMaxSeq(200);
+      await emitActive(host);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/b.ts", 210)]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/b.ts" }]);
+      host.setMaxSeq(220);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFireOf(host)).toMatchObject({ scopePaths: ["src/b.ts"] });
+      await host.harness.dispose();
+    });
+
+    it.each([true, false])("reviews work after clearing the checkbox mid-turn (workspace available: %s)", async (workspaceAvailable) => {
+      const host = createHost({ workingTreeFiles: [] });
+      await loadPreferencePlugin(host.bb);
+      await setPreference(host, true);
+      host.setEnvThreads([{ id: THREAD_ID, status: "active" }]);
+      await emitActive(host);
+      host.setWorkingTree([{ path: "src/a.ts" }]);
+      host.setMaxSeq(150);
+      host.setStatusThrows(!workspaceAvailable);
+
+      await setPreference(host, false);
+      expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 150 });
+      host.setStatusThrows(false);
+      host.setEnvThreads([{ id: THREAD_ID, status: "idle" }]);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts"), fileChangeRow("src/b.ts", 161)]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/b.ts" }]);
+      host.setMaxSeq(170);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFireOf(host)).toMatchObject({ scopePaths: ["src/b.ts"] });
+      await host.harness.dispose();
+    });
+
+    it.each([
+      { phase: "pending-dispatch", reviewDeliveredSeq: 100 },
+      { phase: "awaiting-review", reviewDeliveredSeq: 100 },
+      { phase: "awaiting-review" },
+    ])("keeps an already-sent review when clearing the checkbox (%j)", async (review) => {
+      const host = createHost();
+      await loadPreferencePlugin(host.bb);
+      await setPreference(host, true);
+      host.setEnvThreads([{ id: THREAD_ID, status: "active" }]);
+      const pending = { ...review, turnStart: { sinceSeq: 100 } };
+      Object.assign(host.metadata, pending);
+      host.requestTurn({ seq: 120, initiator: "system", text: "A review child finished" });
+      host.setMaxSeq(150);
+      await setPreference(host, false);
+      expect(host.metadata).toMatchObject(pending);
+      await host.harness.dispose();
+    });
+
+    it.each([
+      { postToggleEdit: true, outage: false, stopped: false },
+      { postToggleEdit: false, outage: false, stopped: false },
+      { postToggleEdit: false, outage: true, stopped: false },
+      { postToggleEdit: false, outage: true, stopped: true },
+      { postToggleEdit: false, outage: true, stopped: true, fallback: "request" },
+      { postToggleEdit: false, outage: true, stopped: true, fallback: "handled", requestsFail: true, completion: "same-ms" },
+      { postToggleEdit: false, outage: true, stopped: true, fallback: "handled", requestsFail: true, completion: "same-ms", priorSameMs: true },
+      { postToggleEdit: false, outage: true, stopped: true, fallback: "delivery", requestsFail: true, completion: "during-lookup" },
+      { postToggleEdit: false, outage: true, stopped: true, fallback: "delivery", requestsFail: true, boundaryUnavailable: true },
+      { postToggleEdit: false, outage: true, stopped: true, fallback: "delivery", requestsFail: true, boundaryUnavailable: "no-events" },
+      { postToggleEdit: false, outage: true, stopped: false, fallback: "delivery", requestsFail: true, laterUserTurn: true },
+    ])("keeps the earlier review and bounds follow-up to the re-enable cursor (%j)", async ({
+      postToggleEdit, outage, stopped, fallback, requestsFail, completion, priorSameMs, boundaryUnavailable, laterUserTurn,
+    }) => {
+      const host = createHost({ workingTreeFiles: [] });
+      await loadPreferencePlugin(host.bb);
+      const reviewDeliveredAt = Date.now() - 1_000;
+      await latchReview(host.bb.storage.kv, host.metadata, THREAD_ID, reviewDeliveredAt);
+      Object.assign(host.metadata, {
+        reviewDeliveredAt, lastCodeReviewSeq: 100, userTurnStart: { sinceSeq: 105 }, userTurnAuthored: true,
+      });
+      await setPreference(host, true);
+      expect(host.metadata.userTurnStart).toBeUndefined();
+      expect(host.metadata.userTurnAuthored).toBeUndefined();
+
+      const child = { id: "child", parentThreadId: THREAD_ID, status: "active" };
+      host.setEnvThreads([{ id: THREAD_ID, status: "active" }, child]);
+      const restoredAt = Date.now();
+      if (fallback === "request" || requestsFail) {
+        host.requestTurn({ seq: 105, initiator: "user", text: "A prior turn also ended" });
+        host.completeTurnOf(105, 115, THREAD_ID, priorSameMs ? restoredAt : restoredAt - 1_000);
+      }
+      host.requestTurn({ seq: 120, initiator: "user", text: "Make a separate change", running: true, queued: boundaryUnavailable === "no-events" });
+      host.setMaxSeq(130);
+      await emitActive(host);
+      if (fallback !== undefined) delete host.metadata.turnStart;
+      if (fallback === "handled") host.metadata.handledTurnEndSeq = 110;
+      if (boundaryUnavailable === "no-events") host.metadata.handledTurnEndSeq = 115;
+      if (boundaryUnavailable === true) host.failTurnEndRead(1);
+      host.setWorkingTree([{ path: "src/a.ts" }]);
+      host.setMaxSeq(150);
+      host.setTimelineThrows(outage);
+      host.setTurnRequestsThrow(requestsFail === true);
+      let now = restoredAt;
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+      if (completion === "during-lookup") {
+        host.onNextTurnRequestRead(() => {
+          host.completeTurnOf(120, 170, THREAD_ID, restoredAt + 1);
+          now = restoredAt + 2;
+        });
+      }
+      try {
+        await setPreference(host, false);
+      } finally {
+        clock.mockRestore();
+      }
+      host.setTimelineThrows(false);
+      host.setTurnRequestsThrow(false);
+      if (boundaryUnavailable === "no-events") host.startQueuedTurn(120, 130, true);
+      expect(host.metadata).toMatchObject({ phase: "awaiting-review", reviewDeliveredAt });
+      if (fallback === undefined) expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 130 });
+      else expect(host.metadata.turnStart).toBeUndefined();
+      if (!outage) expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 150 });
+
+      const rows = [fileChangeRow("src/a.ts", 140)];
+      const files = [{ path: "src/a.ts" }];
+      if (postToggleEdit) {
+        rows.push(fileChangeRow("src/b.ts", 161));
+        files.push({ path: "src/b.ts" });
+      }
+      host.setSiblingRows(THREAD_ID, rows);
+      host.setWorkingTree(files);
+      host.lifecycle(145, "turn-120");
+      if (stopped) host.interrupt({ seq: 165, reason: "manual-stop" });
+      if (completion !== "during-lookup") {
+        host.completeTurnOf(120, 170, THREAD_ID, completion === "same-ms" ? restoredAt : restoredAt + 1);
+      }
+      if (laterUserTurn) {
+        host.requestTurn({ seq: 172, initiator: "user", text: "Edit after the skipped turn" });
+        rows.push(fileChangeRow("src/after.ts", 173));
+        files.push({ path: "src/after.ts" });
+        host.setSiblingRows(THREAD_ID, rows);
+        host.setWorkingTree(files);
+        host.completeTurnOf(172, 174);
+      }
+      host.setMaxSeq(laterUserTurn ? 174 : 170);
+      host.setEnvThreads([{ id: THREAD_ID, status: "idle" }, child]);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(0);
+      expect(host.metadata.phase).toBe("awaiting-review");
+      expect(host.metadata.userStopFloorSeq).toBe(laterUserTurn ? 174 : 170);
+      if (boundaryUnavailable) expect(host.metadata.skipHeldTurn).toEqual({ sinceSeq: boundaryUnavailable === "no-events" ? 115 : 100 });
+      else expect(host.metadata.skipHeldTurn).toBeUndefined();
+      expect(host.metadata.userTurnAuthored).toBe(postToggleEdit || laterUserTurn || undefined);
+
+      host.setEnvThreads([{ id: THREAD_ID, status: "idle" }, { ...child, status: "idle" }]);
+      host.requestTurn({ seq: 180, initiator: "system", text: "A review child finished" });
+      host.setMaxSeq(190);
+      await emitActive(host);
+      if (!postToggleEdit && !laterUserTurn) {
+        host.setSiblingRows(THREAD_ID, [...rows, fileChangeRow("src/fix.ts", 195)]);
+        host.setWorkingTree([...files, { path: "src/fix.ts" }]);
+      }
+      host.completeTurnOf(180, 200);
+      host.setMaxSeq(200);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(postToggleEdit || laterUserTurn ? 1 : 0);
+      if (postToggleEdit) expect(await lastFireOf(host)).toMatchObject({ scopePaths: ["src/b.ts"] });
+      if (laterUserTurn) expect(await lastFireOf(host)).toMatchObject({ scopePaths: ["src/after.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("captures the active cursor when the previous turn was already decided", async () => {
+      const host = createHost({ workingTreeFiles: [] });
+      await loadPreferencePlugin(host.bb);
+      await setPreference(host, true);
+      host.setEnvThreads([{ id: THREAD_ID, status: "active" }]);
+      Object.assign(host.metadata, { phase: "idle", turnStart: { sinceSeq: 100 }, turnDecided: true });
+      host.setMaxSeq(150);
+      await setPreference(host, false);
+      expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 150 });
+      expect(host.metadata.turnDecided).toBeUndefined();
+      await host.harness.dispose();
+    });
+
+    it("clears the opt-out through a timeline outage and resumes on the next turn", async () => {
+      const host = createHost({ workingTreeFiles: [] });
+      await loadPreferencePlugin(host.bb);
+      await setPreference(host, true);
+      host.setEnvThreads([{ id: THREAD_ID, status: "active" }]);
+      await emitActive(host);
+      host.setWorkingTree([{ path: "src/a.ts" }]);
+      host.setTimelineThrows(true);
+      expect(await setPreference(host, false)).toEqual({ skipAutoReview: false });
+      expect(await getPreference(host)).toEqual({ skipAutoReview: false });
+      expect(warnings(host)).toEqual(expect.arrayContaining([expect.stringContaining("the current turn will not be reviewed")]));
+      expect(host.metadata.turnStart).toBeUndefined();
+
+      host.setTimelineThrows(false);
+      host.setEnvThreads([{ id: THREAD_ID, status: "idle" }]);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(0);
+      host.setMaxSeq(150);
+      await emitActive(host);
+      host.setSiblingRows(THREAD_ID, [fileChangeRow("src/a.ts", 140), fileChangeRow("src/b.ts", 161)]);
+      host.setWorkingTree([{ path: "src/a.ts" }, { path: "src/b.ts" }]);
+      host.setMaxSeq(170);
+      await emitIdle(host);
+      expect(host.sends).toHaveLength(1);
+      expect(await lastFireOf(host)).toMatchObject({ scopePaths: ["src/b.ts"] });
+      await host.harness.dispose();
+    });
+
+    it("preserves the preference and parked review if preparation or commit fails", async () => {
+      const host = createHost();
+      await loadPreferencePlugin(host.bb);
+      await emitActive(host);
+      Object.assign(host.metadata, { phase: "deferred", deferredSince: Date.now() });
+      const deferral = { threadId: THREAD_ID, projectId: "project-1", environmentId: ENV_ID };
+      await host.bb.storage.kv.set(`deferral:${THREAD_ID}`, deferral);
+      host.harness.sdk.stub("threads.getPluginMetadata", vi.fn()
+        .mockRejectedValueOnce(new Error("metadata unavailable"))
+        .mockImplementation(async () => host.metadata));
+
+      await expect(setPreference(host, true)).rejects.toThrow("metadata unavailable");
+      await expect(setPreference(host, true, THREAD_ID, () => {
+        throw new Error("Approval expired");
+      })).rejects.toThrow("Approval expired");
+      expect(await getPreference(host)).toEqual({ skipAutoReview: false });
+      expect(host.metadata.phase).toBe("deferred");
+      expect(await host.bb.storage.kv.get(`deferral:${THREAD_ID}`)).toEqual(deferral);
+      expect(await setPreference(host, true)).toEqual({ skipAutoReview: true });
+      expect(host.metadata.phase).toBe("idle");
+      expect(await host.bb.storage.kv.list("deferral:")).toEqual([]);
+      await host.harness.dispose();
+    });
+
+    it("keeps the saved preference when recording discarded work fails", async () => {
+      const host = createHost();
+      await loadPreferencePlugin(host.bb);
+      await emitActive(host);
+      const kv = host.bb.storage.kv;
+      const set = kv.set.bind(kv);
+      vi.spyOn(kv, "set").mockImplementation((key, value) => key === `lastfire:project-1:${THREAD_ID}`
+        ? Promise.reject(new Error("storage unavailable"))
+        : set(key, value));
+
+      expect(await setPreference(host, true)).toEqual({ skipAutoReview: true });
+      expect(await getPreference(host)).toEqual({ skipAutoReview: true });
+      expect(host.metadata.turnStart).toBeUndefined();
+      expect(warnings(host)).toEqual(expect.arrayContaining([expect.stringContaining("could not record discarded work")]));
+      await host.harness.dispose();
+    });
+
+    it("keeps plan-first guidance conditional in provider sessions started before an opt-out", async () => {
+      const host = createHost();
+      await loadPreferencePlugin(host.bb);
+      for (const [id, form, guidance] of [
+        ["claude-code", false, "use the provider's normal approval."],
+        ["codex", false, "ask the user in chat."],
+        ["codex", true, "call PresentPlan."],
+      ] as const) {
         const agent = await host.harness.resolveAgentConfiguration(makePluginAgentConfigurationContext({
           thread: { id: THREAD_ID },
           provider: { id },
+          pluginMetadata: { presentPlanFormMode: form },
         }));
-        expect(agent.instructions).toBeNull();
+        expect(agent.instructions).toContain("Follow the plan-first instructions below only when `enabled` is true.");
+        expect(agent.instructions).toContain(guidance);
       }
 
+      await setPreference(host, true);
       await emitPlan(host);
       expect(host.sends).toEqual([]);
       expect(host.resolutions).toEqual([]);
@@ -4633,9 +4983,77 @@ describe("auto-review plugin", () => {
       await host.harness.dispose();
     });
 
+    it.each(["thread", "project"])("requires a new native review after bypassing an armed plan for the %s", async (scope) => {
+      const host = createHost({ sendDelivery: "queued" });
+      await loadPreferencePlugin(host.bb);
+      await host.harness.runCli(["auto-approve", "on", "--project", "project-1"]);
+      await emitPlan(host);
+      await host.harness.emitThreadEvent("message.dispatched", { entry: queueEntry() });
+      host.completeItem({ seq: 101, item: { type: "toolCall", tool: "Read", status: "completed" } });
+      expect(host.metadata.planReviewArmedAt).toEqual(expect.any(Number));
+
+      if (scope === "thread") {
+        await setPreference(host, true);
+      } else {
+        await host.harness.runCli(["disable", "--project", "project-1"]);
+      }
+      await emitPlan(host, planInteraction("# Original plan revised", "pint-2"));
+      expect(host.sends).toHaveLength(1);
+      expect(host.metadata.planReviewArmedAt).toBeUndefined();
+      await host.bb.sdk.threads.interactions.resolve({
+        threadId: THREAD_ID,
+        interactionId: "pint-2",
+        resolution: { decision: "deny" },
+      });
+
+      if (scope === "thread") {
+        await setPreference(host, false);
+      } else {
+        await host.harness.runCli(["enable", "--project", "project-1"]);
+      }
+      await emitPlan(host, planInteraction("# Different plan", "pint-3"));
+      expect(host.sends).toHaveLength(2);
+      expect(host.resolutions.at(-1)).toMatchObject({ interactionId: "pint-3", resolution: { decision: "deny" } });
+      await host.harness.dispose();
+    });
+
+    it("discards a PresentPlan arm when the thread opts out", async () => {
+      const host = createHost();
+      await loadPreferencePlugin(host.bb);
+      const args = { planFilePath: "docs/plans/p.md" };
+      const ctx = { threadId: THREAD_ID, projectId: "project-1" };
+      await host.harness.callAgentTool("PresentPlan", args, ctx);
+      expect(host.metadata.presentPlanArmedAt).toEqual(expect.any(Number));
+      await setPreference(host, true);
+      expect(host.metadata.presentPlanArmedAt).toBeUndefined();
+      await setPreference(host, false);
+      expect(await host.harness.callAgentTool("PresentPlan", args, ctx)).toContain("Nobody rejected it");
+      await host.harness.dispose();
+    });
+
+    it.each([{ parentThreadId: "parent" }, { originPluginId: "side-chat" }])(
+      "declines a cached PresentPlan call after a thread becomes ineligible (%j)",
+      async (origin) => {
+        const host = createHost();
+        await loadPreferencePlugin(host.bb);
+        const ctx = { threadId: THREAD_ID, projectId: "project-1" };
+        const agent = await host.harness.resolveAgentConfiguration(makePluginAgentConfigurationContext({
+          thread: { id: THREAD_ID },
+          provider: { id: "codex" },
+        }));
+        expect(agent.tools.map((tool) => tool.name)).toContain("PresentPlan");
+
+        host.setEnvThreads([{ id: THREAD_ID, status: "idle", ...origin }]);
+        const result = await host.harness.callAgentTool("PresentPlan", { planFilePath: "docs/plans/p.md" }, ctx);
+        expect(result).toBe(PRESENT_PLAN_OFF_MESSAGE);
+        expect(host.metadata.presentPlanArmedAt).toBeUndefined();
+        await host.harness.dispose();
+      },
+    );
+
     it("keeps subthreads exempt at any depth and follows the project after detaching", async () => {
       const host = createHost();
-      await plugin(host.bb);
+      await loadPreferencePlugin(host.bb);
       const descendants = [
         { id: "child", status: "idle", parentThreadId: THREAD_ID },
         { id: "grandchild", status: "idle", parentThreadId: "child" },
@@ -4665,12 +5083,14 @@ describe("auto-review plugin", () => {
 
       host.setEnvThreads([{ id: "child", status: "idle", deletedAt: 1 }]);
       expect(await getPreference(host, "child")).toBeNull();
+      host.harness.sdk.stub("threads.get", async () => makeThreadResponse({ id: "child", environmentId: null }));
+      expect(await getPreference(host, "child")).toBeNull();
       await host.harness.dispose();
     });
 
     it("restores a thread's own saved choice when it becomes top-level again", async () => {
       const host = createHost();
-      await plugin(host.bb);
+      await loadPreferencePlugin(host.bb);
       await setPreference(host, true, SIBLING_ID);
 
       host.setEnvThreads([
@@ -4729,13 +5149,13 @@ describe("auto-review plugin", () => {
     const claudeCode = await resolve(null, null, "claude-code");
     expect(claudeCode.tools.map((tool) => tool.name)).toEqual(["ReportReview"]);
     expect(claudeCode.skills).toEqual(["auto-review"]);
-    expect(claudeCode.instructions).toBe(PLAN_FIRST_INSTRUCTIONS);
+    expect(claudeCode.instructions).toContain(PLAN_FIRST_INSTRUCTIONS);
 
     // A claude-code profile provider shares the bridge, so it gets the same.
     const claudeCodeWork = await resolve(null, null, "claude-code-work");
     expect(claudeCodeWork.tools.map((tool) => tool.name)).toEqual(["ReportReview"]);
     expect(claudeCodeWork.skills).toEqual(["auto-review"]);
-    expect(claudeCodeWork.instructions).toBe(PLAN_FIRST_INSTRUCTIONS);
+    expect(claudeCodeWork.instructions).toContain(PLAN_FIRST_INSTRUCTIONS);
 
     // Every other provider's plan approvals never reach the native gate, so
     // they get PresentPlan plus its own instructions instead.
@@ -4743,7 +5163,7 @@ describe("auto-review plugin", () => {
       const resolved = await resolve(null, null, providerId);
       expect(resolved.tools.map((tool) => tool.name).sort()).toEqual(["PresentPlan", "ReportReview"]);
       expect(resolved.skills).toEqual(["auto-review"]);
-      expect(resolved.instructions).toBe(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN);
+      expect(resolved.instructions).toContain(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN);
     }
     // The plan gate never serves these, so they keep the skill but get no
     // tool or instruction.
@@ -6242,11 +6662,11 @@ describe("auto-review plugin", () => {
 
     it.each(["project", "thread"])("tells the agent review is off when disabled for the %s", async (scope) => {
       const host = createHost();
-      await plugin(host.bb);
+      await loadPreferencePlugin(host.bb);
       if (scope === "project") {
         await host.harness.runCli(["disable", "--project", "project-1"]);
       } else {
-        await host.harness.callRpc("setThreadReviewPreference", { threadId: THREAD_ID, skipAutoReview: true });
+        await setPreference(host, true);
       }
       const result = await host.harness.callAgentTool(
         "PresentPlan",

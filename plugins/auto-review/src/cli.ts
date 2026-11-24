@@ -1,4 +1,4 @@
-import type { BbPluginApi, PluginCliResult } from "@get-bb/plugin-sdk";
+import type { PluginCliResult } from "@get-bb/plugin-sdk";
 import {
   effectiveConfig,
   readLastFire,

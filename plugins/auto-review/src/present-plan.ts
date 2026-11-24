@@ -330,6 +330,17 @@ async function reopenReleasedPlan(
   };
 }
 
+async function planThreadRefusal(bb: BbPluginApi, threadId: string): Promise<PluginAgentToolResult | null> {
+  let thread: Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["get"]>>;
+  try {
+    thread = await bb.sdk.threads.get({ threadId });
+  } catch {
+    return { content: [{ type: "text", text: "Could not verify the thread for plan approval." }], isError: true };
+  }
+  // A running provider session can retain a tool that core would no longer offer.
+  return thread.parentThreadId !== null || thread.originPluginId !== null ? PRESENT_PLAN_OFF_MESSAGE : null;
+}
+
 /** `PresentPlan`'s `execute`: the first call for a plan arms its review, the second releases it. */
 async function presentPlan(
   review: ReviewContext,
@@ -338,6 +349,8 @@ async function presentPlan(
 ): Promise<PluginAgentToolResult> {
   const { bb } = review;
   const outcome = await withThreadLock<PluginAgentToolResult | NeedsForm>(ctx.threadId, async () => {
+    const refused = await planThreadRefusal(bb, ctx.threadId);
+    if (refused !== null) return refused;
     const state = await readState(bb, ctx.threadId);
     const config = await readThreadConfig(review, ctx.projectId, ctx.threadId);
     // The mode the thread's instructions were written with; the live setting only before one is stored.
@@ -397,9 +410,9 @@ async function presentPlan(
 // nobody reviews or may be watching. The same top-level threads get
 // `ReportReview`, with or without the global switch (see below). The
 // callback is synchronous, so it has the global setting and the cached thread
-// opt-outs. Project overrides are checked when a plan is presented. Keep the
-// tools available to an opted-out thread: its session may still have the old
-// instructions, or may have a review to report from before the opt-out.
+// opt-outs. Project overrides are checked when a plan is presented. An opted-out
+// session keeps the tools and conditional guidance because some providers reuse
+// their initial instructions after the checkbox is cleared.
 //
 // The claude-code family (`claude-code` and its `claude-code-<slug>` profile
 // providers, which share one bridge) is the only set of providers whose plan
@@ -432,17 +445,20 @@ function agentConfiguration(
   if (!review.globals.enabled) {
     return { tools: [REPORT_REVIEW_TOOL_NAME], skills: ["auto-review"] };
   }
-  const configuration = isNativePlanGateProvider(context.provider.id)
-    ? {
-        tools: [REPORT_REVIEW_TOOL_NAME],
-        skills: ["auto-review"],
-        instructions: PLAN_FIRST_INSTRUCTIONS,
-      }
-    : presentPlanConfiguration(review, context);
-  if (review.threadOptOuts.has(context.thread.id)) {
-    return { tools: configuration.tools, skills: configuration.skills };
-  }
-  return configuration;
+  if (!isNativePlanGateProvider(context.provider.id)) return presentPlanConfiguration(review, context);
+  return {
+    tools: [REPORT_REVIEW_TOOL_NAME],
+    skills: ["auto-review"],
+    instructions: conditionalPlanInstructions(PLAN_FIRST_INSTRUCTIONS, "use the provider's normal approval"),
+  };
+}
+
+function conditionalPlanInstructions(instructions: string, ordinaryApproval: string): string {
+  return [
+    "Before substantial work, check this thread with `bb auto-review status --json`. Follow the plan-first instructions below only when `enabled` is true.",
+    `If you need ordinary plan approval while review is off, ${ordinaryApproval}.`,
+    instructions,
+  ].join("\n\n");
 }
 
 /**
@@ -467,7 +483,9 @@ function presentPlanConfiguration(review: ReviewContext, context: PluginAgentCon
   return {
     tools: [PRESENT_PLAN_TOOL_NAME, REPORT_REVIEW_TOOL_NAME],
     skills: ["auto-review"],
-    instructions: form ? PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM : PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN,
+    instructions: form
+      ? conditionalPlanInstructions(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN_FORM, "call PresentPlan")
+      : conditionalPlanInstructions(PLAN_FIRST_INSTRUCTIONS_PRESENT_PLAN, "ask the user in chat"),
   };
 }
 

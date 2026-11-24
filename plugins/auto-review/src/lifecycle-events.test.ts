@@ -112,6 +112,58 @@ describe("unlatch", () => {
 });
 
 describe("registerLifecycleEvents", () => {
+  it("continues deletion cleanup when the opted-out thread's preference cannot be removed", async () => {
+    const { bb, deletedKeys, handlers, warnings } = fakeBb();
+    const review = ctx(bb);
+    review.threadOptOuts.add("thread-1");
+    vi.spyOn(bb.storage.kv, "delete").mockRejectedValueOnce(new Error("storage unavailable"));
+    release.releaseDeferred.mockClear();
+    registerLifecycleEvents(review);
+    await handlers.get("thread.deleted")?.({ thread: { id: "thread-1", providerId: "codex" } });
+    expect(warnings).toContain("auto-review: could not remove the opt-out for deleted thread thread-1: Error: storage unavailable");
+    expect(deletedKeys).toEqual(expect.arrayContaining([
+      "deferral:thread-1",
+      "review:thread-1",
+      expect.stringContaining("finding"),
+      expect.stringContaining("baseline"),
+    ]));
+    expect(release.releaseDeferred).toHaveBeenCalledWith(review, "codex");
+  });
+
+  it("publishes a preference refresh after a thread changes parent", async () => {
+    const { bb, handlers } = fakeBb();
+    const publish = vi.spyOn(bb.realtime, "publish");
+    registerLifecycleEvents(ctx(bb));
+    await handlers.get("experimental_thread.parentChanged")?.({ thread: { id: "thread-1" } });
+    expect(publish).toHaveBeenCalledWith("auto-review:thread:thread-1", {});
+  });
+
+  it("keeps other events on older BB hosts that reject the parent-change event", () => {
+    const { bb, handlers } = fakeBb();
+    const register = bb.events.on;
+    // BB 0.38 server's plugin API rejects unrecognized event names at registration.
+    vi.spyOn(bb.events, "on").mockImplementation((event, handler) => {
+      if (event === "experimental_thread.parentChanged") {
+        throw new Error('unknown event "experimental_thread.parentChanged" — supported events: thread.deleted');
+      }
+      register(event, handler);
+    });
+    registerLifecycleEvents(ctx(bb));
+    expect(handlers.has("thread.deleted")).toBe(true);
+  });
+
+  it("reports a parent-change registration failure unrelated to host support", () => {
+    const { bb } = fakeBb();
+    const register = bb.events.on;
+    vi.spyOn(bb.events, "on").mockImplementation((event, handler) => {
+      if (event === "experimental_thread.parentChanged") {
+        throw new Error("plugin is unloading");
+      }
+      register(event, handler);
+    });
+    expect(() => registerLifecycleEvents(ctx(bb))).toThrow("plugin is unloading");
+  });
+
   it("runs both sweeps and reports one that fails without skipping the other", async () => {
     const { bb, warnings, scheduled } = fakeBb();
     release.sweepDeferrals.mockClear();

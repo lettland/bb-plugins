@@ -1,5 +1,7 @@
 import type { PluginRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { THREAD_OPT_OUT_PREFIX } from "./context.js";
+import { DEFERRAL_KEY_PREFIX } from "./deferrals.js";
 import { REVIEW_OUTCOMES } from "./findings-schema.js";
 
 const reviewOverrideSchema = z.enum(["default", "on", "off"]);
@@ -32,6 +34,18 @@ export type ThreadReview = z.infer<typeof threadReviewSchema>;
 
 const threadIdSchema = z.object({ threadId: z.string().min(1).max(128) });
 const threadReviewPreferenceSchema = z.object({ skipAutoReview: z.boolean() });
+
+const setThreadReviewPreference = {
+  input: threadIdSchema.extend(threadReviewPreferenceSchema.shape),
+  output: threadReviewPreferenceSchema,
+  experimental_threadPreferenceApproval: {
+    title: "Change auto-review for this thread",
+    checkingDetail: "BB will discard reviews that have not been sent. Reviews already sent can finish.",
+    clearingDetail: "This thread will follow the project or global setting. If auto-review is enabled, it can review edits made after this change in the current turn.",
+    preferenceKeyPrefix: THREAD_OPT_OUT_PREFIX,
+    deferralKeyPrefix: DEFERRAL_KEY_PREFIX,
+  },
+};
 
 export const autoReviewRpcContract = {
   listProjectSettings: {
@@ -71,10 +85,7 @@ export const autoReviewRpcContract = {
     input: threadIdSchema,
     output: threadReviewPreferenceSchema.nullable(),
   },
-  setThreadReviewPreference: {
-    input: threadIdSchema.extend(threadReviewPreferenceSchema.shape),
-    output: threadReviewPreferenceSchema,
-  },
+  setThreadReviewPreference,
 } satisfies PluginRpcContract;
 
 export type AutoReviewRpcContract = typeof autoReviewRpcContract;

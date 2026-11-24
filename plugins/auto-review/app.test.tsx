@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { createElement } from "react";
+import { createElement, useMemo } from "react";
 import { installTestPluginRuntime, loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { PluginRpcTestHandlers, RenderSlotOptions } from "@get-bb/plugin-sdk/testing/app";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -19,14 +19,26 @@ import type { AutoReviewRpcContract, ProjectSetting, ThreadReview } from "./src/
 // by intercepting useRpc itself. Quirk learned under @get-bb/plugin-sdk
 // 0.6.79 (dist/testing/app.js).
 const rpcStringRejection = vi.hoisted(() => ({ current: null as string | null }));
+type ApprovalStatus = "applied" | "cancelled" | "rejected" | "unsupported";
+type PreferenceInput = { threadId: string; skipAutoReview: boolean };
+interface TestApproval {
+  targetKey: string;
+  probe(method: string): Promise<boolean>;
+  confirm(method: string, input: PreferenceInput): Promise<ApprovalStatus>;
+}
+const approval = vi.hoisted(() => ({ current: undefined as TestApproval | undefined }));
 vi.mock("@get-bb/plugin-sdk/app", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@get-bb/plugin-sdk/app")>();
   return {
     ...actual,
     useRpc: () => {
-      if (rpcStringRejection.current === null) return actual.useRpc();
+      const client = actual.useRpc();
       const message = rpcStringRejection.current;
-      return { call: () => Promise.reject(message) };
+      const preferenceApproval = approval.current;
+      return useMemo(() => ({
+        call: message === null ? client.call : () => Promise.reject(message),
+        experimental_threadPreferenceApproval: preferenceApproval,
+      }), [client, message, preferenceApproval]);
     },
   };
 });
@@ -50,6 +62,7 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   rpcStringRejection.current = null;
+  approval.current = undefined;
 });
 
 function project(overrides: Partial<ProjectSetting> = {}): ProjectSetting {
@@ -97,9 +110,19 @@ function baseHandlers(): PluginRpcTestHandlers<AutoReviewRpcContract> {
 }
 
 describe("Thread review preference", () => {
-  function renderPreference(handlers: Handlers = {}) {
+  function renderPreference(handlers: Handlers = {}, capabilities: Partial<TestApproval> | null = {}) {
+    const { setThreadReviewPreference, ...reads } = handlers;
+    approval.current = capabilities === null ? undefined : {
+      targetKey: "owned-local",
+      probe: async () => true,
+      confirm: vi.fn(async (_method, input) => {
+        await setThreadReviewPreference?.(input);
+        return "applied" as const;
+      }),
+      ...capabilities,
+    };
     return renderSlot<object, AutoReviewRpcContract>(composerCustomization.banners![0]!, {}, {
-      rpc: { ...baseHandlers(), ...handlers },
+      rpc: { ...baseHandlers(), ...reads },
       composer: { scope: { kind: "thread", threadId: "thr_1" } },
     });
   }
@@ -134,12 +157,100 @@ describe("Thread review preference", () => {
     await waitFor(() => expect(checkbox().disabled).toBe(false));
     fireEvent.click(checkbox());
     expect(checkbox().disabled).toBe(true);
-    expect(view.rpcCalls).toContainEqual({ method: "setThreadReviewPreference", input: { threadId: "thr_1", skipAutoReview: true } });
+    expect(approval.current?.confirm).toHaveBeenCalledWith("setThreadReviewPreference", { threadId: "thr_1", skipAutoReview: true });
+    expect(view.rpcCalls.map((call) => call.method)).not.toContain("setThreadReviewPreference");
     await act(async () => { finish({ skipAutoReview: true }); });
     await waitFor(() => expect(checkbox().checked).toBe(true));
     fireEvent.click(checkbox());
     await act(async () => { finish({ skipAutoReview: false }); });
     await waitFor(() => expect(checkbox().checked).toBe(false));
+  });
+
+  it.each([false, true])("keeps the saved value when native confirmation is cancelled (%s)", async (stored) => {
+    const confirm = vi.fn(async () => "cancelled" as const);
+    renderPreference({ getThreadReviewPreference: () => ({ skipAutoReview: stored }) }, { confirm });
+    await waitFor(() => expect(checkbox().disabled).toBe(false));
+    fireEvent.click(checkbox());
+    expect(confirm).toHaveBeenCalledWith("setThreadReviewPreference", { threadId: "thr_1", skipAutoReview: !stored });
+    await waitFor(() => expect(checkbox().disabled).toBe(false));
+    expect(checkbox().checked).toBe(stored);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows the saved preference on a client without the Desktop SDK", async () => {
+    const view = renderPreference({ getThreadReviewPreference: () => ({ skipAutoReview: true }) }, null);
+    await screen.findByText("This change requires a local server started by BB Desktop.");
+    expect(checkbox().checked).toBe(true);
+    expect(checkbox().disabled).toBe(true);
+    fireEvent.click(checkbox());
+    expect(view.rpcCalls.map((call) => call.method)).not.toContain("setThreadReviewPreference");
+  });
+
+  it.each(["rejected", "unsupported"] as const)("reloads after a %s native save", async (status) => {
+    let supported = true;
+    renderPreference({}, {
+      probe: async () => supported,
+      confirm: async () => {
+        supported = status !== "unsupported";
+        return status;
+      },
+    });
+    await waitFor(() => expect(checkbox().disabled).toBe(false));
+    fireEvent.click(checkbox());
+    if (status === "rejected") {
+      expect((await screen.findByRole("alert")).textContent).toContain("BB Desktop could not save the change.");
+      await waitFor(() => expect(checkbox().disabled).toBe(false));
+    } else {
+      await screen.findByText("This change requires a local server started by BB Desktop.");
+      expect(checkbox().disabled).toBe(true);
+    }
+    expect(checkbox().checked).toBe(false);
+  });
+
+  it("keeps the saved choice visible when the capability probe fails", async () => {
+    renderPreference({ getThreadReviewPreference: () => ({ skipAutoReview: true }) }, {
+      probe: async () => { throw new Error("Desktop disconnected"); },
+    });
+    await screen.findByText("This change requires a local server started by BB Desktop.");
+    expect(checkbox().checked).toBe(true);
+    expect(checkbox().disabled).toBe(true);
+  });
+
+  it("shows the destination's read-only choice after switching servers during confirmation", async () => {
+    let stored = true;
+    let finish!: (outcome: ApprovalStatus) => void;
+    const view = renderPreference({ getThreadReviewPreference: () => ({ skipAutoReview: stored }) }, {
+      confirm: () => new Promise((resolve) => { finish = resolve; }),
+    });
+    await waitFor(() => expect(checkbox().disabled).toBe(false));
+    expect(checkbox().checked).toBe(true);
+    fireEvent.click(checkbox());
+
+    stored = false;
+    approval.current = { ...approval.current!, targetKey: "remote", probe: async () => false };
+    await view.setComposerScope({ kind: "thread", threadId: "thr_1" });
+    await screen.findByText("This change requires a local server started by BB Desktop.");
+    expect(checkbox().checked).toBe(false);
+    expect(checkbox().disabled).toBe(true);
+    await act(async () => { finish("rejected"); });
+    expect(checkbox().checked).toBe(false);
+    expect(checkbox().disabled).toBe(true);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("reconciles the save response with a concurrent change from another view", async () => {
+    let loads = 0;
+    let finish!: (value: { skipAutoReview: boolean }) => void;
+    renderPreference({
+      getThreadReviewPreference: () => ++loads === 1
+        ? { skipAutoReview: false }
+        : new Promise((resolve) => { finish = resolve; }),
+    });
+    await waitFor(() => expect(checkbox().disabled).toBe(false));
+    fireEvent.click(checkbox());
+    await waitFor(() => expect(checkbox().checked).toBe(true));
+    await act(async () => { finish({ skipAutoReview: false }); });
+    expect(checkbox().checked).toBe(false);
   });
 
   it("shows load and save errors and preserves the saved value", async () => {
