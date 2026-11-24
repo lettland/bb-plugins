@@ -206,6 +206,35 @@ function heldTurnPatch(
   };
 }
 
+async function confirmIdleCutoff(
+  bb: ReviewContext["bb"],
+  threadId: string,
+  skip: ThreadState["skipHeldTurn"],
+): Promise<number | undefined> {
+  if (skip === undefined || skip.clearAtSeq !== undefined) return undefined;
+  try {
+    const { status } = await bb.sdk.threads.get({ threadId });
+    return status === "idle" ? skip.sinceSeq : undefined;
+  } catch (error) {
+    bb.log.warn(`auto-review: could not confirm idle in ${threadId}: ${String(error)}`);
+    return undefined;
+  }
+}
+
+async function recordHeldTurn(
+  bb: ReviewContext["bb"],
+  threadId: string,
+  held: ThreadState,
+  patch: Partial<ThreadState>,
+  resumeAt: number | undefined,
+): Promise<ThreadState> {
+  if (resumeAt !== undefined) patch.userTurnStart = { sinceSeq: resumeAt };
+  await writeState(bb, threadId, patch, resumeAt === undefined ? [] : ["skipHeldTurn"]);
+  const next = { ...held, ...patch };
+  if (resumeAt !== undefined) delete next.skipHeldTurn;
+  return next;
+}
+
 /**
  * What the idle that just ended a turn during the hold adds to the state, for
  * each turn of the user's own that ended: where their work began, whether any
@@ -242,7 +271,11 @@ export async function noteUserTurn(
   if (turnStart === undefined) {
     return state;
   }
+  // Check live status before reading completions. A delayed idle can arrive while
+  // the skipped turn is still active, with only older completions in the log.
+  const confirmedIdleCutoff = await confirmIdleCutoff(bb, thread.id, state.skipHeldTurn);
   let held = state;
+  let lastCompletedSeq = state.handledTurnEndSeq ?? 0;
   let reEnabledAt = state.userTurnStart !== undefined && state.userTurnStart.sinceSeq > turnStart.sinceSeq
     ? state.userTurnStart
     : undefined;
@@ -252,9 +285,7 @@ export async function noteUserTurn(
     // Core logs a turn's `turn/completed` before it delivers that turn's `thread.idle`, so once a
     // turn was handled, an idle with nothing new to read is a surplus one, not a gap in the log.
     const ended = await readEndedTurn(bb, thread.id, held, turnStart, first && held.handledTurnEndSeq === undefined);
-    if (ended === null) {
-      break;
-    }
+    if (ended === null) break;
     const reEnabledSeq = reEnabledAt?.sinceSeq;
     let byApproval = false;
     // The review turn is the first turn read that carries the code-review
@@ -287,20 +318,17 @@ export async function noteUserTurn(
     });
     const { completedSeq } = ended;
     const clearAtSeq = held.skipHeldTurn?.clearAtSeq;
-    const clearSkip = clearAtSeq !== undefined && completedSeq !== undefined && completedSeq >= clearAtSeq;
-    if (clearSkip) {
-      // Another turn may have completed before this idle ran. Give it a
-      // boundary past the skipped turn even without a fresh active snapshot.
-      reEnabledAt = { sinceSeq: completedSeq };
-      patch.userTurnStart = reEnabledAt;
-    }
-    await writeState(bb, thread.id, patch, clearSkip ? ["skipHeldTurn"] : []);
-    held = { ...held, ...patch };
-    if (clearSkip) delete held.skipHeldTurn;
+    const resumeAt = clearAtSeq !== undefined && completedSeq !== undefined && completedSeq >= clearAtSeq
+      ? completedSeq
+      : undefined;
+    held = await recordHeldTurn(bb, thread.id, held, patch, resumeAt);
+    if (resumeAt !== undefined) reEnabledAt = held.userTurnStart;
     // Each read starts after the end just handled, so it moves on; with no end found it cannot.
-    if (ended.completedSeq === undefined) {
-      break;
-    }
+    if (completedSeq === undefined) return held;
+    lastCompletedSeq = completedSeq;
   }
-  return held;
+  // Without an exact cutoff, resume only after draining all completions at idle.
+  return confirmedIdleCutoff !== undefined && lastCompletedSeq > confirmedIdleCutoff
+    ? recordHeldTurn(bb, thread.id, held, {}, lastCompletedSeq)
+    : held;
 }

@@ -70,7 +70,7 @@ async function heldTurnCutoff(bb: ReviewContext["bb"], threadId: string, sinceSe
       return { sinceSeq, clearAtSeq: event.type === "turn/completed" ? event.seq : event.seq + 1 };
     }
   } catch (error) {
-    bb.log.warn(`auto-review: could not find the held turn in ${threadId}; follow-up review will resume after the hold: ${String(error)}`);
+    bb.log.warn(`auto-review: could not find the held turn in ${threadId}; waiting for an idle completion: ${String(error)}`);
   }
   return { sinceSeq };
 }

@@ -4773,7 +4773,15 @@ describe("auto-review plugin", () => {
     ])("keeps the earlier review and bounds follow-up to the re-enable cursor (%j)", async ({
       postToggleEdit, outage, stopped, fallback, requestsFail, completion, priorSameMs, boundaryUnavailable, laterUserTurn,
     }) => {
-      const host = createHost({ workingTreeFiles: [] });
+      let failIdleStatus = false;
+      const host = createHost({
+        workingTreeFiles: [],
+        getThrowsWhen: () => {
+          const fail = failIdleStatus;
+          failIdleStatus = false;
+          return fail;
+        },
+      });
       await loadPreferencePlugin(host.bb);
       const reviewDeliveredAt = Date.now() - 1_000;
       await latchReview(host.bb.storage.kv, host.metadata, THREAD_ID, reviewDeliveredAt);
@@ -4817,11 +4825,23 @@ describe("auto-review plugin", () => {
       }
       host.setTimelineThrows(false);
       host.setTurnRequestsThrow(false);
-      if (boundaryUnavailable === "no-events") host.startQueuedTurn(120, 130, true);
+      if (boundaryUnavailable === "no-events") {
+        host.setEnvThreads([{ id: THREAD_ID, status: "idle" }, child]);
+        await emitIdle(host);
+        expect(host.metadata.skipHeldTurn).toEqual({ sinceSeq: 115 });
+        host.setEnvThreads([{ id: THREAD_ID, status: "active" }, child]);
+        host.startQueuedTurn(120, 130, true);
+      }
       expect(host.metadata).toMatchObject({ phase: "awaiting-review", reviewDeliveredAt });
       if (fallback === undefined) expect(host.metadata.turnStart).toMatchObject({ sinceSeq: 130 });
       else expect(host.metadata.turnStart).toBeUndefined();
       if (!outage) expect(host.metadata.userTurnStart).toMatchObject({ sinceSeq: 150 });
+      if (boundaryUnavailable === true) {
+        // A delayed idle for the previous completion arrives while the skipped turn is still active.
+        await emitIdle(host);
+        expect(host.metadata.handledTurnEndSeq).toBe(115);
+        expect(host.metadata.skipHeldTurn).toEqual({ sinceSeq: 100 });
+      }
 
       const rows = [fileChangeRow("src/a.ts", 140)];
       const files = [{ path: "src/a.ts" }];
@@ -4846,28 +4866,49 @@ describe("auto-review plugin", () => {
       }
       host.setMaxSeq(laterUserTurn ? 174 : 170);
       host.setEnvThreads([{ id: THREAD_ID, status: "idle" }, child]);
+      if (boundaryUnavailable === true) {
+        failIdleStatus = true;
+        await emitIdle(host);
+        expect(host.metadata.handledTurnEndSeq).toBe(170);
+        expect(host.metadata.skipHeldTurn).toEqual({ sinceSeq: 100 });
+      }
       await emitIdle(host);
       expect(host.sends).toHaveLength(0);
       expect(host.metadata.phase).toBe("awaiting-review");
       expect(host.metadata.userStopFloorSeq).toBe(laterUserTurn ? 174 : 170);
-      if (boundaryUnavailable) expect(host.metadata.skipHeldTurn).toEqual({ sinceSeq: boundaryUnavailable === "no-events" ? 115 : 100 });
-      else expect(host.metadata.skipHeldTurn).toBeUndefined();
       expect(host.metadata.userTurnAuthored).toBe(postToggleEdit || laterUserTurn || undefined);
+      if (boundaryUnavailable) {
+        host.setEnvThreads([{ id: THREAD_ID, status: "active" }, child]);
+        host.requestTurn({ seq: 172, initiator: "user", text: "Edit after the skipped turn", running: true });
+        host.setMaxSeq(172);
+        await emitActive(host);
+        rows.push(fileChangeRow("src/after.ts", 173));
+        files.push({ path: "src/after.ts" });
+        host.setSiblingRows(THREAD_ID, rows);
+        host.setWorkingTree(files);
+        host.completeTurnOf(172, 174);
+        host.setMaxSeq(174);
+        host.setEnvThreads([{ id: THREAD_ID, status: "idle" }, child]);
+        await emitIdle(host);
+        expect(host.metadata.phase).toBe("awaiting-review");
+        expect(host.metadata.userTurnAuthored).toBe(true);
+      }
+      expect(host.metadata.skipHeldTurn).toBeUndefined();
 
       host.setEnvThreads([{ id: THREAD_ID, status: "idle" }, { ...child, status: "idle" }]);
       host.requestTurn({ seq: 180, initiator: "system", text: "A review child finished" });
       host.setMaxSeq(190);
       await emitActive(host);
-      if (!postToggleEdit && !laterUserTurn) {
+      if (!postToggleEdit && !laterUserTurn && !boundaryUnavailable) {
         host.setSiblingRows(THREAD_ID, [...rows, fileChangeRow("src/fix.ts", 195)]);
         host.setWorkingTree([...files, { path: "src/fix.ts" }]);
       }
       host.completeTurnOf(180, 200);
       host.setMaxSeq(200);
       await emitIdle(host);
-      expect(host.sends).toHaveLength(postToggleEdit || laterUserTurn ? 1 : 0);
+      expect(host.sends).toHaveLength(postToggleEdit || laterUserTurn || boundaryUnavailable ? 1 : 0);
       if (postToggleEdit) expect(await lastFireOf(host)).toMatchObject({ scopePaths: ["src/b.ts"] });
-      if (laterUserTurn) expect(await lastFireOf(host)).toMatchObject({ scopePaths: ["src/after.ts"] });
+      if (laterUserTurn || boundaryUnavailable) expect(await lastFireOf(host)).toMatchObject({ scopePaths: ["src/after.ts"] });
       await host.harness.dispose();
     });
 
