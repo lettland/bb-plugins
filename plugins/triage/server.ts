@@ -128,6 +128,10 @@ export const rpcContract = defineRpcContract({
     input: z.object({ threadId: z.string().min(1) }).strict(),
     output: taskSchema,
   },
+  markThreadReminder: {
+    input: z.object({ threadId: z.string().min(1) }).strict(),
+    output: taskSchema,
+  },
   setThreadSidebar: {
     input: z.object({ number: z.number().int().positive(), visible: z.boolean() }).strict(),
     output: z.object({ ok: z.literal(true) }),
@@ -821,6 +825,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (!thread || thread.archivedAt !== null || thread.deletedAt !== null) {
       throw new Error("Only unarchived threads can move to Reminder");
     }
+    return thread;
   };
 
   const moveTask = async (
@@ -881,7 +886,7 @@ export default async function plugin(bb: BbPluginApi) {
     thread: CardThread,
     origin: CardOrigin,
     caches?: LookupCaches,
-    options: { model?: string; event?: string; settleIfDormant?: boolean } = {},
+    options: { model?: string; event?: string; settleIfDormant?: boolean; reminder?: boolean } = {},
   ) => {
     const generation = mirroringGeneration;
     const existing = getTaskByThread(thread.id);
@@ -896,6 +901,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
     });
     const machine = await resolveMachine({ type: "reuse", environmentId: thread.environmentId }, caches);
+    if (options.reminder) thread = await requireReminderThread(thread.id);
     if (disposed) return undefined;
     return db.transaction(() => {
       const duplicate = getTaskByThread(thread.id);
@@ -907,7 +913,7 @@ export default async function plugin(bb: BbPluginApi) {
       ).get() as { value: number };
       const now = Date.now();
       const active = thread.status === "active" || thread.status === "starting";
-      const stage = getSystemStage(active ? "active" : "intake");
+      const stage = options.reminder ? getStageRow(REMINDER_STAGE_ID) : getSystemStage(active ? "active" : "intake");
       // Dormant history (idle or failed sessions) starts settled; live ones stay on the board.
       const settledAt = options.settleIfDormant && (thread.status === "idle" || thread.status === "error") ? now : null;
       db.prepare(`INSERT INTO triage_tasks (
@@ -925,6 +931,7 @@ export default async function plugin(bb: BbPluginApi) {
       db.prepare("UPDATE triage_meta SET value = value + 1 WHERE key = 'next_task_number'").run();
       const created = getTaskRow(number);
       if (origin === "mirror") addEvent(created.id, "bb", options.event ?? "mirrored");
+      else if (options.reminder) addEvent(created.id, "user", `moved to ${stage.name}`);
       else addEvent(created.id, "user", "moved session to triage");
       return created;
     })();
@@ -1660,6 +1667,23 @@ export default async function plugin(bb: BbPluginApi) {
       await setSidebarVisibility(threadId, false);
       await reconcileNative(threadId);
       return toTask(getTaskRow(task.number));
+    },
+    async markThreadReminder({ threadId }) {
+      const thread = await requireReminderThread(threadId);
+      const existing = getTaskByThread(threadId);
+      if (existing) {
+        if (existing.stage_id === REMINDER_STAGE_ID) return toTask(existing);
+        return moveTask(existing.number, REMINDER_STAGE_ID, "user");
+      }
+      const execution = await bb.sdk.threads.defaultExecutionOptions({ threadId });
+      const task = await ensureCardForThread(thread, "manual", undefined, {
+        model: execution?.model,
+        reminder: true,
+      });
+      if (!task) throw new Error("Could not mark the thread as a reminder");
+      if (task.stage_id !== REMINDER_STAGE_ID) return moveTask(task.number, REMINDER_STAGE_ID, "user");
+      publish();
+      return toTask(task);
     },
     async setThreadSidebar({ number, visible }) {
       const task = getTaskRow(number);

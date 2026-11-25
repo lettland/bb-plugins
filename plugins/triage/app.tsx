@@ -1,11 +1,13 @@
 import { useCallback, useMemo, useState } from "react";
 import {
   definePluginApp,
+  experimental_THREAD_ACTION_GROUPS,
   experimental_THREAD_INFO_SECTION_GROUPS,
   experimental_useSidebarThreads,
   useBbContext,
   useBbNavigate,
   useRealtime,
+  useRpc,
   useSidebarThreadDraftIds,
 } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
@@ -31,6 +33,7 @@ import {
 import { claimTriageRefresh } from "@/lib/triage-mounts";
 import { patchTaskRead, patchTaskStage, useOpenTaskRequests, useTriage } from "@/lib/triage-store";
 import { REMINDER_STAGE_ID, type NotificationLevel, type Stage, type Task } from "@/lib/triage-types";
+import type { rpcContract } from "./server";
 import "./app.css";
 
 interface RealtimePayload {
@@ -403,6 +406,28 @@ function TriageBoard() {
 }
 
 export default definePluginApp((app) => {
+  app.slots.experimental_threadAction({
+    id: "mark-reminder",
+    title: "Mark as Reminder",
+    icon: "Bell",
+    group: experimental_THREAD_ACTION_GROUPS.organize,
+    useData: () => useRpc<typeof rpcContract>(),
+    item: ({ thread, data: rpc }) => {
+      if (thread.archivedAt !== null) return null;
+      return {
+        label: "Mark as Reminder",
+        icon: "Bell",
+        async run() {
+          try {
+            await rpc.call("markThreadReminder", { threadId: thread.id });
+            toast.success("Marked as Reminder");
+          } catch (error) {
+            toast.error(error instanceof Error ? error.message : "Could not mark the thread as a reminder");
+          }
+        },
+      };
+    },
+  });
   app.slots.experimental_threadHeaderAction({
     id: "triage-thread-action",
     title: "Triage",

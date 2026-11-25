@@ -1051,6 +1051,7 @@ test("Reminder accepts only linked unarchived threads through create, move and e
     await expect(rpc("updateTask", edit)).rejects.toThrow(error);
     const linked = await rpc("runTask", { number: task.number });
     harness.inspection.sdk.stub("threads.get", async () => ({ ...thread, archivedAt: 1 }));
+    await expect(rpc("markThreadReminder", { threadId: thread.id })).rejects.toThrow(error);
     await expect(rpc("moveTask", { number: linked.number, stageId: "stage-reminder" })).rejects.toThrow(error);
     await expect(rpc("updateTask", { ...edit, number: linked.number })).rejects.toThrow(error);
     harness.inspection.sdk.stub("threads.get", async () => { throw new Error("missing"); });
@@ -1065,6 +1066,81 @@ test("Reminder accepts only linked unarchived threads through create, move and e
     expect((await rpc("moveTask", { number: linked.number, stageId: "stage-todo" })).stageId).toBe("stage-todo");
     expect((await rpc("updateTask", { ...edit, number: linked.number })).stageId).toBe("stage-reminder");
     await expect(rpc("deleteStage", { id: "stage-reminder" })).rejects.toThrow("Core workflow stages can be renamed but not removed");
+  } finally { await harness.lifecycle.dispose(); }
+});
+
+test("marking a settled thread moves its existing card without reopening or hiding it", async () => {
+  const { harness, rpc, thread } = await setup();
+  try {
+    const input = { threadId: thread.id };
+    const card = await rpc("importThread", input);
+    await rpc("moveTask", { number: card.number, stageId: "stage-completed" });
+    const settled = await rpc("setTaskRead", { number: card.number, read: true });
+    const updates = harness.inspection.sdk.callsTo("threads.update").length;
+    const marked = await rpc("markThreadReminder", input);
+    expect(marked).toMatchObject({ id: card.id, stageId: "stage-reminder", settledAt: settled.settledAt });
+    expect(settled.settledAt).toBeGreaterThan(0);
+    expect(await rpc("markThreadReminder", input)).toEqual(marked);
+    expect(harness.inspection.sdk.callsTo("threads.update")).toHaveLength(updates);
+  } finally { await harness.lifecycle.dispose(); }
+});
+
+test("concurrent marks create one card directly in Reminder for an untracked thread", async () => {
+  const { harness, rpc, thread } = await setup();
+  try {
+    const input = { threadId: thread.id };
+    const [first, second] = await Promise.all([rpc("markThreadReminder", input), rpc("markThreadReminder", input)]);
+    expect(first).toMatchObject({ threadId: thread.id, stageId: "stage-reminder", settledAt: null });
+    expect(second).toEqual(first);
+    expect(harness.inspection.sdk.callsTo("threads.update")).toHaveLength(0);
+    harness.inspection.sdk.stub("threads.list", async ({ archived }: { archived?: boolean }) => archived ? [] : [thread]);
+    expect((await rpc("snapshot")).tasks).toEqual([expect.objectContaining({ id: first.id, stageId: "stage-reminder", sidebarVisible: true })]);
+  } finally { await harness.lifecycle.dispose(); }
+});
+
+test("marking a thread moves the same card when an import creates it during lookup", async () => {
+  const { harness, rpc, thread } = await setup();
+  try {
+    let entered = () => {};
+    let release = () => {};
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const paused = new Promise<void>((resolve) => { release = resolve; });
+    harness.inspection.sdk.stub("threads.defaultExecutionOptions", async () => {
+      entered();
+      await paused;
+      return null;
+    });
+    const input = { threadId: thread.id };
+    const marking = rpc("markThreadReminder", input);
+    await started;
+    harness.inspection.sdk.stub("threads.defaultExecutionOptions", async () => null);
+    const imported = await rpc("importThread", input);
+    release();
+    expect(await marking).toMatchObject({ id: imported.id, stageId: "stage-reminder" });
+  } finally { await harness.lifecycle.dispose(); }
+});
+
+test("marking a thread rejects an archive during metadata lookup before creating a card", async () => {
+  const { harness, rpc, thread } = await setup();
+  try {
+    harness.inspection.sdk.stub("projects.get", async () => {
+      harness.inspection.sdk.stub("threads.get", async () => ({ ...thread, archivedAt: 1 }));
+      return { id: thread.projectId, name: "Project" };
+    });
+    await expect(rpc("markThreadReminder", { threadId: thread.id })).rejects.toThrow("Only unarchived threads can move to Reminder");
+    expect((await rpc("snapshot")).tasks).toEqual([]);
+  } finally { await harness.lifecycle.dispose(); }
+});
+
+test("marking a thread reports failure if Triage unloads during the last thread lookup", async () => {
+  const { harness, rpc, thread } = await setup();
+  try {
+    let lookups = 0;
+    harness.inspection.sdk.stub("threads.get", async () => {
+      if (++lookups === 2) await harness.lifecycle.dispose();
+      return thread;
+    });
+    await expect(rpc("markThreadReminder", { threadId: thread.id })).rejects.toThrow("Could not mark the thread as a reminder");
   } finally { await harness.lifecycle.dispose(); }
 });
 

@@ -1,6 +1,13 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
-import { experimental_THREAD_INFO_SECTION_GROUPS, useRpc } from "@get-bb/plugin-sdk/app";
+import {
+  experimental_THREAD_INFO_SECTION_GROUPS,
+  experimental_ThreadActionsContextMenu as ThreadActionsContextMenu,
+  useBbNavigate,
+  useRpc,
+  useSdk,
+  type PluginThreadActionTarget,
+} from "@get-bb/plugin-sdk/app";
 import { installTestPluginRuntime, loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import type { ReactElement } from "react";
 import { toast } from "sonner";
@@ -212,6 +219,51 @@ describe("registration", () => {
     expect(experimental_THREAD_INFO_SECTION_GROUPS.related).toBe("1_related");
     // The sidebar list retirement left no thread-list registration behind.
     expect(app.threadLists).toStrictEqual([]);
+  });
+});
+
+describe("thread Reminder menu", () => {
+  const registration = app.threadActions.find((action) => action.id === "mark-reminder")!;
+
+  function ThreadMenu({ archivedAt }: { archivedAt: number | null }) {
+    const thread: PluginThreadActionTarget = {
+      id: "thr-done", projectId: "p2", parentThreadId: null, parentNotifications: "auto",
+      archivedAt, pinnedAt: null, sectionId: null, isUnread: false, status: "idle", environment: null,
+    };
+    const data = registration.useData!({ threadIds: [thread.id] });
+    const action = registration.item({ thread, data, sdk: useSdk(), navigate: useBbNavigate(), experimental_panel: {} as never });
+    return (
+      <ThreadActionsContextMenu thread={thread} inline={action ? [{ key: registration.id, group: registration.group, action }] : []}>
+        <span>Example thread</span>
+      </ThreadActionsContextMenu>
+    );
+  }
+
+  test("marks the right-clicked thread as a Reminder", async () => {
+    const markThreadReminder = vi.fn(() => task({ number: 4, title: "Settled card", stageId: "stage-reminder" }));
+    const success = vi.spyOn(toast, "success");
+    renderSlot({ component: ThreadMenu }, { archivedAt: null }, { rpc: { markThreadReminder } });
+    fireEvent.contextMenu(screen.getByText("Example thread"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Mark as Reminder" }));
+    await waitFor(() => expect(success).toHaveBeenCalledWith("Marked as Reminder"));
+    expect(markThreadReminder).toHaveBeenCalledWith({ threadId: "thr-done" });
+  });
+
+  test("offers no Reminder action for archived threads", () => {
+    renderSlot({ component: ThreadMenu }, { archivedAt: NOW });
+    fireEvent.contextMenu(screen.getByText("Example thread"));
+    expect(screen.queryByRole("menuitem", { name: "Mark as Reminder" })).toBeNull();
+  });
+
+  test.each([new Error("Thread was archived"), "disconnected"])("shows a Reminder failure for %s", async (failure) => {
+    const error = vi.spyOn(toast, "error");
+    renderSlot({ component: () => <><CaptureRpcClient /><ThreadMenu archivedAt={null} /></> }, {});
+    rejectRaw(rawRpcClient!, "markThreadReminder", failure);
+    fireEvent.contextMenu(screen.getByText("Example thread"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Mark as Reminder" }));
+    await waitFor(() => expect(error).toHaveBeenCalledWith(
+      failure instanceof Error ? failure.message : "Could not mark the thread as a reminder",
+    ));
   });
 });
 
