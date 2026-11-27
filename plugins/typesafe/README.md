@@ -65,7 +65,7 @@ TypeSafe key.
 
 | Setting | Type | Default | Meaning |
 |---|---|---|---|
-| `apiKey` | string (secret) | — | TypeSafe API key. Falls back to the `TYPESAFE_API_KEY` environment variable when unset. |
+| `apiKey` | string (secret) | — | TypeSafe API key. Set it here: bb machine env (`bb machine env set`) does not reach plugins. When unset, the plugin only uses `TYPESAFE_API_KEY` if vbb itself was started with it in its environment (not when started from Finder or at login). |
 | `model` | string | `jev-1.14.0` | Pinned Jev model id, so classification does not drift. |
 | `triage` | boolean | on | Classify each top-level thread's opening request and add the advisory line. |
 | `skipProjects` | string (JSON) | `[]` | JSON array of project-name globs that get neither triage nor the tool, e.g. `["sandbox-*"]`. `*` is the only special character. |

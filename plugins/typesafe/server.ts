@@ -53,7 +53,7 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "API key",
       description:
-        "TypeSafe API key. Falls back to the TYPESAFE_API_KEY environment variable when unset.",
+        "TypeSafe API key. Set it here: bb machine env does not reach plugins. When unset, the plugin only uses TYPESAFE_API_KEY if vbb itself was started with it in its environment (not when started from Finder or at login).",
       secret: true,
     },
     model: {

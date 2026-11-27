@@ -38,7 +38,7 @@ Treat the line as context, not an order.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `apiKey` | — | TypeSafe API key (secret). Falls back to the `TYPESAFE_API_KEY` environment variable. |
+| `apiKey` | — | TypeSafe API key (secret). Set it here: bb machine env does not reach plugins. When unset, `TYPESAFE_API_KEY` is used only if vbb itself was started with it (not from Finder or at login). |
 | `model` | `jev-1.14.0` | Pinned Jev model id. |
 | `triage` | on | Opening-request triage. |
 | `skipProjects` | `[]` | JSON array of project-name globs with neither triage nor the tool. |
